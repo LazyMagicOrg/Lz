@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Lz.Aws/Lz.Aws.csproj" />
+  <Project Path="Lz.Azure/Lz.Azure.csproj" />
+  <Project Path="Lz.Core/Lz.Core.csproj" />
+  <Project Path="Lz.Tests/Lz.Tests.csproj" />
+  <Project Path="Lz.Cli/Lz.Cli.csproj" />
+</Solution>

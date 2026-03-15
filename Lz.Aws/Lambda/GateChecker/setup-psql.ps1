@@ -1,0 +1,69 @@
+<#
+.SYNOPSIS
+    Extracts psql binary and shared libraries from Amazon Linux 2023 via Docker.
+    Run this once before deploying the gate-checker Lambda with database restore support.
+
+.DESCRIPTION
+    The gate-checker Lambda can restore a database.sql dump file placed on EFS
+    alongside Default.zip. This requires a psql binary compiled for Amazon Linux 2023
+    (the Lambda runtime OS). This script uses Docker to extract psql and its
+    library dependencies into bin/ and lib/ directories, which are then bundled
+    into the Lambda zip by the build process.
+
+.NOTES
+    Requires Docker Desktop running with Linux containers.
+    Only needs to be run once (or when upgrading PostgreSQL version).
+#>
+
+$ErrorActionPreference = "Stop"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$binDir = Join-Path $scriptDir "bin"
+$libDir = Join-Path $scriptDir "lib"
+
+Write-Host "Extracting psql from Amazon Linux 2023 via Docker..." -ForegroundColor Cyan
+Write-Host ""
+
+# Clean previous artifacts
+if (Test-Path $binDir) { Remove-Item -Recurse -Force $binDir }
+if (Test-Path $libDir) { Remove-Item -Recurse -Force $libDir }
+New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+New-Item -ItemType Directory -Path $libDir -Force | Out-Null
+
+# Run Docker container to install postgresql15 and extract binaries
+docker run --rm `
+    -v "${binDir}:/out/bin" `
+    -v "${libDir}:/out/lib" `
+    amazonlinux:2023 `
+    bash -c @'
+set -e
+echo "Installing postgresql15..."
+dnf install -y postgresql15 > /dev/null 2>&1
+
+echo "Copying psql binary..."
+cp /usr/bin/psql /out/bin/
+chmod +x /out/bin/psql
+
+echo "Copying shared libraries..."
+for lib in $(ldd /usr/bin/psql | grep '=> /' | awk '{print $3}'); do
+    cp "$lib" /out/lib/ 2>/dev/null || true
+done
+
+echo ""
+echo "psql version: $(psql --version)"
+echo "Libraries copied:"
+ls -la /out/lib/
+'@
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "ERROR: Docker extraction failed." -ForegroundColor Red
+    Write-Host "Make sure Docker Desktop is running with Linux containers." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Setup complete!" -ForegroundColor Green
+Write-Host "  bin/psql  - PostgreSQL client binary (Amazon Linux 2023)" -ForegroundColor White
+Write-Host "  lib/      - Shared libraries for psql" -ForegroundColor White
+Write-Host ""
+Write-Host "These will be bundled into the Lambda package on next 'lz deployfoundation'." -ForegroundColor Yellow

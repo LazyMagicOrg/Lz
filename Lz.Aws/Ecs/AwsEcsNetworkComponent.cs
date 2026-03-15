@@ -1,0 +1,1015 @@
+using System.Collections.Immutable;
+using Lz.Core.Config;
+using Lz.Core.Interfaces;
+using Lz.Core.Interfaces.Outputs;
+using Pulumi;
+using Pulumi.Aws.Acm;
+using Pulumi.Aws.CloudWatch;
+using Pulumi.Aws.Ec2;
+using Pulumi.Aws.Ec2.Inputs;
+using Pulumi.Aws.Iam;
+using Pulumi.Aws.Iam.Inputs;
+using Pulumi.Aws.LB;
+using Pulumi.Aws.LB.Inputs;
+using Pulumi.Aws.Route53;
+using Pulumi.Aws.Route53.Inputs;
+using AcmCertificate = Pulumi.Aws.Acm.Certificate;
+using AcmCertificateArgs = Pulumi.Aws.Acm.CertificateArgs;
+using Route53Record = Pulumi.Aws.Route53.Record;
+using Route53RecordArgs = Pulumi.Aws.Route53.RecordArgs;
+
+namespace Lz.Aws.Ecs;
+
+/// <summary>
+/// AWS ECS network infrastructure component — full foundation matching SAM template.
+/// Creates VPC, subnets, IGW, NAT, security groups, ALBs, ACM cert, Route 53 zones,
+/// VPC Flow Logs, and DNS records.
+/// </summary>
+public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
+{
+    public AwsEcsNetworkComponent()
+        : base("lz:aws:EcsNetwork", "network", ResourceArgs.Empty, null)
+    {
+    }
+
+    public INetworkOutputs Deploy(SystemConfig config)
+    {
+        var prefix = config.SystemKey;
+        var opts = new CustomResourceOptions { Parent = this };
+
+        // =====================================================================
+        // VPC
+        // =====================================================================
+
+        var vpcCidr = config.VpcCidr;
+
+        // Validate CIDR format — must be x.x.0.0/16
+        var cidrParts = vpcCidr.Split('.');
+        if (cidrParts.Length < 4 || !vpcCidr.EndsWith(".0.0/16"))
+            throw new ArgumentException(
+                $"VpcCidr must be a /16 CIDR block (e.g., 10.20.0.0/16), got: {vpcCidr}");
+
+        // Derive subnet CIDRs from VPC CIDR base (e.g., "10.20" from "10.20.0.0/16")
+        var cidrBase = $"{cidrParts[0]}.{cidrParts[1]}";
+
+        var publicSubnet1Cidr = $"{cidrBase}.1.0/24";
+        var publicSubnet2Cidr = $"{cidrBase}.2.0/24";
+        var privateSubnet1Cidr = $"{cidrBase}.10.0/24";
+        var privateSubnet2Cidr = $"{cidrBase}.11.0/24";
+
+        var vpc = new Vpc($"{prefix}-vpc", new VpcArgs
+        {
+            CidrBlock = vpcCidr,
+            EnableDnsSupport = true,
+            EnableDnsHostnames = true,
+            Tags = Tags(config, "vpc"),
+        }, opts);
+
+        // =====================================================================
+        // VPC FLOW LOGS
+        // =====================================================================
+
+        var logRetention = config.ECS?.LogRetentionDays ?? 3;
+
+        var flowLogsLogGroup = new LogGroup($"{prefix}-vpc-flow-logs", new LogGroupArgs
+        {
+            Name = $"/vpc/{prefix}/flow-logs",
+            RetentionInDays = logRetention,
+            Tags = Tags(config, "vpc-flow-logs"),
+        }, opts);
+
+        var flowLogsRole = new Role($"{prefix}-vpc-flow-logs-role", new RoleArgs
+        {
+            Name = $"{prefix}-vpc-flow-logs-role",
+            AssumeRolePolicy = @"{
+                ""Version"": ""2012-10-17"",
+                ""Statement"": [{
+                    ""Effect"": ""Allow"",
+                    ""Principal"": { ""Service"": ""vpc-flow-logs.amazonaws.com"" },
+                    ""Action"": ""sts:AssumeRole""
+                }]
+            }",
+            InlinePolicies =
+            {
+                new RoleInlinePolicyArgs
+                {
+                    Name = "FlowLogsPolicy",
+                    Policy = flowLogsLogGroup.Arn.Apply(arn => $@"{{
+                        ""Version"": ""2012-10-17"",
+                        ""Statement"": [{{
+                            ""Effect"": ""Allow"",
+                            ""Action"": [
+                                ""logs:CreateLogStream"",
+                                ""logs:PutLogEvents"",
+                                ""logs:DescribeLogGroups"",
+                                ""logs:DescribeLogStreams""
+                            ],
+                            ""Resource"": ""{arn}""
+                        }}]
+                    }}"),
+                },
+            },
+            Tags = Tags(config, "vpc-flow-logs-role"),
+        }, opts);
+
+        new FlowLog($"{prefix}-vpc-flow-log", new FlowLogArgs
+        {
+            IamRoleArn = flowLogsRole.Arn,
+            LogDestination = flowLogsLogGroup.Arn,
+            VpcId = vpc.Id,
+            TrafficType = "ALL",
+            Tags = Tags(config, "vpc-flow-logs"),
+        }, opts);
+
+        // =====================================================================
+        // SUBNETS (matching SAM /24 CIDRs)
+        // =====================================================================
+
+        var azs = Pulumi.Aws.GetAvailabilityZones.Invoke(new Pulumi.Aws.GetAvailabilityZonesInvokeArgs
+        {
+            State = "available",
+        });
+
+        // Validate that at least 2 AZs are available (required for multi-AZ ALB + RDS)
+        azs.Apply(a =>
+        {
+            if (a.Names.Length < 2)
+                throw new InvalidOperationException(
+                    $"Region {config.Region} has {a.Names.Length} availability zone(s), but at least 2 are required.");
+            return a;
+        });
+
+        var publicSubnet1 = new Subnet($"{prefix}-public-1", new SubnetArgs
+        {
+            VpcId = vpc.Id,
+            CidrBlock = publicSubnet1Cidr,
+            AvailabilityZone = azs.Apply(a => a.Names[0]),
+            MapPublicIpOnLaunch = true,
+            Tags = Tags(config, "public-subnet-1"),
+        }, opts);
+
+        var publicSubnet2 = new Subnet($"{prefix}-public-2", new SubnetArgs
+        {
+            VpcId = vpc.Id,
+            CidrBlock = publicSubnet2Cidr,
+            AvailabilityZone = azs.Apply(a => a.Names[1]),
+            MapPublicIpOnLaunch = true,
+            Tags = Tags(config, "public-subnet-2"),
+        }, opts);
+
+        var privateSubnet1 = new Subnet($"{prefix}-private-1", new SubnetArgs
+        {
+            VpcId = vpc.Id,
+            CidrBlock = privateSubnet1Cidr,
+            AvailabilityZone = azs.Apply(a => a.Names[0]),
+            Tags = Tags(config, "private-subnet-1"),
+        }, opts);
+
+        var privateSubnet2 = new Subnet($"{prefix}-private-2", new SubnetArgs
+        {
+            VpcId = vpc.Id,
+            CidrBlock = privateSubnet2Cidr,
+            AvailabilityZone = azs.Apply(a => a.Names[1]),
+            Tags = Tags(config, "private-subnet-2"),
+        }, opts);
+
+        // =====================================================================
+        // INTERNET GATEWAY + NAT GATEWAY
+        // =====================================================================
+
+        var igw = new InternetGateway($"{prefix}-igw", new InternetGatewayArgs
+        {
+            VpcId = vpc.Id,
+            Tags = Tags(config, "igw"),
+        }, opts);
+
+        var eip = new Eip($"{prefix}-nat-eip", new EipArgs
+        {
+            Domain = "vpc",
+            Tags = Tags(config, "nat-eip"),
+        }, opts);
+
+        var natGw = new NatGateway($"{prefix}-nat", new NatGatewayArgs
+        {
+            SubnetId = publicSubnet1.Id,
+            AllocationId = eip.Id,
+            Tags = Tags(config, "nat-gateway"),
+        }, new CustomResourceOptions { Parent = this, DependsOn = { igw } });
+
+        // =====================================================================
+        // ROUTE TABLES
+        // =====================================================================
+
+        var publicRt = new RouteTable($"{prefix}-public-rt", new RouteTableArgs
+        {
+            VpcId = vpc.Id,
+            Tags = Tags(config, "public-rt"),
+        }, opts);
+
+        new Route($"{prefix}-public-route", new RouteArgs
+        {
+            RouteTableId = publicRt.Id,
+            DestinationCidrBlock = "0.0.0.0/0",
+            GatewayId = igw.Id,
+        }, opts);
+
+        new RouteTableAssociation($"{prefix}-public-rta-1", new RouteTableAssociationArgs
+        {
+            SubnetId = publicSubnet1.Id,
+            RouteTableId = publicRt.Id,
+        }, opts);
+
+        new RouteTableAssociation($"{prefix}-public-rta-2", new RouteTableAssociationArgs
+        {
+            SubnetId = publicSubnet2.Id,
+            RouteTableId = publicRt.Id,
+        }, opts);
+
+        var privateRt = new RouteTable($"{prefix}-private-rt", new RouteTableArgs
+        {
+            VpcId = vpc.Id,
+            Tags = Tags(config, "private-rt"),
+        }, opts);
+
+        new Route($"{prefix}-private-route", new RouteArgs
+        {
+            RouteTableId = privateRt.Id,
+            DestinationCidrBlock = "0.0.0.0/0",
+            NatGatewayId = natGw.Id,
+        }, opts);
+
+        new RouteTableAssociation($"{prefix}-private-rta-1", new RouteTableAssociationArgs
+        {
+            SubnetId = privateSubnet1.Id,
+            RouteTableId = privateRt.Id,
+        }, opts);
+
+        new RouteTableAssociation($"{prefix}-private-rta-2", new RouteTableAssociationArgs
+        {
+            SubnetId = privateSubnet2.Id,
+            RouteTableId = privateRt.Id,
+        }, opts);
+
+        // =====================================================================
+        // SECURITY GROUPS
+        // =====================================================================
+
+        var albSg = new SecurityGroup($"{prefix}-alb-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-alb-sg",
+            Description = "Security group for public ALB",
+            Ingress =
+            {
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 443, ToPort = 443, CidrBlocks = { "0.0.0.0/0" }, Description = "HTTPS from internet" },
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 80, ToPort = 80, CidrBlocks = { "0.0.0.0/0" }, Description = "HTTP from internet (redirects to HTTPS)" },
+            },
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "alb-sg"),
+        }, opts);
+
+        var internalAlbSg = new SecurityGroup($"{prefix}-internal-alb-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-internal-alb-sg",
+            Description = "Security group for internal ALB (VPN-only access)",
+            Ingress =
+            {
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 443, ToPort = 443, CidrBlocks = { vpcCidr }, Description = "HTTPS from VPC" },
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 443, ToPort = 443, CidrBlocks = { "100.64.0.0/10" }, Description = "HTTPS from Tailscale network" },
+            },
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "internal-alb-sg"),
+        }, opts);
+
+        // ECS Public — no inline ingress (added via SecurityGroupRule to avoid circular refs)
+        var ecsPublicSg = new SecurityGroup($"{prefix}-ecs-public-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-ecs-public-sg",
+            Description = "Security group for public ECS tasks",
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "ecs-public-sg"),
+        }, opts);
+
+        // ECS Public ingress from public ALB
+        new SecurityGroupRule($"{prefix}-ecs-pub-alb-8080", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = albSg.Id, Description = "HTTP from public ALB",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-pub-alb-80", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 80, ToPort = 80,
+            SourceSecurityGroupId = albSg.Id, Description = "HTTP port 80 from public ALB",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-pub-alb-9000", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 9000, ToPort = 9000,
+            SourceSecurityGroupId = albSg.Id, Description = "Keycloak health port from ALB",
+        }, opts);
+
+        // ECS Public ingress from internal ALB
+        new SecurityGroupRule($"{prefix}-ecs-pub-ialb-8080", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = internalAlbSg.Id, Description = "Keycloak traffic from internal ALB",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-pub-ialb-9000", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 9000, ToPort = 9000,
+            SourceSecurityGroupId = internalAlbSg.Id, Description = "Keycloak health port from internal ALB",
+        }, opts);
+
+        // ECS Private
+        var ecsPrivateSg = new SecurityGroup($"{prefix}-ecs-private-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-ecs-private-sg",
+            Description = "Security group for private ECS tasks (VPN-only)",
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "ecs-private-sg"),
+        }, opts);
+
+        // ECS Private ingress from internal ALB
+        foreach (var port in new[] { 80, 443, 8080, 9000 })
+        {
+            new SecurityGroupRule($"{prefix}-ecs-priv-ialb-{port}", new SecurityGroupRuleArgs
+            {
+                Type = "ingress", SecurityGroupId = ecsPrivateSg.Id,
+                Protocol = "tcp", FromPort = port, ToPort = port,
+                SourceSecurityGroupId = internalAlbSg.Id,
+                Description = $"Port {port} from internal ALB",
+            }, opts);
+        }
+
+        // Inter-service communication rules
+        new SecurityGroupRule($"{prefix}-ecs-pub-self", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = ecsPublicSg.Id, Description = "ECS public tasks self-communication",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-priv-self", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPrivateSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = ecsPrivateSg.Id, Description = "ECS private tasks self-communication",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-pub-to-priv", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPrivateSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = ecsPublicSg.Id, Description = "Public ECS to private ECS",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-priv-to-pub", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 8080, ToPort = 8080,
+            SourceSecurityGroupId = ecsPrivateSg.Id, Description = "Private ECS to public ECS",
+        }, opts);
+
+        // Tailscale Security Group
+        var tailscaleSg = new SecurityGroup($"{prefix}-tailscale-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-tailscale-sg",
+            Description = "Security group for Tailscale subnet router",
+            Ingress =
+            {
+                new SecurityGroupIngressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { vpcCidr }, Description = "All traffic from VPC" },
+            },
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound traffic" },
+            },
+            Tags = Tags(config, "tailscale-sg"),
+        }, opts);
+
+        // RDS Security Group (VPC CIDR-based, matching SAM)
+        var rdsSg = new SecurityGroup($"{prefix}-rds-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-rds-sg",
+            Description = "Security group for RDS PostgreSQL",
+            Ingress =
+            {
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 5432, ToPort = 5432, CidrBlocks = { vpcCidr }, Description = "PostgreSQL from VPC (ECS tasks, Tailscale)" },
+            },
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "rds-sg"),
+        }, opts);
+
+        // EFS Security Group (VPC CIDR-based, matching SAM)
+        var efsSg = new SecurityGroup($"{prefix}-efs-sg", new SecurityGroupArgs
+        {
+            VpcId = vpc.Id,
+            Name = $"{prefix}-efs-sg",
+            Description = "Security group for EFS",
+            Ingress =
+            {
+                new SecurityGroupIngressArgs { Protocol = "tcp", FromPort = 2049, ToPort = 2049, CidrBlocks = { vpcCidr }, Description = "NFS from VPC (ECS tasks, Tailscale)" },
+            },
+            Egress =
+            {
+                new SecurityGroupEgressArgs { Protocol = "-1", FromPort = 0, ToPort = 0, CidrBlocks = { "0.0.0.0/0" }, Description = "All outbound" },
+            },
+            Tags = Tags(config, "efs-sg"),
+        }, opts);
+
+        // =====================================================================
+        // ROUTE 53 — Look up existing public zone, create private zone
+        // =====================================================================
+
+        var publicZone = GetZone.Invoke(new GetZoneInvokeArgs
+        {
+            Name = config.SystemDomain,
+            PrivateZone = false,
+        });
+
+        var privateZone = new Zone($"{prefix}-private-zone", new ZoneArgs
+        {
+            Name = config.SystemDomain,
+            Vpcs =
+            {
+                new ZoneVpcArgs { VpcId = vpc.Id },
+            },
+            Comment = $"Private zone for {prefix} - VPN-only records",
+            Tags = Tags(config, "private-zone"),
+        }, opts);
+
+        // =====================================================================
+        // ACM WILDCARD CERTIFICATE (DNS validated)
+        // =====================================================================
+
+        var cert = new AcmCertificate($"{prefix}-wildcard-cert", new AcmCertificateArgs
+        {
+            DomainName = config.SystemDomain,
+            SubjectAlternativeNames =
+            {
+                $"*.{config.SystemDomain}",
+                $"*.shop.{config.SystemDomain}",
+            },
+            ValidationMethod = "DNS",
+            Tags = Tags(config, "wildcard-cert"),
+        }, opts);
+
+        // DNS validation records in the public hosted zone
+        var validationRecord = new Route53Record($"{prefix}-cert-validation", new Route53RecordArgs
+        {
+            ZoneId = publicZone.Apply(z => z.ZoneId),
+            Name = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordName!),
+            Type = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordType!),
+            Records = { cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordValue!) },
+            Ttl = 300,
+            AllowOverwrite = true,
+        }, opts);
+
+        // shop.{domain} validation record (index 1 — distinct CNAME for *.shop.{domain})
+        var shopValidationRecord = new Route53Record($"{prefix}-cert-validation-shop", new Route53RecordArgs
+        {
+            ZoneId = publicZone.Apply(z => z.ZoneId),
+            Name = cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordName! : o[0].ResourceRecordName!),
+            Type = cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordType! : o[0].ResourceRecordType!),
+            Records = { cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordValue! : o[0].ResourceRecordValue!) },
+            Ttl = 300,
+            AllowOverwrite = true,
+        }, opts);
+
+        var certValidation = new CertificateValidation($"{prefix}-cert-validated", new CertificateValidationArgs
+        {
+            CertificateArn = cert.Arn,
+            ValidationRecordFqdns =
+            {
+                validationRecord.Fqdn,
+                shopValidationRecord.Fqdn,
+            },
+        }, opts);
+
+        // =====================================================================
+        // APPLICATION LOAD BALANCERS
+        // =====================================================================
+
+        var publicAlb = new LoadBalancer($"{prefix}-alb", new LoadBalancerArgs
+        {
+            Name = $"{prefix}-alb",
+            LoadBalancerType = "application",
+            Internal = false,
+            IpAddressType = "ipv4",
+            Subnets = { publicSubnet1.Id, publicSubnet2.Id },
+            SecurityGroups = { albSg.Id },
+            Tags = Tags(config, "alb"),
+        }, opts);
+
+        var httpsListener = new Listener($"{prefix}-https-listener", new ListenerArgs
+        {
+            LoadBalancerArn = publicAlb.Arn,
+            Port = 443,
+            Protocol = "HTTPS",
+            SslPolicy = "ELBSecurityPolicy-TLS13-1-2-2021-06",
+            CertificateArn = certValidation.CertificateArn,
+            DefaultActions =
+            {
+                new ListenerDefaultActionArgs
+                {
+                    Type = "fixed-response",
+                    FixedResponse = new ListenerDefaultActionFixedResponseArgs
+                    {
+                        StatusCode = "404",
+                        ContentType = "text/plain",
+                        MessageBody = "Not Found",
+                    },
+                },
+            },
+        }, opts);
+
+        // WebFinger endpoint — Tailscale OIDC discovery (RFC 7033)
+        // Returns the Keycloak OIDC issuer URL for the adminsauth realm in the shared-services account.
+        var webFingerJson = $@"{{""subject"":""acct:tailscale@{config.SystemDomain}"",""links"":[{{""rel"":""http://openid.net/specs/connect/1.0/issuer"",""href"":""https://{config.CentralAuthDomain}/realms/adminsauth""}}]}}";
+
+        new ListenerRule($"{prefix}-webfinger", new ListenerRuleArgs
+        {
+            ListenerArn = httpsListener.Arn,
+            Priority = 2,
+            Conditions =
+            {
+                new ListenerRuleConditionArgs
+                {
+                    HostHeader = new ListenerRuleConditionHostHeaderArgs
+                    {
+                        Values = { config.SystemDomain },
+                    },
+                },
+                new ListenerRuleConditionArgs
+                {
+                    PathPattern = new ListenerRuleConditionPathPatternArgs
+                    {
+                        Values = { "/.well-known/webfinger" },
+                    },
+                },
+            },
+            Actions =
+            {
+                new ListenerRuleActionArgs
+                {
+                    Type = "fixed-response",
+                    FixedResponse = new ListenerRuleActionFixedResponseArgs
+                    {
+                        StatusCode = "200",
+                        ContentType = "application/json",
+                        MessageBody = webFingerJson,
+                    },
+                },
+            },
+            Tags = Tags(config, "webfinger-rule"),
+        }, opts);
+
+        // HTTP -> HTTPS redirect
+        new Listener($"{prefix}-http-listener", new ListenerArgs
+        {
+            LoadBalancerArn = publicAlb.Arn,
+            Port = 80,
+            Protocol = "HTTP",
+            DefaultActions =
+            {
+                new ListenerDefaultActionArgs
+                {
+                    Type = "redirect",
+                    Redirect = new ListenerDefaultActionRedirectArgs
+                    {
+                        Protocol = "HTTPS",
+                        Port = "443",
+                        StatusCode = "HTTP_301",
+                    },
+                },
+            },
+        }, opts);
+
+        // Internal ALB
+        var internalAlb = new LoadBalancer($"{prefix}-internal-alb", new LoadBalancerArgs
+        {
+            Name = $"{prefix}-internal-alb",
+            LoadBalancerType = "application",
+            Internal = true,
+            IpAddressType = "ipv4",
+            Subnets = { privateSubnet1.Id, privateSubnet2.Id },
+            SecurityGroups = { internalAlbSg.Id },
+            Tags = Tags(config, "internal-alb"),
+        }, opts);
+
+        var internalHttpsListener = new Listener($"{prefix}-internal-https-listener", new ListenerArgs
+        {
+            LoadBalancerArn = internalAlb.Arn,
+            Port = 443,
+            Protocol = "HTTPS",
+            SslPolicy = "ELBSecurityPolicy-TLS13-1-2-2021-06",
+            CertificateArn = certValidation.CertificateArn,
+            DefaultActions =
+            {
+                new ListenerDefaultActionArgs
+                {
+                    Type = "fixed-response",
+                    FixedResponse = new ListenerDefaultActionFixedResponseArgs
+                    {
+                        StatusCode = "404",
+                        ContentType = "text/plain",
+                        MessageBody = "Not Found - VPN Access Required",
+                    },
+                },
+            },
+        }, opts);
+
+        // =====================================================================
+        // PUBLIC DNS RECORDS
+        // =====================================================================
+
+        new Route53Record($"{prefix}-dns-origin", new Route53RecordArgs
+        {
+            ZoneId = publicZone.Apply(z => z.ZoneId),
+            Name = $"origin.{config.SystemDomain}",
+            Type = "A",
+            Aliases =
+            {
+                new RecordAliasArgs
+                {
+                    Name = publicAlb.DnsName,
+                    ZoneId = publicAlb.ZoneId,
+                    EvaluateTargetHealth = true,
+                },
+            },
+        }, opts);
+
+        // Apex domain — needed for WebFinger (Tailscale OIDC discovery)
+        new Route53Record($"{prefix}-dns-root", new Route53RecordArgs
+        {
+            ZoneId = publicZone.Apply(z => z.ZoneId),
+            Name = config.SystemDomain,
+            Type = "A",
+            Aliases =
+            {
+                new RecordAliasArgs
+                {
+                    Name = publicAlb.DnsName,
+                    ZoneId = publicAlb.ZoneId,
+                    EvaluateTargetHealth = true,
+                },
+            },
+        }, opts);
+
+        // Auth DNS records — only for shared-services deployment where Keycloak is in the same account.
+        // For per-system deployments, auth.{domain} is in the shared account, not here.
+        if (!string.IsNullOrEmpty(config.CentralAuthDomain)
+            && config.CentralAuthDomain.EndsWith(config.SystemDomain))
+        {
+            new Route53Record($"{prefix}-dns-auth", new Route53RecordArgs
+            {
+                ZoneId = publicZone.Apply(z => z.ZoneId),
+                Name = config.CentralAuthDomain,
+                Type = "A",
+                Aliases =
+                {
+                    new RecordAliasArgs
+                    {
+                        Name = publicAlb.DnsName,
+                        ZoneId = publicAlb.ZoneId,
+                        EvaluateTargetHealth = true,
+                    },
+                },
+            }, opts);
+        }
+
+        // =====================================================================
+        // PRIVATE DNS RECORDS (split-horizon for VPC/VPN)
+        // =====================================================================
+
+        new Route53Record($"{prefix}-private-dns-root", new Route53RecordArgs
+        {
+            ZoneId = privateZone.ZoneId,
+            Name = config.SystemDomain,
+            Type = "A",
+            Aliases =
+            {
+                new RecordAliasArgs
+                {
+                    Name = publicAlb.DnsName,
+                    ZoneId = publicAlb.ZoneId,
+                    EvaluateTargetHealth = true,
+                },
+            },
+        }, opts);
+
+        // auth.{domain} in private zone — resolves to internal ALB via VPC DNS.
+        // When on VPN, auth.{domain} resolves here instead of the public ALB,
+        // so the admin console at auth.{domain}/admin/ and its OIDC login flow
+        // stay same-origin (avoids 3rd-party cookie issues with modern browsers).
+        // From the internet, auth.{domain} still resolves to the public ALB
+        // where /admin/* is blocked at priority 5.
+        new Route53Record($"{prefix}-private-dns-auth", new Route53RecordArgs
+        {
+            ZoneId = privateZone.ZoneId,
+            Name = $"auth.{config.SystemDomain}",
+            Type = "A",
+            Aliases =
+            {
+                new RecordAliasArgs
+                {
+                    Name = internalAlb.DnsName,
+                    ZoneId = internalAlb.ZoneId,
+                    EvaluateTargetHealth = true,
+                },
+            },
+        }, opts);
+
+        // =====================================================================
+        // PRIVATELINK — VPC ENDPOINT SERVICE (shared account only)
+        // Exposes the internal ALB (Keycloak admin API) to consumer accounts.
+        // =====================================================================
+
+        if (config.TrustedAccountIds.Count > 0)
+        {
+            // NLB (TCP passthrough to internal ALB)
+            var nlb = new LoadBalancer($"{prefix}-privatelink-nlb", new Pulumi.Aws.LB.LoadBalancerArgs
+            {
+                Name = $"{prefix}-pl-nlb",
+                LoadBalancerType = "network",
+                Internal = true,
+                Subnets = { privateSubnet1.Id, privateSubnet2.Id },
+                Tags = Tags(config, "privatelink-nlb"),
+            }, opts);
+
+            // NLB target group — ALB as target
+            var nlbTg = new TargetGroup($"{prefix}-privatelink-nlb-tg", new TargetGroupArgs
+            {
+                Name = $"{prefix}-pl-nlb-tg",
+                Port = 443,
+                Protocol = "TCP",
+                VpcId = vpc.Id,
+                TargetType = "alb",
+                HealthCheck = new TargetGroupHealthCheckArgs
+                {
+                    Protocol = "HTTPS",
+                    Path = "/health",
+                    Matcher = "200-399",
+                },
+                Tags = Tags(config, "privatelink-nlb-tg"),
+            }, opts);
+
+            // Attach internal ALB as NLB target
+            new TargetGroupAttachment($"{prefix}-privatelink-nlb-attach",
+                new TargetGroupAttachmentArgs
+                {
+                    TargetGroupArn = nlbTg.Arn,
+                    TargetId = internalAlb.Arn,
+                    Port = 443,
+                }, opts);
+
+            // NLB listener — TCP passthrough on 443
+            new Listener($"{prefix}-privatelink-nlb-listener", new ListenerArgs
+            {
+                LoadBalancerArn = nlb.Arn,
+                Port = 443,
+                Protocol = "TCP",
+                DefaultActions =
+                {
+                    new ListenerDefaultActionArgs
+                    {
+                        Type = "forward",
+                        TargetGroupArn = nlbTg.Arn,
+                    },
+                },
+            }, opts);
+
+            // VPC Endpoint Service — allows consumer accounts to connect via PrivateLink
+            var allowedPrincipals = config.TrustedAccountIds
+                .Select(id => $"arn:aws:iam::{id}:root").ToList();
+
+            new VpcEndpointService($"{prefix}-endpoint-service",
+                new VpcEndpointServiceArgs
+                {
+                    AcceptanceRequired = false,
+                    NetworkLoadBalancerArns = { nlb.Arn },
+                    AllowedPrincipals = allowedPrincipals,
+                    Tags =
+                    {
+                        { "Name", $"{prefix}-endpoint-service" },
+                        { "System", config.SystemKey },
+                        { "Environment", config.Environment },
+                        { "ManagedBy", "lz-pulumi" },
+                    },
+                }, opts);
+        }
+
+        // =====================================================================
+        // PRIVATELINK — VPC ENDPOINT (consumer account only)
+        // Connects to the shared account's Keycloak admin API via PrivateLink.
+        // =====================================================================
+
+        if (!string.IsNullOrEmpty(config.SharedEndpointServiceName))
+        {
+            // Security group for VPC endpoint ENIs
+            var endpointSg = new SecurityGroup($"{prefix}-endpoint-sg", new SecurityGroupArgs
+            {
+                VpcId = vpc.Id,
+                Name = $"{prefix}-endpoint-sg",
+                Description = "Security group for PrivateLink VPC endpoint to shared Keycloak",
+                Ingress =
+                {
+                    new SecurityGroupIngressArgs
+                    {
+                        Protocol = "tcp", FromPort = 443, ToPort = 443,
+                        CidrBlocks = { vpcCidr },
+                        Description = "HTTPS from VPC to PrivateLink endpoint",
+                    },
+                },
+                Egress =
+                {
+                    new SecurityGroupEgressArgs
+                    {
+                        Protocol = "-1", FromPort = 0, ToPort = 0,
+                        CidrBlocks = { "0.0.0.0/0" },
+                        Description = "All outbound",
+                    },
+                },
+                Tags = Tags(config, "endpoint-sg"),
+            }, opts);
+
+            // Interface VPC Endpoint to the shared Keycloak endpoint service
+            var endpoint = new VpcEndpoint($"{prefix}-keycloak-endpoint", new VpcEndpointArgs
+            {
+                VpcId = vpc.Id,
+                ServiceName = config.SharedEndpointServiceName,
+                VpcEndpointType = "Interface",
+                SubnetIds = { privateSubnet1.Id, privateSubnet2.Id },
+                SecurityGroupIds = { endpointSg.Id },
+                PrivateDnsEnabled = false,
+                Tags = Tags(config, "keycloak-endpoint"),
+            }, opts);
+
+            // Private hosted zone for the shared domain (e.g., monroadmin.click)
+            // This shadows the public DNS within this VPC so ECS tasks resolve
+            // auth.monroadmin.click to the PrivateLink endpoint for Keycloak.
+            // Browser-based OIDC redirects are unaffected (browsers use public DNS).
+            if (!string.IsNullOrEmpty(config.SharedAuthDomain))
+            {
+                var sharedPrivateZone = new Zone($"{prefix}-shared-private-zone", new ZoneArgs
+                {
+                    Name = config.SharedAuthDomain,
+                    Vpcs =
+                    {
+                        new ZoneVpcArgs { VpcId = vpc.Id },
+                    },
+                    Comment = $"Private zone for shared-services PrivateLink ({prefix})",
+                    Tags = Tags(config, "shared-private-zone"),
+                }, opts);
+
+                // auth.{sharedDomain} → VPC endpoint (PrivateLink to shared Keycloak)
+                // ECS tasks validating OIDC tokens go through PrivateLink (private network)
+                // instead of the public internet. Browser flows use public DNS directly.
+                new Route53Record($"{prefix}-shared-auth", new Route53RecordArgs
+                {
+                    ZoneId = sharedPrivateZone.ZoneId,
+                    Name = $"auth.{config.SharedAuthDomain}",
+                    Type = "CNAME",
+                    Ttl = 300,
+                    Records =
+                    {
+                        endpoint.DnsEntries.Apply(entries =>
+                            entries.Length > 0 ? entries[0].DnsName! : ""),
+                    },
+                }, opts);
+            }
+
+            // =================================================================
+            // AUTH FORWARDING — route /realms/*, /resources/*, /js/* from
+            // public ALB through the VPC endpoint to shared Keycloak.
+            // CloudFront → public ALB → IP target group → VPC endpoint
+            //   → shared NLB → shared internal ALB → Keycloak
+            // =================================================================
+
+            // IP target group (HTTPS, port 443) — targets are VPC endpoint ENI IPs
+            var authTg = new TargetGroup($"{prefix}-auth-tg", new TargetGroupArgs
+            {
+                Name = $"{prefix}-auth-tg",
+                Port = 443,
+                Protocol = "HTTPS",
+                VpcId = vpc.Id,
+                TargetType = "ip",
+                HealthCheck = new TargetGroupHealthCheckArgs
+                {
+                    Protocol = "HTTPS",
+                    Path = "/",
+                    Matcher = "200-499", // internal ALB returns 404 for / — still proves connectivity
+                    Interval = 30,
+                    Timeout = 10,
+                    HealthyThreshold = 2,
+                    UnhealthyThreshold = 3,
+                },
+                Tags = Tags(config, "auth-tg"),
+            }, opts);
+
+            // Register VPC endpoint ENI private IPs as targets.
+            // The endpoint creates one ENI per subnet (2 subnets = 2 ENIs).
+            for (int i = 0; i < 2; i++)
+            {
+                var idx = i;
+                new TargetGroupAttachment($"{prefix}-auth-tga-{idx}", new TargetGroupAttachmentArgs
+                {
+                    TargetGroupArn = authTg.Arn,
+                    TargetId = endpoint.NetworkInterfaceIds.Apply(async eniIds =>
+                    {
+                        if (eniIds.Length <= idx) return "";
+                        var eni = await GetNetworkInterface.InvokeAsync(
+                            new GetNetworkInterfaceArgs { Id = eniIds[idx] });
+                        return eni.PrivateIp;
+                    }),
+                    Port = 443,
+                }, opts);
+            }
+
+            // Public ALB listener rule — forward auth paths to shared Keycloak via PrivateLink
+            new ListenerRule($"{prefix}-auth-forward", new ListenerRuleArgs
+            {
+                ListenerArn = httpsListener.Arn,
+                Priority = 14,
+                Conditions =
+                {
+                    new ListenerRuleConditionArgs
+                    {
+                        PathPattern = new ListenerRuleConditionPathPatternArgs
+                        {
+                            Values = { "/realms/*", "/resources/*", "/js/*" },
+                        },
+                    },
+                },
+                Actions =
+                {
+                    new ListenerRuleActionArgs
+                    {
+                        Type = "forward",
+                        TargetGroupArn = authTg.Arn,
+                    },
+                },
+                Tags = Tags(config, "auth-forward-rule"),
+            }, opts);
+        }
+
+        // =====================================================================
+        // OUTPUTS
+        // =====================================================================
+
+        return new AwsNetworkOutputs
+        {
+            NetworkId = vpc.Id,
+            PrivateSubnetIds = Output.All(privateSubnet1.Id, privateSubnet2.Id)
+                .Apply(ids => ids.ToImmutableArray()),
+            PublicSubnetIds = Output.All(publicSubnet1.Id, publicSubnet2.Id)
+                .Apply(ids => ids.ToImmutableArray()),
+            PublicDnsZoneId = publicZone.Apply(z => z.ZoneId),
+            PrivateDnsZoneId = privateZone.ZoneId,
+            PublicAlbArn = publicAlb.Arn,
+            InternalAlbArn = internalAlb.Arn,
+            PublicAlbDns = publicAlb.DnsName,
+            InternalAlbDns = internalAlb.DnsName,
+            InternalAlbZoneId = internalAlb.ZoneId,
+            HttpsListenerArn = httpsListener.Arn,
+            InternalHttpsListenerArn = internalHttpsListener.Arn,
+            EcsPublicSecurityGroupId = ecsPublicSg.Id,
+            EcsPrivateSecurityGroupId = ecsPrivateSg.Id,
+            AlbSecurityGroupId = albSg.Id,
+            InternalAlbSecurityGroupId = internalAlbSg.Id,
+            RdsSecurityGroupId = rdsSg.Id,
+            EfsSecurityGroupId = efsSg.Id,
+            TailscaleSecurityGroupId = tailscaleSg.Id,
+            CertificateArn = certValidation.CertificateArn,
+            NatGatewayId = natGw.Id,
+        };
+    }
+
+    private static InputMap<string> Tags(SystemConfig config, string resourceName) => new()
+    {
+        { "Name", $"{config.SystemKey}-{resourceName}" },
+        { "System", config.SystemKey },
+        { "Environment", config.Environment },
+        { "ManagedBy", "lz-pulumi" },
+    };
+}

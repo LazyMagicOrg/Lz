@@ -1,0 +1,705 @@
+using System.CommandLine;
+using Lz.Core.Config;
+using Lz.Core.Definitions;
+using Lz.Core.Interfaces;
+using Lz.Core.Orchestration;
+using Lz.Core.Plugin;
+using Lz.Core.Validation;
+using Lz.Aws;
+using Lz.Aws.Docker;
+using Lz.Aws.Ecs;
+using Lz.Aws.Webapp;
+
+namespace Lz.Cli;
+
+class Program
+{
+    static async Task<int> Main(string[] args)
+    {
+        var rootCommand = new RootCommand("Lz infrastructure deployment tool");
+
+        // Load plugin (optional — core commands work without one)
+        ILzPlugin? plugin = null;
+        try
+        {
+            plugin = PluginLoader.LoadPlugin();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"Warning: Plugin load failed: {ex.Message}");
+            Console.ResetColor();
+        }
+
+        // Shared options used across multiple commands
+        var systemKeyOption = new Option<string?>("--systemkey",
+            "System key (auto-detected if only one systemconfig exists for the env)");
+        var envOption = new Option<string?>("--env",
+            "Environment (auto-detected from folder hierarchy: _Dev → dev, _Test → test, _Prod → prod)");
+
+        RegisterDeploySharedCommand(rootCommand);
+        RegisterDeployFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterDeployContainerCommand(rootCommand, systemKeyOption, envOption);
+        RegisterDeployWebappCommand(rootCommand, systemKeyOption, envOption);
+        RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterDestroySharedCommand(rootCommand);
+        RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
+
+        // Plugin-specific commands (e.g., seed)
+        plugin?.RegisterCommands(rootCommand);
+
+        return await rootCommand.InvokeAsync(args);
+    }
+
+    // ---------------------------------------------------------------
+    // deployshared
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeploySharedCommand(RootCommand root)
+    {
+        var cmd = new Command("deployshared",
+            "Deploy shared-services infrastructure (Keycloak + Tailscale)");
+
+        cmd.SetHandler(async () =>
+        {
+            var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+
+            Console.WriteLine("Shared-services deployment");
+            Console.WriteLine($"  Domain: {sharedConfig.Domain}");
+            Console.WriteLine();
+
+            // Ensure Pulumi state backend (S3 bucket + KMS key) exists
+            if (sharedConfig.State != null)
+                await AwsStateBootstrapper.BootstrapAsync(
+                    sharedConfig.Profile, sharedConfig.Region, sharedConfig.State);
+
+            var factory = CreateFactory(new SystemConfig
+            {
+                SystemKey = "shared",
+                Environment = "shared",
+                Platform = "aws",
+                Topology = "ecs",
+                Profile = sharedConfig.Profile,
+                Region = sharedConfig.Region,
+                SystemDomain = sharedConfig.Domain,
+                VpcCidr = sharedConfig.VpcCidr,
+                AdminAuth = "adminsauth",
+                TrustedAccountIds = sharedConfig.TrustedAccountIds,
+            });
+            var deployment = new SharedDeployment(factory, sharedConfig);
+            await deployment.RunAsync();
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // deployfoundation
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeployFoundationCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deployfoundation",
+            "Deploy foundation infrastructure (VPC, ECS, RDS, EFS)");
+
+        var platformOption = new Option<string?>("--platform", "Override platform from config");
+        var topologyOption = new Option<string?>("--topology", "Override topology from config");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(platformOption);
+        cmd.AddOption(topologyOption);
+
+        cmd.SetHandler(async (systemKey, env, platform, topology) =>
+        {
+            RequirePlugin(plugin, "deployfoundation");
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                if (platform != null) config.Platform = platform;
+                if (topology != null) config.Topology = topology;
+
+                // Resolve cross-account shared services references
+                if (!string.IsNullOrEmpty(config.SharedProfile))
+                {
+                    var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
+                        config.SharedProfile, config.Region);
+                    config.SharedSecretArn =
+                        $"arn:aws:secretsmanager:{config.Region}:{sharedAccountId}:secret:shared/system";
+                    config.SharedRegion = config.Region;
+
+                    // Resolve actual KMS key ARN — alias ARNs can't be used in IAM policy resources
+                    config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                        config.SharedProfile, config.Region, "alias/shared-secrets-key");
+
+                    var endpointServiceName = await AwsAccountResolver.ResolveEndpointServiceNameAsync(
+                        config.SharedProfile, config.Region);
+                    if (endpointServiceName != null)
+                        config.SharedEndpointServiceName = endpointServiceName;
+
+                    Console.WriteLine($"  Shared account: {sharedAccountId}");
+                    Console.WriteLine($"  Shared secret:  {config.SharedSecretArn}");
+                    if (config.SharedKmsKeyArn != null)
+                        Console.WriteLine($"  Shared KMS key: {config.SharedKmsKeyArn}");
+                    if (config.SharedEndpointServiceName != null)
+                        Console.WriteLine($"  Endpoint svc:   {config.SharedEndpointServiceName}");
+                }
+
+                // Ensure Pulumi state backend (S3 bucket + KMS key) exists
+                if (config.State != null)
+                    await AwsStateBootstrapper.BootstrapAsync(
+                        config.Profile, config.Region, config.State);
+
+                var (system, factory) = PrepareSystem(plugin!, config);
+
+                Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
+                Console.WriteLine($"Platform: {config.Platform}, Topology: {config.Topology}");
+                Console.WriteLine($"Domain: {config.SystemDomain}");
+                Console.WriteLine();
+
+                var deployment = new SystemDeployment(factory, system, config);
+                await deployment.DeployFoundationAsync();
+            }
+        }, systemKeyOption, envOption, platformOption, topologyOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // deploycontainer
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeployContainerCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deploycontainer",
+            "Build and push container images to ECR");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (auto-detected if only one tenant)");
+        var containerOption = new Option<string?>("--container",
+            "Container name to build (builds all if not specified)");
+        var tagOption = new Option<string>("--tag",
+            () => "latest", "Docker image tag");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(containerOption);
+        cmd.AddOption(tagOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, container, tag) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var containerServiceConfig = ConfigLoader
+                    .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                var deployer = new EcrDeployer();
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var containersToProcess = container != null
+                        ? containerServiceConfig.Containers
+                            .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
+                            .ToDictionary(c => c.Key, c => c.Value)
+                        : containerServiceConfig.Containers;
+
+                    if (containersToProcess.Count == 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
+                        Console.ResetColor();
+                        continue;
+                    }
+
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+
+                    foreach (var (svcName, def) in containersToProcess)
+                    {
+                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine($"=== {svcName} for tenant {tk} ===");
+                        Console.ResetColor();
+
+                        await deployer.DeployAsync(
+                            svcName, def,
+                            containerServiceConfig.ConfigDirectory,
+                            ecrName,
+                            profile,
+                            region,
+                            tag);
+                    }
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, containerOption, tagOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // deploywebapp
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeployWebappCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deploywebapp",
+            "Build and deploy a Blazor WASM web application to S3 + CloudFront");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (auto-detected if only one tenant)");
+        var webappOption = new Option<string?>("--webapp",
+            "Webapp solution folder name (e.g., 'StoreApp'). Not needed if running from inside the webapp folder.");
+        var projectOption = new Option<string>("--project",
+            () => "WASMApp", "Project subfolder and name within the webapp solution");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(webappOption);
+        cmd.AddOption(projectOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, webapp, project) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                // Determine webapp folder path
+                var cwd = Directory.GetCurrentDirectory();
+                string webappFolder;
+
+                if (!string.IsNullOrEmpty(webapp))
+                {
+                    // --webapp specified: resolve relative to cwd
+                    webappFolder = Path.GetFullPath(Path.Combine(cwd, webapp));
+                }
+                else if (Directory.Exists(Path.Combine(cwd, project)))
+                {
+                    // No --webapp: assume cwd IS the webapp solution folder
+                    webappFolder = cwd;
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(
+                        $"Cannot find project folder '{project}/' in current directory.\n" +
+                        $"  Either run from the webapp solution folder, or use --webapp <folder>.");
+                    Console.ResetColor();
+                    return;
+                }
+
+                if (!Directory.Exists(webappFolder))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Webapp folder not found: {webappFolder}");
+                    Console.ResetColor();
+                    return;
+                }
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine($"=== deploywebapp: {project} for tenant {tk} ===");
+                    Console.ResetColor();
+
+                    // Derive S3 bucket name from naming convention:
+                    // {systemKey}-{tenantKey}-{tenantSuffix}-{env}-assets
+                    var suffix = tenantConfig.TenantSuffix;
+                    if (string.IsNullOrEmpty(suffix))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("TenantSuffix not set in tenant config.");
+                        Console.ResetColor();
+                        return;
+                    }
+
+                    var bucketName = $"{config.SystemKey}-{tk}-{suffix}-{config.Environment}-assets";
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region ?? "us-west-2";
+
+                    // Look up CloudFront distribution ID from AWS (for cache invalidation)
+                    var distributionId = "";
+                    if (!config.Environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
+                    {
+                        distributionId = await WebappDeployer.FindDistributionIdAsync(
+                            tenantConfig.RootDomain, profile, region);
+                    }
+
+                    var deployer = new WebappDeployer();
+                    await deployer.DeployAsync(
+                        webappFolder, project, project,
+                        bucketName, distributionId,
+                        profile, region, config.Environment);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // deploytenant
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeployTenantCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deploytenant", "Deploy tenant infrastructure");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (deploys all tenants if not specified)");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        {
+            RequirePlugin(plugin, "deploytenant");
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                // Load container service config to check ECR images
+                var containerServiceConfig = ConfigLoader
+                    .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+                // Resolve cross-account shared services references
+                if (!string.IsNullOrEmpty(config.SharedProfile))
+                {
+                    var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
+                        config.SharedProfile, config.Region);
+                    config.SharedSecretArn =
+                        $"arn:aws:secretsmanager:{config.Region}:{sharedAccountId}:secret:shared/system";
+                    config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                        config.SharedProfile, config.Region, "alias/shared-secrets-key");
+                    config.SharedRegion = config.Region;
+                }
+
+                // Read SES SMTP secrets from shared/system for keycloak template replacements
+                Dictionary<string, string?> smtpSecrets = new();
+                if (!string.IsNullOrEmpty(config.SharedProfile))
+                {
+                    smtpSecrets = await AwsAccountResolver.ReadSecretEntriesAsync(
+                        config.SharedProfile, config.Region, "shared/system",
+                        "SES_SMTP_USER", "SES_SMTP_PASSWORD", "SES_SMTP_DOMAIN", "SES_SMTP_URL");
+                }
+
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config);
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    // Pre-flight: verify ECR images exist for all containers
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+                    var missingImages = new List<string>();
+
+                    Console.WriteLine("Checking ECR images...");
+                    foreach (var (svcName, _) in containerServiceConfig.Containers)
+                    {
+                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                        var exists = await EcrDeployer.CheckEcrImageExistsAsync(
+                            profile, region, ecrName);
+                        if (!exists)
+                            missingImages.Add(svcName);
+                    }
+
+                    if (missingImages.Count == 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("  \u2713 ecr-images");
+                        Console.ResetColor();
+                    }
+                    else
+                    {
+                        Console.WriteLine();
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine("  GATE: ecr-images");
+                        Console.WriteLine();
+                        Console.WriteLine(
+                            $"  ECR images missing for tenant '{tk}': {string.Join(", ", missingImages)}");
+                        Console.WriteLine(
+                            $"  Run 'lz deploycontainer --tenantkey {tk}' first to build and push container images.");
+                        Console.WriteLine();
+                        Console.WriteLine("  Re-run the same deploy command after completing this step.");
+                        Console.ResetColor();
+                        Console.WriteLine();
+                        continue;
+                    }
+
+                    // Propagate shared secret ARN and KMS key to tenant config
+                    tenantConfig.SharedSecretArn = config.SharedSecretArn;
+                    tenantConfig.SharedKmsKeyArn = config.SharedKmsKeyArn;
+
+                    Console.WriteLine(
+                        $"Deploying tenant '{tk}' for system " +
+                        $"'{config.SystemKey}' ({config.Environment})");
+                    await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // destroyshared
+    // ---------------------------------------------------------------
+
+    private static void RegisterDestroySharedCommand(RootCommand root)
+    {
+        var cmd = new Command("destroyshared",
+            "Destroy shared-services infrastructure");
+
+        cmd.SetHandler(async () =>
+        {
+            var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("WARNING: This will destroy the shared-services stack.");
+            Console.ResetColor();
+            Console.Write("Type 'yes' to confirm: ");
+            var confirmation = Console.ReadLine();
+            if (confirmation?.Trim().ToLowerInvariant() != "yes")
+            {
+                Console.WriteLine("Aborted.");
+                return;
+            }
+
+            // Ensure Pulumi state backend exists (needed to find the stack)
+            if (sharedConfig.State != null)
+                await AwsStateBootstrapper.BootstrapAsync(
+                    sharedConfig.Profile, sharedConfig.Region, sharedConfig.State);
+
+            var factory = CreateFactory(new SystemConfig
+            {
+                SystemKey = "shared",
+                Environment = "shared",
+                Platform = "aws", Topology = "ecs",
+                Profile = sharedConfig.Profile, Region = sharedConfig.Region,
+                SystemDomain = sharedConfig.Domain,
+                VpcCidr = sharedConfig.VpcCidr,
+                AdminAuth = "adminsauth",
+                TrustedAccountIds = sharedConfig.TrustedAccountIds,
+            });
+            var deployment = new SharedDeployment(factory, sharedConfig);
+            await deployment.DestroyAsync();
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // destroyfoundation
+    // ---------------------------------------------------------------
+
+    private static void RegisterDestroyFoundationCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("destroyfoundation",
+            "Destroy foundation infrastructure (VPC, ECS, RDS, EFS)");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+
+        cmd.SetHandler(async (systemKey, env) =>
+        {
+            RequirePlugin(plugin, "destroyfoundation");
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine(
+                    $"WARNING: This will destroy foundation for system " +
+                    $"'{config.SystemKey}' ({config.Environment}).");
+                Console.ResetColor();
+                Console.Write("Type 'yes' to confirm: ");
+                var confirmation = Console.ReadLine();
+                if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                {
+                    Console.WriteLine("Aborted.");
+                    continue;
+                }
+
+                // Ensure Pulumi state backend exists (needed to find the stack)
+                if (config.State != null)
+                    await AwsStateBootstrapper.BootstrapAsync(
+                        config.Profile, config.Region, config.State);
+
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config);
+                await deployment.DestroyFoundationAsync();
+            }
+        }, systemKeyOption, envOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // destroytenant
+    // ---------------------------------------------------------------
+
+    private static void RegisterDestroyTenantCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("destroytenant",
+            "Destroy tenant infrastructure");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (destroys all tenants if not specified)");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        {
+            RequirePlugin(plugin, "destroytenant");
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                // Ensure Pulumi state backend exists (needed to find the stack)
+                if (config.State != null)
+                    await AwsStateBootstrapper.BootstrapAsync(
+                        config.Profile, config.Region, config.State);
+
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config);
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, _) in tenants)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine(
+                        $"WARNING: This will destroy tenant '{tk}' for system " +
+                        $"'{config.SystemKey}' ({config.Environment}).");
+                    Console.ResetColor();
+                    Console.Write("Type 'yes' to confirm: ");
+                    var confirmation = Console.ReadLine();
+                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    {
+                        Console.WriteLine("Aborted.");
+                        continue;
+                    }
+
+                    await deployment.DestroyTenantAsync(tk);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // status
+    // ---------------------------------------------------------------
+
+    private static void RegisterStatusCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("status", "Show deployment status");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+
+        cmd.SetHandler(async (systemKey, env) =>
+        {
+            RequirePlugin(plugin, "status");
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config);
+
+                await deployment.StatusFoundationAsync();
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment);
+                foreach (var (tk, _) in tenants)
+                    await deployment.StatusTenantAsync(tk);
+            }
+        }, systemKeyOption, envOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
+
+    private static (SystemDefinition System, IPlatformFactory Factory)
+        PrepareSystem(ILzPlugin plugin, SystemConfig config)
+    {
+        var system = plugin.CreateSystemDefinition();
+        system.Define(config);
+
+        var validation = TopologyValidator.Validate(system, config.Topology);
+        if (!validation.IsValid)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            foreach (var error in validation.Errors)
+                Console.Error.WriteLine($"  ERROR: {error}");
+            Console.ResetColor();
+            throw new InvalidOperationException("Topology validation failed.");
+        }
+
+        var factory = CreateFactory(config);
+        return (system, factory);
+    }
+
+    private static IPlatformFactory CreateFactory(SystemConfig config)
+    {
+        return (config.Platform, config.Topology) switch
+        {
+            ("aws", "ecs") => new AwsEcsPlatformFactory(config),
+            _ => throw new ArgumentException(
+                $"Unsupported platform/topology: {config.Platform}/{config.Topology}")
+        };
+    }
+
+    private static void RequirePlugin(ILzPlugin? plugin, string commandName)
+    {
+        if (plugin == null)
+            throw new InvalidOperationException(
+                $"The '{commandName}' command requires a system plugin. " +
+                "Build the Deploy/ project or create an lz.json file pointing to the plugin DLL.");
+    }
+}

@@ -1,0 +1,17 @@
+Profile: "monro-shared"
+Region: "us-west-2"
+Domain: "monroadmin.click"
+VpcCidr: "10.10.0.0/16"
+SharedSuffix: "49d2-8357"
+
+Keycloak:
+  ImageTag: '26.5.0'
+  Cpu: 512
+  Memory: 1024
+  DesiredCount: 2
+
+DbInstanceClass: 'db.t4g.micro'
+DbAllocatedStorage: 20
+TailscaleInstanceType: 't4g.nano'
+TailscaleDesiredCapacity: 2
+LogRetentionDays: 3

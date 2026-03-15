@@ -1,0 +1,259 @@
+using Amazon.ECS;
+using Amazon.ECS.Model;
+using Amazon.Runtime.CredentialManagement;
+using Lz.Core.Config;
+using Task = System.Threading.Tasks.Task;
+
+namespace Lz.Aws.Ecs;
+
+/// <summary>
+/// Imperative ECS task runner for seed data export/import operations.
+/// Launches the seeder ECS Fargate task and waits for it to complete.
+/// Follows the AwsEcsPostDeployHelper pattern for RunTask/DescribeTasks.
+/// </summary>
+public class AwsSeedRunner
+{
+    private readonly SystemConfig _config;
+
+    public AwsSeedRunner(SystemConfig config)
+    {
+        _config = config;
+    }
+
+    /// <summary>
+    /// Run a seed export task: EFS + database → S3.
+    /// </summary>
+    public async Task<bool> RunExportAsync(
+        string tenantKey,
+        string? clusterArn = null,
+        List<string>? subnetIds = null,
+        string? securityGroupId = null)
+    {
+        // EFS access points use /{sk}-{tk}-{env}/ prefix, but S3 uses just {tenantKey}/
+        var efsPrefix = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
+        var args = new[]
+        {
+            "seed-export",
+            "--env", _config.Environment,
+            "--tenant", tenantKey,
+            "--bucket", _config.SeedData!.Bucket,
+            "--region", _config.SeedData.Region,
+            "--efs-root", "/mnt/efs",
+            "--efs-prefix", efsPrefix
+        };
+
+        return await RunSeedTaskAsync(tenantKey, args, "export", clusterArn, subnetIds, securityGroupId);
+    }
+
+    /// <summary>
+    /// Run a seed import task: S3 → EFS + database.
+    /// </summary>
+    public async Task<bool> RunImportAsync(
+        string tenantKey,
+        string sourceKey = "latest",
+        string? clusterArn = null,
+        List<string>? subnetIds = null,
+        string? securityGroupId = null)
+    {
+        // EFS access points use /{sk}-{tk}-{env}/ prefix, but S3 uses just {tenantKey}/
+        var efsPrefix = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
+        var args = new[]
+        {
+            "seed-import",
+            "--env", _config.Environment,
+            "--tenant", tenantKey,
+            "--bucket", _config.SeedData!.Bucket,
+            "--region", _config.SeedData.Region,
+            "--source", sourceKey,
+            "--efs-root", "/mnt/efs",
+            "--efs-prefix", efsPrefix
+        };
+
+        return await RunSeedTaskAsync(tenantKey, args, "import", clusterArn, subnetIds, securityGroupId);
+    }
+
+    private async Task<bool> RunSeedTaskAsync(
+        string tenantKey,
+        string[] commandArgs,
+        string operation,
+        string? clusterArn,
+        List<string>? subnetIds,
+        string? securityGroupId)
+    {
+        var client = CreateEcsClient(_config.Region, _config.Profile);
+
+        // Discover cluster and network config from existing ECS services if not provided
+        if (clusterArn is null || subnetIds is null || securityGroupId is null)
+        {
+            var discovered = await DiscoverEcsConfigAsync(client);
+            clusterArn ??= discovered.ClusterArn;
+            subnetIds ??= discovered.SubnetIds;
+            securityGroupId ??= discovered.SecurityGroupId;
+        }
+
+        var taskFamily = $"{_config.SystemKey}-seeder";
+
+        Console.WriteLine($"Starting seed {operation} task for tenant '{tenantKey}'...");
+        Console.WriteLine($"  Cluster: {clusterArn}");
+        Console.WriteLine($"  Task: {taskFamily}");
+        Console.WriteLine($"  Command: {string.Join(" ", commandArgs)}");
+
+        // Run the task with command override
+        var runResponse = await client.RunTaskAsync(new RunTaskRequest
+        {
+            Cluster = clusterArn,
+            TaskDefinition = taskFamily,
+            LaunchType = LaunchType.FARGATE,
+            NetworkConfiguration = new NetworkConfiguration
+            {
+                AwsvpcConfiguration = new AwsVpcConfiguration
+                {
+                    Subnets = subnetIds,
+                    SecurityGroups = [securityGroupId],
+                    AssignPublicIp = AssignPublicIp.DISABLED,
+                },
+            },
+            Overrides = new TaskOverride
+            {
+                ContainerOverrides =
+                [
+                    new ContainerOverride
+                    {
+                        Name = "seeder",
+                        Command = commandArgs.ToList(),
+                    }
+                ],
+            },
+        });
+
+        if (runResponse.Tasks.Count == 0)
+        {
+            var failures = string.Join(", ", runResponse.Failures.Select(f => $"{f.Reason}: {f.Detail}"));
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"Failed to start seed task: {failures}");
+            Console.ResetColor();
+            return false;
+        }
+
+        string taskArn = runResponse.Tasks[0].TaskArn;
+        Console.WriteLine($"  Task started: {taskArn}");
+        Console.WriteLine($"  Waiting for task to complete (check CloudWatch: /ecs/{_config.SystemKey}-seeder)...");
+
+        // Wait for completion
+        var exitCode = await WaitForTaskAsync(client, clusterArn, taskArn);
+
+        if (exitCode == 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  Seed {operation} completed successfully.");
+            Console.ResetColor();
+            return true;
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"  Seed {operation} failed with exit code {exitCode}.");
+            Console.Error.WriteLine($"  Check CloudWatch logs: /ecs/{_config.SystemKey}-seeder");
+            Console.ResetColor();
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Discover cluster ARN, subnet IDs, and security group from existing ECS services.
+    /// </summary>
+    private async Task<(string ClusterArn, List<string> SubnetIds, string SecurityGroupId)> DiscoverEcsConfigAsync(
+        AmazonECSClient client)
+    {
+        // List clusters to find ours
+        var clusterName = $"{_config.SystemKey}-cluster";
+        var clustersResponse = await client.DescribeClustersAsync(new DescribeClustersRequest
+        {
+            Clusters = [clusterName],
+        });
+
+        var cluster = clustersResponse.Clusters.FirstOrDefault()
+            ?? throw new InvalidOperationException($"ECS cluster '{clusterName}' not found. Is the foundation deployed?");
+
+        // List services to discover network config
+        var servicesResponse = await client.ListServicesAsync(new ListServicesRequest
+        {
+            Cluster = cluster.ClusterArn,
+        });
+
+        if (servicesResponse.ServiceArns.Count == 0)
+            throw new InvalidOperationException("No ECS services found in cluster. Is the foundation fully deployed?");
+
+        // Describe first service for its network config
+        var describeResponse = await client.DescribeServicesAsync(new DescribeServicesRequest
+        {
+            Cluster = cluster.ClusterArn,
+            Services = [servicesResponse.ServiceArns[0]],
+        });
+
+        var service = describeResponse.Services.FirstOrDefault()
+            ?? throw new InvalidOperationException("Could not describe ECS service for network config");
+
+        var vpcConfig = service.NetworkConfiguration?.AwsvpcConfiguration
+            ?? throw new InvalidOperationException("Service has no awsvpc network configuration");
+
+        return (
+            cluster.ClusterArn,
+            vpcConfig.Subnets,
+            vpcConfig.SecurityGroups.FirstOrDefault()
+                ?? throw new InvalidOperationException("Service has no security group configured")
+        );
+    }
+
+    private static async Task<int> WaitForTaskAsync(
+        AmazonECSClient client,
+        string clusterArn,
+        string taskArn,
+        int pollIntervalSeconds = 10,
+        int timeoutSeconds = 3600) // 1 hour timeout for large seed operations
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var response = await client.DescribeTasksAsync(new DescribeTasksRequest
+            {
+                Cluster = clusterArn,
+                Tasks = [taskArn],
+            });
+
+            var task = response.Tasks.FirstOrDefault()
+                ?? throw new InvalidOperationException("Seed task not found");
+
+            if (task.LastStatus == "STOPPED")
+            {
+                var container = task.Containers.FirstOrDefault();
+                var exitCode = container?.ExitCode ?? -1;
+
+                if (task.StoppedReason is not null)
+                    Console.WriteLine($"  Stopped reason: {task.StoppedReason}");
+
+                return exitCode;
+            }
+
+            Console.Write(".");
+            await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds));
+        }
+
+        throw new TimeoutException($"Seed task did not complete within {timeoutSeconds}s");
+    }
+
+    private static AmazonECSClient CreateEcsClient(string region, string? profile)
+    {
+        var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+
+        if (!string.IsNullOrEmpty(profile))
+        {
+            var chain = new CredentialProfileStoreChain();
+            if (chain.TryGetAWSCredentials(profile, out var credentials))
+                return new AmazonECSClient(credentials, regionEndpoint);
+        }
+
+        return new AmazonECSClient(regionEndpoint);
+    }
+}

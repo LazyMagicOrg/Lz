@@ -1,0 +1,1 @@
+{"passed": true, "reason": "Database med_monro_dev_smartstore already exists; Updated password for role med_monro_app; Granted schema privileges; Default/Media already exists, skipping zip extraction; Database dump already imported (marker exists), skipping; Wrote Settings.txt to med-monro-dev/smartstore-data/Default/; Wrote usersettings.json to med-monro-dev/smartstore-config/"}

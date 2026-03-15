@@ -1,0 +1,79 @@
+AdminAuth: "adminsauth"
+AdminEmail: "test@example.com"
+SystemSuffix: "496a-ffff"
+Profile: "testapp-dev"
+Region: "us-west-2"
+SystemDomain: "testdev.click"
+DefaultTenant: "testdev.click"
+VpcCidr: "10.20.0.0/16"
+CentralAuthDomain: "auth.meadowsservices.com"
+Platform: aws
+Topology: ecs
+
+SecretsManager:
+  SecretPrefix: "testapp"
+  VerboseLogging: false
+
+IntegrationSecretsPath: ""
+
+Integrations:
+  Services:
+    store:
+      Deployment: "cloud"
+      Host: "shop.testdev.click"
+      DockerName: "smartstore"
+      Scheme: "https"
+      Description: "SmartStore e-commerce platform"
+      Modules:
+        - ShopModule
+        - ShopRestModule
+    auth:
+      Deployment: "all"
+      Host: "auth.testdev.click"
+      DockerName: "keycloak"
+      Scheme: "https"
+      Description: "Keycloak authentication server"
+
+AuthConfigs:
+  usersauth:
+    HostedUIDomain: "https://testdev.click/realms/usersauth"
+    MetadataUrl: "https://testdev.click/realms/usersauth/.well-known/openid-configuration"
+    ClientId: "test-client"
+    ValidateAudience: false
+  adminsauth:
+    HostedUIDomain: "https://auth.testdev.click/realms/adminsauth"
+    MetadataUrl: "https://auth.testdev.click/realms/adminsauth/.well-known/openid-configuration"
+    ValidateAudience: false
+    ClientId: "test-client"
+
+RequestRewriter:
+  LogRewrites: false
+  VerboseLogging: false
+  PreserveOriginalPath: true
+  Rules:
+    - Name: "StripAppApi"
+      MatchPrefix: "/AppApi"
+      ReplaceWith: ""
+      Enabled: true
+      Order: 0
+      StopOnMatch: true
+
+ECS:
+  LogRetentionDays: 3
+  DbInstanceClass: 'db.t4g.micro'
+  DbAllocatedStorage: 20
+  KeycloakImageTag: '26.5.0'
+  KeycloakCpu: 512
+  KeycloakMemory: 1024
+  TailscaleInstanceType: 't4g.nano'
+  TailscaleDesiredCapacity: 2
+  EnableEfsMountInstance: true
+  SmartStoreCpu: 512
+  SmartStoreMemory: 1024
+  AppHostCpu: 256
+  AppHostMemory: 512
+  ServiceDesiredCount: 1
+
+CDN:
+  PriceClass: PriceClass_100
+  DefaultRootObject: app/index.html
