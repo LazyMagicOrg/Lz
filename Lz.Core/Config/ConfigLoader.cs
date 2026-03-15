@@ -154,7 +154,7 @@ public static class ConfigLoader
     /// Discover a per-tenant keycloakconfig file with template fallback.
     /// Resolution order:
     ///   1. keycloakconfig.{systemKey}.{tenantKey}.{env}.yaml (tenant-specific override)
-    ///   2. keycloakconfig.system.tenant.env.yaml (template with &lt;&lt;placeholder&gt;&gt; replacements)
+    ///   2. keycloakconfig.system.tenant.{env}.yaml (template with &lt;&lt;placeholder&gt;&gt; replacements)
     /// Returns null if neither file is found (seeding is optional).
     /// </summary>
     public static KeycloakSeedConfig? DiscoverTenantKeycloakSeedConfig(
@@ -172,7 +172,7 @@ public static class ConfigLoader
             return LoadKeycloakSeedConfig(specificPath);
 
         // 2. Fall back to template
-        var templateFilename = "keycloakconfig.system.tenant.env.yaml";
+        var templateFilename = $"keycloakconfig.system.tenant.{environment}.yaml";
         var templatePath = DiscoverConfigFile(dir, templateFilename);
         if (templatePath == null)
             return null;
