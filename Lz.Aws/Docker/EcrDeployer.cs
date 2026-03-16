@@ -53,11 +53,22 @@ public class EcrDeployer
         // 3. Ensure ECR repo exists
         await EnsureEcrRepoAsync(profile, region, ecrRepoName);
 
-        // 4. Docker build
+        // 4. Sync local NuGet packages into build context (if configured)
+        if (container.SyncPackages)
+        {
+            // Determine the project to restore from the BuildArgs or convention
+            var projectRelPath = container.BuildArgs?.TryGetValue("ContainerName", out var cn) == true
+                ? $"Containers/{cn}/{cn}.csproj"
+                : $"Containers/{serviceName}/{serviceName}.csproj";
+
+            await DockerPackageSyncer.SyncAsync(contextPath, projectRelPath);
+        }
+
+        // 5. Docker build
         Console.WriteLine($"Building Docker image '{serviceName}'...");
         await DockerBuildAsync(contextPath, dockerfilePath, localImage, container.BuildArgs);
 
-        // 5. Tag and push
+        // 6. Tag and push
         Console.WriteLine($"Tagging image as {imageUri}...");
         await RunAsync("docker", $"tag {localImage} {imageUri}");
 

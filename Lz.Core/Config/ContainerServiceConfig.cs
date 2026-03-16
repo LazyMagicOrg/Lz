@@ -39,4 +39,12 @@ public class ContainerDefinition
     /// Optional build arguments passed as --build-arg to docker build.
     /// </summary>
     public Dictionary<string, string>? BuildArgs { get; set; }
+
+    /// <summary>
+    /// When true, run dotnet restore locally before Docker build and sync all
+    /// resolved NuGet packages into a DockerPackages folder inside the build context.
+    /// This is needed when the project depends on packages that are only available
+    /// from local NuGet sources (not nuget.org).
+    /// </summary>
+    public bool SyncPackages { get; set; }
 }
