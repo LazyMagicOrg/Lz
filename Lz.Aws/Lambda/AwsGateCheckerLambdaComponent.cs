@@ -111,21 +111,27 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         }, opts);
 
         // --- EFS Access Point (root path for checking any tenant directory) ---
+        // Uses UID 0 (root) because the EFS root directory is owned by root (0:0, 755).
+        // The gate-checker must create tenant prefix directories (e.g. /med-monro-test/)
+        // under the root before tenant access points have been exercised, so it needs
+        // root-level write access. Files it creates inside tenant subdirectories will be
+        // owned by UID 0, but the tenant access points (UID 1000) override ownership
+        // when ECS tasks mount them.
         var ap = new AccessPoint($"{prefix}-gate-checker-ap", new AccessPointArgs
         {
             FileSystemId = fileStorage.FileSystemId,
             PosixUser = new AccessPointPosixUserArgs
             {
-                Uid = 1000,
-                Gid = 1000,
+                Uid = 0,
+                Gid = 0,
             },
             RootDirectory = new AccessPointRootDirectoryArgs
             {
                 Path = "/",
                 CreationInfo = new AccessPointRootDirectoryCreationInfoArgs
                 {
-                    OwnerUid = 1000,
-                    OwnerGid = 1000,
+                    OwnerUid = 0,
+                    OwnerGid = 0,
                     Permissions = "755",
                 },
             },
@@ -330,7 +336,10 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         // Copy handler.py into stage
         File.Copy(handlerPath, Path.Combine(stageDir, "handler.py"), overwrite: true);
 
-        // Copy bin/ and lib/ directories if present (psql binary and shared libraries)
+        // Ensure psql binary and shared libraries are extracted from Amazon Linux 2023
+        EnsurePsqlExtracted(binSourceDir, libSourceDir);
+
+        // Copy bin/ and lib/ directories into Lambda package
         CopyDirectoryIfExists(binSourceDir, Path.Combine(stageDir, "bin"));
         CopyDirectoryIfExists(libSourceDir, Path.Combine(stageDir, "lib"));
 
@@ -345,6 +354,78 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
 
         Log.Info($"Gate-checker Lambda package built: {zipPath}");
         return zipPath;
+    }
+
+    /// <summary>
+    /// Extract psql binary and shared libraries from Amazon Linux 2023 via Docker.
+    /// Runs only once — skips if bin/psql already exists.
+    /// </summary>
+    private static void EnsurePsqlExtracted(string binDir, string libDir)
+    {
+        var psqlPath = Path.Combine(binDir, "psql");
+        if (File.Exists(psqlPath))
+        {
+            Log.Info("psql binary already extracted, skipping Docker extraction.");
+            return;
+        }
+
+        Log.Info("Extracting psql from Amazon Linux 2023 via Docker...");
+        Console.WriteLine("  Extracting psql binary from Amazon Linux 2023 (one-time)...");
+
+        Directory.CreateDirectory(binDir);
+        Directory.CreateDirectory(libDir);
+
+        // Convert Windows paths to Docker-compatible mount paths
+        var binMount = binDir.Replace('\\', '/');
+        var libMount = libDir.Replace('\\', '/');
+
+        var script =
+            "set -e; " +
+            "dnf install -y postgresql15 > /dev/null 2>&1; " +
+            "cp /usr/bin/psql /out/bin/; " +
+            "chmod +x /out/bin/psql; " +
+            "for lib in $(ldd /usr/bin/psql | grep '=> /' | awk '{print $3}'); do " +
+            "cp \"$lib\" /out/lib/ 2>/dev/null || true; " +
+            "done; " +
+            "echo \"psql version: $(psql --version)\"";
+
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "docker",
+            Arguments = $"run --rm -v \"{binMount}:/out/bin\" -v \"{libMount}:/out/lib\" amazonlinux:2023 bash -c \"{script}\"",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        var process = System.Diagnostics.Process.Start(psi);
+        var stdout = process?.StandardOutput.ReadToEnd() ?? "";
+        var stderr = process?.StandardError.ReadToEnd() ?? "";
+        process?.WaitForExit();
+
+        if (process?.ExitCode != 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  WARNING: Could not extract psql via Docker (exit {process?.ExitCode}).");
+            Console.WriteLine("  Database restore from database.sql will not be available.");
+            Console.WriteLine("  Ensure Docker Desktop is running with Linux containers.");
+            Console.ResetColor();
+            if (!string.IsNullOrWhiteSpace(stderr))
+                Log.Warn($"Docker psql extraction stderr: {stderr}");
+            return;
+        }
+
+        // Log the version line from stdout
+        foreach (var line in stdout.Split('\n'))
+        {
+            if (line.Contains("psql version:"))
+            {
+                Console.WriteLine($"  {line.Trim()}");
+                break;
+            }
+        }
+
+        Log.Info($"psql extracted: {Directory.GetFiles(binDir).Length} bin, {Directory.GetFiles(libDir).Length} lib files");
     }
 
     /// <summary>
