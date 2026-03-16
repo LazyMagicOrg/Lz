@@ -176,10 +176,10 @@ public class SystemDeployment
     /// <summary>
     /// Tenant deployment: gates first, single Pulumi up, then post-deploy with gates.
     ///   Pre-flight: tenantconfig gate
-    ///   Pulumi up: data + service-layer + host-layer + CDN (all at once)
-    ///   Post-deploy: build/push/scale service-layer (SmartStore)
-    ///   GATE: EFS seeded, DB seeded, SmartStore secrets
-    ///   Post-deploy: build/push/scale host-layer (AppHost), deploy WASM
+    ///   Pulumi up: data + service-layer + host-layer + CDN (all at once, desiredCount=0)
+    ///   GATE: EFS seeded, DB seeded (blocks until user seeds data)
+    ///   Post-deploy: build/push/scale service-layer (SmartStore) — after seed confirmed
+    ///   Post-deploy: build/push/scale host-layer (AppHost)
     ///   Post-deploy: seed per-tenant Keycloak realms (if keycloakconfig found)
     /// </summary>
     public async Task DeployTenantAsync(
@@ -246,6 +246,27 @@ public class SystemDeployment
             }
         }
 
+        // --- GATE: Check for data-seeding prerequisites ---
+        // This must happen BEFORE scaling SmartStore, otherwise SmartStore
+        // boots on an empty DB, runs EF migrations, and creates tables that
+        // prevent the seed restore (which expects an empty database).
+        var seedGates = _system.ServiceLayerServices
+            .SelectMany(s => s.TransitionRequirements)
+            .Concat(_system.HostLayerServices
+                .SelectMany(s => s.TransitionRequirements))
+            .ToList();
+
+        if (seedGates.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Checking tenant transition gates...");
+            var gatePassed = await TransitionGate.CheckAndReportAsync(
+                checker, seedGates, _config.SystemKey, tenantKey);
+
+            if (!gatePassed)
+                return; // Stop — user must seed data and re-run
+        }
+
         // --- Post-deploy: build/push/scale service-layer ---
         var serviceLayerServices = _system.ServiceLayerServices;
         if (serviceLayerServices.Count > 0)
@@ -260,22 +281,6 @@ public class SystemDeployment
                     kv => kv.Value.Value);
                 await serviceAction.ExecuteAsync(outputs);
             }
-        }
-
-        // --- GATE: Check for data-seeding prerequisites ---
-        var hostGates = _system.HostLayerServices
-            .SelectMany(s => s.TransitionRequirements)
-            .ToList();
-
-        if (hostGates.Count > 0)
-        {
-            Console.WriteLine();
-            Console.WriteLine("Checking tenant transition gates...");
-            var gatePassed = await TransitionGate.CheckAndReportAsync(
-                checker, hostGates, _config.SystemKey, tenantKey);
-
-            if (!gatePassed)
-                return; // Stop — user must seed SmartStore and re-run
         }
 
         // --- Post-seed config: re-write Settings.txt with correct credentials ---
