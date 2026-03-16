@@ -14,8 +14,30 @@ namespace Lz.Cli;
 
 class Program
 {
+    /// <summary>
+    /// Global cancellation token source — wired to Console.CancelKeyPress (Ctrl+C).
+    /// Passed through to all Pulumi operations so they abort gracefully.
+    /// </summary>
+    internal static readonly CancellationTokenSource Cts = new();
+
     static async Task<int> Main(string[] args)
     {
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true; // Prevent immediate process termination
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("Cancellation requested — waiting for current operation to finish...");
+            Console.WriteLine("Press Ctrl+C again to force-kill.");
+            Console.ResetColor();
+            if (Cts.IsCancellationRequested)
+            {
+                // Second Ctrl+C — force exit
+                Environment.Exit(1);
+            }
+            Cts.Cancel();
+        };
+
         var rootCommand = new RootCommand("Lz infrastructure deployment tool");
 
         // Load plugin (optional — core commands work without one)
@@ -88,7 +110,7 @@ class Program
                 AdminAuth = "adminsauth",
                 TrustedAccountIds = sharedConfig.TrustedAccountIds,
             });
-            var deployment = new SharedDeployment(factory, sharedConfig);
+            var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
             await deployment.RunAsync();
         });
 
@@ -163,7 +185,7 @@ class Program
                 Console.WriteLine($"Domain: {config.SystemDomain}");
                 Console.WriteLine();
 
-                var deployment = new SystemDeployment(factory, system, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 await deployment.DeployFoundationAsync();
             }
         }, systemKeyOption, envOption, platformOption, topologyOption);
@@ -408,7 +430,7 @@ class Program
                 }
 
                 var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
 
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
@@ -508,7 +530,7 @@ class Program
                 AdminAuth = "adminsauth",
                 TrustedAccountIds = sharedConfig.TrustedAccountIds,
             });
-            var deployment = new SharedDeployment(factory, sharedConfig);
+            var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
             await deployment.DestroyAsync();
         });
 
@@ -557,7 +579,7 @@ class Program
                         config.Profile, config.Region, config.State);
 
                 var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 await deployment.DestroyFoundationAsync();
             }
         }, systemKeyOption, envOption);
@@ -597,7 +619,7 @@ class Program
                         config.Profile, config.Region, config.State);
 
                 var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
 
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
@@ -647,7 +669,7 @@ class Program
             foreach (var config in configs)
             {
                 var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
 
                 await deployment.StatusFoundationAsync();
 

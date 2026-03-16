@@ -293,10 +293,13 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         var zipPath = Path.Combine(buildDir, "gate-checker.zip");
 
         // Skip if zip already exists and is newer than handler.py and bin/lib dirs
+        // Also require psql binary to be present — forces rebuild if psql hasn't been extracted yet
         var handlerPath = Path.Combine(sourceDir, "handler.py");
         var binSourceDir = Path.Combine(sourceDir, "bin");
         var libSourceDir = Path.Combine(sourceDir, "lib");
+        var psqlPath = Path.Combine(binSourceDir, "psql");
         if (File.Exists(zipPath)
+            && File.Exists(psqlPath)
             && File.GetLastWriteTimeUtc(zipPath) > File.GetLastWriteTimeUtc(handlerPath)
             && !HasNewerFiles(binSourceDir, zipPath)
             && !HasNewerFiles(libSourceDir, zipPath))

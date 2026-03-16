@@ -113,14 +113,21 @@ public class AwsLambdaAdminSetupRunner : IAdminSetupRunner
     private AmazonLambdaClient CreateLambdaClient()
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+        var lambdaConfig = new AmazonLambdaConfig
+        {
+            RegionEndpoint = regionEndpoint,
+            // Admin setup may take minutes (DB operations via Lambda).
+            // Default SDK timeout (~100s) is too short for synchronous invocations.
+            Timeout = TimeSpan.FromMinutes(15),
+        };
 
         if (!string.IsNullOrEmpty(_config.Profile))
         {
             var chain = new CredentialProfileStoreChain();
             if (chain.TryGetAWSCredentials(_config.Profile, out var credentials))
-                return new AmazonLambdaClient(credentials, regionEndpoint);
+                return new AmazonLambdaClient(credentials, lambdaConfig);
         }
 
-        return new AmazonLambdaClient(regionEndpoint);
+        return new AmazonLambdaClient(lambdaConfig);
     }
 }

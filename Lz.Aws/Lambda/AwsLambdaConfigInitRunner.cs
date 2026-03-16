@@ -118,14 +118,21 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
     private AmazonLambdaClient CreateLambdaClient()
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+        var lambdaConfig = new AmazonLambdaConfig
+        {
+            RegionEndpoint = regionEndpoint,
+            // init_config Lambda may take several minutes (DB creation, EFS extraction).
+            // Default SDK timeout is ~100s which is too short.
+            Timeout = TimeSpan.FromMinutes(15),
+        };
 
         if (!string.IsNullOrEmpty(_config.Profile))
         {
             var chain = new CredentialProfileStoreChain();
             if (chain.TryGetAWSCredentials(_config.Profile, out var credentials))
-                return new AmazonLambdaClient(credentials, regionEndpoint);
+                return new AmazonLambdaClient(credentials, lambdaConfig);
         }
 
-        return new AmazonLambdaClient(regionEndpoint);
+        return new AmazonLambdaClient(lambdaConfig);
     }
 }

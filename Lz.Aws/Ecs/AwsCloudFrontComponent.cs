@@ -211,6 +211,20 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",        // CachingDisabled
                     OriginRequestPolicyId = "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
                 },
+                // SmartStore media → ALB origin (product images, thumbnails, etc.)
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/media/*",
+                    TargetOriginId = "alb-origin",
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = env == "dev"
+                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"        // CachingDisabled (dev)
+                        : "658327ea-f89d-4fab-a63d-7e88639e58f6",        // CachingOptimized
+                    OriginRequestPolicyId = "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
+                },
                 // AppHost API behaviors → ALB origin
                 new DistributionOrderedCacheBehaviorArgs
                 {

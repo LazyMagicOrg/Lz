@@ -65,12 +65,12 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
             BackupRetentionPeriod = 7,
             BackupWindow = "03:00-04:00",
             MaintenanceWindow = "sun:04:00-sun:05:00",
-            DeletionProtection = config.Environment is "prod" or "staging",
+            DeletionProtection = config.Environment != "dev",
             EnabledCloudwatchLogsExports = { "postgresql" },
             PerformanceInsightsEnabled = true,
             PerformanceInsightsRetentionPeriod = 7,
-            SkipFinalSnapshot = config.Environment is not ("prod" or "staging"),
-            FinalSnapshotIdentifier = config.Environment is "prod" or "staging" ? $"{prefix}-db-final" : null!,
+            SkipFinalSnapshot = config.Environment == "dev",
+            FinalSnapshotIdentifier = config.Environment != "dev" ? $"{prefix}-db-final" : null!,
             Tags =
             {
                 { "Name", $"{prefix}-db" },

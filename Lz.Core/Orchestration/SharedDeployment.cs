@@ -23,12 +23,16 @@ public class SharedDeployment
 {
     private readonly IPlatformFactory _factory;
     private readonly SharedConfig _config;
+    private readonly CancellationToken _ct;
     private bool _adminBlockingEnabled;
 
-    public SharedDeployment(IPlatformFactory factory, SharedConfig config)
+    public SharedDeployment(
+        IPlatformFactory factory, SharedConfig config,
+        CancellationToken cancellationToken = default)
     {
         _factory = factory;
         _config = config;
+        _ct = cancellationToken;
     }
 
     /// <summary>
@@ -186,7 +190,7 @@ public class SharedDeployment
                 Console.Error.WriteLine(msg);
                 Console.ResetColor();
             },
-        });
+        }, _ct);
 
         Console.WriteLine();
         if (result.Summary.ResourceChanges != null)
@@ -229,7 +233,7 @@ public class SharedDeployment
                 Console.Error.WriteLine(msg);
                 Console.ResetColor();
             },
-        });
+        }, _ct);
 
         Console.WriteLine();
         if (result.Summary.ResourceChanges != null)

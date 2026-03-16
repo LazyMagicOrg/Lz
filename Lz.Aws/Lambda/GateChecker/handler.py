@@ -301,8 +301,12 @@ def init_config(event):
     finally:
         tenant_conn.close()
 
-    # --- Extract Default.zip if present and Default/Media not yet seeded ---
+    # --- Ensure all tenant EFS directories exist with correct ownership ---
     efs_prefix = f"{sk}-{tk}-{env}"
+    efs_steps = _ensure_tenant_dirs(mount_path, efs_prefix)
+    steps.extend(efs_steps)
+
+    # --- Extract Default.zip if present and Default/Media not yet seeded ---
     smartstore_data = os.path.join(mount_path, efs_prefix, "smartstore-data")
     zip_steps = _extract_default_zip_if_needed(smartstore_data)
     steps.extend(zip_steps)
@@ -321,6 +325,12 @@ def init_config(event):
         user_settings=user_settings,
     )
     steps.extend(file_steps)
+
+    # --- Final ownership pass ---
+    # _ensure_tenant_dirs() chowns before Default.zip extraction and config writes,
+    # so those files end up owned by root. Fix ownership on everything one more time.
+    _chown_tree(os.path.join(mount_path, efs_prefix), 1000, 1000)
+    steps.append("Final chown pass: set all files to 1000:1000")
 
     return {
         "passed": True,
@@ -385,6 +395,11 @@ def post_seed_config(event):
         user_settings=user_settings,
     )
 
+    # Fix ownership on config files written as root
+    efs_prefix = f"{sk}-{tk}-{env}"
+    _chown_tree(os.path.join(mount_path, efs_prefix), 1000, 1000)
+    steps.append("Fixed ownership to 1000:1000")
+
     return {
         "passed": True,
         "reason": "; ".join(steps),
@@ -409,6 +424,56 @@ def _extract_default_zip_if_needed(smartstore_data_dir):
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(smartstore_data_dir)
     steps.append(f"Extracted Default.zip ({os.path.getsize(zip_path)} bytes)")
+
+    return steps
+
+
+def _chown_tree(root_path, uid, gid):
+    """Recursively set ownership on a directory tree.
+    Skips files already owned by the target uid:gid to avoid
+    expensive no-op chown syscalls over NFS (EFS).
+    """
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        st = os.stat(dirpath)
+        if st.st_uid != uid or st.st_gid != gid:
+            os.chown(dirpath, uid, gid)
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            st = os.stat(fpath)
+            if st.st_uid != uid or st.st_gid != gid:
+                os.chown(fpath, uid, gid)
+
+
+def _ensure_tenant_dirs(mount_path, efs_prefix):
+    """Create all tenant EFS directories and set ownership to 1000:1000.
+
+    The gate-checker Lambda runs as root (UID 0) so it can create directories
+    under the EFS root (owned by 0:0). ECS tasks and SSH users access these
+    directories as UID 1000, so we chown everything to 1000:1000.
+    """
+    steps = []
+    tenant_root = os.path.join(mount_path, efs_prefix)
+    subdirs = [
+        "smartstore-data",
+        "smartstore-config",
+        "smartstore-dataprotection",
+        "apphost-config",
+    ]
+
+    created = []
+    for subdir in subdirs:
+        path = os.path.join(tenant_root, subdir)
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+            created.append(subdir)
+
+    # Chown only newly created dirs — the final _chown_tree pass in
+    # init_config covers everything after zip extraction and config writes.
+    if created:
+        for subdir in created:
+            path = os.path.join(tenant_root, subdir)
+            os.chown(path, 1000, 1000)
+        steps.append(f"Created EFS dirs: {', '.join(created)}")
 
     return steps
 

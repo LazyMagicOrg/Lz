@@ -20,12 +20,16 @@ public class SystemDeployment
     private readonly IPlatformFactory _factory;
     private readonly SystemDefinition _system;
     private readonly SystemConfig _config;
+    private readonly CancellationToken _ct;
 
-    public SystemDeployment(IPlatformFactory factory, SystemDefinition system, SystemConfig config)
+    public SystemDeployment(
+        IPlatformFactory factory, SystemDefinition system, SystemConfig config,
+        CancellationToken cancellationToken = default)
     {
         _factory = factory;
         _system = system;
         _config = config;
+        _ct = cancellationToken;
     }
 
     // ---------------------------------------------------------------
@@ -161,7 +165,7 @@ public class SystemDeployment
                 Console.Error.WriteLine(msg);
                 Console.ResetColor();
             },
-        });
+        }, _ct);
 
         Console.WriteLine();
         PrintResourceChanges("Update", result.Summary);
@@ -436,7 +440,7 @@ public class SystemDeployment
                 Console.Error.WriteLine(msg);
                 Console.ResetColor();
             },
-        });
+        }, _ct);
 
         Console.WriteLine();
         PrintResourceChanges("Update", result.Summary);
@@ -481,7 +485,7 @@ public class SystemDeployment
                 Console.Error.WriteLine(msg);
                 Console.ResetColor();
             },
-        });
+        }, _ct);
 
         Console.WriteLine();
         PrintResourceChanges("Destroy", result.Summary);
