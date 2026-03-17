@@ -1,10 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <Import Project="$(SolutionDir)CommonPackageHandling.targets" />
+
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Lz.Core</RootNamespace>
+    <PackageId>Lz.Core</PackageId>
+    <Description>Lz core interfaces, config models, and orchestration</Description>
   </PropertyGroup>
 
   <ItemGroup>

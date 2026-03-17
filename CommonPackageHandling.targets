@@ -1,0 +1,53 @@
+<Project>
+	<Import Project="$(SolutionDir)LzVersion.props" />
+	<!-- Common properties for package handling -->
+	<PropertyGroup>
+		<PackageRepoFolder>$(SolutionDir)Packages</PackageRepoFolder>
+		<Version>$(LzVersion)</Version>
+		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+	</PropertyGroup>
+
+	<!-- Create Packages directory before build -->
+	<Target Name="CreateDirectories" BeforeTargets="Build">
+		<MakeDir Directories="$(PackageRepoFolder)"/>
+	</Target>
+
+	<!-- Copy Package to local feed -->
+	<Target Name="CopyPackage" AfterTargets="Pack">
+		<Message Importance="high" Text="Copying $(AssemblyName).$(Version).nupkg to Packages folder" />
+		<MakeDir Directories="$(PackageRepoFolder)" />
+		<Copy SourceFiles=".\bin\$(Configuration)\$(AssemblyName).$(Version).nupkg"
+			  DestinationFiles="$(PackageRepoFolder)\$(AssemblyName).$(Version).nupkg" />
+		<Copy Condition="Exists('.\bin\$(Configuration)\$(AssemblyName).$(Version).snupkg')"
+			  SourceFiles=".\bin\$(Configuration)\$(AssemblyName).$(Version).snupkg"
+			  DestinationFiles="$(PackageRepoFolder)\$(AssemblyName).$(Version).snupkg" />
+	</Target>
+
+	<!-- Delete Package from local cache to force fresh resolution -->
+	<Target Name="DeletePackage" AfterTargets="Build">
+		<MSBuild Projects="$(MSBuildProjectFile)" Targets="DeleteSpecificPackage" Properties="Configuration=$(Configuration)" />
+	</Target>
+	<Target Name="DeleteSpecificPackage">
+		<PropertyGroup>
+			<PackageCacheFolder Condition=" '$(OS)' == 'Windows_NT' ">$(UserProfile)\.nuget\packages\$(AssemblyName)\$(Version)</PackageCacheFolder>
+			<PackageCacheFolder Condition=" '$(OS)' != 'Windows_NT' ">$(Home)/.nuget/packages/$(AssemblyName)/$(Version)</PackageCacheFolder>
+		</PropertyGroup>
+		<Message Importance="high" Text="Attempting to delete package $(AssemblyName) version $(Version) from cache folder $(PackageCacheFolder)" />
+		<!-- Windows-specific delete command -->
+		<Exec Condition=" '$(OS)' == 'Windows_NT' AND Exists('$(PackageCacheFolder)')"
+			  Command="cmd.exe /c &quot;if exist &quot;$(PackageCacheFolder)&quot; rmdir /s /q &quot;$(PackageCacheFolder)&quot;&quot;"
+			  ContinueOnError="true">
+			<Output TaskParameter="ExitCode" PropertyName="ErrorCode"/>
+		</Exec>
+		<!-- Unix/Linux/Mac-specific delete command -->
+		<Exec Condition=" '$(OS)' != 'Windows_NT' AND Exists('$(PackageCacheFolder)')"
+			  Command="rm -rf &quot;$(PackageCacheFolder)&quot;"
+			  ContinueOnError="true">
+			<Output TaskParameter="ExitCode" PropertyName="ErrorCode"/>
+		</Exec>
+		<Message Condition="'$(ErrorCode)' != '0'" Importance="high" Text="Failed to delete package. Error code: $(ErrorCode)" />
+		<Message Condition="'$(ErrorCode)' == '0'" Importance="high" Text="Successfully deleted package from $(PackageCacheFolder)" />
+	</Target>
+</Project>

@@ -1,10 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <Import Project="$(SolutionDir)CommonPackageHandling.targets" />
+
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Lz.Azure</RootNamespace>
+    <PackageId>Lz.Azure</PackageId>
+    <Description>Lz Azure platform implementations</Description>
   </PropertyGroup>
 
   <ItemGroup>
