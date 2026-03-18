@@ -62,6 +62,7 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
             VpcSecurityGroupIds = { awsNetwork.RdsSecurityGroupId },
             PubliclyAccessible = false,
             MultiAz = ecs.DbMultiAZ,
+            ApplyImmediately = ecs.DbChangesApplyImmediately,
             BackupRetentionPeriod = 7,
             BackupWindow = "03:00-04:00",
             MaintenanceWindow = "sun:04:00-sun:05:00",

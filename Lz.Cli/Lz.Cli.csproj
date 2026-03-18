@@ -11,7 +11,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>lz</ToolCommandName>
     <PackageId>Lz.Cli</PackageId>
-    <Version>0.9.71</Version>
+    <Version>0.9.72</Version>
     <Description>Lz infrastructure deployment tool</Description>
   </PropertyGroup>
 

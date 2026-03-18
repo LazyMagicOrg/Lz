@@ -20,6 +20,7 @@ public class EcsConfig
     public string DbInstanceClass { get; set; } = "db.t4g.micro";
     public int DbAllocatedStorage { get; set; } = 20;
     public bool DbMultiAZ { get; set; }
+    public bool DbChangesApplyImmediately { get; set; }
 
     // Tailscale (system-level only)
     public string TailscaleInstanceType { get; set; } = "t4g.nano";
