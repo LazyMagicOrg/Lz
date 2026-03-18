@@ -15,6 +15,19 @@
     <ProjectReference Include="..\Lz.Core\Lz.Core.csproj" />
   </ItemGroup>
 
+  <!-- Pre-built Lambda package — ships with the tool so FindProjectRoot() is unnecessary -->
+  <ItemGroup>
+    <Content Include="Lambda\gate-checker.zip" Condition="Exists('Lambda\gate-checker.zip')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Lambda\gate-checker.zip</Link>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="WarnMissingGateChecker" BeforeTargets="Build"
+          Condition="!Exists('Lambda\gate-checker.zip')">
+    <Warning Text="Lambda/gate-checker.zip is missing. Run Lambda/build-gate-checker.ps1 to build it." />
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="AWSSDK.AutoScaling" Version="4.*" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />

@@ -278,22 +278,39 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
     }
 
     /// <summary>
-    /// Build the gate-checker Lambda zip package.
-    /// Installs pip dependencies and bundles handler.py into a zip file.
+    /// Locate the gate-checker Lambda zip package.
+    /// Primary: use the pre-built zip distributed alongside the assembly (via Content item).
+    /// Fallback: build from source when running from the development repo.
     /// </summary>
     private static string EnsureLambdaPackageBuilt()
     {
-        // Locate the GateChecker source directory relative to the Lz.Aws assembly
+        // 1. Check for pre-built zip next to the assembly (shipped with the tool package)
         var assemblyDir = Path.GetDirectoryName(typeof(AwsGateCheckerLambdaComponent).Assembly.Location)!;
+        var packagedZip = Path.Combine(assemblyDir, "Lambda", "gate-checker.zip");
 
-        // Walk up to find the Lz.Aws project root (contains Lambda/GateChecker/)
+        if (File.Exists(packagedZip))
+        {
+            Log.Info($"Using packaged gate-checker Lambda: {packagedZip}");
+            return packagedZip;
+        }
+
+        // 2. Fall back to source-build (development scenario)
+        Log.Info("Packaged gate-checker.zip not found next to assembly, building from source...");
+        return BuildLambdaFromSource(assemblyDir);
+    }
+
+    /// <summary>
+    /// Build the gate-checker Lambda zip from source (development only).
+    /// Installs pip dependencies and bundles handler.py into a zip file.
+    /// </summary>
+    private static string BuildLambdaFromSource(string assemblyDir)
+    {
         var projectDir = FindProjectRoot(assemblyDir);
         var sourceDir = Path.Combine(projectDir, "Lambda", "GateChecker");
         var buildDir = Path.Combine(sourceDir, "build");
         var zipPath = Path.Combine(buildDir, "gate-checker.zip");
 
         // Skip if zip already exists and is newer than handler.py and bin/lib dirs
-        // Also require psql binary to be present — forces rebuild if psql hasn't been extracted yet
         var handlerPath = Path.Combine(sourceDir, "handler.py");
         var binSourceDir = Path.Combine(sourceDir, "bin");
         var libSourceDir = Path.Combine(sourceDir, "lib");
@@ -473,9 +490,17 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
 
         // Fallback: try relative to current working directory
         var cwd = Directory.GetCurrentDirectory();
-        var candidate = Path.Combine(cwd, "..", "Lzm", "Lz.Aws");
-        if (Directory.Exists(candidate))
-            return Path.GetFullPath(candidate);
+        // Check common sibling directory names for the Lz repo
+        foreach (var siblingName in new[] { "Lzm", "_lz" })
+        {
+            var candidate = Path.Combine(cwd, "..", siblingName, "Lz.Aws");
+            if (Directory.Exists(candidate))
+                return Path.GetFullPath(candidate);
+        }
+        // Also check if cwd itself is inside the Lz repo (e.g. running from the repo root)
+        var cwdCandidate = Path.Combine(cwd, "Lz.Aws");
+        if (Directory.Exists(cwdCandidate) && File.Exists(Path.Combine(cwdCandidate, "Lz.Aws.csproj")))
+            return Path.GetFullPath(cwdCandidate);
 
         throw new Exception(
             "Could not locate Lz.Aws project root. " +

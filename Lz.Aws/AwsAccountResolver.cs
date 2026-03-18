@@ -157,6 +157,7 @@ public static class AwsAccountResolver
                 Type = ParameterType.String,
                 Overwrite = true,
                 Description = description,
+                Tier = ParameterTier.IntelligentTiering,
             });
         }
     }
