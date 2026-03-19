@@ -454,6 +454,89 @@ public class KeycloakAdminClient : IDisposable
     }
 
     // ---------------------------------------------------------------
+    // Client's assigned scopes (including dedicated scopes)
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Get the default client scopes assigned to a specific client.
+    /// GET /admin/realms/{realm}/clients/{clientUuid}/default-client-scopes
+    /// </summary>
+    public async Task<List<JsonElement>> GetClientDefaultScopesAsync(string realm, string clientUuid)
+    {
+        return await GetListAsync(
+            $"{_baseUrl}/admin/realms/{realm}/clients/{clientUuid}/default-client-scopes");
+    }
+
+    /// <summary>
+    /// Find the UUID of a client's dedicated scope (type "None").
+    /// NOTE: In Keycloak 26+, dedicated scopes are hidden from all standard
+    /// REST API endpoints (client-scopes, default-client-scopes, optional-client-scopes).
+    /// Client-level protocol mappers are equivalent to dedicated scope mappers,
+    /// so callers should use CreateClientProtocolMapperAsync instead.
+    /// This method is retained for compatibility with older Keycloak versions.
+    /// </summary>
+    public async Task<string?> FindDedicatedScopeUuidAsync(string realm, string clientUuid, string scopeName)
+    {
+        // Try 1: default scopes
+        var defaultScopes = await GetListAsync(
+            $"{_baseUrl}/admin/realms/{realm}/clients/{clientUuid}/default-client-scopes");
+        foreach (var s in defaultScopes)
+        {
+            if (s.TryGetProperty("name", out var n) && n.GetString() == scopeName
+                && s.TryGetProperty("id", out var id))
+                return id.GetString();
+        }
+
+        // Try 2: optional scopes
+        var optionalScopes = await GetListAsync(
+            $"{_baseUrl}/admin/realms/{realm}/clients/{clientUuid}/optional-client-scopes");
+        foreach (var s in optionalScopes)
+        {
+            if (s.TryGetProperty("name", out var n) && n.GetString() == scopeName
+                && s.TryGetProperty("id", out var id))
+                return id.GetString();
+        }
+
+        // Try 3: general client-scopes endpoint (includes dedicated in some versions)
+        var allScopes = await GetListAsync(
+            $"{_baseUrl}/admin/realms/{realm}/client-scopes");
+        foreach (var s in allScopes)
+        {
+            if (s.TryGetProperty("name", out var n) && n.GetString() == scopeName
+                && s.TryGetProperty("id", out var id))
+                return id.GetString();
+        }
+
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // Protocol Mappers (on client scopes)
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Get protocol mappers for a client scope (e.g., "storeapp-dedicated").
+    /// GET /admin/realms/{realm}/client-scopes/{scopeUuid}/protocol-mappers/models
+    /// </summary>
+    public async Task<List<JsonElement>> GetScopeProtocolMappersAsync(string realm, string scopeUuid)
+    {
+        return await GetListAsync(
+            $"{_baseUrl}/admin/realms/{realm}/client-scopes/{scopeUuid}/protocol-mappers/models");
+    }
+
+    /// <summary>
+    /// Create a protocol mapper on a client scope. Returns true if created, false if 409.
+    /// POST /admin/realms/{realm}/client-scopes/{scopeUuid}/protocol-mappers/models
+    /// </summary>
+    public async Task<bool> CreateScopeProtocolMapperAsync(
+        string realm, string scopeUuid, Dictionary<string, object?> mapperDef)
+    {
+        return await PostAsync(
+            $"{_baseUrl}/admin/realms/{realm}/client-scopes/{scopeUuid}/protocol-mappers/models",
+            mapperDef);
+    }
+
+    // ---------------------------------------------------------------
     // Identity Providers
     // ---------------------------------------------------------------
 

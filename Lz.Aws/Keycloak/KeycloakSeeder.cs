@@ -92,6 +92,9 @@ public class KeycloakSeeder
             // 4c. Create protocol mappers on clients
             await CreateClientProtocolMappersAsync(realmName, realmConfig);
 
+            // 4d. Create protocol mappers on dedicated client scopes
+            await CreateDedicatedScopeMappersAsync(realmName, realmConfig);
+
             // 5. Create realm roles
             await CreateRealmRolesAsync(realmName, realmConfig);
 
@@ -148,13 +151,25 @@ public class KeycloakSeeder
 
     private async System.Threading.Tasks.Task UpdateRealmSettingsAsync(string realmName, RealmSeedConfig config)
     {
-        if (config.RealmSettings == null && config.Smtp == null) return;
+        if (config.RealmSettings == null && config.Smtp == null && config.UnmanagedAttributePolicy == null) return;
 
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("  Updating realm settings...");
         Console.ResetColor();
 
         var realmUpdate = new Dictionary<string, object?>();
+
+        // Set unmanaged attribute policy (ENABLED, ADMIN_EDIT, ADMIN_VIEW, or DISABLED)
+        if (!string.IsNullOrEmpty(config.UnmanagedAttributePolicy))
+        {
+            realmUpdate["attributes"] = new Dictionary<string, string>
+            {
+                ["unmanagedAttributePolicy"] = config.UnmanagedAttributePolicy
+            };
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine($"    Setting unmanagedAttributePolicy = {config.UnmanagedAttributePolicy}");
+            Console.ResetColor();
+        }
 
         // Fields removed from Keycloak's RealmRepresentation in v26+
         var unsupportedFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "frontendUrl" };
@@ -446,6 +461,81 @@ public class KeycloakSeeder
                 .ToHashSet();
 
             foreach (var mapperDef in clientDef.ProtocolMappers!)
+            {
+                if (existingMapperNames.Contains(mapperDef.Name))
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"    Mapper '{mapperDef.Name}' exists on '{clientDef.ClientId}'");
+                    Console.ResetColor();
+                    _skipped++;
+                    continue;
+                }
+
+                var body = new Dictionary<string, object?>
+                {
+                    ["name"] = mapperDef.Name,
+                    ["protocol"] = "openid-connect",
+                    ["protocolMapper"] = mapperDef.ProtocolMapper,
+                    ["consentRequired"] = false,
+                };
+
+                if (mapperDef.Config is { Count: > 0 })
+                {
+                    body["config"] = mapperDef.Config;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"    Creating mapper '{mapperDef.Name}' on '{clientDef.ClientId}'");
+                Console.ResetColor();
+                await _client.CreateClientProtocolMapperAsync(realmName, clientUuid, body);
+                _created++;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Step 4d: Protocol mappers on dedicated client scopes
+    // In Keycloak 26+, dedicated scopes (type "None") are not accessible
+    // through standard REST API endpoints. However, client-level protocol
+    // mappers are equivalent — they appear in the dedicated scope in the UI.
+    // So we add these mappers directly to the client via the same API as 4c.
+    // ---------------------------------------------------------------
+
+    private async System.Threading.Tasks.Task CreateDedicatedScopeMappersAsync(
+        string realmName, RealmSeedConfig config)
+    {
+        if (config.Clients is not { Count: > 0 }) return;
+
+        var clientsWithDedicatedMappers = config.Clients
+            .Where(c => c.DedicatedScopeMappers is { Count: > 0 })
+            .ToList();
+
+        if (clientsWithDedicatedMappers.Count == 0) return;
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("  Dedicated client scope mappers (via client protocol mappers)...");
+        Console.ResetColor();
+
+        foreach (var clientDef in clientsWithDedicatedMappers)
+        {
+            var clientUuid = await _client.FindClientUuidAsync(realmName, clientDef.ClientId);
+            if (clientUuid == null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"    WARNING: Client '{clientDef.ClientId}' not found — cannot create dedicated scope mappers");
+                Console.ResetColor();
+                _warned++;
+                continue;
+            }
+
+            // Get existing client-level mappers to avoid duplicates
+            var existingMappers = await _client.GetClientProtocolMappersAsync(realmName, clientUuid);
+            var existingMapperNames = existingMappers
+                .Where(m => m.TryGetProperty("name", out _))
+                .Select(m => m.GetProperty("name").GetString()!)
+                .ToHashSet();
+
+            foreach (var mapperDef in clientDef.DedicatedScopeMappers!)
             {
                 if (existingMapperNames.Contains(mapperDef.Name))
                 {

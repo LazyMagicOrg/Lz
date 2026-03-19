@@ -16,6 +16,10 @@ public class KeycloakSeedConfig
 
 public class RealmSeedConfig
 {
+    // Unmanaged attribute policy: ENABLED, ADMIN_EDIT, ADMIN_VIEW, or DISABLED.
+    // Controls whether custom user attributes can be set outside Keycloak's managed profile.
+    public string? UnmanagedAttributePolicy { get; set; }
+
     // Realm-level settings (displayName, loginTheme, registrationAllowed, etc.)
     public Dictionary<string, object>? RealmSettings { get; set; }
 
@@ -82,6 +86,11 @@ public class ClientSeedConfig
 
     // Protocol mappers to create on this client (e.g., user attribute → JWT claim).
     public List<ProtocolMapperSeedConfig>? ProtocolMappers { get; set; }
+
+    // Protocol mappers to create on the client's dedicated client scope
+    // (e.g., "storeapp-dedicated"). Keycloak routes token claims through the
+    // dedicated scope, so mappers often need to exist there as well.
+    public List<ProtocolMapperSeedConfig>? DedicatedScopeMappers { get; set; }
 }
 
 /// <summary>
