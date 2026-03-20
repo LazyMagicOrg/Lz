@@ -5,6 +5,7 @@ using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Lz.Aws.Keycloak;
+using Lz.Aws.Lambda;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;
 using Task = System.Threading.Tasks.Task;
@@ -60,6 +61,10 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
             keycloakServiceName,
             subnetIds,
             securityGroups.First());
+
+        // Step 2.5: Deploy Keycloak themes to EFS (before seeding, so themes are
+        // available when Keycloak boots and realms reference them)
+        await DeployKeycloakThemesAsync();
 
         // Step 3-4: Seed Keycloak configuration (if config file exists)
         await SeedKeycloakAsync();
@@ -137,6 +142,71 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
 
         // Retrieve Tailscale OIDC client secret and store in system secret
         await StoreTailscaleClientSecretAsync(adminClient);
+    }
+
+    /// <summary>
+    /// Discover tenant keycloakconfig files, read themeSource from each,
+    /// and deploy unique themes to EFS via the gate-checker Lambda.
+    /// </summary>
+    private async Task DeployKeycloakThemesAsync()
+    {
+        Console.WriteLine();
+        Console.WriteLine("Checking for Keycloak themes to deploy...");
+
+        // Discover all tenant keycloakconfig template files to find themeSource entries.
+        // Convention: keycloakconfig.system.tenant.{env}.yaml in the monorepo root.
+        var dir = Directory.GetCurrentDirectory();
+        var pattern = $"keycloakconfig.system.tenant.{_config.Environment}.yaml";
+        var configPath = ConfigLoader.DiscoverConfigFile(dir, pattern);
+
+        if (configPath == null)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  No tenant keycloakconfig template found ({pattern}) — skipping theme deploy.");
+            Console.ResetColor();
+            return;
+        }
+
+        // Load the YAML to read themeSource (top-level field)
+        var seedConfig = ConfigLoader.LoadKeycloakSeedConfig(configPath);
+        if (seedConfig?.ThemeSource == null)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine("  No themeSource specified in keycloakconfig — skipping theme deploy.");
+            Console.ResetColor();
+            return;
+        }
+
+        var themeSource = seedConfig.ThemeSource;
+        var themeName = Path.GetFileName(themeSource.TrimEnd('/'));
+
+        // Resolve the theme source path relative to monorepo root
+        var monorepoRoot = Path.GetDirectoryName(configPath)!;
+        var themeSourcePath = Path.Combine(monorepoRoot, themeSource);
+
+        if (!Directory.Exists(themeSourcePath))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Theme source directory not found: {themeSourcePath}");
+            Console.ResetColor();
+            return;
+        }
+
+        Console.WriteLine($"  Deploying theme '{themeName}' from {themeSource}...");
+
+        // Themes bucket is in the shared-services account; derive name from SharedConfig
+        var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+        var themesBucket = $"keycloak-themes-{sharedConfig.SharedSuffix}";
+
+        var runner = new AwsLambdaThemeDeployRunner(_config, themesBucket);
+        var success = await runner.DeployThemeAsync(themeName, themeSourcePath);
+
+        if (!success)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  Theme deployment failed — Keycloak will use default themes.");
+            Console.ResetColor();
+        }
     }
 
     /// <summary>

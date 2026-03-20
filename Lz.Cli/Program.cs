@@ -84,9 +84,51 @@ class Program
         var cmd = new Command("deployshared",
             "Deploy shared-services infrastructure (Keycloak + Tailscale)");
 
-        cmd.SetHandler(async () =>
+        var themeOption = new Option<string?>("--theme",
+            "Deploy only a Keycloak theme to EFS (skips full shared deploy)");
+        cmd.AddOption(themeOption);
+
+        cmd.SetHandler(async (themeName) =>
         {
             var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+
+            // --theme: ad-hoc theme deploy only (no Pulumi, no full shared deploy)
+            if (!string.IsNullOrEmpty(themeName))
+            {
+                var themeSourcePath = Path.Combine("keycloakthemes", themeName);
+                if (!Path.IsPathRooted(themeSourcePath))
+                    themeSourcePath = Path.GetFullPath(themeSourcePath);
+
+                if (!Directory.Exists(themeSourcePath))
+                {
+                    Console.Error.WriteLine($"Theme directory not found: {themeSourcePath}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                // Build a minimal SystemConfig with shared-account credentials
+                var config = new SystemConfig
+                {
+                    SystemKey = "shared",
+                    Environment = "shared",
+                    Profile = sharedConfig.Profile,
+                    Region = sharedConfig.Region,
+                    SharedProfile = sharedConfig.Profile,
+                    SharedRegion = sharedConfig.Region,
+                };
+
+                var themesBucket = $"keycloak-themes-{sharedConfig.SharedSuffix}";
+                Console.WriteLine($"Deploying theme '{themeName}' from {themeSourcePath}...");
+                var runner = new Lz.Aws.Lambda.AwsLambdaThemeDeployRunner(config, themesBucket);
+                var success = await runner.DeployThemeAsync(themeName, themeSourcePath);
+
+                if (!success)
+                {
+                    Console.Error.WriteLine("Theme deployment failed.");
+                    Environment.ExitCode = 1;
+                }
+                return;
+            }
 
             Console.WriteLine("Shared-services deployment");
             Console.WriteLine($"  Domain: {sharedConfig.Domain}");
@@ -112,7 +154,7 @@ class Program
             });
             var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
             await deployment.RunAsync();
-        });
+        }, themeOption);
 
         root.AddCommand(cmd);
     }

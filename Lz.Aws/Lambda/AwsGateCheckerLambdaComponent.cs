@@ -169,8 +169,10 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
             PolicyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
         }, opts);
 
-        // EFS + Secrets Manager inline policy
+        // EFS + Secrets Manager + S3 (themes bucket) inline policy
         // init_config needs: EFS write, Secrets Manager read/write for tenant secrets
+        // deploy_theme needs: S3 read for theme tarballs
+        var themesBucketName = $"keycloak-themes-{config.SystemSuffix}";
         var inlinePolicy = new RolePolicy($"{prefix}-gate-checker-inline", new RolePolicyArgs
         {
             Role = role.Id,
@@ -205,6 +207,13 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         ""secretsmanager:UpdateSecret""
       ],
       ""Resource"": ""arn:aws:secretsmanager:*:*:secret:{prefix}/*""
+    }},
+    {{
+      ""Effect"": ""Allow"",
+      ""Action"": [
+        ""s3:GetObject""
+      ],
+      ""Resource"": ""arn:aws:s3:::{themesBucketName}/*""
     }}
   ]
 }}"),

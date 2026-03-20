@@ -13,6 +13,7 @@ public class EcsConfig
     public int KeycloakMemory { get; set; } = 1024;
 
     // Keycloak EFS theme path (system-level only)
+    // Must match the theme name used in keycloakthemes/<name>/ and keycloakconfig YAML.
     public string KeycloakThemePath { get; set; } = "/keycloak-themes/meadows-healing";
 
     // Database (system-level only)

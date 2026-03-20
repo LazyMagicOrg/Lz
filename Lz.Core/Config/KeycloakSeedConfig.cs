@@ -12,6 +12,13 @@ public class KeycloakSeedConfig
     public string? BaselineRealm { get; set; }
     public string? Note { get; set; }
     public Dictionary<string, RealmSeedConfig>? Realms { get; set; }
+
+    /// <summary>
+    /// Path to the Keycloak theme directory, relative to the monorepo root.
+    /// e.g., "keycloakthemes/harmova". When set, the theme is deployed to EFS
+    /// during the foundation post-deploy phase.
+    /// </summary>
+    public string? ThemeSource { get; set; }
 }
 
 public class RealmSeedConfig

@@ -264,11 +264,13 @@ public class SharedDeployment
             State = _config.State,
             AdminAuth = "adminsauth",
             TrustedAccountIds = _config.TrustedAccountIds,
+            SystemSuffix = _config.SharedSuffix,
             ECS = new EcsConfig
             {
                 KeycloakImageTag = _config.Keycloak.ImageTag,
                 KeycloakCpu = _config.Keycloak.Cpu,
                 KeycloakMemory = _config.Keycloak.Memory,
+                KeycloakThemePath = _config.Keycloak.ThemePath ?? new EcsConfig().KeycloakThemePath,
                 DbInstanceClass = _config.DbInstanceClass,
                 DbAllocatedStorage = _config.DbAllocatedStorage,
                 TailscaleInstanceType = _config.TailscaleInstanceType,
@@ -302,6 +304,13 @@ public class SharedDeployment
         // File Storage: EFS for Keycloak themes
         var fileStorage = _factory.CreateFileStorage();
         var fileStorageOutputs = fileStorage.Deploy(systemConfig, networkOutputs);
+
+        // Gate Checker: Lambda for EFS writes (theme deploy, future shared-level operations)
+        var gateCheckerComponent = _factory.CreateGateChecker();
+        if (gateCheckerComponent != null)
+        {
+            gateCheckerComponent.Deploy(systemConfig, networkOutputs, databaseOutputs, fileStorageOutputs);
+        }
 
         // Auth: Keycloak ECS task + service + listener rules
         var auth = _factory.CreateAuthService();

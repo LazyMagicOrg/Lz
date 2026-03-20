@@ -1,11 +1,12 @@
 """
 Gate-checker Lambda: verifies EFS data and database tables exist,
 initializes tenant config (database, user, Settings.txt, usersettings.json),
-re-writes config files after seeding, and sets up SmartStore admin users
-with API credentials.
+re-writes config files after seeding, sets up SmartStore admin users
+with API credentials, and deploys Keycloak themes to EFS from S3.
 Deployed inside the VPC with EFS mount and RDS access.
 Invoked by AwsTransitionChecker, AwsLambdaConfigInitRunner,
-AwsLambdaPostSeedRunner, and AwsLambdaAdminSetupRunner.
+AwsLambdaPostSeedRunner, AwsLambdaAdminSetupRunner, and
+AwsLambdaThemeDeployRunner.
 """
 
 import json
@@ -16,7 +17,8 @@ import secrets
 def handler(event, context):
     """
     Entry point. Expects event:
-      { "check_type": "efs" | "database" | "init_config" | "post_seed_config", ... }
+      { "check_type": "efs" | "database" | "init_config" | "post_seed_config"
+                     | "deploy_theme" | ..., ... }
     Returns:
       { "passed": bool, "reason": "..." }
     """
@@ -35,6 +37,8 @@ def handler(event, context):
             return diagnose_database(event)
         elif check_type == "setup_admin":
             return setup_admin(event)
+        elif check_type == "deploy_theme":
+            return deploy_theme(event)
         else:
             return {"passed": False, "reason": f"Unknown check_type: {check_type}"}
     except Exception as e:
@@ -1002,6 +1006,88 @@ def _update_tenant_secret(sm, secret_name, secret_data):
             Name=secret_name,
             SecretString=secret_json,
         )
+
+
+# -------------------------------------------------------------------------
+# deploy_theme: download Keycloak theme tarball from S3, extract to EFS
+# -------------------------------------------------------------------------
+
+
+def deploy_theme(event):
+    """
+    Deploy a Keycloak theme to EFS by downloading a tarball from S3 and
+    extracting it to the theme directory. Idempotent — overwrites any
+    existing theme files.
+
+    Event:
+      { "check_type": "deploy_theme",
+        "s3_bucket": "med--seeddata-496a-f222",
+        "s3_key": "themes/harmova.tar.gz",
+        "theme_name": "harmova" }
+    """
+    import tarfile
+    import shutil
+
+    import boto3
+
+    s3_bucket = event.get("s3_bucket", "")
+    s3_key = event.get("s3_key", "")
+    theme_name = event.get("theme_name", "")
+
+    if not all([s3_bucket, s3_key, theme_name]):
+        return {"passed": False, "reason": "Missing required fields: s3_bucket, s3_key, theme_name"}
+
+    # The Keycloak theme EFS access point is mounted at a dedicated path.
+    # The gate-checker Lambda's root EFS mount gives us access to the full filesystem.
+    mount_path = os.environ.get("EFS_MOUNT_PATH", "/mnt/efs")
+    theme_root = os.path.join(mount_path, "keycloak-themes")
+    theme_dir = os.path.join(theme_root, theme_name)
+
+    steps = []
+
+    # Download tarball from S3 to /tmp
+    tmp_tarball = f"/tmp/theme-{theme_name}.tar.gz"
+    try:
+        s3 = boto3.client("s3")
+        s3.download_file(s3_bucket, s3_key, tmp_tarball)
+        tar_size = os.path.getsize(tmp_tarball)
+        steps.append(f"Downloaded s3://{s3_bucket}/{s3_key} ({tar_size} bytes)")
+    except Exception as e:
+        return {"passed": False, "reason": f"Failed to download from S3: {str(e)}"}
+
+    # Clear existing theme directory for idempotent overwrite
+    if os.path.isdir(theme_dir):
+        shutil.rmtree(theme_dir)
+        steps.append(f"Cleared existing theme directory: {theme_dir}")
+
+    os.makedirs(theme_dir, exist_ok=True)
+
+    # Extract tarball — expects contents like login/, account/, email/
+    try:
+        with tarfile.open(tmp_tarball, "r:gz") as tar:
+            tar.extractall(path=theme_dir)
+        steps.append(f"Extracted theme to {theme_dir}")
+    except Exception as e:
+        return {"passed": False, "reason": f"Failed to extract tarball: {str(e)}"}
+    finally:
+        if os.path.isfile(tmp_tarball):
+            os.remove(tmp_tarball)
+
+    # Set ownership to 1000:1000 (Keycloak container user)
+    _chown_tree(theme_dir, 1000, 1000)
+    steps.append("Set ownership to 1000:1000")
+
+    # Verify expected subdirectories exist
+    expected_dirs = {"login", "account", "email"}
+    actual_dirs = set(os.listdir(theme_dir)) if os.path.isdir(theme_dir) else set()
+    found = expected_dirs & actual_dirs
+    if found:
+        steps.append(f"Theme contains: {', '.join(sorted(found))}")
+
+    return {
+        "passed": True,
+        "reason": "; ".join(steps),
+    }
 
 
 def _get_or_create_app_password(sm, secret_name, app_user):

@@ -50,4 +50,11 @@ public class SharedKeycloakConfig
     public int Cpu { get; set; } = 512;
     public int Memory { get; set; } = 1024;
     public int DesiredCount { get; set; } = 2;
+
+    /// <summary>
+    /// EFS path for the Keycloak custom theme directory.
+    /// Must match the theme name in keycloakthemes/{name}/.
+    /// e.g., "/keycloak-themes/harmova"
+    /// </summary>
+    public string? ThemePath { get; set; }
 }
