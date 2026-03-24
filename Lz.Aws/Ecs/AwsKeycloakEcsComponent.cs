@@ -254,14 +254,14 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                     {
                         HostHeader = new ListenerRuleConditionHostHeaderArgs
                         {
-                            Values = { $"auth.{config.SystemDomain}" },
+                            Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
                         },
                     },
                     new ListenerRuleConditionArgs
                     {
                         PathPattern = new ListenerRuleConditionPathPatternArgs
                         {
-                            Values = { "/admin/realms/*" },
+                            Values = { "/admin/realms", "/admin/realms/*" },
                         },
                     },
                 },
@@ -289,7 +289,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                     {
                         HostHeader = new ListenerRuleConditionHostHeaderArgs
                         {
-                            Values = { $"auth.{config.SystemDomain}" },
+                            Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
                         },
                     },
                     new ListenerRuleConditionArgs
@@ -327,7 +327,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                 {
                     HostHeader = new ListenerRuleConditionHostHeaderArgs
                     {
-                        Values = { $"auth.{config.SystemDomain}" },
+                        Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
                     },
                 },
             },
