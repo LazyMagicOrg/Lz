@@ -65,6 +65,12 @@ public class TransitionRequirement
     public string? Profile { get; set; }
 
     /// <summary>
+    /// Optional AWS region override for cross-account checks.
+    /// When set, the gate checker uses this region instead of the system's own region.
+    /// </summary>
+    public string? Region { get; set; }
+
+    /// <summary>
     /// Whether this requirement is only relevant on first deploy.
     /// Once satisfied, it typically stays satisfied on subsequent deploys.
     /// </summary>

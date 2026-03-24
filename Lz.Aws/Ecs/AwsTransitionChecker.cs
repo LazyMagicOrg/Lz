@@ -58,7 +58,7 @@ public class AwsTransitionChecker : ITransitionChecker
 
         try
         {
-            var client = CreateSecretsManagerClient(requirement.Profile);
+            var client = CreateSecretsManagerClient(requirement.Profile, requirement.Region);
             var response = await client.GetSecretValueAsync(
                 new Amazon.SecretsManager.Model.GetSecretValueRequest { SecretId = secretName });
 
@@ -207,10 +207,10 @@ public class AwsTransitionChecker : ITransitionChecker
         return new AmazonLambdaClient(lambdaConfig);
     }
 
-    private AmazonSecretsManagerClient CreateSecretsManagerClient(string? profileOverride = null)
+    private AmazonSecretsManagerClient CreateSecretsManagerClient(string? profileOverride = null, string? regionOverride = null)
     {
         var profile = profileOverride ?? _config.Profile;
-        var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+        var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(regionOverride ?? _config.Region);
 
         if (!string.IsNullOrEmpty(profile))
         {

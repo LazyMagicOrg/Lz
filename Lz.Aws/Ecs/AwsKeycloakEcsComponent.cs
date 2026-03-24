@@ -237,6 +237,45 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
         // LISTENER RULES
         // =====================================================================
 
+        // Admin REST API pass-through (priority 4) — allows /admin/realms/* before
+        // the block rule catches it. Cross-region consumer accounts (no PrivateLink)
+        // need this path for service-account user management. The API is still
+        // protected by Keycloak client credentials (client_id + client_secret).
+        // The admin console UI (/admin/master/*) stays blocked at priority 5.
+        if (enableAdminBlocking)
+        {
+            new ListenerRule($"{prefix}-kc-admin-api-allow", new ListenerRuleArgs
+            {
+                ListenerArn = awsNetwork.HttpsListenerArn,
+                Priority = 4,
+                Conditions =
+                {
+                    new ListenerRuleConditionArgs
+                    {
+                        HostHeader = new ListenerRuleConditionHostHeaderArgs
+                        {
+                            Values = { $"auth.{config.SystemDomain}" },
+                        },
+                    },
+                    new ListenerRuleConditionArgs
+                    {
+                        PathPattern = new ListenerRuleConditionPathPatternArgs
+                        {
+                            Values = { "/admin/realms/*" },
+                        },
+                    },
+                },
+                Actions =
+                {
+                    new ListenerRuleActionArgs
+                    {
+                        Type = "forward",
+                        TargetGroupArn = publicTg.Arn,
+                    },
+                },
+            }, opts);
+        }
+
         // Admin block rule (priority 5) — only when EnableAdminBlocking is true
         if (enableAdminBlocking)
         {

@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 New-Item -ItemType Directory -Path $libDir -Force | Out-Null
 
 # Run Docker container to install postgresql15 and extract binaries
-docker run --rm `
+docker run --rm --platform linux/amd64 `
     -v "${binDir}:/out/bin" `
     -v "${libDir}:/out/lib" `
     amazonlinux:2023 `

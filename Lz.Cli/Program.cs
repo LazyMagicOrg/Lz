@@ -192,18 +192,22 @@ class Program
                 // Resolve cross-account shared services references
                 if (!string.IsNullOrEmpty(config.SharedProfile))
                 {
+                    // Use the shared account's region from sharedconfig.yaml, not the system's region
+                    var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+                    var sharedRegion = sharedConfig.Region;
+
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.SharedProfile, config.Region);
+                        config.SharedProfile, sharedRegion);
                     config.SharedSecretArn =
-                        $"arn:aws:secretsmanager:{config.Region}:{sharedAccountId}:secret:shared/system";
-                    config.SharedRegion = config.Region;
+                        $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
+                    config.SharedRegion = sharedRegion;
 
                     // Resolve actual KMS key ARN — alias ARNs can't be used in IAM policy resources
                     config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.SharedProfile, config.Region, "alias/shared-secrets-key");
+                        config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
 
                     var endpointServiceName = await AwsAccountResolver.ResolveEndpointServiceNameAsync(
-                        config.SharedProfile, config.Region);
+                        config.SharedProfile, sharedRegion);
                     if (endpointServiceName != null)
                         config.SharedEndpointServiceName = endpointServiceName;
 
@@ -453,13 +457,16 @@ class Program
                 // Resolve cross-account shared services references
                 if (!string.IsNullOrEmpty(config.SharedProfile))
                 {
+                    var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+                    var sharedRegion = sharedConfig.Region;
+
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.SharedProfile, config.Region);
+                        config.SharedProfile, sharedRegion);
                     config.SharedSecretArn =
-                        $"arn:aws:secretsmanager:{config.Region}:{sharedAccountId}:secret:shared/system";
+                        $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
                     config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.SharedProfile, config.Region, "alias/shared-secrets-key");
-                    config.SharedRegion = config.Region;
+                        config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
+                    config.SharedRegion = sharedRegion;
                 }
 
                 // Read SES SMTP secrets from shared/system for keycloak template replacements
@@ -467,7 +474,7 @@ class Program
                 if (!string.IsNullOrEmpty(config.SharedProfile))
                 {
                     smtpSecrets = await AwsAccountResolver.ReadSecretEntriesAsync(
-                        config.SharedProfile, config.Region, "shared/system",
+                        config.SharedProfile, config.SharedRegion!, "shared/system",
                         "SES_SMTP_USER", "SES_SMTP_PASSWORD", "SES_SMTP_DOMAIN", "SES_SMTP_URL");
                 }
 
@@ -517,9 +524,13 @@ class Program
                         continue;
                     }
 
-                    // Propagate shared secret ARN and KMS key to tenant config
+                    // Propagate shared-services context to tenant config
                     tenantConfig.SharedSecretArn = config.SharedSecretArn;
                     tenantConfig.SharedKmsKeyArn = config.SharedKmsKeyArn;
+                    tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+                    tenantConfig.UsePrivateLink =
+                        !string.IsNullOrEmpty(config.SharedEndpointServiceName) &&
+                        string.Equals(config.Region, config.SharedRegion, StringComparison.OrdinalIgnoreCase);
 
                     Console.WriteLine(
                         $"Deploying tenant '{tk}' for system " +

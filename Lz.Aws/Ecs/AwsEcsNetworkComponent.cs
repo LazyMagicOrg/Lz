@@ -824,7 +824,9 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         // Connects to the shared account's Keycloak admin API via PrivateLink.
         // =====================================================================
 
-        if (!string.IsNullOrEmpty(config.SharedEndpointServiceName))
+        // PrivateLink is regional-only — skip if shared services are in a different region.
+        var sameRegion = string.Equals(config.Region, config.SharedRegion, StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(config.SharedEndpointServiceName) && sameRegion)
         {
             // Security group for VPC endpoint ENIs
             var endpointSg = new SecurityGroup($"{prefix}-endpoint-sg", new SecurityGroupArgs

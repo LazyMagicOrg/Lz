@@ -138,29 +138,10 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
 
-            // S3 origin for static assets + ALB origin for auth paths
-            Origins =
-            {
-                new DistributionOriginArgs
-                {
-                    OriginId = "s3-assets",
-                    DomainName = assetsBucket.BucketRegionalDomainName,
-                    OriginAccessControlId = oac.Id,
-                    OriginPath = "/wwwroot",
-                },
-                new DistributionOriginArgs
-                {
-                    OriginId = "alb-origin",
-                    DomainName = $"origin.{domain}",
-                    CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
-                    {
-                        HttpPort = 80,
-                        HttpsPort = 443,
-                        OriginProtocolPolicy = "https-only",
-                        OriginSslProtocols = { "TLSv1.2" },
-                    },
-                },
-            },
+            // S3 origin for static assets + ALB origin for API/media paths
+            // When PrivateLink is unavailable (cross-region), a separate origin
+            // routes auth paths directly to the shared Keycloak public ALB.
+            Origins = BuildOrigins(tenantConfig, assetsBucket, oac, domain),
 
             // Default behavior → S3 (WASM app)
             DefaultCacheBehavior = new DistributionDefaultCacheBehaviorArgs
@@ -173,15 +154,17 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 CachePolicyId = "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
             },
 
-            // Auth behaviors → ALB origin (Keycloak via PrivateLink)
-            // Routes /realms/*, /resources/*, /js/* through the public ALB
-            // to the shared Keycloak instance via VPC endpoint + PrivateLink.
+            // Auth behaviors → Keycloak (via PrivateLink through ALB, or direct to shared ALB)
+            // Same-region: /realms/* etc. go through tenant ALB → PrivateLink → shared Keycloak
+            // Cross-region: /realms/* etc. go directly to shared public ALB (CloudFront is global)
+            // AllViewer origin request policy forwards the Host header (e.g., harmova.life)
+            // so Keycloak uses the tenant domain as the token issuer.
             OrderedCacheBehaviors =
             {
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/realms/*",
-                    TargetOriginId = "alb-origin",
+                    TargetOriginId = AuthOriginId(tenantConfig),
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
@@ -192,7 +175,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/resources/*",
-                    TargetOriginId = "alb-origin",
+                    TargetOriginId = AuthOriginId(tenantConfig),
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
@@ -203,7 +186,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/js/*",
-                    TargetOriginId = "alb-origin",
+                    TargetOriginId = AuthOriginId(tenantConfig),
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
@@ -413,6 +396,73 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             distributionId: distribution.Id,
             domainName: distribution.DomainName,
             assetsBucketId: assetsBucket.Id);
+    }
+
+    /// <summary>
+    /// Returns the origin ID for auth behaviors (/realms/*, /resources/*, /js/*).
+    /// Same-region (PrivateLink available): routes through tenant ALB.
+    /// Cross-region: routes directly to shared Keycloak public ALB.
+    /// </summary>
+    private static string AuthOriginId(TenantConfig tenantConfig)
+        => tenantConfig.UsePrivateLink ? "alb-origin" : "shared-auth";
+
+    /// <summary>
+    /// Builds the list of CloudFront origins. Always includes S3 + ALB.
+    /// For cross-region deployments (no PrivateLink), adds a direct origin
+    /// to the shared Keycloak public ALB so CloudFront can route auth paths
+    /// across regions without PrivateLink.
+    /// </summary>
+    private static InputList<DistributionOriginArgs> BuildOrigins(
+        TenantConfig tenantConfig,
+        BucketV2 assetsBucket,
+        OriginAccessControl oac,
+        string domain)
+    {
+        var origins = new InputList<DistributionOriginArgs>
+        {
+            new DistributionOriginArgs
+            {
+                OriginId = "s3-assets",
+                DomainName = assetsBucket.BucketRegionalDomainName,
+                OriginAccessControlId = oac.Id,
+                OriginPath = "/wwwroot",
+            },
+            new DistributionOriginArgs
+            {
+                OriginId = "alb-origin",
+                DomainName = $"origin.{domain}",
+                CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
+                {
+                    HttpPort = 80,
+                    HttpsPort = 443,
+                    OriginProtocolPolicy = "https-only",
+                    OriginSslProtocols = { "TLSv1.2" },
+                },
+            },
+        };
+
+        // Cross-region: add direct origin to shared Keycloak public ALB.
+        // CloudFront connects via TLS to CentralAuthDomain (e.g., auth.monroadmin.click).
+        // The AllViewer origin request policy forwards the viewer's Host header
+        // (e.g., harmova.life), so Keycloak uses the tenant domain as the token issuer.
+        // The shared ALB's path-only /realms/* rule (priority 12) matches any Host.
+        if (!tenantConfig.UsePrivateLink && !string.IsNullOrEmpty(tenantConfig.CentralAuthDomain))
+        {
+            origins.Add(new DistributionOriginArgs
+            {
+                OriginId = "shared-auth",
+                DomainName = tenantConfig.CentralAuthDomain,
+                CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
+                {
+                    HttpPort = 80,
+                    HttpsPort = 443,
+                    OriginProtocolPolicy = "https-only",
+                    OriginSslProtocols = { "TLSv1.2" },
+                },
+            });
+        }
+
+        return origins;
     }
 
     private static InputMap<string> Tags(string systemKey, string tenantKey) => new()

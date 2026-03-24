@@ -39,21 +39,41 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
 
         using var client = new TailscaleApiClient(apiKey);
 
-        // 2. Recycle any instances running an older launch template version
-        await RecycleStaleInstancesAsync();
-
-        // 3. Wait for subnet router devices to register
         var hostnamePrefix = $"{_config.SystemKey}-{_config.Environment}-efs";
+
+        // 2. Snapshot current Tailscale device IDs before recycling, so we know
+        //    exactly which devices to delete after their backing EC2 instances
+        //    are terminated.
+        var preRecycleDevices = (await client.ListDevicesAsync())
+            .Where(d => d.Hostname.StartsWith(hostnamePrefix, StringComparison.OrdinalIgnoreCase)
+                     || d.Name.StartsWith(hostnamePrefix, StringComparison.OrdinalIgnoreCase))
+            .Select(d => d.Id)
+            .ToHashSet();
+
+        // 3. Recycle any instances running an older launch template version.
+        var recycledCount = await RecycleStaleInstancesAsync();
+
+        // 4. If instances were recycled, delete the pre-recycle Tailscale devices.
+        //    We ONLY delete devices when we know their backing instances were just
+        //    terminated. We never speculatively delete based on online/offline status
+        //    or lastSeen — the Tailscale API can transiently report live devices as
+        //    offline, and deleting a live device deauthorises it permanently.
+        if (recycledCount > 0 && preRecycleDevices.Count > 0)
+        {
+            Console.WriteLine("  Waiting for recycled instances to disconnect...");
+            await Task.Delay(TimeSpan.FromSeconds(15));
+
+            await DeleteDevicesByIdAsync(client, preRecycleDevices, hostnamePrefix);
+        }
+
+        // 4. Wait for subnet router devices to register
         var devices = await client.WaitForDevicesAsync(hostnamePrefix, minCount: 1, timeoutSeconds: 180);
 
-        // 4-5. For each device: approve routes + disable key expiry
-        //
-        // NOTE: We intentionally do NOT auto-delete offline/stale devices.
-        // Deleting a device via the admin API deauthorises it from the tailnet,
-        // but the tailscale daemon on the instance doesn't know — it keeps
-        // running in a zombie state and the replacement instance may also fail
-        // to appear in the API. Stale entries are harmless; delete manually
-        // in the Tailscale admin if desired.
+        // 5-6. For each device: approve routes + disable key expiry.
+        //    Do NOT filter by Online status — the Tailscale API can transiently
+        //    report connected devices as offline. Approving routes and disabling
+        //    key expiry on an offline device is harmless and takes effect when
+        //    it reconnects.
         var vpcCidr = _config.VpcCidr;
         var configuredCount = 0;
 
@@ -325,6 +345,50 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     }
 
     // ---------------------------------------------------------------
+    // Tailscale device cleanup
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Delete specific Tailscale devices by their IDs.
+    /// Used after RecycleStaleInstancesAsync to remove the device registrations
+    /// for instances that were just terminated. We know exactly which devices
+    /// to remove because we snapshotted them before recycling.
+    /// </summary>
+    private static async Task DeleteDevicesByIdAsync(
+        TailscaleApiClient client, HashSet<string> deviceIds, string hostnamePrefix)
+    {
+        // Re-fetch to get current state and display names
+        var allDevices = await client.ListDevicesAsync();
+        var toDelete = allDevices
+            .Where(d => deviceIds.Contains(d.Id)
+                     && (d.Hostname.StartsWith(hostnamePrefix, StringComparison.OrdinalIgnoreCase)
+                      || d.Name.StartsWith(hostnamePrefix, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (toDelete.Count == 0)
+            return;
+
+        Console.WriteLine($"  Removing {toDelete.Count} recycled device(s)...");
+
+        foreach (var device in toDelete)
+        {
+            var displayName = !string.IsNullOrEmpty(device.Hostname) ? device.Hostname : device.Name;
+            try
+            {
+                await client.DeleteDeviceAsync(device.Id);
+                Console.WriteLine($"    Removed: {displayName} ({device.Id})");
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"    Warning: Could not remove {displayName}: {ex.Message}");
+                Console.ResetColor();
+            }
+        }
+    }
+
+
+    // ---------------------------------------------------------------
     // Instance recycling
     // ---------------------------------------------------------------
 
@@ -332,8 +396,9 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     /// Compare each running ASG instance's launch template version against
     /// the latest version. Terminate any that are stale — ASG auto-replaces
     /// them with instances using the current launch template.
+    /// Returns the number of instances terminated.
     /// </summary>
-    private async Task RecycleStaleInstancesAsync()
+    private async Task<int> RecycleStaleInstancesAsync()
     {
         var prefix = _config.SystemKey;
         var asgName = $"{prefix}-tailscale-asg";
@@ -356,7 +421,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
         if (ltResponse.LaunchTemplateVersions.Count == 0)
         {
             Console.WriteLine("  Launch template not found — skipping instance recycle.");
-            return;
+            return 0;
         }
 
         var latestVersion = ltResponse.LaunchTemplateVersions[0].VersionNumber;
@@ -371,7 +436,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
         if (asgResponse.AutoScalingGroups.Count == 0)
         {
             Console.WriteLine("  ASG not found — skipping instance recycle.");
-            return;
+            return 0;
         }
 
         var instances = asgResponse.AutoScalingGroups[0].Instances;
@@ -394,7 +459,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"  All {instances.Count} instance(s) are on launch template v{latestVersion}.");
             Console.ResetColor();
-            return;
+            return 0;
         }
 
         Console.ForegroundColor = ConsoleColor.Yellow;
@@ -415,6 +480,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  {staleInstances.Count} stale instance(s) terminated — ASG replacing with v{latestVersion}.");
         Console.ResetColor();
+        return staleInstances.Count;
     }
 
     // ---------------------------------------------------------------

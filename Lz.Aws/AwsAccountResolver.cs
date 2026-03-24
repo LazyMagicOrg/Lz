@@ -43,24 +43,35 @@ public static class AwsAccountResolver
     /// </summary>
     public static async Task<string?> ResolveEndpointServiceNameAsync(string profile, string region)
     {
-        var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        var chain = new CredentialProfileStoreChain();
-
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            return null;
-
-        var client = new AmazonEC2Client(credentials, regionEndpoint);
-        var response = await client.DescribeVpcEndpointServiceConfigurationsAsync(
-            new DescribeVpcEndpointServiceConfigurationsRequest());
-
-        // Find the service tagged with System=shared
-        foreach (var svc in response.ServiceConfigurations)
+        try
         {
-            if (svc.Tags.Any(t => t.Key == "System" && t.Value == "shared"))
-                return svc.ServiceName;
-        }
+            var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+            var chain = new CredentialProfileStoreChain();
 
-        return null;
+            if (!chain.TryGetAWSCredentials(profile, out var credentials))
+                return null;
+
+            var client = new AmazonEC2Client(credentials, regionEndpoint);
+            var response = await client.DescribeVpcEndpointServiceConfigurationsAsync(
+                new DescribeVpcEndpointServiceConfigurationsRequest());
+
+            // Find the service tagged with System=shared
+            if (response.ServiceConfigurations == null)
+                return null;
+
+            foreach (var svc in response.ServiceConfigurations)
+            {
+                if (svc.Tags.Any(t => t.Key == "System" && t.Value == "shared"))
+                    return svc.ServiceName;
+            }
+
+            return null;
+        }
+        catch (Exception)
+        {
+            // EC2 endpoint service discovery is optional — return null if unavailable
+            return null;
+        }
     }
 
     /// <summary>

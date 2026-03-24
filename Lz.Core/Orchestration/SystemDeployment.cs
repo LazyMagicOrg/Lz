@@ -83,6 +83,7 @@ public class SystemDeployment
                 CheckType = TransitionCheckType.SecretEntry,
                 SecretName = "shared/system",
                 Profile = _config.SharedProfile,
+                Region = _config.SharedRegion,
                 CheckTarget = "tailscale-api-key",
                 Description =
                     "Tailscale API key is required for managing subnet routers.\n" +

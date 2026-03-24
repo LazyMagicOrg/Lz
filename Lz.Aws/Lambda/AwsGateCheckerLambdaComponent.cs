@@ -421,7 +421,7 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = "docker",
-            Arguments = $"run --rm -v \"{binMount}:/out/bin\" -v \"{libMount}:/out/lib\" amazonlinux:2023 bash -c \"{script}\"",
+            Arguments = $"run --rm --platform linux/amd64 -v \"{binMount}:/out/bin\" -v \"{libMount}:/out/lib\" amazonlinux:2023 bash -c \"{script}\"",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
