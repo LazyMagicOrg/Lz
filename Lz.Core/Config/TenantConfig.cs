@@ -13,6 +13,13 @@ public class TenantConfig
     public string TenantKey { get; set; } = string.Empty;
     public string Environment { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Directory containing the tenantconfig YAML file (i.e., repo root).
+    /// Set by ConfigLoader, used to resolve relative paths (e.g., CloudFront function JS files).
+    /// </summary>
+    [YamlDotNet.Serialization.YamlIgnore]
+    public string ConfigDirectory { get; set; } = ".";
+
     // --- Deployment Settings ---
     public string RootDomain { get; set; } = string.Empty;
     public string? DisplayName { get; set; }

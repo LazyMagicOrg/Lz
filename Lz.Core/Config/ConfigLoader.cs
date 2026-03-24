@@ -92,6 +92,7 @@ public static class ConfigLoader
         config.SystemKey = systemKey;
         config.TenantKey = tenantKey;
         config.Environment = environment;
+        config.ConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? ".";
         ConfigValidator.Validate(config, filePath);
 
         // Load smartstore.usersettings.json from the same directory if present.

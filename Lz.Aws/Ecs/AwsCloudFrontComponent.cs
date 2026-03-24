@@ -129,6 +129,15 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             }
         }
 
+        // =====================================================================
+        // CLOUDFRONT FUNCTION — viewer-request for region detection
+        // =====================================================================
+        // Intercepts default behavior (S3/WASM) requests. If the user has no
+        // region-pref cookie and no ?region= param, redirects to
+        // /AppApi/util/detect-region to geo-detect before the WASM app loads.
+
+        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig.ConfigDirectory);
+
         var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
         {
             Enabled = true,
@@ -143,7 +152,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             // routes auth paths directly to the shared Keycloak public ALB.
             Origins = BuildOrigins(tenantConfig, assetsBucket, oac, domain),
 
-            // Default behavior → S3 (WASM app)
+            // Default behavior → S3 (WASM app) with optional viewer-request function
             DefaultCacheBehavior = new DistributionDefaultCacheBehaviorArgs
             {
                 TargetOriginId = "s3-assets",
@@ -152,6 +161,16 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 CachedMethods = { "GET", "HEAD" },
                 Compress = true,
                 CachePolicyId = "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+                FunctionAssociations = viewerRequestFn != null
+                    ? new[]
+                    {
+                        new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request",
+                            FunctionArn = viewerRequestFn.Arn,
+                        },
+                    }
+                    : Array.Empty<DistributionDefaultCacheBehaviorFunctionAssociationArgs>(),
             },
 
             // Auth behaviors → Keycloak (via PrivateLink through ALB, or direct to shared ALB)
@@ -463,6 +482,37 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         }
 
         return origins;
+    }
+
+    /// <summary>
+    /// Creates a CloudFront Function for viewer-request region detection.
+    /// Reads CFViewerRequest.js from the repo's CloudFront/ directory,
+    /// replaces ${RootDomainParameter} with the tenant's root domain.
+    /// Returns null if the JS file doesn't exist (graceful fallback).
+    /// </summary>
+    private Pulumi.Aws.CloudFront.Function? CreateViewerRequestFunction(
+        string prefix, string domain, string configDirectory)
+    {
+        var jsPath = Path.Combine(configDirectory, "CloudFront", "CFViewerRequest.js");
+        if (!File.Exists(jsPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Warning: CloudFront function not found at {jsPath} — skipping viewer-request function.");
+            Console.ResetColor();
+            return null;
+        }
+
+        var jsCode = File.ReadAllText(jsPath)
+            .Replace("${RootDomainParameter}", domain);
+
+        return new Pulumi.Aws.CloudFront.Function(
+            $"{prefix}-viewer-request", new FunctionArgs
+            {
+                Runtime = "cloudfront-js-2.0",
+                Code = jsCode,
+                Comment = $"Region detection redirect for {domain}",
+                Publish = true,
+            }, new CustomResourceOptions { Parent = this });
     }
 
     private static InputMap<string> Tags(string systemKey, string tenantKey) => new()
