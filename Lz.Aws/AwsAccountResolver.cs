@@ -1,6 +1,4 @@
 using System.Text.Json;
-using Amazon.EC2;
-using Amazon.EC2.Model;
 using Amazon.KeyManagementService;
 using Amazon.KeyManagementService.Model;
 using Amazon.Runtime.CredentialManagement;
@@ -14,8 +12,8 @@ using Amazon.SimpleSystemsManagement.Model;
 namespace Lz.Aws;
 
 /// <summary>
-/// Resolves cross-account AWS information using STS and EC2 APIs.
-/// Used at CLI startup to discover shared account ID and endpoint service names.
+/// Resolves cross-account AWS information using STS and KMS APIs.
+/// Used at CLI startup to discover shared account ID and KMS key ARNs.
 /// </summary>
 public static class AwsAccountResolver
 {
@@ -35,43 +33,6 @@ public static class AwsAccountResolver
         var client = new AmazonSecurityTokenServiceClient(credentials, regionEndpoint);
         var response = await client.GetCallerIdentityAsync(new GetCallerIdentityRequest());
         return response.Account;
-    }
-
-    /// <summary>
-    /// Discover the VPC Endpoint Service name from the shared account.
-    /// Looks for an endpoint service tagged with System=shared.
-    /// </summary>
-    public static async Task<string?> ResolveEndpointServiceNameAsync(string profile, string region)
-    {
-        try
-        {
-            var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-            var chain = new CredentialProfileStoreChain();
-
-            if (!chain.TryGetAWSCredentials(profile, out var credentials))
-                return null;
-
-            var client = new AmazonEC2Client(credentials, regionEndpoint);
-            var response = await client.DescribeVpcEndpointServiceConfigurationsAsync(
-                new DescribeVpcEndpointServiceConfigurationsRequest());
-
-            // Find the service tagged with System=shared
-            if (response.ServiceConfigurations == null)
-                return null;
-
-            foreach (var svc in response.ServiceConfigurations)
-            {
-                if (svc.Tags.Any(t => t.Key == "System" && t.Value == "shared"))
-                    return svc.ServiceName;
-            }
-
-            return null;
-        }
-        catch (Exception)
-        {
-            // EC2 endpoint service discovery is optional — return null if unavailable
-            return null;
-        }
     }
 
     /// <summary>

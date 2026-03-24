@@ -36,14 +36,6 @@ public class TenantConfig
     public string? SharedKmsKeyArn { get; set; }
     public string? CentralAuthDomain { get; set; }
 
-    /// <summary>
-    /// True when shared services are in the same region and PrivateLink is available.
-    /// When false, CloudFront routes auth paths directly to the shared public ALB
-    /// instead of through the tenant ALB's PrivateLink forwarding rule.
-    /// Set by ConfigMerger from SystemConfig at deployment time.
-    /// </summary>
-    public bool UsePrivateLink { get; set; }
-
     // Per-tenant infrastructure overrides
     public EcsConfig? ECS { get; set; }
     public CdnConfig? CDN { get; set; }

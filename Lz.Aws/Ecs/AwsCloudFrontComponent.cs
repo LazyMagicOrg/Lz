@@ -183,7 +183,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/realms/*",
-                    TargetOriginId = AuthOriginId(tenantConfig),
+                    TargetOriginId = "shared-auth",
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
@@ -194,7 +194,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/resources/*",
-                    TargetOriginId = AuthOriginId(tenantConfig),
+                    TargetOriginId = "shared-auth",
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
@@ -205,7 +205,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/js/*",
-                    TargetOriginId = AuthOriginId(tenantConfig),
+                    TargetOriginId = "shared-auth",
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
@@ -418,18 +418,8 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
     }
 
     /// <summary>
-    /// Returns the origin ID for auth behaviors (/realms/*, /resources/*, /js/*).
-    /// Same-region (PrivateLink available): routes through tenant ALB.
-    /// Cross-region: routes directly to shared Keycloak public ALB.
-    /// </summary>
-    private static string AuthOriginId(TenantConfig tenantConfig)
-        => tenantConfig.UsePrivateLink ? "alb-origin" : "shared-auth";
-
-    /// <summary>
-    /// Builds the list of CloudFront origins. Always includes S3 + ALB.
-    /// For cross-region deployments (no PrivateLink), adds a direct origin
-    /// to the shared Keycloak public ALB so CloudFront can route auth paths
-    /// across regions without PrivateLink.
+    /// Builds the list of CloudFront origins: S3 (WASM assets), ALB (API),
+    /// and shared-auth (Keycloak on shared public ALB).
     /// </summary>
     private static InputList<DistributionOriginArgs> BuildOrigins(
         TenantConfig tenantConfig,
@@ -460,12 +450,12 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             },
         };
 
-        // Cross-region: add direct origin to shared Keycloak public ALB.
-        // CloudFront connects via TLS to CentralAuthDomain (e.g., auth.monroadmin.click).
+        // Shared-auth origin — routes /realms/*, /resources/*, /js/* directly
+        // to the shared Keycloak public ALB (CentralAuthDomain).
         // The AllViewer origin request policy forwards the viewer's Host header
         // (e.g., harmova.life), so Keycloak uses the tenant domain as the token issuer.
         // The shared ALB's path-only /realms/* rule (priority 12) matches any Host.
-        if (!tenantConfig.UsePrivateLink && !string.IsNullOrEmpty(tenantConfig.CentralAuthDomain))
+        if (!string.IsNullOrEmpty(tenantConfig.CentralAuthDomain))
         {
             origins.Add(new DistributionOriginArgs
             {

@@ -34,8 +34,6 @@ public class SystemConfig
     public string? SharedSecretArn { get; set; }
     public string? SharedKmsKeyArn { get; set; }
     public string? SharedRegion { get; set; }
-    public string? SharedEndpointServiceName { get; set; }
-    public string? SharedAuthDomain { get; set; }
     public List<string> TrustedAccountIds { get; set; } = new();
 
     // NEW fields (not in current config, will be added)

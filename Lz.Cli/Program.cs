@@ -206,17 +206,10 @@ class Program
                     config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
                         config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
 
-                    var endpointServiceName = await AwsAccountResolver.ResolveEndpointServiceNameAsync(
-                        config.SharedProfile, sharedRegion);
-                    if (endpointServiceName != null)
-                        config.SharedEndpointServiceName = endpointServiceName;
-
                     Console.WriteLine($"  Shared account: {sharedAccountId}");
                     Console.WriteLine($"  Shared secret:  {config.SharedSecretArn}");
                     if (config.SharedKmsKeyArn != null)
                         Console.WriteLine($"  Shared KMS key: {config.SharedKmsKeyArn}");
-                    if (config.SharedEndpointServiceName != null)
-                        Console.WriteLine($"  Endpoint svc:   {config.SharedEndpointServiceName}");
                 }
 
                 // Ensure Pulumi state backend (S3 bucket + KMS key) exists
@@ -528,9 +521,6 @@ class Program
                     tenantConfig.SharedSecretArn = config.SharedSecretArn;
                     tenantConfig.SharedKmsKeyArn = config.SharedKmsKeyArn;
                     tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
-                    tenantConfig.UsePrivateLink =
-                        !string.IsNullOrEmpty(config.SharedEndpointServiceName) &&
-                        string.Equals(config.Region, config.SharedRegion, StringComparison.OrdinalIgnoreCase);
 
                     Console.WriteLine(
                         $"Deploying tenant '{tk}' for system " +

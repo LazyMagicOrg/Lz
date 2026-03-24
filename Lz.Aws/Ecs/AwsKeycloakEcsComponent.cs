@@ -238,8 +238,8 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
         // =====================================================================
 
         // Admin REST API pass-through (priority 4) — allows /admin/realms/* before
-        // the block rule catches it. Cross-region consumer accounts (no PrivateLink)
-        // need this path for service-account user management. The API is still
+        // the block rule catches it. Tenant AppHost services use this path for
+        // service-account user management via the public ALB. The API is still
         // protected by Keycloak client credentials (client_id + client_secret).
         // The admin console UI (/admin/master/*) stays blocked at priority 5.
         if (enableAdminBlocking)
@@ -393,9 +393,9 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
             },
         }, opts);
 
-        // Path-based rule on internal ALB (priority 12) for PrivateLink traffic
-        // from tenant accounts. Tenant requests arrive with tenant Host headers
-        // (not auth.{domain}), so we match by path to route auth traffic
+        // Path-based rule on internal ALB (priority 12) for auth traffic.
+        // Requests may arrive with tenant Host headers (e.g., harmova.life)
+        // rather than auth.{domain}, so we match by path only
         // to Keycloak.
         new ListenerRule($"{prefix}-kc-internal-paths", new ListenerRuleArgs
         {
