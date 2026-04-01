@@ -640,6 +640,112 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         }, opts);
 
         // =====================================================================
+        // NETWORK LOAD BALANCER (for UDP media traffic — e.g., LiveKit SFU)
+        // =====================================================================
+        // NLB handles UDP (WebRTC media) and TCP (WebSocket signaling) for services
+        // that need direct transport-layer access. Unlike ALBs, NLBs support UDP.
+        // NLB does not use security groups — traffic is controlled by target SGs.
+
+        var nlb = new LoadBalancer($"{prefix}-nlb", new LoadBalancerArgs
+        {
+            Name = $"{prefix}-nlb",
+            LoadBalancerType = "network",
+            Internal = false,
+            IpAddressType = "ipv4",
+            Subnets = { publicSubnet1.Id, publicSubnet2.Id },
+            Tags = Tags(config, "nlb"),
+        }, opts);
+
+        // TCP target group for WebSocket signaling (port 7880)
+        var nlbTcpTargetGroup = new TargetGroup($"{prefix}-nlb-tcp-tg", new TargetGroupArgs
+        {
+            NamePrefix = "nlbtcp",
+            Port = 7880,
+            Protocol = "TCP",
+            VpcId = vpc.Id,
+            TargetType = "ip",
+            HealthCheck = new TargetGroupHealthCheckArgs
+            {
+                Enabled = true,
+                Protocol = "TCP",
+                Port = "7880",
+                Interval = 30,
+                HealthyThreshold = 2,
+                UnhealthyThreshold = 3,
+            },
+            Tags = Tags(config, "nlb-tcp-tg"),
+        }, opts);
+
+        // UDP target group for WebRTC media (port 7882)
+        var nlbUdpTargetGroup = new TargetGroup($"{prefix}-nlb-udp-tg", new TargetGroupArgs
+        {
+            NamePrefix = "nlbudp",
+            Port = 7882,
+            Protocol = "UDP",
+            VpcId = vpc.Id,
+            TargetType = "ip",
+            HealthCheck = new TargetGroupHealthCheckArgs
+            {
+                Enabled = true,
+                Protocol = "TCP",  // Health check uses TCP fallback — UDP can't be probed
+                Port = "7880",
+                Interval = 30,
+                HealthyThreshold = 2,
+                UnhealthyThreshold = 3,
+            },
+            Tags = Tags(config, "nlb-udp-tg"),
+        }, opts);
+
+        // TCP listener for WebSocket signaling
+        new Listener($"{prefix}-nlb-tcp-listener", new ListenerArgs
+        {
+            LoadBalancerArn = nlb.Arn,
+            Port = 7880,
+            Protocol = "TCP",
+            DefaultActions =
+            {
+                new ListenerDefaultActionArgs
+                {
+                    Type = "forward",
+                    TargetGroupArn = nlbTcpTargetGroup.Arn,
+                },
+            },
+        }, opts);
+
+        // UDP listener for WebRTC media
+        new Listener($"{prefix}-nlb-udp-listener", new ListenerArgs
+        {
+            LoadBalancerArn = nlb.Arn,
+            Port = 7882,
+            Protocol = "UDP",
+            DefaultActions =
+            {
+                new ListenerDefaultActionArgs
+                {
+                    Type = "forward",
+                    TargetGroupArn = nlbUdpTargetGroup.Arn,
+                },
+            },
+        }, opts);
+
+        // Allow NLB traffic to ECS tasks — NLBs don't have security groups,
+        // so we allow the NLB CIDR (VPC CIDR) to reach ECS on the required ports.
+        new SecurityGroupRule($"{prefix}-ecs-pub-nlb-tcp-7880", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "tcp", FromPort = 7880, ToPort = 7880,
+            CidrBlocks = { vpcCidr },
+            Description = "WebSocket signaling from NLB",
+        }, opts);
+        new SecurityGroupRule($"{prefix}-ecs-pub-nlb-udp-7882", new SecurityGroupRuleArgs
+        {
+            Type = "ingress", SecurityGroupId = ecsPublicSg.Id,
+            Protocol = "udp", FromPort = 7882, ToPort = 7900,
+            CidrBlocks = { "0.0.0.0/0" },
+            Description = "WebRTC media UDP from NLB (NLB preserves client IP)",
+        }, opts);
+
+        // =====================================================================
         // PUBLIC DNS RECORDS
         // =====================================================================
 
@@ -773,6 +879,11 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             TailscaleSecurityGroupId = tailscaleSg.Id,
             CertificateArn = certValidation.CertificateArn,
             NatGatewayId = natGw.Id,
+            NlbArn = nlb.Arn,
+            NlbDns = nlb.DnsName,
+            NlbZoneId = nlb.ZoneId,
+            NlbTcpTargetGroupArn = nlbTcpTargetGroup.Arn,
+            NlbUdpTargetGroupArn = nlbUdpTargetGroup.Arn,
         };
     }
 

@@ -24,6 +24,13 @@ public abstract class SystemDefinition
     public List<TransitionRequirement> FoundationGates { get; } = new();
 
     /// <summary>
+    /// Foundation-level services — shared across all tenants.
+    /// Deployed during deployfoundation, not per-tenant.
+    /// </summary>
+    public IReadOnlyList<ServiceDefinition> FoundationLayerServices
+        => Services.Where(s => s.Layer == ServiceLayer.Foundation).ToList();
+
+    /// <summary>
     /// Services in the Service layer — deployed first within each tenant.
     /// Must be running and configured before host-layer services.
     /// </summary>

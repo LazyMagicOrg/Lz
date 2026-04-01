@@ -48,6 +48,14 @@ public interface IPlatformFactory
     ITenantKeycloakSeeder? GetTenantKeycloakSeeder();
 
     /// <summary>
+    /// Post-deploy action for building/pushing Docker images and scaling
+    /// foundation-level services (e.g., LiveKit SFU).
+    /// Returns null if no foundation services with Docker builds exist.
+    /// </summary>
+    IPostDeployAction? GetFoundationServiceDeployAction(
+        Definitions.SystemDefinition system);
+
+    /// <summary>
     /// Post-deploy action for building/pushing Docker images and scaling ECS services.
     /// Called with a specific list of services during tenant deployment.
     /// tenantKey is used to locate the tenant-specific config file for baking into Docker images.

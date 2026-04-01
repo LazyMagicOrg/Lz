@@ -204,7 +204,10 @@ def init_config(event):
         "system_key": "med", "tenant_key": "meadows", "environment": "dev",
         "db_name": "med_meadows_dev_smartstore",
         "app_user": "med_meadows_app",
-        "app_version": "6.3.0.0" }
+        "app_version": "6.3.0.0",
+        "platform_db_name": "med_meadows_dev_platform",  # optional
+        "platform_app_user": "med_meadows_platform_app"   # optional
+      }
     """
     import pg8000.native
     import boto3
@@ -304,6 +307,69 @@ def init_config(event):
         steps.append("Granted schema privileges")
     finally:
         tenant_conn.close()
+
+    # --- Create platform database if requested (optional) ---
+    platform_db_name = event.get("platform_db_name") or ""
+    platform_app_user = event.get("platform_app_user") or ""
+    if platform_db_name and platform_app_user:
+        platform_password = _get_or_create_platform_password(sm, tenant_secret_name, platform_app_user)
+
+        admin_conn2 = pg8000.native.Connection(
+            user=master_user, password=master_password,
+            host=rds_host, port=rds_port, database="postgres",
+        )
+        try:
+            # Create platform database if missing
+            rows = admin_conn2.run(
+                "SELECT 1 FROM pg_database WHERE datname = :name",
+                name=platform_db_name,
+            )
+            if len(rows) == 0:
+                admin_conn2.run(f'CREATE DATABASE "{platform_db_name}" OWNER "{master_user}"')
+                steps.append(f"Created platform database {platform_db_name}")
+            else:
+                steps.append(f"Platform database {platform_db_name} already exists")
+
+            # Create or update platform app user
+            escaped_ppw = platform_password.replace("'", "''")
+            roles = admin_conn2.run(
+                "SELECT 1 FROM pg_roles WHERE rolname = :name",
+                name=platform_app_user,
+            )
+            if len(roles) == 0:
+                admin_conn2.run(
+                    f"CREATE ROLE \"{platform_app_user}\" LOGIN PASSWORD '{escaped_ppw}'"
+                )
+                steps.append(f"Created role {platform_app_user}")
+            else:
+                admin_conn2.run(
+                    f"ALTER ROLE \"{platform_app_user}\" PASSWORD '{escaped_ppw}'"
+                )
+                steps.append(f"Updated password for role {platform_app_user}")
+
+            admin_conn2.run(f'GRANT ALL PRIVILEGES ON DATABASE "{platform_db_name}" TO "{platform_app_user}"')
+        finally:
+            admin_conn2.close()
+
+        # Grant schema-level privileges on platform DB
+        platform_conn = pg8000.native.Connection(
+            user=master_user, password=master_password,
+            host=rds_host, port=rds_port, database=platform_db_name,
+        )
+        try:
+            platform_conn.run(f'GRANT ALL ON SCHEMA public TO "{platform_app_user}"')
+            platform_conn.run(f'GRANT CREATE ON SCHEMA public TO "{platform_app_user}"')
+            platform_conn.run(
+                f'ALTER DEFAULT PRIVILEGES IN SCHEMA public '
+                f'GRANT ALL ON TABLES TO "{platform_app_user}"'
+            )
+            platform_conn.run(
+                f'ALTER DEFAULT PRIVILEGES IN SCHEMA public '
+                f'GRANT ALL ON SEQUENCES TO "{platform_app_user}"'
+            )
+            steps.append("Granted platform schema privileges")
+        finally:
+            platform_conn.close()
 
     # --- Ensure all tenant EFS directories exist with correct ownership ---
     efs_prefix = f"{sk}-{tk}-{env}"
@@ -1121,6 +1187,42 @@ def _get_or_create_app_password(sm, secret_name, app_user):
             SecretString=json.dumps({
                 "smartstore-db-password": new_pw,
                 "smartstore-db-username": app_user,
+            }),
+        )
+        return new_pw
+
+
+def _get_or_create_platform_password(sm, secret_name, platform_app_user):
+    """
+    Read existing platform DB password from tenant secret, or generate a new one
+    and store it. Returns the password string.
+    """
+    try:
+        resp = sm.get_secret_value(SecretId=secret_name)
+        secret_data = json.loads(resp["SecretString"])
+
+        existing_pw = secret_data.get("platform-db-password")
+        if existing_pw:
+            return existing_pw
+
+        # Secret exists but no platform password yet — generate and update
+        new_pw = secrets.token_urlsafe(32)
+        secret_data["platform-db-password"] = new_pw
+        secret_data["platform-db-username"] = platform_app_user
+        sm.put_secret_value(
+            SecretId=secret_name,
+            SecretString=json.dumps(secret_data),
+        )
+        return new_pw
+
+    except sm.exceptions.ResourceNotFoundException:
+        # Should not happen — tenant secret should already exist
+        new_pw = secrets.token_urlsafe(32)
+        sm.create_secret(
+            Name=secret_name,
+            SecretString=json.dumps({
+                "platform-db-password": new_pw,
+                "platform-db-username": platform_app_user,
             }),
         )
         return new_pw

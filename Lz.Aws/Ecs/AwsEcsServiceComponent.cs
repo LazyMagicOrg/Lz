@@ -5,7 +5,7 @@ using Lz.Core.Interfaces.Outputs;
 using Pulumi;
 using Pulumi.Aws;
 using Pulumi.Aws.CloudWatch;
-using Pulumi.Aws.Ecr;
+
 using Pulumi.Aws.Ecs;
 using Pulumi.Aws.Ecs.Inputs;
 using Pulumi.Aws.Efs;
@@ -68,22 +68,13 @@ public class AwsEcsServiceComponent : IServiceComponent
         var containerProtocol = definition.Container?.Protocol ?? "HTTP";
         var healthCheckPath = definition.Container?.HealthCheckPath ?? "/health";
 
-        // ECR image URI
+        // ECR image URI — repo is created by `lz deploycontainer`, not by Pulumi
+        var ecrName = $"{prefix}-{_config.SystemSuffix}-{_config.Environment}-{serviceName}";
         var identity = GetCallerIdentity.Invoke();
         var imageUri = identity.Apply(id =>
-            $"{id.AccountId}.dkr.ecr.{_config.Region}.amazonaws.com/{prefix}-{_config.SystemSuffix}-{_config.Environment}-{serviceName}:latest");
-
-        // =====================================================================
-        // ECR REPOSITORY
-        // =====================================================================
-
-        var ecrRepo = new Repository($"{prefix}-{serviceName}-ecr", new RepositoryArgs
-        {
-            Name = $"{prefix}-{_config.SystemSuffix}-{_config.Environment}-{serviceName}",
-            ImageTagMutability = "MUTABLE",
-            ForceDelete = _config.Environment == "dev",
-            Tags = Tags(serviceName),
-        });
+            $"{id.AccountId}.dkr.ecr.{_config.Region}.amazonaws.com/{ecrName}:latest");
+        var ecrRepoArn = identity.Apply(id =>
+            $"arn:aws:ecr:{_config.Region}:{id.AccountId}:repository/{ecrName}");
 
         // =====================================================================
         // LOG GROUP
@@ -113,7 +104,7 @@ public class AwsEcsServiceComponent : IServiceComponent
                 new RoleInlinePolicyArgs
                 {
                     Name = "SecretsAndEcrAccess",
-                    Policy = Output.Tuple(awsDatabase.MasterSecretArn, awsDatabase.SystemSecretArn, ecrRepo.Arn)
+                    Policy = Output.Tuple(awsDatabase.MasterSecretArn, awsDatabase.SystemSecretArn, ecrRepoArn)
                         .Apply(t => $@"{{
                             ""Version"": ""2012-10-17"",
                             ""Statement"": [
@@ -228,58 +219,55 @@ public class AwsEcsServiceComponent : IServiceComponent
         }
 
         // =====================================================================
-        // TARGET GROUP
+        // LOAD BALANCER ROUTING
         // =====================================================================
+        // HTTP/HTTPS services → ALB target group + listener rule
+        // TCP/UDP services → NLB target groups (created by network component)
 
-        var targetGroup = new TargetGroup($"{prefix}-{serviceName}-tg", new TargetGroupArgs
+        var usesAlb = containerProtocol.Equals("HTTP", StringComparison.OrdinalIgnoreCase)
+            || containerProtocol.Equals("HTTPS", StringComparison.OrdinalIgnoreCase);
+
+        TargetGroup? targetGroup = null;
+        ListenerRule? listenerRule = null;
+
+        if (usesAlb)
         {
-            NamePrefix = TruncateName($"{prefix}-{serviceName}-", 6),
-            Port = containerPort,
-            Protocol = containerProtocol,
-            VpcId = network.NetworkId,
-            TargetType = "ip",
-            HealthCheck = new TargetGroupHealthCheckArgs
+            targetGroup = new TargetGroup($"{prefix}-{serviceName}-tg", new TargetGroupArgs
             {
-                Enabled = true,
-                Path = healthCheckPath,
+                NamePrefix = TruncateName($"{prefix}-{serviceName}-", 6),
+                Port = containerPort,
                 Protocol = containerProtocol,
-                Port = "traffic-port",
-                Interval = 30,
-                Timeout = 10,
-                HealthyThreshold = 2,
-                UnhealthyThreshold = 5,
-            },
-            DeregistrationDelay = 30,
-            Tags = Tags(serviceName),
-        });
+                VpcId = network.NetworkId,
+                TargetType = "ip",
+                HealthCheck = BuildTargetGroupHealthCheck(containerProtocol, healthCheckPath),
+                DeregistrationDelay = 30,
+                Tags = Tags(serviceName),
+            });
 
-        // =====================================================================
-        // LISTENER RULE (priority 20 — after Keycloak rules at 2/5/10/12)
-        // =====================================================================
-
-        var listenerRule = new ListenerRule($"{prefix}-{serviceName}-rule", new ListenerRuleArgs
-        {
-            ListenerArn = listenerArn,
-            Priority = GetListenerPriority(serviceName, ecs),
-            Conditions =
+            listenerRule = new ListenerRule($"{prefix}-{serviceName}-rule", new ListenerRuleArgs
             {
-                new ListenerRuleConditionArgs
+                ListenerArn = listenerArn,
+                Priority = GetListenerPriority(serviceName, ecs),
+                Conditions =
                 {
-                    HostHeader = new ListenerRuleConditionHostHeaderArgs
+                    new ListenerRuleConditionArgs
                     {
-                        Values = { host },
+                        HostHeader = new ListenerRuleConditionHostHeaderArgs
+                        {
+                            Values = { host },
+                        },
                     },
                 },
-            },
-            Actions =
-            {
-                new ListenerRuleActionArgs
+                Actions =
                 {
-                    Type = "forward",
-                    TargetGroupArn = targetGroup.Arn,
+                    new ListenerRuleActionArgs
+                    {
+                        Type = "forward",
+                        TargetGroupArn = targetGroup.Arn,
+                    },
                 },
-            },
-        });
+            });
+        }
 
         // =====================================================================
         // SERVICE DISCOVERY
@@ -378,6 +366,12 @@ public class AwsEcsServiceComponent : IServiceComponent
                     new { name = "DB_PASSWORD", valueFrom = $"{masterSecretArn}:password::" },
                 };
 
+                // LiveKit needs LIVEKIT_KEYS from the system secret
+                if (serviceName.Equals("livekit", StringComparison.OrdinalIgnoreCase))
+                {
+                    secrets.Add(new { name = "LIVEKIT_KEYS", valueFrom = $"{systemSecretArn}:livekit-keys::" });
+                }
+
                 return System.Text.Json.JsonSerializer.Serialize(new[]
                 {
                     new
@@ -385,10 +379,7 @@ public class AwsEcsServiceComponent : IServiceComponent
                         name = serviceName,
                         image,
                         essential = true,
-                        portMappings = new[]
-                        {
-                            new { containerPort, protocol = "tcp" },
-                        },
+                        portMappings = BuildFoundationPortMappings(containerPort, definition),
                         mountPoints,
                         environment = envVars.ToArray(),
                         secrets = secrets.ToArray(),
@@ -402,14 +393,16 @@ public class AwsEcsServiceComponent : IServiceComponent
                                 ["awslogs-stream-prefix"] = serviceName,
                             },
                         },
-                        healthCheck = new
-                        {
-                            command = new[] { "CMD-SHELL", $"curl -sf http://localhost:{containerPort}{healthCheckPath} || exit 1" },
-                            interval = 30,
-                            timeout = 10,
-                            retries = 3,
-                            startPeriod = 120,
-                        },
+                        healthCheck = usesAlb
+                            ? (object)new
+                            {
+                                command = new[] { "CMD-SHELL", $"curl -sf http://localhost:{containerPort}{healthCheckPath} || exit 1" },
+                                interval = 30,
+                                timeout = 10,
+                                retries = 3,
+                                startPeriod = 120,
+                            }
+                            : null, // NLB services (e.g., LiveKit) use distroless images — no shell available for health checks. NLB target group health check handles liveness.
                     },
                 });
             }),
@@ -443,15 +436,7 @@ public class AwsEcsServiceComponent : IServiceComponent
                 Subnets = network.PrivateSubnetIds.Apply(ids => ids.AsEnumerable().ToList()),
                 SecurityGroups = { securityGroupId },
             },
-            LoadBalancers =
-            {
-                new ServiceLoadBalancerArgs
-                {
-                    ContainerName = serviceName,
-                    ContainerPort = containerPort,
-                    TargetGroupArn = targetGroup.Arn,
-                },
-            },
+            LoadBalancers = BuildFoundationLoadBalancers(serviceName, containerPort, definition, targetGroup, awsNetwork),
             ServiceRegistries = new ServiceServiceRegistriesArgs
             {
                 RegistryArn = serviceDiscovery.Arn,
@@ -459,7 +444,7 @@ public class AwsEcsServiceComponent : IServiceComponent
             Tags = Tags(serviceName),
         }, new CustomResourceOptions
         {
-            DependsOn = { listenerRule },
+            DependsOn = listenerRule != null ? new List<Resource> { listenerRule } : new List<Resource>(),
         });
 
         var endpoint = isInternal
@@ -483,6 +468,7 @@ public class AwsEcsServiceComponent : IServiceComponent
         {
             "smartstore" => (ecs.SmartStoreCpu, ecs.SmartStoreMemory),
             "apphost" => (ecs.AppHostCpu, ecs.AppHostMemory),
+            "livekit" => (ecs.LiveKitCpu, ecs.LiveKitMemory),
             _ => (256, 512),
         };
     }
@@ -518,6 +504,105 @@ public class AwsEcsServiceComponent : IServiceComponent
 
     private static string TruncateName(string name, int maxLen)
         => name.Length <= maxLen ? name : name[..maxLen];
+
+    /// <summary>
+    /// Build port mappings for foundation service task definitions, supporting additional TCP/UDP ports.
+    /// </summary>
+    private static object[] BuildFoundationPortMappings(int primaryPort, ServiceDefinition definition)
+    {
+        var mappings = new List<object>
+        {
+            new { containerPort = primaryPort, protocol = "tcp" },
+        };
+
+        foreach (var pm in definition.Container?.AdditionalPorts ?? new())
+        {
+            if (pm.ToPort.HasValue)
+            {
+                for (int p = pm.Port; p <= pm.ToPort.Value; p++)
+                {
+                    mappings.Add(new { containerPort = p, hostPort = p, protocol = pm.Protocol.ToLowerInvariant() });
+                }
+            }
+            else
+            {
+                mappings.Add(new { containerPort = pm.Port, hostPort = pm.Port, protocol = pm.Protocol.ToLowerInvariant() });
+            }
+        }
+
+        return mappings.ToArray();
+    }
+
+    /// <summary>
+    /// Build load balancer registrations for foundation services.
+    /// ALB services use the ALB target group; NLB services use NLB target groups.
+    /// </summary>
+    private static InputList<ServiceLoadBalancerArgs> BuildFoundationLoadBalancers(
+        string serviceName, int containerPort, ServiceDefinition definition,
+        TargetGroup? albTargetGroup, AwsNetworkOutputs awsNetwork)
+    {
+        var lbs = new InputList<ServiceLoadBalancerArgs>();
+
+        if (albTargetGroup != null)
+        {
+            // ALB-routed service (HTTP/HTTPS)
+            lbs.Add(new ServiceLoadBalancerArgs
+            {
+                ContainerName = serviceName,
+                ContainerPort = containerPort,
+                TargetGroupArn = albTargetGroup.Arn,
+            });
+        }
+        else
+        {
+            // NLB-routed service (TCP/UDP) — register primary port with NLB TCP target group,
+            // and any additional UDP ports with NLB UDP target group
+            var additionalPorts = definition.Container?.AdditionalPorts ?? new();
+            bool hasUdp = additionalPorts.Any(p => p.Protocol.Equals("udp", StringComparison.OrdinalIgnoreCase));
+
+            // Primary TCP port → NLB TCP target group
+            if (awsNetwork.NlbTcpTargetGroupArn != null)
+            {
+                lbs.Add(new ServiceLoadBalancerArgs
+                {
+                    ContainerName = serviceName,
+                    ContainerPort = containerPort,
+                    TargetGroupArn = awsNetwork.NlbTcpTargetGroupArn,
+                });
+            }
+            if (hasUdp && awsNetwork.NlbUdpTargetGroupArn != null)
+            {
+                var udpPort = additionalPorts.First(p => p.Protocol.Equals("udp", StringComparison.OrdinalIgnoreCase));
+                lbs.Add(new ServiceLoadBalancerArgs
+                {
+                    ContainerName = serviceName,
+                    ContainerPort = udpPort.Port,
+                    TargetGroupArn = awsNetwork.NlbUdpTargetGroupArn,
+                });
+            }
+        }
+
+        return lbs;
+    }
+
+    /// <summary>
+    /// Build target group health check args. TCP protocol cannot use path-based health checks.
+    /// </summary>
+    private static TargetGroupHealthCheckArgs BuildTargetGroupHealthCheck(string protocol, string healthCheckPath)
+    {
+        var isTcp = protocol.Equals("TCP", StringComparison.OrdinalIgnoreCase);
+        return new TargetGroupHealthCheckArgs
+        {
+            Enabled = true,
+            Path = isTcp ? null : healthCheckPath,
+            Protocol = isTcp ? "TCP" : protocol,
+            Port = "traffic-port",
+            Interval = 30,
+            Timeout = isTcp ? 10 : 10,
+            HealthyThreshold = 2,
+            UnhealthyThreshold = 5,
+        };
+    }
 
     private const string EcsAssumeRolePolicy = @"{
         ""Version"": ""2012-10-17"",

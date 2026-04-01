@@ -23,9 +23,14 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
 
     public async Task<bool> RunInitConfigAsync(
         string tenantKey, string dbName, string appUser,
-        string appVersion = "6.3.0.0", Dictionary<string, object>? userSettings = null)
+        string appVersion = "6.3.0.0", Dictionary<string, object>? userSettings = null,
+        string? platformDatabaseName = null)
     {
         var functionName = $"{_config.SystemKey}-gate-checker";
+
+        var platformAppUser = platformDatabaseName != null
+            ? $"{_config.SystemKey}_{tenantKey}_platform_app"
+            : null;
 
         var payload = new
         {
@@ -37,6 +42,8 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
             app_user = appUser,
             app_version = appVersion,
             user_settings = userSettings,
+            platform_db_name = platformDatabaseName,
+            platform_app_user = platformAppUser,
         };
 
         try
@@ -47,6 +54,8 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
             Console.WriteLine($"  Invoking {functionName} (init_config)...");
             Console.WriteLine($"    Database: {dbName}");
             Console.WriteLine($"    App user: {appUser}");
+            if (platformDatabaseName != null)
+                Console.WriteLine($"    Platform DB: {platformDatabaseName}");
 
             var response = await client.InvokeAsync(new InvokeRequest
             {

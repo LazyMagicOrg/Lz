@@ -32,6 +32,10 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
 
     public async Task ExecuteAsync(IDictionary<string, object> outputs)
     {
+        // Step 0: Ensure LiveKit API credentials exist in system secret
+        // This must run BEFORE Keycloak operations — Keycloak may not exist in all systems.
+        await EnsureLiveKitCredentialsAsync();
+
         var prefix = _config.SystemKey;
         var clusterName = $"{prefix}-cluster";
         var keycloakServiceName = $"{prefix}-keycloak";
@@ -62,7 +66,7 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
             subnetIds,
             securityGroups.First());
 
-        // Step 2.5: Deploy Keycloak themes to EFS (before seeding, so themes are
+        // Step 2.6: Deploy Keycloak themes to EFS (before seeding, so themes are
         // available when Keycloak boots and realms reference them)
         await DeployKeycloakThemesAsync();
 
@@ -337,6 +341,78 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
         }
 
         return new AmazonECSClient(regionEndpoint);
+    }
+
+    /// <summary>
+    /// Ensure LiveKit API key and secret exist in the system secret.
+    /// Generates them if missing — idempotent.
+    /// </summary>
+    private async Task EnsureLiveKitCredentialsAsync()
+    {
+        var secretName = $"{_config.SystemKey}/system";
+        var smClient = CreateSecretsManagerClient(_config.Region, _config.Profile);
+
+        try
+        {
+            var resp = await smClient.GetSecretValueAsync(new GetSecretValueRequest { SecretId = secretName });
+            var secretData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(resp.SecretString)
+                ?? new Dictionary<string, string>();
+
+            bool changed = false;
+
+            if (!secretData.ContainsKey("livekit-api-key") || string.IsNullOrEmpty(secretData["livekit-api-key"]))
+            {
+                secretData["livekit-api-key"] = $"API{GenerateRandomString(12)}";
+                changed = true;
+            }
+
+            if (!secretData.ContainsKey("livekit-api-secret") || string.IsNullOrEmpty(secretData["livekit-api-secret"]))
+            {
+                secretData["livekit-api-secret"] = GenerateRandomString(40);
+                changed = true;
+            }
+
+            // Always ensure the composite LIVEKIT_KEYS value is up-to-date
+            var apiKey = secretData.GetValueOrDefault("livekit-api-key", "");
+            var apiSecret = secretData.GetValueOrDefault("livekit-api-secret", "");
+            var expectedKeys = $"{apiKey}: {apiSecret}";
+            if (secretData.GetValueOrDefault("livekit-keys", "") != expectedKeys)
+            {
+                secretData["livekit-keys"] = expectedKeys;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                await smClient.PutSecretValueAsync(new PutSecretValueRequest
+                {
+                    SecretId = secretName,
+                    SecretString = System.Text.Json.JsonSerializer.Serialize(secretData),
+                });
+                Console.WriteLine("  LiveKit API credentials generated and stored in system secret.");
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine("  LiveKit API credentials already exist in system secret.");
+                Console.ResetColor();
+            }
+        }
+        catch (Amazon.SecretsManager.Model.ResourceNotFoundException)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  WARNING: System secret '{secretName}' not found. LiveKit credentials not stored.");
+            Console.ResetColor();
+        }
+    }
+
+    private static string GenerateRandomString(int length)
+    {
+        const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        var random = System.Security.Cryptography.RandomNumberGenerator.Create();
+        var bytes = new byte[length];
+        random.GetBytes(bytes);
+        return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
     }
 
     private static AmazonSecretsManagerClient CreateSecretsManagerClient(string region, string? profile)

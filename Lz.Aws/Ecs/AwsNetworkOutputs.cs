@@ -41,4 +41,12 @@ public class AwsNetworkOutputs : INetworkOutputs
 
     // AWS-specific — NAT Gateway (used for DependsOn by components needing outbound internet)
     public required Output<string> NatGatewayId { get; init; }
+
+    // AWS-specific — NLB (for UDP media traffic, e.g., LiveKit)
+    // Not required — may not exist in deployments without UDP services.
+    public Output<string>? NlbArn { get; init; }
+    public Output<string>? NlbDns { get; init; }
+    public Output<string>? NlbZoneId { get; init; }
+    public Output<string> NlbTcpTargetGroupArn { get; init; } = Output.Create("");
+    public Output<string> NlbUdpTargetGroupArn { get; init; } = Output.Create("");
 }

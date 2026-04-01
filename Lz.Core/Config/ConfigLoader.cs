@@ -244,6 +244,24 @@ public static class ConfigLoader
     }
 
     /// <summary>
+    /// Discover and load foundation ContainerServiceConfig by convention: servicesconfig.foundation.{env}.yaml.
+    /// Foundation containers are system-scoped (shared across all tenants).
+    /// </summary>
+    public static ContainerServiceConfig DiscoverAndLoadFoundationContainerConfig(
+        string systemKey, string environment, string? startDirectory = null)
+    {
+        var dir = startDirectory ?? Directory.GetCurrentDirectory();
+        var pattern = $"servicesconfig.foundation.{environment}.yaml";
+        var filePath = DiscoverConfigFile(dir, pattern);
+        if (filePath == null)
+        {
+            // Foundation config is optional — return empty if not found
+            return new ContainerServiceConfig { ConfigDirectory = dir };
+        }
+        return LoadContainerServiceConfig(filePath);
+    }
+
+    /// <summary>
     /// Discover the monorepo root directory (where systemconfig lives).
     /// Searches upward from the current directory for the systemconfig file.
     /// </summary>

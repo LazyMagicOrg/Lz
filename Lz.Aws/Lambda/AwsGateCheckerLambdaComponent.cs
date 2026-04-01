@@ -264,6 +264,7 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
                     { "RDS_SECRET_ARN", awsDatabase.MasterSecretArn },
                     { "RDS_HOST", awsDatabase.Endpoint },
                     { "RDS_PORT", awsDatabase.Port.Apply(p => p.ToString()) },
+                    { "LZ_VERSION", typeof(AwsGateCheckerLambdaComponent).Assembly.GetName().Version?.ToString() ?? "unknown" },
                 },
             },
             Tags =

@@ -42,6 +42,8 @@ public class AzureContainerAppsPlatformFactory : IPlatformFactory
 
     public ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
 
+    public IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system) => null;
+
     public IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system,
         IReadOnlyList<ServiceDefinition> services,

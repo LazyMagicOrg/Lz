@@ -262,23 +262,66 @@ class Program
 
             foreach (var config in configs)
             {
-                var containerServiceConfig = ConfigLoader
+                var deployer = new EcrDeployer();
+
+                // Load both foundation and tenant container configs
+                var foundationConfig = ConfigLoader
+                    .DiscoverAndLoadFoundationContainerConfig(config.SystemKey, config.Environment);
+                var tenantServiceConfig = ConfigLoader
                     .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+                // Check if the requested container is a foundation container
+                bool isFoundation = container != null
+                    && foundationConfig.Containers.ContainsKey(container);
+
+                // --- Foundation containers (system-scoped ECR, no tenant key) ---
+                if (isFoundation || (container == null && foundationConfig.Containers.Count > 0))
+                {
+                    var foundationContainers = container != null
+                        ? foundationConfig.Containers
+                            .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
+                            .ToDictionary(c => c.Key, c => c.Value)
+                        : foundationConfig.Containers;
+
+                    foreach (var (svcName, def) in foundationContainers)
+                    {
+                        var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
+
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine($"=== {svcName} (foundation) ===");
+                        Console.ResetColor();
+
+                        await deployer.DeployAsync(
+                            svcName, def,
+                            foundationConfig.ConfigDirectory,
+                            ecrName,
+                            config.Profile,
+                            config.Region,
+                            tag);
+                    }
+
+                    // If a specific foundation container was requested, we're done
+                    if (isFoundation)
+                        continue;
+                }
+
+                // --- Tenant containers (tenant-scoped ECR) ---
+                // Skip if the requested container was already handled as foundation
+                if (isFoundation)
+                    continue;
 
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
 
-                var deployer = new EcrDeployer();
-
                 foreach (var (tk, tenantConfig) in tenants)
                 {
                     var containersToProcess = container != null
-                        ? containerServiceConfig.Containers
+                        ? tenantServiceConfig.Containers
                             .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
                             .ToDictionary(c => c.Key, c => c.Value)
-                        : containerServiceConfig.Containers;
+                        : tenantServiceConfig.Containers;
 
-                    if (containersToProcess.Count == 0)
+                    if (container != null && containersToProcess.Count == 0)
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
                         Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
@@ -299,7 +342,7 @@ class Program
 
                         await deployer.DeployAsync(
                             svcName, def,
-                            containerServiceConfig.ConfigDirectory,
+                            tenantServiceConfig.ConfigDirectory,
                             ecrName,
                             profile,
                             region,

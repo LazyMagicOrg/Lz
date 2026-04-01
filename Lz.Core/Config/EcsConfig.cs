@@ -38,6 +38,9 @@ public class EcsConfig
     public string? AppHostImage { get; set; }
     public int AppHostCpu { get; set; } = 256;
     public int AppHostMemory { get; set; } = 512;
+    public string? LiveKitImage { get; set; }
+    public int LiveKitCpu { get; set; } = 1024;
+    public int LiveKitMemory { get; set; } = 2048;
     public int ServiceDesiredCount { get; set; } = 1;
 
     // Per-tenant resource isolation (tenantconfig only)
@@ -46,6 +49,7 @@ public class EcsConfig
     public string? EfsSmartStoreDataProtectionPath { get; set; }
     public string? EfsAppHostConfigPath { get; set; }
     public string? DatabaseName { get; set; }
+    public string? PlatformDatabaseName { get; set; }
     public string? SmartStoreServiceDiscoveryName { get; set; }
     public string? AppHostServiceDiscoveryName { get; set; }
 

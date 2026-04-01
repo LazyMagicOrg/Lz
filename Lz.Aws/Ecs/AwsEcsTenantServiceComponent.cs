@@ -571,10 +571,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                         name = serviceName,
                         image,
                         essential = true,
-                        portMappings = new[]
-                        {
-                            new { containerPort, protocol = "tcp" },
-                        },
+                        portMappings = BuildPortMappings(containerPort, definition),
                         mountPoints,
                         environment = envVars.ToArray(),
                         secrets = secrets.ToArray(),
@@ -588,14 +585,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                                 ["awslogs-stream-prefix"] = serviceName,
                             },
                         },
-                        healthCheck = new
-                        {
-                            command = new[] { "CMD-SHELL", $"bash -c '(echo > /dev/tcp/localhost/{containerPort}) 2>/dev/null' || exit 1" },
-                            interval = 30,
-                            timeout = 10,
-                            retries = 3,
-                            startPeriod = 120,
-                        },
+                        healthCheck = BuildHealthCheck(containerPort, definition),
                     },
                 });
             }),
@@ -629,7 +619,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                 Subnets = network.PrivateSubnetIds.Apply(ids => ids.AsEnumerable().ToList()),
                 SecurityGroups = { securityGroupId },
             },
-            LoadBalancers = BuildLoadBalancers(serviceName, containerPort, targetGroup, vpnTargetGroup),
+            LoadBalancers = BuildLoadBalancers(serviceName, containerPort, definition, targetGroup, vpnTargetGroup, awsNetwork),
             ServiceRegistries = new ServiceServiceRegistriesArgs
             {
                 RegistryArn = serviceDiscovery.Arn,
@@ -652,6 +642,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
         {
             "smartstore" => (ecs.SmartStoreCpu, ecs.SmartStoreMemory),
             "apphost" => (ecs.AppHostCpu, ecs.AppHostMemory),
+            "livekit" => (ecs.LiveKitCpu, ecs.LiveKitMemory),
             _ => (256, 512),
         };
     }
@@ -676,8 +667,8 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
     }
 
     private static InputList<ServiceLoadBalancerArgs> BuildLoadBalancers(
-        string serviceName, int containerPort,
-        TargetGroup primaryTg, TargetGroup? vpnTg)
+        string serviceName, int containerPort, ServiceDefinition definition,
+        TargetGroup primaryTg, TargetGroup? vpnTg, AwsNetworkOutputs awsNetwork)
     {
         var lbs = new InputList<ServiceLoadBalancerArgs>
         {
@@ -699,7 +690,98 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             });
         }
 
+        // Register with NLB target groups for services with UDP ports
+        // Guard: only register if NLB target groups are available (created by deployfoundation)
+        var additionalPorts = definition.Container?.AdditionalPorts ?? new();
+        var nlbTcpArn = awsNetwork.NlbTcpTargetGroupArn;
+        var nlbUdpArn = awsNetwork.NlbUdpTargetGroupArn;
+
+        bool hasNlb = nlbTcpArn != null;
+        bool hasUdp = additionalPorts.Any(p => p.Protocol.Equals("udp", StringComparison.OrdinalIgnoreCase));
+        bool hasTcp7880 = additionalPorts.Any(p => p.Protocol.Equals("tcp", StringComparison.OrdinalIgnoreCase) && p.Port == 7880);
+
+        if (hasTcp7880 && hasNlb)
+        {
+            lbs.Add(new ServiceLoadBalancerArgs
+            {
+                ContainerName = serviceName,
+                ContainerPort = 7880,
+                TargetGroupArn = nlbTcpArn!,
+            });
+        }
+        if (hasUdp && hasNlb)
+        {
+            var udpPort = additionalPorts.First(p => p.Protocol.Equals("udp", StringComparison.OrdinalIgnoreCase));
+            lbs.Add(new ServiceLoadBalancerArgs
+            {
+                ContainerName = serviceName,
+                ContainerPort = udpPort.Port,
+                TargetGroupArn = nlbUdpArn!,
+            });
+        }
+
         return lbs;
+    }
+
+    /// <summary>
+    /// Build port mappings for the ECS task definition, supporting additional TCP/UDP ports.
+    /// </summary>
+    private static object[] BuildPortMappings(int primaryPort, ServiceDefinition definition)
+    {
+        var mappings = new List<object>
+        {
+            new { containerPort = primaryPort, protocol = "tcp" },
+        };
+
+        foreach (var pm in definition.Container?.AdditionalPorts ?? new())
+        {
+            if (pm.ToPort.HasValue)
+            {
+                // Port range — add each port individually (ECS requires individual mappings)
+                for (int p = pm.Port; p <= pm.ToPort.Value; p++)
+                {
+                    mappings.Add(new { containerPort = p, hostPort = p, protocol = pm.Protocol.ToLowerInvariant() });
+                }
+            }
+            else
+            {
+                mappings.Add(new { containerPort = pm.Port, hostPort = pm.Port, protocol = pm.Protocol.ToLowerInvariant() });
+            }
+        }
+
+        return mappings.ToArray();
+    }
+
+    /// <summary>
+    /// Build health check for the ECS task definition.
+    /// Services with a HealthCheckPath use curl; others use TCP socket test.
+    /// </summary>
+    private static object BuildHealthCheck(int containerPort, ServiceDefinition definition)
+    {
+        var hasAdditionalPorts = (definition.Container?.AdditionalPorts?.Count ?? 0) > 0;
+
+        // Services with additional ports (like LiveKit) often use HTTP health endpoints
+        // rather than raw TCP socket tests
+        if (hasAdditionalPorts && definition.Container?.HealthCheckPath != null)
+        {
+            return new
+            {
+                command = new[] { "CMD-SHELL", $"curl -f http://localhost:{containerPort}{definition.Container.HealthCheckPath} || exit 1" },
+                interval = 30,
+                timeout = 10,
+                retries = 3,
+                startPeriod = 120,
+            };
+        }
+
+        return new
+        {
+            command = new[] { "CMD-SHELL", $"bash -c '(echo > /dev/tcp/localhost/{containerPort}) 2>/dev/null' || exit 1" },
+            interval = 30,
+            timeout = 10,
+            retries = 3,
+            startPeriod = 120,
+        };
     }
 
     private static string TruncateName(string name, int maxLen)

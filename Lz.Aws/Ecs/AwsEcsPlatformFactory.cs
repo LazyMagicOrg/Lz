@@ -58,6 +58,14 @@ public class AwsEcsPlatformFactory : IPlatformFactory
     public ITenantKeycloakSeeder? GetTenantKeycloakSeeder()
         => new AwsTenantKeycloakSeeder(_config);
 
+    public IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system)
+    {
+        var foundationServices = system.FoundationLayerServices;
+        if (foundationServices.Count == 0 || !foundationServices.Any(s => s.Docker != null))
+            return null;
+        return new AwsServicesPostDeployAction(_config, system, foundationServices);
+    }
+
     public IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system,
         IReadOnlyList<ServiceDefinition> services,

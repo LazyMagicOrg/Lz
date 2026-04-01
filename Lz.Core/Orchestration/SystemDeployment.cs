@@ -125,6 +125,18 @@ public class SystemDeployment
             await tailscalePostDeploy.ExecuteAsync(tailscaleOutputs);
         }
 
+        // --- Post-deploy: Build/push/scale foundation-level services (e.g., LiveKit) ---
+        var foundationServiceDeploy = _factory.GetFoundationServiceDeployAction(_system);
+        if (foundationServiceDeploy != null)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Building and deploying foundation services...");
+            var foundationOutputs = result.Outputs.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value.Value);
+            await foundationServiceDeploy.ExecuteAsync(foundationOutputs);
+        }
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("Foundation deployment complete.");
@@ -237,11 +249,13 @@ public class SystemDeployment
             var dbName = ecs.DatabaseName
                 ?? $"{_config.SystemKey}_{tenantKey}_{_config.Environment}_smartstore";
             var appUser = $"{_config.SystemKey}_{tenantKey}_app";
+            var platformDbName = ecs.PlatformDatabaseName; // null if not configured — Lambda skips platform DB creation
 
             Console.WriteLine();
             Console.WriteLine("Initializing tenant config (database + EFS config files)...");
             var initOk = await configInit.RunInitConfigAsync(tenantKey, dbName, appUser,
-                userSettings: tenantConfig.Smartstore);
+                userSettings: tenantConfig.Smartstore,
+                platformDatabaseName: platformDbName);
             if (!initOk)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -643,6 +657,15 @@ public class SystemDeployment
         if (seedTaskComponent != null)
         {
             seedTaskOutputs = seedTaskComponent.Deploy(_config, networkOutputs, databaseOutputs, fileStorageOutputs);
+        }
+
+        // Foundation-level services (e.g., LiveKit SFU) — shared across tenants
+        var foundationServices = _system.FoundationLayerServices;
+        foreach (var svcDef in foundationServices)
+        {
+            var serviceComponent = _factory.CreateService();
+            var svcOutputs = serviceComponent.Deploy(
+                svcDef.Name, svcDef, networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs);
         }
 
         var exports = new Dictionary<string, object?>

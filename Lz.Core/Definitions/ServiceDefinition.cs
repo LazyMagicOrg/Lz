@@ -16,6 +16,13 @@ public enum IngressType
 public enum ServiceLayer
 {
     /// <summary>
+    /// Foundation-level services shared across all tenants.
+    /// Deployed during deployfoundation, not per-tenant.
+    /// Examples: LiveKit SFU, shared message broker.
+    /// </summary>
+    Foundation,
+
+    /// <summary>
     /// Core services deployed first. May require seeding, manual admin
     /// interaction, or secret generation before host-layer services can start.
     /// </summary>
@@ -79,6 +86,23 @@ public class ContainerOptions
     public int Port { get; set; } = 80;
     public string Protocol { get; set; } = "HTTP";
     public string HealthCheckPath { get; set; } = "/health";
+
+    /// <summary>
+    /// Additional port mappings for services that need multiple protocols (e.g., TCP + UDP).
+    /// If empty, only the primary Port/Protocol is used.
+    /// </summary>
+    public List<PortMapping> AdditionalPorts { get; set; } = new();
+}
+
+/// <summary>
+/// A port or port range with protocol specification.
+/// Used for services that need UDP (e.g., WebRTC media servers).
+/// </summary>
+public class PortMapping
+{
+    public int Port { get; set; }
+    public int? ToPort { get; set; }  // For port ranges (e.g., 7882-7900)
+    public string Protocol { get; set; } = "tcp";  // "tcp" or "udp"
 }
 
 public class LambdaOptions

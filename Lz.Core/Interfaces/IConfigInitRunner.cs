@@ -15,7 +15,9 @@ public interface IConfigInitRunner
     /// <param name="appUser">Database app user name (e.g., "med_meadows_app").</param>
     /// <param name="appVersion">SmartStore app version string (default: "6.3.0.0").</param>
     /// <param name="userSettings">Optional dictionary to write as usersettings.json (e.g., SmartStore section from tenant config).</param>
+    /// <param name="platformDatabaseName">Optional platform database name (e.g., "med_meadows_dev_platform"). If provided, creates the database and app user.</param>
     /// <returns>True if initialization succeeded.</returns>
     Task<bool> RunInitConfigAsync(string tenantKey, string dbName, string appUser,
-        string appVersion = "6.3.0.0", Dictionary<string, object>? userSettings = null);
+        string appVersion = "6.3.0.0", Dictionary<string, object>? userSettings = null,
+        string? platformDatabaseName = null);
 }
