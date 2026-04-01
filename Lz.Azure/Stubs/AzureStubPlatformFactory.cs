@@ -63,6 +63,8 @@ public class AzureContainerAppsPlatformFactory : IPlatformFactory
 
     public ISeedTaskComponent? CreateSeedTask() => null;
 
+    public string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey) => null;
+
     public (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
         IDatabaseOutputs Database, IFileStorageOutputs FileStorage)
         LookupFoundation(SystemConfig config)

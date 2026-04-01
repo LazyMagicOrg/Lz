@@ -23,8 +23,10 @@ public class AwsSeedRunner
     /// <summary>
     /// Run a seed export task: EFS + database → S3.
     /// </summary>
+    /// <param name="s3Prefix">S3 prefix within the tenant key (e.g., "seed" or "data"). Default: "seed".</param>
     public async Task<bool> RunExportAsync(
         string tenantKey,
+        string s3Prefix = "seed",
         string? clusterArn = null,
         List<string>? subnetIds = null,
         string? securityGroupId = null)
@@ -39,7 +41,8 @@ public class AwsSeedRunner
             "--bucket", _config.SeedData!.Bucket,
             "--region", _config.SeedData.Region,
             "--efs-root", "/mnt/efs",
-            "--efs-prefix", efsPrefix
+            "--efs-prefix", efsPrefix,
+            "--s3-prefix", s3Prefix
         };
 
         return await RunSeedTaskAsync(tenantKey, args, "export", clusterArn, subnetIds, securityGroupId);
@@ -48,9 +51,11 @@ public class AwsSeedRunner
     /// <summary>
     /// Run a seed import task: S3 → EFS + database.
     /// </summary>
+    /// <param name="s3Prefix">S3 prefix within the tenant key (e.g., "seed" or "data"). Default: "seed".</param>
     public async Task<bool> RunImportAsync(
         string tenantKey,
         string sourceKey = "latest",
+        string s3Prefix = "seed",
         string? clusterArn = null,
         List<string>? subnetIds = null,
         string? securityGroupId = null)
@@ -66,7 +71,8 @@ public class AwsSeedRunner
             "--region", _config.SeedData.Region,
             "--source", sourceKey,
             "--efs-root", "/mnt/efs",
-            "--efs-prefix", efsPrefix
+            "--efs-prefix", efsPrefix,
+            "--s3-prefix", s3Prefix
         };
 
         return await RunSeedTaskAsync(tenantKey, args, "import", clusterArn, subnetIds, securityGroupId);

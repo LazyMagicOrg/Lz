@@ -321,6 +321,27 @@ public static class ConfigLoader
     }
 
     /// <summary>
+    /// Propagate shared SeedData config to a SystemConfig if the system doesn't define its own.
+    /// The bucket name is derived from the systemKey and shared suffix.
+    /// Call this after loading both configs.
+    /// </summary>
+    public static void PropagateSharedSeedData(SystemConfig systemConfig, SharedConfig sharedConfig)
+    {
+        if (systemConfig.SeedData != null)
+            return; // system has explicit SeedData — don't override
+
+        var bucket = sharedConfig.SeedData?.Bucket
+            ?? $"{systemConfig.SystemKey}--seeddata-{sharedConfig.SharedSuffix}";
+        var region = sharedConfig.SeedData?.Region ?? sharedConfig.Region;
+
+        systemConfig.SeedData = new SeedDataConfig
+        {
+            Bucket = bucket,
+            Region = region,
+        };
+    }
+
+    /// <summary>
     /// Generate AWS Pulumi state config from a name prefix and suffix.
     /// The suffix is placed at the end of the resource name (not the middle).
     /// e.g., prefix="med-dev", suffix="4498-a704", region="us-west-2"

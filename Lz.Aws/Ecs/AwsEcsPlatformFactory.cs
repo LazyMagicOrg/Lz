@@ -91,6 +91,98 @@ public class AwsEcsPlatformFactory : IPlatformFactory
     public ISeedTaskComponent? CreateSeedTask()
         => _config.SeedData != null ? new AwsSeedTaskComponent() : null;
 
+    public string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey)
+    {
+        var bucketName = sharedConfig.SeedData?.Bucket
+            ?? $"{systemKey}--seeddata-{sharedConfig.SharedSuffix}";
+        var region = sharedConfig.SeedData?.Region ?? sharedConfig.Region;
+
+        var bucket = new Pulumi.Aws.S3.BucketV2($"{systemKey}-seeddata-bucket", new Pulumi.Aws.S3.BucketV2Args
+        {
+            Bucket = bucketName,
+            Tags =
+            {
+                { "Name", bucketName },
+                { "System", systemKey },
+                { "ManagedBy", "lz-pulumi" },
+                { "Purpose", "seed-data" },
+            },
+        });
+
+        // Block public access
+        new Pulumi.Aws.S3.BucketPublicAccessBlock($"{systemKey}-seeddata-block", new Pulumi.Aws.S3.BucketPublicAccessBlockArgs
+        {
+            Bucket = bucket.Id,
+            BlockPublicAcls = true,
+            BlockPublicPolicy = true,
+            IgnorePublicAcls = true,
+            RestrictPublicBuckets = true,
+        });
+
+        // Enable versioning for safety
+        new Pulumi.Aws.S3.BucketVersioningV2($"{systemKey}-seeddata-versioning", new Pulumi.Aws.S3.BucketVersioningV2Args
+        {
+            Bucket = bucket.Id,
+            VersioningConfiguration = new Pulumi.Aws.S3.Inputs.BucketVersioningV2VersioningConfigurationArgs
+            {
+                Status = "Enabled",
+            },
+        });
+
+        // Enable SSE-S3 encryption
+        new Pulumi.Aws.S3.BucketServerSideEncryptionConfigurationV2($"{systemKey}-seeddata-sse",
+            new Pulumi.Aws.S3.BucketServerSideEncryptionConfigurationV2Args
+        {
+            Bucket = bucket.Id,
+            Rules =
+            {
+                new Pulumi.Aws.S3.Inputs.BucketServerSideEncryptionConfigurationV2RuleArgs
+                {
+                    ApplyServerSideEncryptionByDefault =
+                        new Pulumi.Aws.S3.Inputs.BucketServerSideEncryptionConfigurationV2RuleApplyServerSideEncryptionByDefaultArgs
+                        {
+                            SseAlgorithm = "AES256",
+                        },
+                },
+            },
+        });
+
+        // Cross-account bucket policy — grant trusted accounts access
+        if (sharedConfig.TrustedAccountIds.Count > 0)
+        {
+            var principals = string.Join(",",
+                sharedConfig.TrustedAccountIds.Select(id => $"\"arn:aws:iam::{id}:root\""));
+
+            new Pulumi.Aws.S3.BucketPolicy($"{systemKey}-seeddata-policy", new Pulumi.Aws.S3.BucketPolicyArgs
+            {
+                Bucket = bucket.Id,
+                Policy = bucket.Arn.Apply(arn => $@"{{
+  ""Version"": ""2012-10-17"",
+  ""Statement"": [{{
+    ""Sid"": ""AllowTrustedAccountAccess"",
+    ""Effect"": ""Allow"",
+    ""Principal"": {{
+      ""AWS"": [{principals}]
+    }},
+    ""Action"": [
+      ""s3:GetObject"",
+      ""s3:PutObject"",
+      ""s3:ListBucket"",
+      ""s3:GetBucketLocation"",
+      ""s3:DeleteObject""
+    ],
+    ""Resource"": [
+      ""{arn}"",
+      ""{arn}/*""
+    ]
+  }}]
+}}"),
+            });
+        }
+
+        return bucketName;
+    }
+
     public (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
         IDatabaseOutputs Database, IFileStorageOutputs FileStorage)
         LookupFoundation(SystemConfig config)

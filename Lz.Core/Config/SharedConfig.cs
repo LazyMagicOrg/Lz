@@ -33,6 +33,14 @@ public class SharedConfig
     public string TailscaleInstanceType { get; set; } = "t4g.nano";
     public int TailscaleDesiredCapacity { get; set; } = 2;
 
+    // --- Seed Data ---
+    /// <summary>
+    /// Seed data S3 bucket configuration. The bucket is created in the shared account
+    /// and accessed cross-account by dev, test, and prod seeder tasks.
+    /// If not specified, the bucket name is auto-generated as "{systemKey}--seeddata-{SharedSuffix}".
+    /// </summary>
+    public SeedDataConfig? SeedData { get; set; }
+
     // --- Cross-account access ---
     /// <summary>
     /// Account IDs allowed to read the shared system secret cross-account.

@@ -312,6 +312,9 @@ public class SharedDeployment
             gateCheckerComponent.Deploy(systemConfig, networkOutputs, databaseOutputs, fileStorageOutputs);
         }
 
+        // Seed Data: S3 bucket for cross-account data transfer
+        var seedBucketName = _factory.CreateSeedBucket(_config, systemConfig.SystemKey);
+
         // Auth: Keycloak ECS task + service + listener rules
         var auth = _factory.CreateAuthService();
         var authOutputs = auth.Deploy(systemConfig, networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs, _adminBlockingEnabled);
@@ -325,6 +328,7 @@ public class SharedDeployment
             ["dbEndpoint"] = databaseOutputs.Endpoint,
             ["efsId"] = fileStorageOutputs.FileSystemId,
             ["keycloakEndpoint"] = authOutputs.Endpoint,
+            ["seedBucket"] = seedBucketName,
         };
 
         return new SharedInfraResult(networkOutputs, fileStorageOutputs, exports);

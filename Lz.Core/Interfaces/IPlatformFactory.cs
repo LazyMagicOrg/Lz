@@ -110,6 +110,13 @@ public interface IPlatformFactory
     ISeedTaskComponent? CreateSeedTask();
 
     /// <summary>
+    /// Create a shared S3 seed data bucket with cross-account access policy.
+    /// The bucket is created in the shared account and grants access to trusted environment accounts.
+    /// Returns the bucket name. Returns null if the platform doesn't support S3.
+    /// </summary>
+    string? CreateSeedBucket(Config.SharedConfig sharedConfig, string systemKey);
+
+    /// <summary>
     /// Look up existing foundation resources (created by deployfoundation) using
     /// platform-specific data-source queries. Returns typed output interfaces so
     /// tenant components can use them without re-creating foundation resources.
