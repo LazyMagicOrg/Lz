@@ -190,10 +190,11 @@ class Program
                 if (topology != null) config.Topology = topology;
 
                 // Resolve cross-account shared services references
+                SharedConfig? sharedConfig = null;
                 if (!string.IsNullOrEmpty(config.SharedProfile))
                 {
                     // Use the shared account's region from sharedconfig.yaml, not the system's region
-                    var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+                    sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
                     var sharedRegion = sharedConfig.Region;
 
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
@@ -211,6 +212,10 @@ class Program
                     if (config.SharedKmsKeyArn != null)
                         Console.WriteLine($"  Shared KMS key: {config.SharedKmsKeyArn}");
                 }
+
+                // Propagate seed bucket config from shared account
+                sharedConfig ??= ConfigLoader.DiscoverAndLoadSharedConfig();
+                ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
 
                 // Ensure Pulumi state backend (S3 bucket + KMS key) exists
                 if (config.State != null)
@@ -491,10 +496,11 @@ class Program
                     .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
 
                 // Resolve cross-account shared services references
+                SharedConfig? sharedConfigTenant = null;
                 if (!string.IsNullOrEmpty(config.SharedProfile))
                 {
-                    var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
-                    var sharedRegion = sharedConfig.Region;
+                    sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig();
+                    var sharedRegion = sharedConfigTenant.Region;
 
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
                         config.SharedProfile, sharedRegion);
@@ -504,6 +510,10 @@ class Program
                         config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
                     config.SharedRegion = sharedRegion;
                 }
+
+                // Propagate seed bucket config from shared account
+                sharedConfigTenant ??= ConfigLoader.DiscoverAndLoadSharedConfig();
+                ConfigLoader.PropagateSharedSeedData(config, sharedConfigTenant);
 
                 // Read SES SMTP secrets from shared/system for keycloak template replacements
                 Dictionary<string, string?> smtpSecrets = new();

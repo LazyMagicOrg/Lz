@@ -134,13 +134,17 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
         }, opts);
 
         // Task role: Secrets Manager + EFS access
+        // Grants access to master secret, system secret, AND tenant secrets ({sk}/*)
+        // so the seeder can read app user credentials at runtime.
+        var accountId = Pulumi.Aws.GetCallerIdentity.Invoke().Apply(id => id.AccountId);
         new RolePolicy($"{prefix}-seeder-task-efs-secrets", new RolePolicyArgs
         {
             Role = taskRole.Id,
             Policy = Output.Tuple(
                 awsFileStorage.FileSystemArn,
                 awsDatabase.MasterSecretArn,
-                awsDatabase.SystemSecretArn
+                awsDatabase.SystemSecretArn,
+                accountId
             ).Apply(t => $@"{{
   ""Version"": ""2012-10-17"",
   ""Statement"": [
@@ -156,7 +160,11 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
     {{
       ""Effect"": ""Allow"",
       ""Action"": [""secretsmanager:GetSecretValue""],
-      ""Resource"": [""{t.Item2}"", ""{t.Item3}""]
+      ""Resource"": [
+        ""{t.Item2}"",
+        ""{t.Item3}"",
+        ""arn:aws:secretsmanager:{config.Region}:{t.Item4}:secret:{config.SystemKey}/*""
+      ]
     }}
   ]
 }}"),
@@ -310,7 +318,6 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                 ecr.RepositoryUrl,
                 awsDatabase.Endpoint,
                 awsDatabase.Port.Apply(p => p.ToString()),
-                awsDatabase.MasterSecretArn,
                 logGroup.Name
             ).Apply(t => System.Text.Json.JsonSerializer.Serialize(new[]
             {
@@ -326,23 +333,18 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                     environment = new[]
                     {
                         new { name = "ETL_MODE", value = "ecs" },
+                        new { name = "SYSTEM_KEY", value = config.SystemKey },
                         new { name = "SEED_BUCKET", value = seedBucket },
                         new { name = "AWS_REGION", value = seedBucketRegion },
                         new { name = "RDS_HOST", value = t.Item2 },
                         new { name = "RDS_PORT", value = t.Item3 },
-                        new { name = "RDS_DATABASE", value = "smartstore" },
-                        new { name = "RDS_USERNAME", value = "dbadmin" },
-                    },
-                    secrets = new[]
-                    {
-                        new { name = "RDS_PASSWORD", valueFrom = $"{t.Item4}:password::" }
                     },
                     logConfiguration = new
                     {
                         logDriver = "awslogs",
                         options = new Dictionary<string, string>
                         {
-                            ["awslogs-group"] = t.Item5,
+                            ["awslogs-group"] = t.Item4,
                             ["awslogs-region"] = config.Region,
                             ["awslogs-stream-prefix"] = "seeder"
                         }

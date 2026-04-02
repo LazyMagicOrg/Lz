@@ -27,13 +27,14 @@ public class AwsSeedRunner
     public async Task<bool> RunExportAsync(
         string tenantKey,
         string s3Prefix = "seed",
+        bool skipEfs = false,
         string? clusterArn = null,
         List<string>? subnetIds = null,
         string? securityGroupId = null)
     {
         // EFS access points use /{sk}-{tk}-{env}/ prefix, but S3 uses just {tenantKey}/
         var efsPrefix = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
-        var args = new[]
+        var argsList = new List<string>
         {
             "seed-export",
             "--env", _config.Environment,
@@ -44,8 +45,9 @@ public class AwsSeedRunner
             "--efs-prefix", efsPrefix,
             "--s3-prefix", s3Prefix
         };
+        if (skipEfs) argsList.Add("--skip-efs");
 
-        return await RunSeedTaskAsync(tenantKey, args, "export", clusterArn, subnetIds, securityGroupId);
+        return await RunSeedTaskAsync(tenantKey, argsList.ToArray(), "export", clusterArn, subnetIds, securityGroupId);
     }
 
     /// <summary>
@@ -127,6 +129,11 @@ public class AwsSeedRunner
                     {
                         Name = "seeder",
                         Command = commandArgs.ToList(),
+                        Environment =
+                        [
+                            new Amazon.ECS.Model.KeyValuePair { Name = "TENANT_KEY", Value = tenantKey },
+                            new Amazon.ECS.Model.KeyValuePair { Name = "ENVIRONMENT", Value = _config.Environment },
+                        ],
                     }
                 ],
             },
