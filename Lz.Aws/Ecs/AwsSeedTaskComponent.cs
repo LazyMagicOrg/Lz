@@ -318,7 +318,8 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                 ecr.RepositoryUrl,
                 awsDatabase.Endpoint,
                 awsDatabase.Port.Apply(p => p.ToString()),
-                logGroup.Name
+                logGroup.Name,
+                awsDatabase.MasterSecretArn
             ).Apply(t => System.Text.Json.JsonSerializer.Serialize(new[]
             {
                 new
@@ -343,6 +344,12 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                         new { name = "SEED_BUCKET_REGION", value = seedBucketRegion },
                         new { name = "RDS_HOST", value = t.Item2 },
                         new { name = "RDS_PORT", value = t.Item3 },
+                        new { name = "RDS_SECRET_ARN", value = t.Item5 },
+                    },
+                    secrets = new[]
+                    {
+                        new { name = "RDS_MASTER_PASSWORD", valueFrom = $"{t.Item5}:password::" },
+                        new { name = "RDS_MASTER_USERNAME", valueFrom = $"{t.Item5}:username::" }
                     },
                     logConfiguration = new
                     {
