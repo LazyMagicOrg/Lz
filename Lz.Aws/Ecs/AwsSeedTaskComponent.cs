@@ -287,8 +287,8 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
         var taskDef = new TaskDefinition($"{prefix}-seeder-task", new TaskDefinitionArgs
         {
             Family = $"{prefix}-seeder",
-            Cpu = "1024",   // 1 vCPU
-            Memory = "4096", // 4 GB
+            Cpu = "2048",   // 2 vCPU
+            Memory = "8192", // 8 GB
             NetworkMode = "awsvpc",
             RequiresCompatibilities = { "FARGATE" },
             ExecutionRoleArn = executionRole.Arn,
