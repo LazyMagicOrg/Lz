@@ -327,10 +327,6 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                     name = "seeder",
                     image = $"{t.Item1}:latest",
                     essential = true,
-                    linuxParameters = new
-                    {
-                        initProcessEnabled = true  // .NET 9 PID 1 signal handling fix
-                    },
                     mountPoints = new[]
                     {
                         new { sourceVolume = "efs-data", containerPath = "/mnt/efs", readOnly = false }
