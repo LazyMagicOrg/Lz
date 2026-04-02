@@ -134,12 +134,12 @@ public class EcrDeployer
         {
             Console.WriteLine("  (Cross-platform build via buildx → linux/amd64)");
             await RunAsync("docker",
-                $"buildx build --platform linux/amd64 -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
+                $"buildx build --no-cache --platform linux/amd64 -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
         }
         else
         {
             await RunAsync("docker",
-                $"build -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} \"{contextPath}\"");
+                $"build --no-cache -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} \"{contextPath}\"");
         }
     }
 
