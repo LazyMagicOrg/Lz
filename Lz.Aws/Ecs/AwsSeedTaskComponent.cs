@@ -331,6 +331,10 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                     name = "seeder",
                     image = $"{t.Item1}:latest",
                     essential = true,
+                    linuxParameters = new
+                    {
+                        initProcessEnabled = true  // Prevents .NET 9 SIGSEGV when running as PID 1 in Fargate
+                    },
                     mountPoints = new[]
                     {
                         new { sourceVolume = "efs-data", containerPath = "/mnt/efs", readOnly = false }
