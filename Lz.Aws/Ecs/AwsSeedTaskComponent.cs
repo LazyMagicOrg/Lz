@@ -291,11 +291,6 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
             Memory = "4096", // 4 GB
             NetworkMode = "awsvpc",
             RequiresCompatibilities = { "FARGATE" },
-            RuntimePlatform = new TaskDefinitionRuntimePlatformArgs
-            {
-                OperatingSystemFamily = "LINUX",
-                CpuArchitecture = "X86_64",
-            },
             ExecutionRoleArn = executionRole.Arn,
             TaskRoleArn = taskRole.Arn,
 
@@ -331,10 +326,6 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
                     name = "seeder",
                     image = $"{t.Item1}:latest",
                     essential = true,
-                    linuxParameters = new
-                    {
-                        initProcessEnabled = true  // Prevents .NET 9 SIGSEGV when running as PID 1 in Fargate
-                    },
                     mountPoints = new[]
                     {
                         new { sourceVolume = "efs-data", containerPath = "/mnt/efs", readOnly = false }
