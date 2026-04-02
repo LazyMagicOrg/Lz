@@ -288,9 +288,14 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
         {
             Family = $"{prefix}-seeder",
             Cpu = "1024",   // 1 vCPU
-            Memory = "4096", // 4 GB — needed for large EFS tar operations
+            Memory = "4096", // 4 GB
             NetworkMode = "awsvpc",
             RequiresCompatibilities = { "FARGATE" },
+            RuntimePlatform = new TaskDefinitionRuntimePlatformArgs
+            {
+                OperatingSystemFamily = "LINUX",
+                CpuArchitecture = "X86_64",
+            },
             ExecutionRoleArn = executionRole.Arn,
             TaskRoleArn = taskRole.Arn,
 
