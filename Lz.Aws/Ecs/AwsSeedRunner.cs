@@ -28,6 +28,7 @@ public class AwsSeedRunner
         string tenantKey,
         string s3Prefix = "seed",
         bool skipEfs = false,
+        string? baseUrl = null,
         string? clusterArn = null,
         List<string>? subnetIds = null,
         string? securityGroupId = null)
@@ -47,7 +48,7 @@ public class AwsSeedRunner
         };
         if (skipEfs) argsList.Add("--skip-efs");
 
-        return await RunSeedTaskAsync(tenantKey, argsList.ToArray(), "export", clusterArn, subnetIds, securityGroupId);
+        return await RunSeedTaskAsync(tenantKey, argsList.ToArray(), "export", baseUrl, clusterArn, subnetIds, securityGroupId);
     }
 
     /// <summary>
@@ -58,6 +59,7 @@ public class AwsSeedRunner
         string tenantKey,
         string sourceKey = "latest",
         string s3Prefix = "seed",
+        string? baseUrl = null,
         string? clusterArn = null,
         List<string>? subnetIds = null,
         string? securityGroupId = null)
@@ -77,13 +79,14 @@ public class AwsSeedRunner
             "--s3-prefix", s3Prefix
         };
 
-        return await RunSeedTaskAsync(tenantKey, args, "import", clusterArn, subnetIds, securityGroupId);
+        return await RunSeedTaskAsync(tenantKey, args, "import", baseUrl, clusterArn, subnetIds, securityGroupId);
     }
 
     private async Task<bool> RunSeedTaskAsync(
         string tenantKey,
         string[] commandArgs,
         string operation,
+        string? baseUrl,
         string? clusterArn,
         List<string>? subnetIds,
         string? securityGroupId)
@@ -129,11 +132,7 @@ public class AwsSeedRunner
                     {
                         Name = "seeder",
                         Command = commandArgs.ToList(),
-                        Environment =
-                        [
-                            new Amazon.ECS.Model.KeyValuePair { Name = "TENANT_KEY", Value = tenantKey },
-                            new Amazon.ECS.Model.KeyValuePair { Name = "ENVIRONMENT", Value = _config.Environment },
-                        ],
+                        Environment = BuildEnvironmentOverrides(tenantKey, baseUrl),
                     }
                 ],
             },
@@ -170,6 +169,18 @@ public class AwsSeedRunner
             Console.ResetColor();
             return false;
         }
+    }
+
+    private List<Amazon.ECS.Model.KeyValuePair> BuildEnvironmentOverrides(string tenantKey, string? baseUrl)
+    {
+        var envVars = new List<Amazon.ECS.Model.KeyValuePair>
+        {
+            new() { Name = "TENANT_KEY", Value = tenantKey },
+            new() { Name = "ENVIRONMENT", Value = _config.Environment },
+        };
+        if (!string.IsNullOrEmpty(baseUrl))
+            envVars.Add(new() { Name = "BASE_URL", Value = baseUrl });
+        return envVars;
     }
 
     /// <summary>
