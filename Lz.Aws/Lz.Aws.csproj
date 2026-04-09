@@ -29,10 +29,13 @@
   </Target>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.AppRunner" Version="4.*" />
     <PackageReference Include="AWSSDK.AutoScaling" Version="4.*" />
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.*" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
     <PackageReference Include="AWSSDK.KeyManagementService" Version="4.*" />
     <PackageReference Include="AWSSDK.Lambda" Version="4.*" />
+    <PackageReference Include="AWSSDK.RDS" Version="4.*" />
     <PackageReference Include="AWSSDK.S3" Version="4.*" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />

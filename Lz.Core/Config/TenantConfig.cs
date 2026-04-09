@@ -38,6 +38,7 @@ public class TenantConfig
 
     // Per-tenant infrastructure overrides
     public EcsConfig? ECS { get; set; }
+    public AppRunnerConfig? AppRunner { get; set; }
     public CdnConfig? CDN { get; set; }
 
     // --- Runtime Application Settings (override system defaults) ---

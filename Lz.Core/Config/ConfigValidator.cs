@@ -35,9 +35,22 @@ public static class ConfigValidator
         RequireNonEmpty(errors, nameof(config.Profile), config.Profile);
         RequireNonEmpty(errors, nameof(config.Region), config.Region);
         RequireNonEmpty(errors, nameof(config.SystemDomain), config.SystemDomain);
-        RequireNonEmpty(errors, nameof(config.VpcCidr), config.VpcCidr);
         RequireNonEmpty(errors, nameof(config.SystemSuffix), config.SystemSuffix);
-        RequireNonEmpty(errors, nameof(config.CentralAuthDomain), config.CentralAuthDomain);
+
+        // VpcCidr required for topologies with a VPC (ecs, ecsexpress) but not apprunner.
+        // CentralAuthDomain required only for ecs (Keycloak in shared account).
+        // AppRunner and ECSExpress use Cognito (no central Keycloak).
+        if (config.Topology == "ecs")
+        {
+            RequireNonEmpty(errors, nameof(config.VpcCidr), config.VpcCidr);
+            RequireNonEmpty(errors, nameof(config.CentralAuthDomain), config.CentralAuthDomain);
+        }
+        else if (config.Topology == "ecsexpress")
+        {
+            RequireNonEmpty(errors, nameof(config.VpcCidr), config.VpcCidr);
+            // No CentralAuthDomain — uses Cognito
+        }
+        // apprunner: no VpcCidr, no CentralAuthDomain
 
         ThrowIfErrors(errors, "SystemConfig", sourceFile);
     }

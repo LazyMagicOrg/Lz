@@ -40,8 +40,8 @@ public class WebappDeployer
         Console.WriteLine($"Publishing {projectName}...");
         Console.ResetColor();
 
-        // 2. dotnet publish
-        await RunAsync("dotnet", $"publish \"{csprojPath}\" --configuration Release");
+        // 2. dotnet publish (quiet — only show errors)
+        await RunAsync("dotnet", $"publish \"{csprojPath}\" --configuration Release --verbosity quiet");
 
         // 3. Find the most recent publish/wwwroot output
         var publishBasePath = Path.Combine(webappFolder, projectFolder, "bin", "Release");
@@ -50,14 +50,30 @@ public class WebappDeployer
         Console.WriteLine($"  Publish output: {publishPath}");
         Console.WriteLine($"  Target bucket:  {bucketName}");
 
-        // 4. S3 sync
+        // 4. Ensure S3 bucket exists (create if not)
+        var profileArg = string.IsNullOrEmpty(profile) ? "" : $"--profile \"{profile}\"";
+        var bucketCheck = await RunSilentAsync("aws",
+            $"s3api head-bucket --bucket \"{bucketName}\" --region {region} {profileArg}");
+        if (bucketCheck != 0)
+        {
+            Console.WriteLine($"  Creating bucket {bucketName}...");
+            await RunAsync("aws",
+                $"s3api create-bucket --bucket \"{bucketName}\" --region {region} " +
+                $"--create-bucket-configuration LocationConstraint={region} {profileArg}");
+            await RunAsync("aws",
+                $"s3api put-public-access-block --bucket \"{bucketName}\" --region {region} " +
+                $"--public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true {profileArg}");
+        }
+
+        // Ensure CloudFront OAC bucket policy exists (allow any CF distribution in account)
+        await EnsureBucketPolicyAsync(bucketName, region, profile);
+
+        // 5. S3 sync
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Syncing to S3...");
         Console.ResetColor();
-
-        var profileArg = string.IsNullOrEmpty(profile) ? "" : $"--profile \"{profile}\"";
         await RunAsync("aws",
-            $"s3 sync \"{publishPath}\" \"s3://{bucketName}/wwwroot\" --delete --region {region} {profileArg}");
+            $"s3 sync \"{publishPath}\" \"s3://{bucketName}/wwwroot\" --delete --quiet --region {region} {profileArg}");
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
@@ -96,6 +112,92 @@ public class WebappDeployer
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Successfully deployed {projectName} to {bucketName}");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Deploys a static website (plain HTML/CSS/JS, no dotnet build) to S3 + CloudFront.
+    /// The folder contents are synced directly to s3://{bucket}/wwwroot/.
+    /// </summary>
+    public async Task DeployStaticAsync(
+        string sourceFolder,
+        string bucketName,
+        string distributionId,
+        string profile,
+        string region,
+        string environment)
+    {
+        if (!Directory.Exists(sourceFolder))
+            throw new DirectoryNotFoundException($"Static site folder not found: {sourceFolder}");
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"Deploying static site from {sourceFolder}...");
+        Console.ResetColor();
+
+        Console.WriteLine($"  Target bucket: {bucketName}");
+
+        // Ensure S3 bucket exists
+        var profileArg = string.IsNullOrEmpty(profile) ? "" : $"--profile \"{profile}\"";
+        var bucketCheck = await RunSilentAsync("aws",
+            $"s3api head-bucket --bucket \"{bucketName}\" --region {region} {profileArg}");
+        if (bucketCheck != 0)
+        {
+            Console.WriteLine($"  Creating bucket {bucketName}...");
+            await RunAsync("aws",
+                $"s3api create-bucket --bucket \"{bucketName}\" --region {region} " +
+                $"--create-bucket-configuration LocationConstraint={region} {profileArg}");
+            await RunAsync("aws",
+                $"s3api put-public-access-block --bucket \"{bucketName}\" --region {region} " +
+                $"--public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true {profileArg}");
+        }
+
+        // Ensure CloudFront OAC bucket policy
+        await EnsureBucketPolicyAsync(bucketName, region, profile);
+
+        // S3 sync — folder contents go to /wwwroot/ (matching CloudFront originPath)
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("Syncing to S3...");
+        Console.ResetColor();
+        await RunAsync("aws",
+            $"s3 sync \"{sourceFolder}\" \"s3://{bucketName}/wwwroot\" --delete --quiet --region {region} {profileArg}");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
+        Console.ResetColor();
+
+        // CloudFront invalidation (skip for dev)
+        if (!environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.IsNullOrEmpty(distributionId))
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("Invalidating CloudFront cache...");
+                Console.ResetColor();
+
+                try
+                {
+                    await RunAsync("aws",
+                        $"cloudfront create-invalidation --distribution-id {distributionId} --paths \"/*\" --region {region} {profileArg}");
+
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("  CloudFront invalidation created");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  WARNING: CloudFront invalidation failed (non-fatal): {ex.Message}");
+                    Console.ResetColor();
+                }
+            }
+        }
+        else
+        {
+            Console.WriteLine("  Skipping CloudFront invalidation (dev environment)");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"Successfully deployed static site to {bucketName}");
         Console.ResetColor();
     }
 
@@ -194,6 +296,65 @@ public class WebappDeployer
         if (process.ExitCode != 0)
             throw new InvalidOperationException(
                 $"Command failed (exit {process.ExitCode}): {command} {args}");
+    }
+
+    /// <summary>
+    /// Ensures the S3 bucket has a policy allowing CloudFront OAC access.
+    /// Uses SourceAccount condition (not SourceArn) so any CloudFront distribution
+    /// in the account can access the bucket — required for dynamic origin rewriting.
+    /// </summary>
+    private static async Task EnsureBucketPolicyAsync(string bucketName, string region, string profile)
+    {
+        var profileArg = string.IsNullOrEmpty(profile) ? "" : $"--profile \"{profile}\"";
+
+        // Get account ID
+        var accountId = (await RunCaptureAsync("aws",
+            $"sts get-caller-identity --query Account --output text --region {region} {profileArg}")).Trim();
+
+        var policy = $@"{{
+            ""Version"": ""2012-10-17"",
+            ""Statement"": [{{
+                ""Sid"": ""AllowCloudFrontRead"",
+                ""Effect"": ""Allow"",
+                ""Principal"": {{ ""Service"": ""cloudfront.amazonaws.com"" }},
+                ""Action"": ""s3:GetObject"",
+                ""Resource"": ""arn:aws:s3:::{bucketName}/*"",
+                ""Condition"": {{ ""StringEquals"": {{ ""AWS:SourceAccount"": ""{accountId}"" }} }}
+            }}]
+        }}";
+
+        // Write policy to temp file (avoids shell escaping issues)
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(tempFile, policy);
+            await RunSilentAsync("aws",
+                $"s3api put-bucket-policy --bucket \"{bucketName}\" --policy file://{tempFile} --region {region} {profileArg}");
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    /// <summary>Run a command silently, return exit code (no throw).</summary>
+    private static async Task<int> RunSilentAsync(string command, string args)
+    {
+        var psi = new ProcessStartInfo(command, args)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException($"Failed to start: {command} {args}");
+
+        await process.StandardOutput.ReadToEndAsync();
+        await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        return process.ExitCode;
     }
 
     /// <summary>Run a command, capture stdout. Throws on non-zero exit.</summary>

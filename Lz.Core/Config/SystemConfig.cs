@@ -43,6 +43,7 @@ public class SystemConfig
 
     // Infrastructure sizing
     public EcsConfig? ECS { get; set; }
+    public AppRunnerConfig? AppRunner { get; set; }
     public CdnConfig? CDN { get; set; }
 
     // Seed data — shared S3 bucket for EFS + database seeding/refresh

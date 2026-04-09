@@ -213,9 +213,14 @@ class Program
                         Console.WriteLine($"  Shared KMS key: {config.SharedKmsKeyArn}");
                 }
 
-                // Propagate seed bucket config from shared account
-                sharedConfig ??= ConfigLoader.DiscoverAndLoadSharedConfig();
-                ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
+                // Propagate seed bucket config from shared account (only if shared config exists)
+                if (sharedConfig == null)
+                {
+                    try { sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig(); }
+                    catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
+                }
+                if (sharedConfig != null)
+                    ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
 
                 // Ensure Pulumi state backend (S3 bucket + KMS key) exists
                 if (config.State != null)
@@ -339,7 +344,8 @@ class Program
 
                     foreach (var (svcName, def) in containersToProcess)
                     {
-                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                        // ECR repo is system-scoped (created by deployfoundation), not per-tenant
+                        var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
 
                         Console.ForegroundColor = ConsoleColor.Cyan;
                         Console.WriteLine($"=== {svcName} for tenant {tk} ===");
@@ -425,14 +431,17 @@ class Program
                     return;
                 }
 
+                // Detect static site: folder has index.html but no {project}/{project}.csproj
+                var isStaticSite = File.Exists(Path.Combine(webappFolder, "index.html"))
+                    && !File.Exists(Path.Combine(webappFolder, project, $"{project}.csproj"));
+
                 foreach (var (tk, tenantConfig) in tenants)
                 {
                     Console.ForegroundColor = ConsoleColor.Cyan;
-                    Console.WriteLine($"=== deploywebapp: {project} for tenant {tk} ===");
+                    Console.WriteLine($"=== deploywebapp: {project} for tenant {tk} ({(isStaticSite ? "static" : "blazor")}) ===");
                     Console.ResetColor();
 
-                    // Derive S3 bucket name from naming convention:
-                    // {systemKey}-{tenantKey}-{tenantSuffix}-{env}-assets
+                    // Derive S3 bucket name based on topology
                     var suffix = tenantConfig.TenantSuffix;
                     if (string.IsNullOrEmpty(suffix))
                     {
@@ -442,7 +451,19 @@ class Program
                         return;
                     }
 
-                    var bucketName = $"{config.SystemKey}-{tk}-{suffix}-{config.Environment}-assets";
+                    string bucketName;
+                    if (config.Topology is "ecsexpress" or "apprunner")
+                    {
+                        // Webapp bucket: {sk}---webapp-{appName}-{ss}
+                        // appName derived from webapp folder name, lowercased
+                        var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
+                        bucketName = $"{config.SystemKey}---webapp-{webappName}-{config.SystemSuffix}";
+                    }
+                    else
+                    {
+                        // ECS (Monro) convention: {sk}-{tk}-{suffix}-{env}-assets
+                        bucketName = $"{config.SystemKey}-{tk}-{suffix}-{config.Environment}-assets";
+                    }
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region ?? "us-west-2";
 
@@ -455,10 +476,20 @@ class Program
                     }
 
                     var deployer = new WebappDeployer();
-                    await deployer.DeployAsync(
-                        webappFolder, project, project,
-                        bucketName, distributionId,
-                        profile, region, config.Environment);
+                    if (isStaticSite)
+                    {
+                        await deployer.DeployStaticAsync(
+                            webappFolder,
+                            bucketName, distributionId,
+                            profile, region, config.Environment);
+                    }
+                    else
+                    {
+                        await deployer.DeployAsync(
+                            webappFolder, project, project,
+                            bucketName, distributionId,
+                            profile, region, config.Environment);
+                    }
                 }
             }
         }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption);
@@ -511,9 +542,14 @@ class Program
                     config.SharedRegion = sharedRegion;
                 }
 
-                // Propagate seed bucket config from shared account
-                sharedConfigTenant ??= ConfigLoader.DiscoverAndLoadSharedConfig();
-                ConfigLoader.PropagateSharedSeedData(config, sharedConfigTenant);
+                // Propagate seed bucket config from shared account (only if shared config exists)
+                if (sharedConfigTenant == null)
+                {
+                    try { sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig(); }
+                    catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
+                }
+                if (sharedConfigTenant != null)
+                    ConfigLoader.PropagateSharedSeedData(config, sharedConfigTenant);
 
                 // Read SES SMTP secrets from shared/system for keycloak template replacements
                 Dictionary<string, string?> smtpSecrets = new();
@@ -540,7 +576,8 @@ class Program
                     Console.WriteLine("Checking ECR images...");
                     foreach (var (svcName, _) in containerServiceConfig.Containers)
                     {
-                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                        // ECR repo is system-scoped (created by deployfoundation), not per-tenant
+                        var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
                         var exists = await EcrDeployer.CheckEcrImageExistsAsync(
                             profile, region, ecrName);
                         if (!exists)
@@ -808,6 +845,8 @@ class Program
         return (config.Platform, config.Topology) switch
         {
             ("aws", "ecs") => new AwsEcsPlatformFactory(config),
+            ("aws", "apprunner") => new Lz.Aws.AppRunner.AwsAppRunnerPlatformFactory(config),
+            ("aws", "ecsexpress") => new Lz.Aws.EcsExpress.AwsEcsExpressPlatformFactory(config),
             _ => throw new ArgumentException(
                 $"Unsupported platform/topology: {config.Platform}/{config.Topology}")
         };

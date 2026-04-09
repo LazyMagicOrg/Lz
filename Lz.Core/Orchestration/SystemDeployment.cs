@@ -75,30 +75,34 @@ public class SystemDeployment
                 return;
         }
 
-        var tailscaleGates = new List<TransitionRequirement>
+        // --- Tailscale gates (only when VPN is enabled) ---
+        if (_system.UsesVpn)
         {
-            new TransitionRequirement
+            var tailscaleGates = new List<TransitionRequirement>
             {
-                Name = "tailscale-api-key",
-                CheckType = TransitionCheckType.SecretEntry,
-                SecretName = "shared/system",
-                Profile = _config.SharedProfile,
-                Region = _config.SharedRegion,
-                CheckTarget = "tailscale-api-key",
-                Description =
-                    "Tailscale API key is required for managing subnet routers.\n" +
-                    "  1. Create an API key at https://login.tailscale.com/admin/settings/keys\n" +
-                    "  2. Add 'tailscale-api-key' to the 'shared/system' secret in Secrets Manager.\n" +
-                    "  3. Re-run: lz deployfoundation",
-            },
-        };
+                new TransitionRequirement
+                {
+                    Name = "tailscale-api-key",
+                    CheckType = TransitionCheckType.SecretEntry,
+                    SecretName = "shared/system",
+                    Profile = _config.SharedProfile,
+                    Region = _config.SharedRegion,
+                    CheckTarget = "tailscale-api-key",
+                    Description =
+                        "Tailscale API key is required for managing subnet routers.\n" +
+                        "  1. Create an API key at https://login.tailscale.com/admin/settings/keys\n" +
+                        "  2. Add 'tailscale-api-key' to the 'shared/system' secret in Secrets Manager.\n" +
+                        "  3. Re-run: lz deployfoundation",
+                },
+            };
 
-        Console.WriteLine("Checking Tailscale gates...");
-        var tailscaleGatePassed = await TransitionGate.CheckAndReportAsync(
-            checker, tailscaleGates, _config.SystemKey);
+            Console.WriteLine("Checking Tailscale gates...");
+            var tailscaleGatePassed = await TransitionGate.CheckAndReportAsync(
+                checker, tailscaleGates, _config.SystemKey);
 
-        if (!tailscaleGatePassed)
-            return;
+            if (!tailscaleGatePassed)
+                return;
+        }
 
         // --- Auto-ensure: create/refresh auth key + SSH key if missing or expired ---
         var keyManager = _factory.GetTailscaleKeyManager();
@@ -659,6 +663,15 @@ public class SystemDeployment
             seedTaskOutputs = seedTaskComponent.Deploy(_config, networkOutputs, databaseOutputs, fileStorageOutputs);
         }
 
+        // Auth service — deploy in foundation when no shared account
+        // (ECS/Keycloak is deployed via SharedDeployment; Cognito is per-environment)
+        IServiceOutputs? authOutputs = null;
+        if (_system.Auth != null && string.IsNullOrEmpty(_config.CentralAuthDomain))
+        {
+            var authService = _factory.CreateAuthService();
+            authOutputs = authService.Deploy(_config, networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs, false);
+        }
+
         // Foundation-level services (e.g., LiveKit SFU) — shared across tenants
         var foundationServices = _system.FoundationLayerServices;
         foreach (var svcDef in foundationServices)
@@ -677,6 +690,26 @@ public class SystemDeployment
             ["dbEndpoint"] = databaseOutputs.Endpoint,
             ["efsId"] = fileStorageOutputs.FileSystemId,
         };
+
+        // Export auth outputs for downstream tenant deployment
+        if (authOutputs != null)
+        {
+            exports["authServiceId"] = authOutputs.ServiceId;
+            exports["authEndpoint"] = authOutputs.Endpoint;
+
+            // If the auth component provides per-pool details, export them
+            if (authOutputs is IAuthPoolOutputs poolOutputs)
+            {
+                foreach (var (poolName, pool) in poolOutputs.Pools)
+                {
+                    exports[$"auth_{poolName}_userPoolId"] = pool.UserPoolId;
+                    exports[$"auth_{poolName}_clientId"] = pool.ClientId;
+                    exports[$"auth_{poolName}_metadataUrl"] = pool.MetadataUrl;
+                    if (pool.HostedUIDomain != null)
+                        exports[$"auth_{poolName}_hostedUIDomain"] = pool.HostedUIDomain;
+                }
+            }
+        }
 
         if (gateCheckerOutputs != null)
             exports["gateCheckerFunctionName"] = gateCheckerOutputs.FunctionName;

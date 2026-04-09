@@ -137,6 +137,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // /AppApi/util/detect-region to geo-detect before the WASM app loads.
 
         var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig.ConfigDirectory);
+        var exploreRewriteFn = CreateExploreRewriteFunction(prefix, tenantConfig.ConfigDirectory);
 
         var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
         {
@@ -251,6 +252,44 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                     Compress = false,
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",        // CachingDisabled
                     OriginRequestPolicyId = "33f36d7e-f396-46d9-90e0-52428a34d9dc", // AllViewerAndCloudFrontHeaders-2022-06
+                },
+                // Staging explore pages (non-crawlable review) → ALB origin (SmartStore serves from EFS)
+                // Always CachingDisabled so reviewers see latest generated content immediately
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/exploredev/*",
+                    TargetOriginId = "alb-origin",
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",        // CachingDisabled always
+                    OriginRequestPolicyId = "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
+                },
+                // Published explore pages (crawlable) → S3 assets origin
+                // Uses a dedicated rewrite function for clean directory-style URLs
+                // No SPA fallback — missing pages should 404, not return Blazor index.html
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/explore/*",
+                    TargetOriginId = "s3-assets",
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = env == "dev"
+                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"        // CachingDisabled (dev)
+                        : "658327ea-f89d-4fab-a63d-7e88639e58f6",        // CachingOptimized
+                    FunctionAssociations = exploreRewriteFn != null
+                        ? new[]
+                        {
+                            new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                            {
+                                EventType = "viewer-request",
+                                FunctionArn = exploreRewriteFn.Arn,
+                            },
+                        }
+                        : Array.Empty<DistributionOrderedCacheBehaviorFunctionAssociationArgs>(),
                 },
                 new DistributionOrderedCacheBehaviorArgs
                 {
@@ -503,6 +542,29 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 Runtime = "cloudfront-js-2.0",
                 Code = jsCode,
                 Comment = $"Region detection redirect for {domain}",
+                Publish = true,
+            }, new CustomResourceOptions { Parent = this });
+    }
+
+    private Pulumi.Aws.CloudFront.Function? CreateExploreRewriteFunction(
+        string prefix, string configDirectory)
+    {
+        var jsPath = Path.Combine(configDirectory, "CloudFront", "CFExploreRewrite.js");
+        if (!File.Exists(jsPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Info: Explore rewrite function not found at {jsPath} — /explore/* will not rewrite to index.html.");
+            Console.ResetColor();
+            return null;
+        }
+
+        var jsCode = File.ReadAllText(jsPath);
+        return new Pulumi.Aws.CloudFront.Function(
+            $"{prefix}-explore-rewrite", new FunctionArgs
+            {
+                Runtime = "cloudfront-js-2.0",
+                Code = jsCode,
+                Comment = $"Explore pages index.html rewrite for {prefix}",
                 Publish = true,
             }, new CustomResourceOptions { Parent = this });
     }

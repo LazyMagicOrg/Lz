@@ -65,6 +65,15 @@ public abstract class SystemDefinition
         };
     }
 
+    protected void UseCognito(string[] pools)
+    {
+        Auth = new AuthDefinition
+        {
+            Provider = "cognito",
+            Realms = pools.ToList()  // "Realms" maps to pool names for Cognito
+        };
+    }
+
     protected void UseTailscale()
     {
         UsesVpn = true;
