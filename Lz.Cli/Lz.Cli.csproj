@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="$(SolutionDir)LzVersion.props" />
+  <Import Project="$(SolutionDir)CommonPackageHandling.targets" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
