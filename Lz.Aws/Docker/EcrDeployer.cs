@@ -78,6 +78,12 @@ public class EcrDeployer
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Successfully pushed {serviceName} → {imageUri}");
         Console.ResetColor();
+
+        // Prune dangling images and build cache to prevent VHDX bloat
+        Console.WriteLine("Pruning unused Docker images and build cache...");
+        await RunSilentAsync("docker", "image prune -a --force");
+        await RunSilentAsync("docker", "builder prune --force --keep-storage 10GB");
+        Console.WriteLine("  Prune complete.");
         Console.WriteLine();
     }
 

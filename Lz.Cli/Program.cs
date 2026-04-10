@@ -344,8 +344,9 @@ class Program
 
                     foreach (var (svcName, def) in containersToProcess)
                     {
-                        // ECR repo is system-scoped (created by deployfoundation), not per-tenant
-                        var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
+                        // ECR repo is tenant-scoped: {sk}-{suffix}-{env}-{tk}-{container}
+                        // Must match AwsEcsTenantServiceComponent.cs line 73
+                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
 
                         Console.ForegroundColor = ConsoleColor.Cyan;
                         Console.WriteLine($"=== {svcName} for tenant {tk} ===");
