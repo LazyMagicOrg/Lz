@@ -43,8 +43,8 @@ public class AwsEcsPlatformFactory : IPlatformFactory
     public ITenantServiceComponent CreateTenantService()
         => new AwsEcsTenantServiceComponent();
 
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network)
-        => new AwsTenantDnsAndCertComponent().Deploy(tenantConfig, network);
+    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null)
+        => new AwsTenantDnsAndCertComponent().Deploy(tenantConfig, network, cdn);
 
     public ITailscaleComponent? CreateTailscale()
         => new AwsTailscaleAsgComponent();

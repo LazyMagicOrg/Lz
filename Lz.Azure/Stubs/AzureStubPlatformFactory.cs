@@ -31,7 +31,7 @@ public class AzureContainerAppsPlatformFactory : IPlatformFactory
         => throw new NotImplementedException("Azure tenant data not yet implemented.");
     public ITenantServiceComponent CreateTenantService()
         => throw new NotImplementedException("Azure tenant service not yet implemented.");
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network) { }
+    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
     public Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
 
     public ITailscaleComponent? CreateTailscale() => null;

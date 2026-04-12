@@ -68,6 +68,8 @@ class Program
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterParkCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
 
         // Plugin-specific commands (e.g., seed)
         plugin?.RegisterCommands(rootCommand);
@@ -510,11 +512,14 @@ class Program
 
         var tenantKeyOption = new Option<string?>("--tenantkey",
             "Tenant key (deploys all tenants if not specified)");
+        var refreshOption = new Option<bool>("--refresh",
+            "Run Pulumi refresh before up to detect external state drift (e.g., after lz park)");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(refreshOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, refresh) =>
         {
             RequirePlugin(plugin, "deploytenant");
 
@@ -617,10 +622,10 @@ class Program
                     Console.WriteLine(
                         $"Deploying tenant '{tk}' for system " +
                         $"'{config.SystemKey}' ({config.Environment})");
-                    await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets);
+                    await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
                 }
             }
-        }, systemKeyOption, envOption, tenantKeyOption);
+        }, systemKeyOption, envOption, tenantKeyOption, refreshOption);
 
         root.AddCommand(cmd);
     }
@@ -814,6 +819,140 @@ class Program
                     await deployment.StatusTenantAsync(tk);
             }
         }, systemKeyOption, envOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // park
+    // ---------------------------------------------------------------
+
+    private static void RegisterParkCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("park",
+            "Park tenant site(s) — show maintenance page via CloudFront");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (parks all tenants if not specified)");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                // Discover the Park/ folder by searching upward from cwd
+                var monorepoRoot = ConfigLoader.DiscoverMonorepoRoot(
+                    config.SystemKey, config.Environment);
+                if (monorepoRoot == null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine("Cannot find monorepo root (no systemconfig found).");
+                    Console.ResetColor();
+                    return;
+                }
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var parkFolder = Path.Combine(monorepoRoot, "Park", tk);
+                    var parkPage = Path.Combine(parkFolder, "index.html");
+
+                    if (!File.Exists(parkPage))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine(
+                            $"Park page not found: {parkPage}\n" +
+                            $"  Create Park/{tk}/index.html with your maintenance page HTML.");
+                        Console.ResetColor();
+                        continue;
+                    }
+
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine(
+                        $"WARNING: This will park tenant '{tk}' ({tenantConfig.RootDomain}).");
+                    Console.ResetColor();
+                    Console.Write("Type 'yes' to confirm: ");
+                    var confirmation = Console.ReadLine();
+                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    {
+                        Console.WriteLine("Skipped.");
+                        continue;
+                    }
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine($"=== Parking tenant '{tk}' ===");
+                    Console.ResetColor();
+
+                    var manager = new Lz.Aws.Ecs.AwsParkManager(
+                        config.SystemKey, profile, region);
+                    await manager.ParkAsync(
+                        tk,
+                        tenantConfig.TenantSuffix,
+                        config.Environment,
+                        tenantConfig.RootDomain,
+                        parkFolder,
+                        tenantConfig.LegacyDomains);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // unpark
+    // ---------------------------------------------------------------
+
+    private static void RegisterUnparkCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("unpark",
+            "Unpark tenant site(s) — restore normal CloudFront operation");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (unparks all tenants if not specified)");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine($"=== Unparking tenant '{tk}' ===");
+                    Console.ResetColor();
+
+                    var manager = new Lz.Aws.Ecs.AwsParkManager(
+                        config.SystemKey, profile, region);
+                    await manager.UnparkAsync(tk, tenantConfig.RootDomain, tenantConfig.LegacyDomains);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption);
 
         root.AddCommand(cmd);
     }

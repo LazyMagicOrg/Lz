@@ -18,7 +18,7 @@ public interface IPlatformFactory
     /// Each tenant creates its own ACM cert for RootDomain + LegacyDomains,
     /// attaches it to the shared ALB listeners, and creates origin DNS records.
     /// </summary>
-    void DeployTenantDnsAndCert(Config.TenantConfig tenantConfig, Outputs.INetworkOutputs network);
+    void DeployTenantDnsAndCert(Config.TenantConfig tenantConfig, Outputs.INetworkOutputs network, Outputs.ICdnOutputs? cdn = null);
 
     /// <summary>
     /// Create a Tailscale subnet router component (EC2 ASG).

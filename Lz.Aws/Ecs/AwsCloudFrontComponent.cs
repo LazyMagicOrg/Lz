@@ -156,6 +156,19 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
+        // CLOUDFRONT KEYVALUESTORE
+        // =====================================================================
+        // Used by the viewer-request function to check park state and backend status.
+        // Keys: "parked" (true/false), "backend-status" (ready/deploying)
+        // Managed imperatively by `lz park` and `lz unpark`.
+
+        var kvs = new KeyValueStore($"{prefix}-kvs", new KeyValueStoreArgs
+        {
+            Name = $"{prefix}-kvs",
+            Comment = $"Config for {sk}/{tk} ({env})",
+        }, new CustomResourceOptions { Parent = this });
+
+        // =====================================================================
         // ORIGIN ACCESS CONTROL (OAC)
         // =====================================================================
 
@@ -198,7 +211,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // region-pref cookie and no ?region= param, redirects to
         // /AppApi/util/detect-region to geo-detect before the WASM app loads.
 
-        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig);
+        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig, kvs.Arn);
         var exploreRewriteFn = CreateExploreRewriteFunction(prefix, tenantConfig.ConfigDirectory);
 
         var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
@@ -442,121 +455,9 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 }}"),
         }, new CustomResourceOptions { Parent = this });
 
-        // =====================================================================
-        // ROUTE 53 ALIAS RECORDS
-        // =====================================================================
-
-        // Reuse the hosted zone lookups from cert validation
-        {
-            var zoneId = zonesByDomain[domain];
-
-            // Root domain → CloudFront (overrides any prior ALB record from foundation)
-            var rootAlias = new Record($"{prefix}-cf-alias", new RecordArgs
-            {
-                ZoneId = zoneId,
-                Name = domain,
-                Type = "A",
-                AllowOverwrite = true,
-                Aliases =
-                {
-                    new RecordAliasArgs
-                    {
-                        Name = distribution.DomainName,
-                        ZoneId = distribution.HostedZoneId,
-                        EvaluateTargetHealth = false,
-                    },
-                },
-            }, new CustomResourceOptions { Parent = this });
-
-            // Wildcard → CloudFront (ensures browsers using public DNS can still
-            // resolve subdomains like shop.{domain} that also have private-zone records)
-            new Record($"{prefix}-cf-alias-wildcard", new RecordArgs
-            {
-                ZoneId = zoneId,
-                Name = $"*.{domain}",
-                Type = "A",
-                AllowOverwrite = true,
-                Aliases =
-                {
-                    new RecordAliasArgs
-                    {
-                        Name = distribution.DomainName,
-                        ZoneId = distribution.HostedZoneId,
-                        EvaluateTargetHealth = false,
-                    },
-                },
-            }, new CustomResourceOptions { Parent = this });
-
-            // Subtenant domains → same CloudFront distribution
-            if (tenantConfig.Subtenants != null)
-            {
-                foreach (var sub in tenantConfig.Subtenants)
-                {
-                    if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    {
-                        new Record($"{prefix}-cf-alias-{sub.Key}", new RecordArgs
-                        {
-                            ZoneId = zoneId,
-                            Name = sub.Value.SubDomain,
-                            Type = "A",
-                            Aliases =
-                            {
-                                new RecordAliasArgs
-                                {
-                                    Name = distribution.DomainName,
-                                    ZoneId = distribution.HostedZoneId,
-                                    EvaluateTargetHealth = false,
-                                },
-                            },
-                        }, new CustomResourceOptions { Parent = this });
-                    }
-                }
-            }
-
-            // Legacy domains → same CloudFront distribution (for 301 redirect)
-            if (tenantConfig.LegacyDomains != null)
-            {
-                foreach (var legacy in tenantConfig.LegacyDomains)
-                {
-                    var legacySlug = legacy.Replace(".", "-");
-                    var legacyZoneId = zonesByDomain[legacy];
-
-                    new Record($"{prefix}-cf-alias-legacy-{legacySlug}", new RecordArgs
-                    {
-                        ZoneId = legacyZoneId,
-                        Name = legacy,
-                        Type = "A",
-                        AllowOverwrite = true,
-                        Aliases =
-                        {
-                            new RecordAliasArgs
-                            {
-                                Name = distribution.DomainName,
-                                ZoneId = distribution.HostedZoneId,
-                                EvaluateTargetHealth = false,
-                            },
-                        },
-                    }, new CustomResourceOptions { Parent = this });
-
-                    new Record($"{prefix}-cf-alias-legacy-{legacySlug}-wildcard", new RecordArgs
-                    {
-                        ZoneId = legacyZoneId,
-                        Name = $"*.{legacy}",
-                        Type = "A",
-                        AllowOverwrite = true,
-                        Aliases =
-                        {
-                            new RecordAliasArgs
-                            {
-                                Name = distribution.DomainName,
-                                ZoneId = distribution.HostedZoneId,
-                                EvaluateTargetHealth = false,
-                            },
-                        },
-                    }, new CustomResourceOptions { Parent = this });
-                }
-            }
-        }
+        // DNS records are managed by AwsTenantDnsAndCertComponent (single owner
+        // for all tenant DNS records). This avoids resource identity conflicts when
+        // domains switch between root and legacy roles during domain transitions.
 
         return new AwsCloudFrontOutputs(
             distributionId: distribution.Id,
@@ -628,7 +529,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
     /// Returns null if the JS file doesn't exist (graceful fallback).
     /// </summary>
     private Pulumi.Aws.CloudFront.Function? CreateViewerRequestFunction(
-        string prefix, string domain, TenantConfig tenantConfig)
+        string prefix, string domain, TenantConfig tenantConfig, Output<string> kvsArn)
     {
         var jsPath = Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFViewerRequest.js");
         if (!File.Exists(jsPath))
@@ -644,13 +545,28 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             ? "[" + string.Join(",", tenantConfig.LegacyDomains.Select(d => $"\"{d}\"")) + "]"
             : "[]";
 
-        var jsCode = File.ReadAllText(jsPath)
-            .Replace("${RootDomainParameter}", domain)
-            .Replace("${LegacyDomainsJson}", legacyDomainsJson);
+        // Replace ${KvsId} placeholder with the KVS UUID (extracted from ARN).
+        // cf.kvs() requires the UUID, not the full ARN — using the ARN causes KVSNamespaceNotFound.
+        // See: https://github.com/pulumi/pulumi-aws/issues/3917
+        var jsCode = kvsArn.Apply(arn =>
+        {
+            var kvsUuid = arn.Contains('/') ? arn.Split('/').Last() : arn;
+            var code = File.ReadAllText(jsPath)
+                .Replace("${RootDomainParameter}", domain)
+                .Replace("${LegacyDomainsJson}", legacyDomainsJson)
+                .Replace("${KvsId}", kvsUuid);
+
+            var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(code);
+            const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
+            if (sizeBytes > maxBytes)
+                throw new InvalidOperationException(
+                    $"CloudFront function 'CFViewerRequest.js' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit.");
+            return code;
+        });
 
         var comment = tenantConfig.LegacyDomains?.Count > 0
-            ? $"Region detection + legacy redirect for {domain}"
-            : $"Region detection redirect for {domain}";
+            ? $"Region detection + legacy redirect + park for {domain}"
+            : $"Region detection + park for {domain}";
 
         return new Pulumi.Aws.CloudFront.Function(
             $"{prefix}-viewer-request", new FunctionArgs
@@ -659,6 +575,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 Code = jsCode,
                 Comment = comment,
                 Publish = true,
+                KeyValueStoreAssociations = { kvsArn },
             }, new CustomResourceOptions { Parent = this });
     }
 

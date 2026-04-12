@@ -50,7 +50,7 @@ public class AwsAppRunnerPlatformFactory : IPlatformFactory
 
     public ITenantServiceComponent CreateTenantService()
         => new AwsAppRunnerTenantServiceComponent();
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network) { }
+    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
     public Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
 
     // AppRunner doesn't use Tailscale VPN

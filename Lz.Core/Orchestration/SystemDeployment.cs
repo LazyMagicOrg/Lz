@@ -173,6 +173,23 @@ public class SystemDeployment
             return exports;
         });
 
+        // Always refresh before up — catch state drift from cross-stack
+        // operations, manual changes, or prior failed deploys.
+        Console.WriteLine("Running Pulumi refresh...");
+        Console.WriteLine();
+
+        await stack.RefreshAsync(new RefreshOptions
+        {
+            OnEvent = HandleEngineEvent,
+            OnStandardError = msg =>
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(msg);
+                Console.ResetColor();
+            },
+        }, _ct);
+
+        Console.WriteLine();
         Console.WriteLine("Running Pulumi up...");
         Console.WriteLine();
 
@@ -208,7 +225,8 @@ public class SystemDeployment
     /// </summary>
     public async Task DeployTenantAsync(
         string tenantKey, TenantConfig tenantConfig,
-        Dictionary<string, string?>? smtpSecrets = null)
+        Dictionary<string, string?>? smtpSecrets = null,
+        bool refresh = false)
     {
         var stackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
         var checker = _factory.CreateTransitionChecker();
@@ -244,9 +262,12 @@ public class SystemDeployment
             return;
 
         // --- Single Pulumi up: data + service-layer + host-layer + CDN ---
+        // Always refresh before up. Multi-stack systems with cross-stack DNS records
+        // and imperative operations (lz park) make state drift inevitable. The ~30s
+        // refresh cost is negligible vs the risk of deploying against stale state.
         Console.WriteLine();
         Console.WriteLine("Deploying tenant infrastructure...");
-        var result = await TenantPulumiUpAsync(stackName, tenantKey, tenantConfig);
+        var result = await TenantPulumiUpAsync(stackName, tenantKey, tenantConfig, refresh: true);
 
         // --- Update Tailscale split DNS for tenant domains ---
         // Adds tenant RootDomain (and LegacyDomains) so VPN users can resolve
@@ -407,7 +428,8 @@ public class SystemDeployment
     private async Task<UpResult> TenantPulumiUpAsync(
         string stackName,
         string tenantKey,
-        TenantConfig tenantConfig)
+        TenantConfig tenantConfig,
+        bool refresh = false)
     {
         var stack = await CreateOrSelectStack(stackName, () =>
         {
@@ -416,9 +438,6 @@ public class SystemDeployment
             var (network, compute, database, fileStorage) = _factory.LookupFoundation(_config);
             var foundation = new FoundationOutputs(network, compute, database, fileStorage, null, null, new());
             var exports = new Dictionary<string, object?>();
-
-            // Tenant DNS + ALB certificate (SNI) — origin.{RootDomain} → ALB
-            _factory.DeployTenantDnsAndCert(tenantConfig, foundation.Network);
 
             // Tenant data: EFS access points, tenant secret
             var tenantDataComponent = _factory.CreateTenantData();
@@ -455,8 +474,35 @@ public class SystemDeployment
             exports[$"{tenantKey}_distributionId"] = cdnOutputs.DistributionId;
             exports[$"{tenantKey}_assetsBucketId"] = cdnOutputs.AssetsBucketId;
 
+            // Tenant DNS + ALB certificates (SNI) + all public DNS records.
+            // Runs AFTER CDN so it can create CloudFront alias records.
+            // All DNS for all domains (root + legacy) managed here with stable
+            // resource names keyed by domain — no identity conflicts on transitions.
+            _factory.DeployTenantDnsAndCert(tenantConfig, foundation.Network, cdnOutputs);
+
             return exports;
         });
+
+        // Refresh: sync Pulumi state with actual AWS resource state.
+        // Used after `lz park` or manual AWS changes to detect drift.
+        if (refresh)
+        {
+            Console.WriteLine("Running Pulumi refresh (detecting drift)...");
+            Console.WriteLine();
+
+            await stack.RefreshAsync(new RefreshOptions
+            {
+                OnEvent = HandleEngineEvent,
+                OnStandardError = msg =>
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(msg);
+                    Console.ResetColor();
+                },
+            }, _ct);
+
+            Console.WriteLine();
+        }
 
         Console.WriteLine("Running Pulumi up...");
         Console.WriteLine();

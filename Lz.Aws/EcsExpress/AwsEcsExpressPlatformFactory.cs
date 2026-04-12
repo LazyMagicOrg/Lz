@@ -26,7 +26,7 @@ public class AwsEcsExpressPlatformFactory : IPlatformFactory
     public IComputeEnvironmentComponent CreateComputeEnvironment() => new AwsEcsExpressComputeComponent();
     public ITenantServiceComponent CreateTenantService() => new AwsEcsExpressTenantServiceComponent();
     public ITenantCdnComponent CreateTenantCdn() => new AwsEcsExpressCloudFrontComponent();
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network) { }
+    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
     public Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
 
     // Reused from AppRunner topology (DynamoDB, S3/Secrets, Cognito, stub FileStorage)

@@ -30,7 +30,8 @@ public class AwsTenantDnsAndCertComponent : ComponentResource
 
     public void Deploy(
         TenantConfig tenantConfig,
-        INetworkOutputs network)
+        INetworkOutputs network,
+        ICdnOutputs? cdn = null)
     {
         var sk = tenantConfig.SystemKey;
         var tk = tenantConfig.TenantKey;
@@ -44,13 +45,19 @@ public class AwsTenantDnsAndCertComponent : ComponentResource
         if (tenantConfig.LegacyDomains != null)
             allDomains.AddRange(tenantConfig.LegacyDomains);
 
-        // Look up Route53 hosted zones for all domains
+        Pulumi.Log.Info($"TenantDnsAndCert: allDomains = [{string.Join(", ", allDomains)}], cdn = {(cdn != null ? "provided" : "null")}");
+
+        // Look up PUBLIC Route53 hosted zones for all domains using AWS SDK directly.
+        // We cannot use Pulumi's GetZone data source here because this component also
+        // creates private zones with the same domain names. Pulumi's GetZone may resolve
+        // to the private zone even with PrivateZone=false due to execution ordering.
         var zonesByDomain = new Dictionary<string, Output<string>>();
+        var profile = tenantConfig.Profile ?? "";
+        var region = tenantConfig.Region ?? "us-west-2";
         foreach (var d in allDomains)
         {
-            var zone = GetZone.Invoke(
-                new GetZoneInvokeArgs { Name = d });
-            zonesByDomain[d] = zone.Apply(z => z.ZoneId);
+            var publicZoneId = LookupPublicZoneId(d, profile, region);
+            zonesByDomain[d] = Output.Create(publicZoneId);
         }
 
         // =====================================================================
@@ -222,19 +229,33 @@ public class AwsTenantDnsAndCertComponent : ComponentResource
         }
 
         // =====================================================================
-        // PUBLIC DNS RECORDS — origin.{domain} + *.{domain} → ALB
+        // PUBLIC DNS RECORDS
         // =====================================================================
+        // All DNS records for all domains (root + legacy) are managed here
+        // with stable resource names keyed by domain slug. This prevents
+        // resource identity conflicts when domains switch roles during transitions.
+        //
+        // CloudFront hosted zone ID is a global constant for all distributions.
+        var cfHostedZoneId = "Z2FDTNDATAQYW2";
 
         foreach (var d in allDomains)
         {
             var safeName = d.Replace(".", "-");
 
-            // origin.{domain} → public ALB (used by CloudFront as origin)
-            new Route53Record($"{prefix}-origin-{safeName}", new Route53RecordArgs
+            // Use ReplaceOnChanges for zone ID so records move correctly between zones.
+            var dnsOpts = new CustomResourceOptions
+            {
+                Parent = this,
+                DeleteBeforeReplace = true,
+            };
+
+            // origin.{domain} → public ALB (CloudFront origin endpoint)
+            new Route53Record($"{prefix}-pub-origin-{safeName}", new Route53RecordArgs
             {
                 ZoneId = zonesByDomain[d],
                 Name = $"origin.{d}",
                 Type = "A",
+                AllowOverwrite = true,
                 Aliases =
                 {
                     new RecordAliasArgs
@@ -244,13 +265,79 @@ public class AwsTenantDnsAndCertComponent : ComponentResource
                         EvaluateTargetHealth = true,
                     },
                 },
-                AllowOverwrite = true,
-            }, opts);
+            }, dnsOpts);
 
-            // *.{domain} is NOT created here — CloudFront owns the public wildcard
-            // record (*.{domain} → CloudFront). Only origin.{domain} → ALB is needed
-            // as the CloudFront origin endpoint.
+            // {domain} apex → CloudFront
+            if (cdn != null)
+            {
+                new Route53Record($"{prefix}-pub-apex-{safeName}", new Route53RecordArgs
+                {
+                    ZoneId = zonesByDomain[d],
+                    Name = d,
+                    Type = "A",
+                    AllowOverwrite = true,
+                    Aliases =
+                    {
+                        new RecordAliasArgs
+                        {
+                            Name = cdn.DomainName,
+                            ZoneId = cfHostedZoneId,
+                            EvaluateTargetHealth = false,
+                        },
+                    },
+                }, dnsOpts);
+
+                // *.{domain} → CloudFront
+                new Route53Record($"{prefix}-pub-wildcard-{safeName}", new Route53RecordArgs
+                {
+                    ZoneId = zonesByDomain[d],
+                    Name = $"*.{d}",
+                    Type = "A",
+                    AllowOverwrite = true,
+                    Aliases =
+                    {
+                        new RecordAliasArgs
+                        {
+                            Name = cdn.DomainName,
+                            ZoneId = cfHostedZoneId,
+                            EvaluateTargetHealth = false,
+                        },
+                    },
+                }, dnsOpts);
+            }
         }
+    }
+
+    /// <summary>
+    /// Look up the public Route53 hosted zone ID for a domain using the AWS SDK directly.
+    /// This avoids Pulumi's GetZone data source which can return private zones
+    /// when both public and private zones exist for the same domain.
+    /// </summary>
+    private static string LookupPublicZoneId(string domainName, string profile, string region)
+    {
+        var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
+        chain.TryGetAWSCredentials(profile, out var credentials);
+        using var client = credentials != null
+            ? new Amazon.Route53.AmazonRoute53Client(credentials, Amazon.RegionEndpoint.GetBySystemName(region))
+            : new Amazon.Route53.AmazonRoute53Client(Amazon.RegionEndpoint.GetBySystemName(region));
+        var response = client.ListHostedZonesByNameAsync(
+            new Amazon.Route53.Model.ListHostedZonesByNameRequest
+            {
+                DNSName = domainName,
+                MaxItems = "10",
+            }).GetAwaiter().GetResult();
+
+        var zone = response.HostedZones
+            .FirstOrDefault(z =>
+                z.Name.TrimEnd('.').Equals(domainName, StringComparison.OrdinalIgnoreCase)
+                && z.Config.PrivateZone != true);
+
+        if (zone == null)
+            throw new InvalidOperationException(
+                $"No public Route53 hosted zone found for '{domainName}'. " +
+                $"Create the zone before running deploytenant.");
+
+        return zone.Id.Replace("/hostedzone/", "");
     }
 
     private static InputMap<string> Tags(string sk, string tk, string resource) => new()
