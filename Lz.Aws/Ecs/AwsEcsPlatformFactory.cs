@@ -43,11 +43,70 @@ public class AwsEcsPlatformFactory : IPlatformFactory
     public ITenantServiceComponent CreateTenantService()
         => new AwsEcsTenantServiceComponent();
 
+    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network)
+        => new AwsTenantDnsAndCertComponent().Deploy(tenantConfig, network);
+
     public ITailscaleComponent? CreateTailscale()
         => new AwsTailscaleAsgComponent();
 
+    public async Task CleanupBeforeFoundationAsync()
+    {
+        // Clean up stale records from the old private zone if its name changed.
+        // Pulumi can't delete a Route53 zone that has non-NS/SOA records created
+        // by other stacks (e.g., tenant stack records like shop.{domain}).
+        var expectedZoneName = $"{_config.SystemKey}.private";
+        await AwsPrivateZoneCleanup.CleanupStalePrivateZoneAsync(
+            _config.SystemKey, expectedZoneName, _config.Profile, _config.Region);
+    }
+
     public IPostDeployAction? GetFoundationPostDeployAction()
         => new AwsFoundationPostDeployAction(_config);
+
+    public async Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig)
+    {
+        // Retrieve Tailscale API key from shared/system secret
+        string? apiKey = null;
+        try
+        {
+            var profile = _config.SharedProfile ?? _config.Profile;
+            var region = _config.SharedRegion ?? _config.Region;
+            var entries = await AwsAccountResolver.ReadSecretEntriesAsync(
+                profile, region, "shared/system", "tailscale-api-key");
+            entries.TryGetValue("tailscale-api-key", out apiKey);
+        }
+        catch { /* No Tailscale — skip silently */ }
+
+        if (string.IsNullOrEmpty(apiKey))
+            return;
+
+        var vpcDnsResolver = Tailscale.AwsTailscalePostDeployAction.CalculateVpcDnsResolver(_config.VpcCidr);
+
+        var domains = new List<string> { tenantConfig.RootDomain };
+        if (tenantConfig.LegacyDomains != null)
+            domains.AddRange(tenantConfig.LegacyDomains);
+
+        // Add specific subdomains, NOT the entire domain. Routing the whole domain
+        // through VPC DNS would intercept apex/wildcard queries (monrotest.click,
+        // www.monrotest.click) and break public CloudFront access from VPN clients.
+        // Only shop.{domain} and auth.{domain} need VPC DNS resolution.
+        var splitDnsEntries = new Dictionary<string, string[]>();
+        foreach (var d in domains)
+        {
+            splitDnsEntries[$"shop.{d}"] = [vpcDnsResolver];
+            splitDnsEntries[$"auth.{d}"] = [vpcDnsResolver];
+        }
+
+        Console.WriteLine("Updating Tailscale split DNS for tenant domains...");
+        foreach (var (domain, resolvers) in splitDnsEntries)
+            Console.WriteLine($"  {domain} → {resolvers[0]}");
+
+        using var client = new Tailscale.TailscaleApiClient(apiKey);
+        await client.SetSplitDnsAsync(splitDnsEntries);
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("  Tenant split DNS updated.");
+        Console.ResetColor();
+    }
 
     public IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null)
         => new AwsTailscalePostDeployAction(_config, system);

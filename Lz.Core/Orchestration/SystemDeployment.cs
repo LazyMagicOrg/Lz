@@ -112,6 +112,9 @@ public class SystemDeployment
             await keyManager.EnsureSshKeyAsync();
         }
 
+        // --- Pre-deploy cleanup (e.g., clear stale private zone records) ---
+        await _factory.CleanupBeforeFoundationAsync();
+
         // --- Pulumi up: deploy everything including Tailscale in one pass ---
         Console.WriteLine();
         Console.WriteLine("Deploying foundation infrastructure...");
@@ -244,6 +247,11 @@ public class SystemDeployment
         Console.WriteLine();
         Console.WriteLine("Deploying tenant infrastructure...");
         var result = await TenantPulumiUpAsync(stackName, tenantKey, tenantConfig);
+
+        // --- Update Tailscale split DNS for tenant domains ---
+        // Adds tenant RootDomain (and LegacyDomains) so VPN users can resolve
+        // shop.{RootDomain} → internal ALB via the per-tenant private zone.
+        await _factory.UpdateTenantSplitDnsAsync(tenantConfig);
 
         // --- Init config: create tenant DB + write Settings.txt/usersettings.json ---
         var configInit = _factory.GetConfigInitRunner();
@@ -408,6 +416,9 @@ public class SystemDeployment
             var (network, compute, database, fileStorage) = _factory.LookupFoundation(_config);
             var foundation = new FoundationOutputs(network, compute, database, fileStorage, null, null, new());
             var exports = new Dictionary<string, object?>();
+
+            // Tenant DNS + ALB certificate (SNI) — origin.{RootDomain} → ALB
+            _factory.DeployTenantDnsAndCert(tenantConfig, foundation.Network);
 
             // Tenant data: EFS access points, tenant secret
             var tenantDataComponent = _factory.CreateTenantData();

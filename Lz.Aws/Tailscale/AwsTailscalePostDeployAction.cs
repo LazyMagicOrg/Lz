@@ -106,73 +106,17 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
             }
         }
 
-        // 6. Configure split DNS — route only VPN-only subdomains through VPC DNS.
-        // The root domain (e.g., monrodev.click) must NOT be in split DNS because
-        // it resolves publicly to CloudFront for tenant SPAs.
-        // Only internal services (IngressType.Internal) and auth need VPC DNS.
-        var systemDomain = _config.SystemDomain;
-        var vpcDnsResolver = CalculateVpcDnsResolver(_config.VpcCidr);
-        var splitDnsDomains = GetVpnOnlyDomains(systemDomain);
-
-        Console.WriteLine();
-        Console.WriteLine($"  Configuring split DNS:");
-
-        var splitDnsEntries = new Dictionary<string, string[]>();
-        foreach (var domain in splitDnsDomains)
-        {
-            splitDnsEntries[domain] = [vpcDnsResolver];
-            Console.WriteLine($"    {domain} → {vpcDnsResolver}");
-        }
-
-        if (splitDnsEntries.Count > 0)
-        {
-            await client.SetSplitDnsAsync(splitDnsEntries);
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"    Split DNS configured.");
-            Console.ResetColor();
-        }
-        else
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"    No VPN-only domains found — skipping split DNS.");
-            Console.ResetColor();
-        }
+        // 6. Split DNS — per-tenant domains are added by UpdateTenantSplitDnsAsync
+        // during deploytenant. Foundation does not add split DNS entries because
+        // the {systemKey}.private zone hosts don't match any ALB listener rules.
+        // Tenant deploy adds RootDomain entries so VPN users can reach
+        // shop.{RootDomain} via VPC DNS → per-tenant private zone → internal ALB.
 
         // 7. Summary
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  Tailscale configuration complete: " +
-            $"{configuredCount} device(s) configured, split DNS for {splitDnsDomains.Count} domain(s)");
+        Console.WriteLine($"  Tailscale configuration complete: {configuredCount} device(s) configured.");
         Console.ResetColor();
-    }
-
-    /// <summary>
-    /// Derive the list of VPN-only domains that need split DNS entries.
-    /// Includes auth.{domain} (always VPN-only for admin access) and
-    /// the resolved host of each service with IngressType.Internal.
-    /// </summary>
-    private List<string> GetVpnOnlyDomains(string systemDomain)
-    {
-        var domains = new List<string>();
-
-        // auth.{domain} — Keycloak admin is always VPN-only
-        domains.Add($"auth.{systemDomain}");
-
-        // Internal services — derive hosts from HostPattern
-        if (_system != null)
-        {
-            foreach (var svc in _system.Services)
-            {
-                if (svc.IngressType == IngressType.Internal && !string.IsNullOrEmpty(svc.HostPattern))
-                {
-                    var host = svc.HostPattern.Replace("{domain}", systemDomain);
-                    if (!domains.Contains(host))
-                        domains.Add(host);
-                }
-            }
-        }
-
-        return domains;
     }
 
     /// <summary>

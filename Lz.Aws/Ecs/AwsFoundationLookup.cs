@@ -28,7 +28,18 @@ public static class AwsFoundationLookup
         var prefix = config.SystemKey;
         var region = config.Region;
 
-        var network = LookupNetwork(prefix, config.SystemDomain);
+        // CentralAuthDomain zone may be in a different account (shared-services)
+        Pulumi.Aws.Provider? sharedProvider = null;
+        if (!string.IsNullOrEmpty(config.SharedProfile))
+        {
+            sharedProvider = new Pulumi.Aws.Provider($"lookup-shared-provider", new Pulumi.Aws.ProviderArgs
+            {
+                Region = config.SharedRegion ?? config.Region,
+                Profile = config.SharedProfile,
+            });
+        }
+
+        var network = LookupNetwork(prefix, config.CentralAuthDomain, config.SystemKey, sharedProvider);
         var compute = LookupCompute(prefix);
         var database = LookupDatabase(prefix);
         var fileStorage = LookupFileStorage(prefix, config.Environment);
@@ -36,7 +47,9 @@ public static class AwsFoundationLookup
         return (network, compute, database, fileStorage);
     }
 
-    private static AwsNetworkOutputs LookupNetwork(string prefix, string systemDomain)
+    private static AwsNetworkOutputs LookupNetwork(
+        string prefix, string centralAuthDomain, string systemKey,
+        Pulumi.Aws.Provider? sharedProvider)
     {
         // VPC
         var vpc = GetVpc.Invoke(new GetVpcInvokeArgs
@@ -122,19 +135,20 @@ public static class AwsFoundationLookup
         var efsSg = LookupSecurityGroup(prefix, $"{prefix}-efs-sg", vpcId);
         var tailscaleSg = LookupSecurityGroup(prefix, $"{prefix}-tailscale-sg", vpcId);
 
-        // ACM certificate
+        // ACM certificate — now issued for CentralAuthDomain
         var cert = Pulumi.Aws.Acm.GetCertificate.Invoke(new Pulumi.Aws.Acm.GetCertificateInvokeArgs
         {
-            Domain = systemDomain,
+            Domain = centralAuthDomain,
             MostRecent = true,
             Statuses = new[] { "ISSUED" },
         });
 
-        // DNS zones — look up by domain
+        // DNS zones — CentralAuthDomain public zone (possibly cross-account), {systemKey}.internal private zone
         var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
-            new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = systemDomain });
+            new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = centralAuthDomain },
+            new InvokeOptions { Provider = sharedProvider });
         var privateZone = Pulumi.Aws.Route53.GetZone.Invoke(
-            new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = systemDomain, PrivateZone = true });
+            new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = $"{systemKey}.private", PrivateZone = true });
 
         return new AwsNetworkOutputs
         {
@@ -146,6 +160,7 @@ public static class AwsFoundationLookup
             PublicAlbArn = publicAlb.Apply(a => a.Arn),
             InternalAlbArn = internalAlb.Apply(a => a.Arn),
             PublicAlbDns = publicAlb.Apply(a => a.DnsName),
+            PublicAlbZoneId = publicAlb.Apply(a => a.ZoneId),
             InternalAlbDns = internalAlb.Apply(a => a.DnsName),
             InternalAlbZoneId = internalAlb.Apply(a => a.ZoneId),
             HttpsListenerArn = httpsListener.Apply(l => l.Arn),

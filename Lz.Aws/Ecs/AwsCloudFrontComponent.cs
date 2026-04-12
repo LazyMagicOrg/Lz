@@ -48,33 +48,87 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             Region = "us-east-1",
         }, new CustomResourceOptions { Parent = this });
 
+        // Collect all domains: root + legacy
+        var allDomains = new List<string> { domain };
+        if (tenantConfig.LegacyDomains != null)
+            allDomains.AddRange(tenantConfig.LegacyDomains);
+
+        // Look up Route53 hosted zones for all domains
+        var zonesByDomain = new Dictionary<string, Output<string>>();
+        foreach (var d in allDomains)
+        {
+            var zone = Pulumi.Aws.Route53.GetZone.Invoke(
+                new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = d });
+            zonesByDomain[d] = zone.Apply(z => z.ZoneId);
+        }
+
+        // Build SANs: wildcard for each domain
+        var sans = new InputList<string>();
+        foreach (var d in allDomains)
+        {
+            sans.Add($"*.{d}");
+            if (d != domain) // primary domain is DomainName, not a SAN
+                sans.Add(d);
+        }
+
         var cert = new Certificate($"{prefix}-cdn-cert", new CertificateArgs
         {
             DomainName = domain,
-            SubjectAlternativeNames = { $"*.{domain}" },
+            SubjectAlternativeNames = sans,
             ValidationMethod = "DNS",
             Tags = Tags(sk, tk),
         }, new CustomResourceOptions { Parent = this, Provider = usEast1 });
 
-        // DNS validation records
-        var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
-            new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = domain });
+        // DNS validation records — one per unique base domain
+        // Use stable resource names: original name for primary domain, slug-based for legacy
+        var validationFqdns = new InputList<string>();
 
-        var validationRecord = new Pulumi.Aws.Route53.Record($"{prefix}-cdn-cert-validation", new Pulumi.Aws.Route53.RecordArgs
+        // Primary domain validation (keep original resource name for backward compat)
+        var primaryValidationRecord = new Pulumi.Aws.Route53.Record(
+            $"{prefix}-cdn-cert-validation",
+            new Pulumi.Aws.Route53.RecordArgs
+            {
+                ZoneId = zonesByDomain[domain],
+                Name = cert.DomainValidationOptions.Apply(opts =>
+                    opts.First(o => o.DomainName == domain || o.DomainName == $"*.{domain}").ResourceRecordName!),
+                Type = cert.DomainValidationOptions.Apply(opts =>
+                    opts.First(o => o.DomainName == domain || o.DomainName == $"*.{domain}").ResourceRecordType!),
+                Records = { cert.DomainValidationOptions.Apply(opts =>
+                    opts.First(o => o.DomainName == domain || o.DomainName == $"*.{domain}").ResourceRecordValue!) },
+                Ttl = 300,
+                AllowOverwrite = true,
+            }, new CustomResourceOptions { Parent = this });
+        validationFqdns.Add(primaryValidationRecord.Fqdn);
+
+        // Legacy domain validation records
+        if (tenantConfig.LegacyDomains != null)
         {
-            ZoneId = publicZone.Apply(z => z.ZoneId),
-            Name = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordName!),
-            Type = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordType!),
-            Records = { cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordValue!) },
-            Ttl = 300,
-            AllowOverwrite = true,
-        }, new CustomResourceOptions { Parent = this });
+            foreach (var legacy in tenantConfig.LegacyDomains)
+            {
+                var slug = legacy.Replace(".", "-");
+                var legacyValRecord = new Pulumi.Aws.Route53.Record(
+                    $"{prefix}-cdn-cert-val-{slug}",
+                    new Pulumi.Aws.Route53.RecordArgs
+                    {
+                        ZoneId = zonesByDomain[legacy],
+                        Name = cert.DomainValidationOptions.Apply(opts =>
+                            opts.First(o => o.DomainName == legacy || o.DomainName == $"*.{legacy}").ResourceRecordName!),
+                        Type = cert.DomainValidationOptions.Apply(opts =>
+                            opts.First(o => o.DomainName == legacy || o.DomainName == $"*.{legacy}").ResourceRecordType!),
+                        Records = { cert.DomainValidationOptions.Apply(opts =>
+                            opts.First(o => o.DomainName == legacy || o.DomainName == $"*.{legacy}").ResourceRecordValue!) },
+                        Ttl = 300,
+                        AllowOverwrite = true,
+                    }, new CustomResourceOptions { Parent = this });
+                validationFqdns.Add(legacyValRecord.Fqdn);
+            }
+        }
 
         var certValidation = new CertificateValidation($"{prefix}-cdn-cert-validated",
             new CertificateValidationArgs
             {
                 CertificateArn = cert.Arn,
-                ValidationRecordFqdns = { validationRecord.Fqdn },
+                ValidationRecordFqdns = validationFqdns,
             }, new CustomResourceOptions { Parent = this, Provider = usEast1 });
 
         var certificateId = certValidation.CertificateArn;
@@ -118,8 +172,16 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // CLOUDFRONT DISTRIBUTION
         // =====================================================================
 
-        // Collect aliases: root domain + wildcard + subtenant domains
+        // Collect aliases: root domain + wildcard + legacy domains + subtenant domains
         var aliases = new InputList<string> { domain, $"*.{domain}" };
+        if (tenantConfig.LegacyDomains != null)
+        {
+            foreach (var legacy in tenantConfig.LegacyDomains)
+            {
+                aliases.Add(legacy);
+                aliases.Add($"*.{legacy}");
+            }
+        }
         if (tenantConfig.Subtenants != null)
         {
             foreach (var sub in tenantConfig.Subtenants)
@@ -136,7 +198,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // region-pref cookie and no ?region= param, redirects to
         // /AppApi/util/detect-region to geo-detect before the WASM app loads.
 
-        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig.ConfigDirectory);
+        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig);
         var exploreRewriteFn = CreateExploreRewriteFunction(prefix, tenantConfig.ConfigDirectory);
 
         var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
@@ -384,9 +446,9 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // ROUTE 53 ALIAS RECORDS
         // =====================================================================
 
-        // Reuse the public hosted zone lookup from cert validation
+        // Reuse the hosted zone lookups from cert validation
         {
-            var zoneId = publicZone.Apply(z => z.ZoneId);
+            var zoneId = zonesByDomain[domain];
 
             // Root domain → CloudFront (overrides any prior ALB record from foundation)
             var rootAlias = new Record($"{prefix}-cf-alias", new RecordArgs
@@ -448,6 +510,50 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                             },
                         }, new CustomResourceOptions { Parent = this });
                     }
+                }
+            }
+
+            // Legacy domains → same CloudFront distribution (for 301 redirect)
+            if (tenantConfig.LegacyDomains != null)
+            {
+                foreach (var legacy in tenantConfig.LegacyDomains)
+                {
+                    var legacySlug = legacy.Replace(".", "-");
+                    var legacyZoneId = zonesByDomain[legacy];
+
+                    new Record($"{prefix}-cf-alias-legacy-{legacySlug}", new RecordArgs
+                    {
+                        ZoneId = legacyZoneId,
+                        Name = legacy,
+                        Type = "A",
+                        AllowOverwrite = true,
+                        Aliases =
+                        {
+                            new RecordAliasArgs
+                            {
+                                Name = distribution.DomainName,
+                                ZoneId = distribution.HostedZoneId,
+                                EvaluateTargetHealth = false,
+                            },
+                        },
+                    }, new CustomResourceOptions { Parent = this });
+
+                    new Record($"{prefix}-cf-alias-legacy-{legacySlug}-wildcard", new RecordArgs
+                    {
+                        ZoneId = legacyZoneId,
+                        Name = $"*.{legacy}",
+                        Type = "A",
+                        AllowOverwrite = true,
+                        Aliases =
+                        {
+                            new RecordAliasArgs
+                            {
+                                Name = distribution.DomainName,
+                                ZoneId = distribution.HostedZoneId,
+                                EvaluateTargetHealth = false,
+                            },
+                        },
+                    }, new CustomResourceOptions { Parent = this });
                 }
             }
         }
@@ -522,9 +628,9 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
     /// Returns null if the JS file doesn't exist (graceful fallback).
     /// </summary>
     private Pulumi.Aws.CloudFront.Function? CreateViewerRequestFunction(
-        string prefix, string domain, string configDirectory)
+        string prefix, string domain, TenantConfig tenantConfig)
     {
-        var jsPath = Path.Combine(configDirectory, "CloudFront", "CFViewerRequest.js");
+        var jsPath = Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFViewerRequest.js");
         if (!File.Exists(jsPath))
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
@@ -533,15 +639,25 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             return null;
         }
 
+        // Build legacy domains JSON array for injection into the CloudFront function
+        var legacyDomainsJson = tenantConfig.LegacyDomains?.Count > 0
+            ? "[" + string.Join(",", tenantConfig.LegacyDomains.Select(d => $"\"{d}\"")) + "]"
+            : "[]";
+
         var jsCode = File.ReadAllText(jsPath)
-            .Replace("${RootDomainParameter}", domain);
+            .Replace("${RootDomainParameter}", domain)
+            .Replace("${LegacyDomainsJson}", legacyDomainsJson);
+
+        var comment = tenantConfig.LegacyDomains?.Count > 0
+            ? $"Region detection + legacy redirect for {domain}"
+            : $"Region detection redirect for {domain}";
 
         return new Pulumi.Aws.CloudFront.Function(
             $"{prefix}-viewer-request", new FunctionArgs
             {
                 Runtime = "cloudfront-js-2.0",
                 Code = jsCode,
-                Comment = $"Region detection redirect for {domain}",
+                Comment = comment,
                 Publish = true,
             }, new CustomResourceOptions { Parent = this });
     }

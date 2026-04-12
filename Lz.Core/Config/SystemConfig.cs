@@ -18,7 +18,7 @@ public class SystemConfig
     public string SystemSuffix { get; set; } = string.Empty;
     public string Profile { get; set; } = string.Empty;
     public string Region { get; set; } = string.Empty;
-    public string SystemDomain { get; set; } = string.Empty;
+    public string? SystemDomain { get; set; }
     public string? DefaultTenant { get; set; }
 
     // Network

@@ -27,6 +27,12 @@ public class TenantConfig
     public string? AcmCertificateArn { get; set; }
     public BehaviorsConfig? Behaviors { get; set; }
     public Dictionary<string, SubtenantEntry>? Subtenants { get; set; }
+
+    /// <summary>
+    /// Previous domains that 301 redirect to RootDomain during domain transitions.
+    /// Each legacy domain must have a Route53 hosted zone in the same account.
+    /// </summary>
+    public List<string>? LegacyDomains { get; set; }
     public string TenantSuffix { get; set; } = string.Empty;
     public string? Profile { get; set; }
     public string? Region { get; set; }

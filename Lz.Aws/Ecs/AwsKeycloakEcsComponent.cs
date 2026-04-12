@@ -254,7 +254,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                     {
                         HostHeader = new ListenerRuleConditionHostHeaderArgs
                         {
-                            Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
+                            Values = { config.CentralAuthDomain, $"auth.{config.CentralAuthDomain}" },
                         },
                     },
                     new ListenerRuleConditionArgs
@@ -289,7 +289,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                     {
                         HostHeader = new ListenerRuleConditionHostHeaderArgs
                         {
-                            Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
+                            Values = { config.CentralAuthDomain, $"auth.{config.CentralAuthDomain}" },
                         },
                     },
                     new ListenerRuleConditionArgs
@@ -316,7 +316,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
             }, opts);
         }
 
-        // auth.{domain} host rule (priority 10) — public ALB
+        // CentralAuthDomain host rule (priority 10) — public ALB
         var authRule = new ListenerRule($"{prefix}-kc-auth-host", new ListenerRuleArgs
         {
             ListenerArn = awsNetwork.HttpsListenerArn,
@@ -327,7 +327,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                 {
                     HostHeader = new ListenerRuleConditionHostHeaderArgs
                     {
-                        Values = { config.SystemDomain, $"auth.{config.SystemDomain}" },
+                        Values = { config.CentralAuthDomain, $"auth.{config.CentralAuthDomain}" },
                     },
                 },
             },
@@ -379,7 +379,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
                 {
                     HostHeader = new ListenerRuleConditionHostHeaderArgs
                     {
-                        Values = { $"auth.{config.SystemDomain}" },
+                        Values = { $"auth.{config.CentralAuthDomain}" },
                     },
                 },
             },
@@ -611,7 +611,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
         return new AwsServiceOutputs
         {
             ServiceId = service.Id,
-            Endpoint = Output.Create($"https://auth.{config.SystemDomain}"),
+            Endpoint = Output.Create($"https://{config.CentralAuthDomain}"),
         };
     }
 }

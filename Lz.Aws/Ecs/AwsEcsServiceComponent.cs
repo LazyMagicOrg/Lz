@@ -55,8 +55,8 @@ public class AwsEcsServiceComponent : IServiceComponent
         // then scales to the configured count.
         var desiredCount = 0;
 
-        // Resolve host pattern: {domain} → config.SystemDomain
-        var host = definition.HostPattern.Replace("{domain}", _config.SystemDomain);
+        // Resolve host pattern: {domain} → CentralAuthDomain (foundation services)
+        var host = definition.HostPattern.Replace("{domain}", _config.CentralAuthDomain);
 
         // Which ALB to use: Internal for shop services, Public for public-facing
         var isInternal = definition.IngressType == IngressType.Internal;
@@ -348,7 +348,6 @@ public class AwsEcsServiceComponent : IServiceComponent
                 {
                     new { name = "ASPNETCORE_ENVIRONMENT", value = _config.Environment == "dev" ? "Development" : "Production" },
                     new { name = "LZ_SYSTEM_KEY", value = prefix },
-                    new { name = "LZ_SYSTEM_DOMAIN", value = _config.SystemDomain },
                     new { name = "LZ_SERVICE_NAME", value = serviceName },
                     new { name = "AWS_REGION", value = _config.Region },
                 };

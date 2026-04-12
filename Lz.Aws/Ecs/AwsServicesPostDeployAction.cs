@@ -221,6 +221,28 @@ public class AwsServicesPostDeployAction : IPostDeployAction
         else
         {
             var yamlContent = await File.ReadAllTextAsync(configSource);
+
+            // Replace self-referencing placeholders before upload.
+            // The tenantconfig YAML uses <<rootdomain>>, <<centralauthdomain>>, etc.
+            // as placeholders that reference the config's own fields.
+            if (_tenantConfig != null)
+            {
+                yamlContent = yamlContent.Replace("<<rootdomain>>", _tenantConfig.RootDomain);
+                yamlContent = yamlContent.Replace("<<centralauthdomain>>", _tenantConfig.CentralAuthDomain ?? "");
+
+                var legacyDomain = _tenantConfig.LegacyDomains?.FirstOrDefault();
+                if (!string.IsNullOrEmpty(legacyDomain))
+                {
+                    yamlContent = yamlContent.Replace("<<legacydomain>>", legacyDomain);
+                }
+                else
+                {
+                    // Remove entire lines containing the placeholder
+                    yamlContent = string.Join("\n",
+                        yamlContent.Split('\n').Where(line => !line.Contains("<<legacydomain>>")));
+                }
+            }
+
             var paramName = $"/{sk}/{tk}/{env}/tenantconfig";
 
             Console.WriteLine($"Uploading tenant config to SSM: {paramName}");

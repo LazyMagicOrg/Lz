@@ -115,15 +115,14 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine("Skipping Keycloak seeding — admin blocking is ON.");
             Console.WriteLine("  Realm was seeded on the initial deploy. To re-seed, connect via VPN");
-            Console.WriteLine($"  and use https://auth.{_config.SystemDomain}/admin/");
+            Console.WriteLine($"  and use https://{_config.CentralAuthDomain}/admin/");
             Console.ResetColor();
             return;
         }
 
         Console.WriteLine("Seeding Keycloak configuration...");
 
-        var systemDomain = _config.SystemDomain;
-        var keycloakUrl = $"https://auth.{systemDomain}";
+        var keycloakUrl = $"https://{_config.CentralAuthDomain}";
 
         Console.WriteLine($"  Keycloak admin URL: {keycloakUrl}");
 

@@ -147,7 +147,7 @@ class Program
                 Topology = "ecs",
                 Profile = sharedConfig.Profile,
                 Region = sharedConfig.Region,
-                SystemDomain = sharedConfig.Domain,
+                CentralAuthDomain = sharedConfig.Domain,
                 VpcCidr = sharedConfig.VpcCidr,
                 AdminAuth = "adminsauth",
                 TrustedAccountIds = sharedConfig.TrustedAccountIds,
@@ -231,7 +231,7 @@ class Program
 
                 Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
                 Console.WriteLine($"Platform: {config.Platform}, Topology: {config.Topology}");
-                Console.WriteLine($"Domain: {config.SystemDomain}");
+                Console.WriteLine($"Central auth: {config.CentralAuthDomain}");
                 Console.WriteLine();
 
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
@@ -577,8 +577,9 @@ class Program
                     Console.WriteLine("Checking ECR images...");
                     foreach (var (svcName, _) in containerServiceConfig.Containers)
                     {
-                        // ECR repo is system-scoped (created by deployfoundation), not per-tenant
-                        var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
+                        // ECR repo is tenant-scoped: {sk}-{tenantSuffix}-{env}-{tk}-{container}
+                        // Must match AwsEcsTenantServiceComponent.cs line 73
+                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
                         var exists = await EcrDeployer.CheckEcrImageExistsAsync(
                             profile, region, ecrName);
                         if (!exists)
@@ -659,7 +660,7 @@ class Program
                 Environment = "shared",
                 Platform = "aws", Topology = "ecs",
                 Profile = sharedConfig.Profile, Region = sharedConfig.Region,
-                SystemDomain = sharedConfig.Domain,
+                CentralAuthDomain = sharedConfig.Domain,
                 VpcCidr = sharedConfig.VpcCidr,
                 AdminAuth = "adminsauth",
                 TrustedAccountIds = sharedConfig.TrustedAccountIds,

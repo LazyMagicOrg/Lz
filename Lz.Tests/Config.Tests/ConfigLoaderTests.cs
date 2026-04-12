@@ -190,6 +190,6 @@ public class ConfigLoaderTests
         Assert.Equal("med", config.SystemKey);
         Assert.Equal("dev", config.Environment);
         Assert.Equal("monro-devnew", config.Profile);
-        Assert.Equal("monrodev.click", config.SystemDomain);
+        Assert.Equal("monroadmin.click", config.CentralAuthDomain);
     }
 }

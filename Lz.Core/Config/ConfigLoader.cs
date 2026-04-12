@@ -184,6 +184,20 @@ public static class ConfigLoader
         yaml = yaml.Replace("<<tenant>>", tenantKey);
         yaml = yaml.Replace("<<env>>", environment);
         yaml = yaml.Replace("<<rootdomain>>", tenantConfig.RootDomain);
+
+        // Legacy domain: substitute if present, remove lines if not
+        var legacyDomain = tenantConfig.LegacyDomains?.FirstOrDefault();
+        if (!string.IsNullOrEmpty(legacyDomain))
+        {
+            yaml = yaml.Replace("<<legacydomain>>", legacyDomain);
+        }
+        else
+        {
+            // Remove entire lines containing the placeholder
+            yaml = string.Join("\n",
+                yaml.Split('\n').Where(line => !line.Contains("<<legacydomain>>")));
+        }
+
         yaml = yaml.Replace("<<displayname>>", tenantConfig.DisplayName ?? tenantKey);
 
         // SMTP secrets from shared/system

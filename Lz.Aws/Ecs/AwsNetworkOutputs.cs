@@ -22,6 +22,7 @@ public class AwsNetworkOutputs : INetworkOutputs
     public required Output<string> PublicAlbArn { get; init; }
     public required Output<string> InternalAlbArn { get; init; }
     public required Output<string> PublicAlbDns { get; init; }
+    public required Output<string> PublicAlbZoneId { get; init; }
     public required Output<string> InternalAlbDns { get; init; }
     public required Output<string> InternalAlbZoneId { get; init; }
     public required Output<string> HttpsListenerArn { get; init; }

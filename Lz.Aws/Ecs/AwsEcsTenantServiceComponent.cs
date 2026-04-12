@@ -557,7 +557,6 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "LZ_SYSTEM_KEY", value = sk },
                     new { name = "LZ_TENANT_KEY", value = tk },
                     new { name = "LZ_ENVIRONMENT", value = env },
-                    new { name = "LZ_SYSTEM_DOMAIN", value = tenantConfig.RootDomain },
                     new { name = "LZ_SERVICE_NAME", value = serviceName },
                     new { name = "AWS_REGION", value = region },
                     new { name = "APPHOST_DATA_PATH", value = "/app" },

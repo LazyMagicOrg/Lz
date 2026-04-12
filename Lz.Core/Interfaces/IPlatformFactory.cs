@@ -14,16 +14,38 @@ public interface IPlatformFactory
     ITenantServiceComponent CreateTenantService();
 
     /// <summary>
+    /// Deploy per-tenant DNS records and ALB certificate (SNI).
+    /// Each tenant creates its own ACM cert for RootDomain + LegacyDomains,
+    /// attaches it to the shared ALB listeners, and creates origin DNS records.
+    /// </summary>
+    void DeployTenantDnsAndCert(Config.TenantConfig tenantConfig, Outputs.INetworkOutputs network);
+
+    /// <summary>
     /// Create a Tailscale subnet router component (EC2 ASG).
     /// Returns null if VPN is not used or the platform doesn't support it.
     /// </summary>
     ITailscaleComponent? CreateTailscale();
 
     /// <summary>
+    /// Pre-deploy cleanup before foundation Pulumi up.
+    /// Handles platform-specific resource cleanup that Pulumi can't manage
+    /// (e.g., clearing records from a Route53 zone before it can be replaced).
+    /// </summary>
+    Task CleanupBeforeFoundationAsync() => Task.CompletedTask;
+
+    /// <summary>
     /// Post-deploy actions to run after Pulumi up for the foundation phase.
     /// Returns null if no post-deploy actions are needed.
     /// </summary>
     IPostDeployAction? GetFoundationPostDeployAction();
+
+    /// <summary>
+    /// Update Tailscale split DNS to include a tenant's domains for VPN access.
+    /// Adds entries for shop.{RootDomain} (and LegacyDomains) so VPN users
+    /// resolve tenant-specific services via VPC DNS → internal ALB.
+    /// No-op if VPN is not configured or Tailscale API key is unavailable.
+    /// </summary>
+    Task UpdateTenantSplitDnsAsync(Config.TenantConfig tenantConfig);
 
     /// <summary>
     /// Post-deploy action to configure Tailscale devices (approve routes,

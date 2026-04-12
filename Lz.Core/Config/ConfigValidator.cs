@@ -34,7 +34,6 @@ public static class ConfigValidator
         RequireNonEmpty(errors, nameof(config.Environment), config.Environment);
         RequireNonEmpty(errors, nameof(config.Profile), config.Profile);
         RequireNonEmpty(errors, nameof(config.Region), config.Region);
-        RequireNonEmpty(errors, nameof(config.SystemDomain), config.SystemDomain);
         RequireNonEmpty(errors, nameof(config.SystemSuffix), config.SystemSuffix);
 
         // VpcCidr required for topologies with a VPC (ecs, ecsexpress) but not apprunner.

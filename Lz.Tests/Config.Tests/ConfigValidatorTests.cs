@@ -13,7 +13,6 @@ public class ConfigValidatorTests
             Environment = "dev",
             // Profile intentionally empty
             Region = "us-west-2",
-            SystemDomain = "test.click",
             VpcCidr = "10.20.0.0/16",
             SystemSuffix = "496a-ffff",
             CentralAuthDomain = "auth.test.click",
@@ -31,14 +30,13 @@ public class ConfigValidatorTests
         {
             SystemKey = "med",
             Environment = "dev",
-            // Profile, Region, SystemDomain all empty
+            // Profile, Region all empty
         };
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => ConfigValidator.Validate(config, "test.yaml"));
         Assert.Contains("Profile", ex.Message);
         Assert.Contains("Region", ex.Message);
-        Assert.Contains("SystemDomain", ex.Message);
     }
 
     [Fact]
@@ -50,7 +48,6 @@ public class ConfigValidatorTests
             Environment = "dev",
             Profile = "monro-dev2",
             Region = "us-west-2",
-            SystemDomain = "test.click",
             VpcCidr = "10.20.0.0/16",
             SystemSuffix = "496a-ffff",
             CentralAuthDomain = "auth.test.click",

@@ -3,6 +3,7 @@ using Lz.Core.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
+using Pulumi.Aws;
 using Pulumi.Aws.Acm;
 using Pulumi.Aws.CloudWatch;
 using Pulumi.Aws.Ec2;
@@ -438,18 +439,34 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         }, opts);
 
         // =====================================================================
-        // ROUTE 53 — Look up existing public zone, create private zone
+        // ROUTE 53 — Look up CentralAuthDomain public zone, create private zone
         // =====================================================================
 
-        var publicZone = GetZone.Invoke(new GetZoneInvokeArgs
+        // CentralAuthDomain zone may be in a different account (shared-services).
+        // Use a cross-account provider when SharedProfile is set.
+        var isCrossAccount = !string.IsNullOrEmpty(config.SharedProfile);
+        Provider? sharedProvider = null;
+        if (isCrossAccount)
         {
-            Name = config.SystemDomain,
+            sharedProvider = new Provider($"{prefix}-shared-provider", new ProviderArgs
+            {
+                Region = config.SharedRegion ?? config.Region,
+                Profile = config.SharedProfile,
+            }, opts);
+        }
+        var sharedOpts = sharedProvider != null
+            ? new CustomResourceOptions { Parent = this, Provider = sharedProvider }
+            : opts;
+
+        var centralAuthZone = GetZone.Invoke(new GetZoneInvokeArgs
+        {
+            Name = config.CentralAuthDomain,
             PrivateZone = false,
-        });
+        }, new InvokeOptions { Provider = sharedProvider });
 
         var privateZone = new Zone($"{prefix}-private-zone", new ZoneArgs
         {
-            Name = config.SystemDomain,
+            Name = $"{config.SystemKey}.private",
             Vpcs =
             {
                 new ZoneVpcArgs { VpcId = vpc.Id },
@@ -459,42 +476,32 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         }, opts);
 
         // =====================================================================
-        // ACM WILDCARD CERTIFICATE (DNS validated)
+        // ACM CERTIFICATE for CentralAuthDomain (ALB default cert)
         // =====================================================================
+        // The cert is created in THIS account (where the ALB lives).
+        // DNS validation records go to the CentralAuthDomain zone (possibly cross-account).
 
-        var cert = new AcmCertificate($"{prefix}-wildcard-cert", new AcmCertificateArgs
+        var cert = new AcmCertificate($"{prefix}-auth-cert", new AcmCertificateArgs
         {
-            DomainName = config.SystemDomain,
+            DomainName = config.CentralAuthDomain,
             SubjectAlternativeNames =
             {
-                $"*.{config.SystemDomain}",
-                $"*.shop.{config.SystemDomain}",
+                $"*.{config.CentralAuthDomain}",
             },
             ValidationMethod = "DNS",
-            Tags = Tags(config, "wildcard-cert"),
+            Tags = Tags(config, "auth-cert"),
         }, opts);
 
-        // DNS validation records in the public hosted zone
+        // DNS validation record — written to the CentralAuthDomain zone (may be cross-account)
         var validationRecord = new Route53Record($"{prefix}-cert-validation", new Route53RecordArgs
         {
-            ZoneId = publicZone.Apply(z => z.ZoneId),
+            ZoneId = centralAuthZone.Apply(z => z.ZoneId),
             Name = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordName!),
             Type = cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordType!),
             Records = { cert.DomainValidationOptions.Apply(o => o[0].ResourceRecordValue!) },
             Ttl = 300,
             AllowOverwrite = true,
-        }, opts);
-
-        // shop.{domain} validation record (index 1 — distinct CNAME for *.shop.{domain})
-        var shopValidationRecord = new Route53Record($"{prefix}-cert-validation-shop", new Route53RecordArgs
-        {
-            ZoneId = publicZone.Apply(z => z.ZoneId),
-            Name = cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordName! : o[0].ResourceRecordName!),
-            Type = cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordType! : o[0].ResourceRecordType!),
-            Records = { cert.DomainValidationOptions.Apply(o => o.Length > 1 ? o[1].ResourceRecordValue! : o[0].ResourceRecordValue!) },
-            Ttl = 300,
-            AllowOverwrite = true,
-        }, opts);
+        }, sharedOpts);
 
         var certValidation = new CertificateValidation($"{prefix}-cert-validated", new CertificateValidationArgs
         {
@@ -502,7 +509,6 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             ValidationRecordFqdns =
             {
                 validationRecord.Fqdn,
-                shopValidationRecord.Fqdn,
             },
         }, opts);
 
@@ -543,46 +549,50 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             },
         }, opts);
 
-        // WebFinger endpoint — Tailscale OIDC discovery (RFC 7033)
-        // Returns the Keycloak OIDC issuer URL for the adminsauth realm in the shared-services account.
-        var webFingerJson = $@"{{""subject"":""acct:tailscale@{config.SystemDomain}"",""links"":[{{""rel"":""http://openid.net/specs/connect/1.0/issuer"",""href"":""https://{config.CentralAuthDomain}/realms/adminsauth""}}]}}";
-
-        new ListenerRule($"{prefix}-webfinger", new ListenerRuleArgs
+        // WebFinger endpoint — only on the shared-services ALB where
+        // CentralAuthDomain DNS actually points. Per-system ALBs don't receive
+        // WebFinger traffic (CentralAuthDomain resolves to the shared ALB).
+        if (!isCrossAccount)
         {
-            ListenerArn = httpsListener.Arn,
-            Priority = 2,
-            Conditions =
+            var webFingerJson = $@"{{""subject"":""acct:tailscale@{config.CentralAuthDomain}"",""links"":[{{""rel"":""http://openid.net/specs/connect/1.0/issuer"",""href"":""https://{config.CentralAuthDomain}/realms/adminsauth""}}]}}";
+
+            new ListenerRule($"{prefix}-webfinger", new ListenerRuleArgs
             {
-                new ListenerRuleConditionArgs
+                ListenerArn = httpsListener.Arn,
+                Priority = 2,
+                Conditions =
                 {
-                    HostHeader = new ListenerRuleConditionHostHeaderArgs
+                    new ListenerRuleConditionArgs
                     {
-                        Values = { config.SystemDomain },
+                        HostHeader = new ListenerRuleConditionHostHeaderArgs
+                        {
+                            Values = { config.CentralAuthDomain },
+                        },
+                    },
+                    new ListenerRuleConditionArgs
+                    {
+                        PathPattern = new ListenerRuleConditionPathPatternArgs
+                        {
+                            Values = { "/.well-known/webfinger" },
+                        },
                     },
                 },
-                new ListenerRuleConditionArgs
+                Actions =
                 {
-                    PathPattern = new ListenerRuleConditionPathPatternArgs
+                    new ListenerRuleActionArgs
                     {
-                        Values = { "/.well-known/webfinger" },
+                        Type = "fixed-response",
+                        FixedResponse = new ListenerRuleActionFixedResponseArgs
+                        {
+                            StatusCode = "200",
+                            ContentType = "application/json",
+                            MessageBody = webFingerJson,
+                        },
                     },
                 },
-            },
-            Actions =
-            {
-                new ListenerRuleActionArgs
-                {
-                    Type = "fixed-response",
-                    FixedResponse = new ListenerRuleActionFixedResponseArgs
-                    {
-                        StatusCode = "200",
-                        ContentType = "application/json",
-                        MessageBody = webFingerJson,
-                    },
-                },
-            },
-            Tags = Tags(config, "webfinger-rule"),
-        }, opts);
+                Tags = Tags(config, "webfinger-rule"),
+            }, opts);
+        }
 
         // HTTP -> HTTPS redirect
         new Listener($"{prefix}-http-listener", new ListenerArgs
@@ -748,48 +758,18 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         // =====================================================================
         // PUBLIC DNS RECORDS
         // =====================================================================
+        // Per-tenant public DNS (origin.{RootDomain}, etc.) is created by
+        // AwsTenantDnsAndCertComponent. Foundation only creates auth DNS
+        // if CentralAuthDomain's zone is in this account.
 
-        new Route53Record($"{prefix}-dns-origin", new Route53RecordArgs
-        {
-            ZoneId = publicZone.Apply(z => z.ZoneId),
-            Name = $"origin.{config.SystemDomain}",
-            Type = "A",
-            Aliases =
-            {
-                new RecordAliasArgs
-                {
-                    Name = publicAlb.DnsName,
-                    ZoneId = publicAlb.ZoneId,
-                    EvaluateTargetHealth = true,
-                },
-            },
-        }, opts);
-
-        // Apex domain — needed for WebFinger (Tailscale OIDC discovery)
-        new Route53Record($"{prefix}-dns-root", new Route53RecordArgs
-        {
-            ZoneId = publicZone.Apply(z => z.ZoneId),
-            Name = config.SystemDomain,
-            Type = "A",
-            Aliases =
-            {
-                new RecordAliasArgs
-                {
-                    Name = publicAlb.DnsName,
-                    ZoneId = publicAlb.ZoneId,
-                    EvaluateTargetHealth = true,
-                },
-            },
-        }, opts);
-
-        // Auth DNS records — only for shared-services deployment where Keycloak is in the same account.
-        // For per-system deployments, auth.{domain} is in the shared account, not here.
-        if (!string.IsNullOrEmpty(config.CentralAuthDomain)
-            && config.CentralAuthDomain.EndsWith(config.SystemDomain))
+        // Auth DNS record — only for the shared-services deployment where Keycloak
+        // is behind this ALB. Per-system deployments must NOT create this record
+        // (the shared deployment already points CentralAuthDomain → the shared ALB).
+        if (!isCrossAccount)
         {
             new Route53Record($"{prefix}-dns-auth", new Route53RecordArgs
             {
-                ZoneId = publicZone.Apply(z => z.ZoneId),
+                ZoneId = centralAuthZone.Apply(z => z.ZoneId),
                 Name = config.CentralAuthDomain,
                 Type = "A",
                 Aliases =
@@ -801,6 +781,7 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
                         EvaluateTargetHealth = true,
                     },
                 },
+                AllowOverwrite = true,
             }, opts);
         }
 
@@ -811,7 +792,7 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         new Route53Record($"{prefix}-private-dns-root", new Route53RecordArgs
         {
             ZoneId = privateZone.ZoneId,
-            Name = config.SystemDomain,
+            Name = $"{config.SystemKey}.private",
             Type = "A",
             Aliases =
             {
@@ -824,16 +805,13 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             },
         }, opts);
 
-        // auth.{domain} in private zone — resolves to internal ALB via VPC DNS.
-        // When on VPN, auth.{domain} resolves here instead of the public ALB,
-        // so the admin console at auth.{domain}/admin/ and its OIDC login flow
-        // stay same-origin (avoids 3rd-party cookie issues with modern browsers).
-        // From the internet, auth.{domain} still resolves to the public ALB
-        // where /admin/* is blocked at priority 5.
+        // auth.{systemKey}.internal in private zone — resolves to internal ALB via VPC DNS.
+        // When on VPN, auth traffic resolves here instead of the public ALB,
+        // so the admin console OIDC login flow stays same-origin.
         new Route53Record($"{prefix}-private-dns-auth", new Route53RecordArgs
         {
             ZoneId = privateZone.ZoneId,
-            Name = $"auth.{config.SystemDomain}",
+            Name = $"auth.{config.SystemKey}.private",
             Type = "A",
             Aliases =
             {
@@ -861,11 +839,12 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
                 .Apply(ids => ids.ToImmutableArray()),
             PublicSubnetIds = Output.All(publicSubnet1.Id, publicSubnet2.Id)
                 .Apply(ids => ids.ToImmutableArray()),
-            PublicDnsZoneId = publicZone.Apply(z => z.ZoneId),
+            PublicDnsZoneId = centralAuthZone.Apply(z => z.ZoneId),
             PrivateDnsZoneId = privateZone.ZoneId,
             PublicAlbArn = publicAlb.Arn,
             InternalAlbArn = internalAlb.Arn,
             PublicAlbDns = publicAlb.DnsName,
+            PublicAlbZoneId = publicAlb.ZoneId,
             InternalAlbDns = internalAlb.DnsName,
             InternalAlbZoneId = internalAlb.ZoneId,
             HttpsListenerArn = httpsListener.Arn,
