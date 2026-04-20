@@ -250,8 +250,8 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             }),
         });
 
-        // S3 write access for Explore Pages publish (SmartStore → S3 assets bucket)
-        var assetsBucketName = $"{sk}-{tk}-{suffix}-{env}-assets";
+        // S3 write access for Explore Pages publish (SmartStore → explore S3 bucket)
+        var exploreBucketName = $"{sk}-{tk}--webapp-explore-{suffix}";
         taskRoleInlinePolicies.Add(new RoleInlinePolicyArgs
         {
             Name = "S3ExplorePublish",
@@ -261,8 +261,8 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     ""Effect"": ""Allow"",
                     ""Action"": [""s3:PutObject"", ""s3:GetObject"", ""s3:ListBucket""],
                     ""Resource"": [
-                        ""arn:aws:s3:::{assetsBucketName}"",
-                        ""arn:aws:s3:::{assetsBucketName}/wwwroot/explore/*""
+                        ""arn:aws:s3:::{exploreBucketName}"",
+                        ""arn:aws:s3:::{exploreBucketName}/wwwroot/explore/*""
                     ]
                 }}]
             }}",
@@ -560,7 +560,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "LZ_SERVICE_NAME", value = serviceName },
                     new { name = "AWS_REGION", value = region },
                     new { name = "APPHOST_DATA_PATH", value = "/app" },
-                    new { name = "LZ_ASSETS_BUCKET", value = $"{sk}-{tk}-{suffix}-{env}-assets" },
+                    new { name = "LZ_EXPLORE_BUCKET", value = $"{sk}-{tk}--webapp-explore-{suffix}" },
                 };
 
                 if (definition.RequiresDatabase)

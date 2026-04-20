@@ -472,7 +472,8 @@ public class SystemDeployment
             var cdn = _factory.CreateTenantCdn();
             var cdnOutputs = cdn.Deploy(tenantConfig, foundation.Compute);
             exports[$"{tenantKey}_distributionId"] = cdnOutputs.DistributionId;
-            exports[$"{tenantKey}_assetsBucketId"] = cdnOutputs.AssetsBucketId;
+            exports[$"{tenantKey}_webappBucketId"] = cdnOutputs.WebappBucketId;
+            exports[$"{tenantKey}_exploreBucketId"] = cdnOutputs.ExploreBucketId;
 
             // Tenant DNS + ALB certificates (SNI) + all public DNS records.
             // Runs AFTER CDN so it can create CloudFront alias records.

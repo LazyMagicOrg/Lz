@@ -287,7 +287,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 if (!string.IsNullOrEmpty(sub.Value.SubDomain))
                     CreateAliasRecord($"{prefix}-cf-alias-{sub.Key}", zoneId, sub.Value.SubDomain, distribution);
 
-        return new AwsCloudFrontOutputs(distribution.Id, distribution.DomainName, assetsBucket.Id);
+        return new AwsCloudFrontOutputs(distribution.Id, distribution.DomainName, assetsBucket.Id, assetsBucket.Id);
     }
 
     /// <summary>

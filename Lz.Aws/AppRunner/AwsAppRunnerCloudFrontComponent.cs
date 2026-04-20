@@ -352,7 +352,8 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
         return new AwsCloudFrontOutputs(
             distributionId: distribution.Id,
             domainName: distribution.DomainName,
-            assetsBucketId: assetsBucket.Id);
+            webappBucketId: assetsBucket.Id,
+            exploreBucketId: assetsBucket.Id);
     }
 
     /// <summary>

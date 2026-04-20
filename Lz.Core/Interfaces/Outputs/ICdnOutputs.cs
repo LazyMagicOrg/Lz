@@ -6,5 +6,6 @@ public interface ICdnOutputs
 {
     Output<string> DistributionId { get; }
     Output<string> DomainName { get; }
-    Output<string> AssetsBucketId { get; }
+    Output<string> WebappBucketId { get; }
+    Output<string> ExploreBucketId { get; }
 }

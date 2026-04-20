@@ -41,11 +41,11 @@ public class AwsParkManager
     {
         var prefix = $"{_systemKey}-{tenantKey}";
         var kvsName = $"{prefix}-kvs";
-        var assetsBucketName = $"{_systemKey}-{tenantKey}-{tenantSuffix}-{env}-assets";
+        var parkBucketName = $"{_systemKey}-{tenantKey}--webapp-park-{tenantSuffix}";
 
-        // 1. Upload park page to assets S3 bucket at wwwroot/park/
-        Console.WriteLine($"  Uploading park page to s3://{assetsBucketName}/wwwroot/park/...");
-        await UploadParkPageAsync(assetsBucketName, parkPageFolder);
+        // 1. Upload park page to park S3 bucket at wwwroot/park/
+        Console.WriteLine($"  Uploading park page to s3://{parkBucketName}/wwwroot/park/...");
+        await UploadParkPageAsync(parkBucketName, parkPageFolder);
 
         // 2. Find the KVS and set parked:{domain}=true for each domain
         using var cfClient = CreateCloudFrontClient();
