@@ -70,6 +70,8 @@ class Program
         RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
+        RegisterGetEnvCommand(rootCommand);
+        RegisterUtilCommand(rootCommand);
 
         // Plugin-specific commands (e.g., seed)
         plugin?.RegisterCommands(rootCommand);
@@ -464,8 +466,8 @@ class Program
                     }
                     else
                     {
-                        // ECS (Monro) convention: {sk}-{tk}-{suffix}-{env}-assets
-                        bucketName = $"{config.SystemKey}-{tk}-{suffix}-{config.Environment}-assets";
+                        // ECS convention: {sk}-{tk}-{stk}-webapp-{name}-{suffix}
+                        bucketName = $"{config.SystemKey}-{tk}--webapp-storeapp-{suffix}";
                     }
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region ?? "us-west-2";
@@ -991,6 +993,214 @@ class Program
             _ => throw new ArgumentException(
                 $"Unsupported platform/topology: {config.Platform}/{config.Topology}")
         };
+    }
+
+    // ---------------------------------------------------------------
+    // getenv — print the discovered environment to stdout.
+    // Intended for consumption by build systems (e.g., MSBuild Exec) that
+    // want to pick up the folder-based env without reimplementing the rule.
+    // Prints bare value to stdout: "dev" | "test" | "prod".
+    // ---------------------------------------------------------------
+
+    private static void RegisterGetEnvCommand(RootCommand root)
+    {
+        var cmd = new Command("getenv",
+            "Print the environment (dev|test|prod) discovered from the current folder hierarchy.");
+
+        cmd.SetHandler(() =>
+        {
+            try
+            {
+                var env = ConfigResolver.ResolveEnvironment();
+                Console.Out.WriteLine(env);
+                Environment.ExitCode = 0;
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+            }
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // util — grouping for general-purpose build helpers.
+    // ---------------------------------------------------------------
+
+    private static void RegisterUtilCommand(RootCommand root)
+    {
+        var util = new Command("util", "General-purpose build helpers.");
+        RegisterUtilMergeJsCommand(util);
+        root.AddCommand(util);
+    }
+
+    // ---------------------------------------------------------------
+    // util merge js <output> <input1> [<input2> ...]
+    //
+    // Merges N ES-module files of the exact form
+    //   export const <name> = { ... };
+    // into a single file with the same export name. Later inputs override
+    // earlier inputs on key collisions (shallow merge).
+    //
+    // Contract:
+    //   - Each input must have a SINGLE `export const <name> = {...};` statement.
+    //   - All inputs must use the same export name.
+    //   - Object bodies must be strict JSON — QUOTED keys, no trailing commas.
+    //     (Rationale: keeps the parser trivial and produces unambiguous output.)
+    //   - No nested merge: top-level keys only. If a key's value is an object,
+    //     the later input's object REPLACES the earlier one in full.
+    // ---------------------------------------------------------------
+
+    private static void RegisterUtilMergeJsCommand(Command parent)
+    {
+        var outputArg = new Argument<string>("output", "Path to write the merged file.");
+        var inputsArg = new Argument<string[]>("inputs", "Two or more input files to merge, in override order (rightmost wins).")
+        {
+            Arity = ArgumentArity.OneOrMore
+        };
+
+        var cmd = new Command("merge", "Merge JS config files.");
+        var js = new Command("js",
+            "Merge ES-module files of the form `export const X = {...};` — rightmost input wins on key collision.");
+        js.AddArgument(outputArg);
+        js.AddArgument(inputsArg);
+
+        js.SetHandler((string output, string[] inputs) =>
+        {
+            try
+            {
+                MergeJs(output, inputs);
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"lz util merge js: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, outputArg, inputsArg);
+
+        cmd.AddCommand(js);
+        parent.AddCommand(cmd);
+    }
+
+    // Core merge implementation — public-ish for potential future use.
+    private static void MergeJs(string output, string[] inputs)
+    {
+        if (inputs == null || inputs.Length == 0)
+            throw new ArgumentException("At least one input file is required.");
+
+        // Locate `export const <name> = ` via regex; then find the matching
+        // closing brace by counting depth. The regex alone can't bound the
+        // body reliably when files contain leading comments or strings with
+        // { } characters.
+        var headerPattern = new System.Text.RegularExpressions.Regex(
+            @"export\s+const\s+(?<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\{");
+
+        string? exportName = null;
+        var merged = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
+
+        foreach (var path in inputs)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Input not found: {path}");
+
+            var text = File.ReadAllText(path);
+            var match = headerPattern.Match(text);
+            if (!match.Success)
+                throw new InvalidDataException(
+                    $"{path}: no `export const X = {{` found (single top-level export required).");
+
+            var secondMatch = headerPattern.Match(text, match.Index + match.Length);
+            if (secondMatch.Success)
+                throw new InvalidDataException(
+                    $"{path}: multiple `export const` statements found — only one is allowed.");
+
+            var name = match.Groups["name"].Value;
+            if (exportName == null) exportName = name;
+            else if (name != exportName)
+                throw new InvalidDataException(
+                    $"{path}: export name '{name}' does not match '{exportName}' from earlier input(s).");
+
+            // Find the matching `}` by counting braces while tracking string
+            // literals (both " and ') so braces inside strings don't confuse.
+            var openIdx = match.Index + match.Length - 1; // position of the `{`
+            var closeIdx = FindMatchingBrace(text, openIdx, path);
+            var body = text.Substring(openIdx, closeIdx - openIdx + 1);
+
+            System.Text.Json.JsonDocument doc;
+            try
+            {
+                doc = System.Text.Json.JsonDocument.Parse(body,
+                    new System.Text.Json.JsonDocumentOptions
+                    {
+                        CommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+                        AllowTrailingCommas = true,
+                    });
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                throw new InvalidDataException(
+                    $"{path}: object body is not valid JSON (QUOTED keys required, double-quoted strings only). {ex.Message}");
+            }
+
+            using (doc)
+            {
+                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                    throw new InvalidDataException($"{path}: export must be an object literal.");
+
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                    merged[prop.Name] = prop.Value.Clone();
+            }
+        }
+
+        // Serialize the merged object with stable indentation.
+        var opts = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+        var bodyJson = System.Text.Json.JsonSerializer.Serialize(merged, opts);
+
+        var header =
+            $"// Generated by `lz util merge js` at {DateTime.UtcNow:O}\n" +
+            $"// Inputs: {string.Join(", ", inputs.Select(Path.GetFileName))}\n" +
+            $"// DO NOT EDIT — regenerate via the build system.\n";
+        var content = header + $"export const {exportName} = {bodyJson};\n";
+        File.WriteAllText(output, content);
+
+        Console.Out.WriteLine($"Wrote {output} (export {exportName}, {merged.Count} keys)");
+    }
+
+    // Given a text with `{` at openIdx, return the index of the matching
+    // `}`. Counts brace depth while skipping over string literals so braces
+    // inside strings don't affect the count.
+    private static int FindMatchingBrace(string text, int openIdx, string path)
+    {
+        if (text[openIdx] != '{')
+            throw new InvalidOperationException($"Internal: expected '{{' at index {openIdx}.");
+
+        int depth = 0;
+        for (int i = openIdx; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c == '"' || c == '\'')
+            {
+                // Skip to matching quote, honouring backslash escapes.
+                char quote = c;
+                i++;
+                while (i < text.Length && text[i] != quote)
+                {
+                    if (text[i] == '\\') i++; // skip next char
+                    i++;
+                }
+                continue;
+            }
+            if (c == '{') depth++;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        throw new InvalidDataException($"{path}: unterminated object literal (no matching closing brace).");
     }
 
     private static void RequirePlugin(ILzPlugin? plugin, string commandName)

@@ -41,7 +41,14 @@ public class WebappDeployer
         Console.ResetColor();
 
         // 2. dotnet publish (quiet — only show errors)
-        await RunAsync("dotnet", $"publish \"{csprojPath}\" --configuration Release --verbosity quiet");
+        // Pass AppEnvironment through so build-time config generation
+        // (see BlazorUI.csproj's GenerateAppConfig target) picks the right
+        // overlay file. The csproj can still resolve env via `lz getenv`
+        // when invoked independently, but passing it explicitly here makes
+        // the publish command self-documenting in logs and CI output.
+        await RunAsync("dotnet",
+            $"publish \"{csprojPath}\" --configuration Release --verbosity quiet " +
+            $"-p:AppEnvironment={environment}");
 
         // 3. Find the most recent publish/wwwroot output
         var publishBasePath = Path.Combine(webappFolder, projectFolder, "bin", "Release");

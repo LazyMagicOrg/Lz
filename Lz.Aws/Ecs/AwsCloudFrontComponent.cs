@@ -134,26 +134,19 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         var certificateId = certValidation.CertificateArn;
 
         // =====================================================================
-        // S3 BUCKET FOR STATIC ASSETS
+        // S3 BUCKETS — webapp, explore, park
         // =====================================================================
+        // Naming: {sk}-{tk}-{stk}-webapp-{name}-{suffix}
+        // With empty subtenantkey, double dash: med-monro--webapp-storeapp-4085-b82b
 
-        var bucketName = $"{prefix}-{suffix}-{env}-assets";
-        var assetsBucket = new BucketV2($"{prefix}-assets-bucket", new BucketV2Args
-        {
-            Bucket = bucketName,
-            ForceDestroy = env == "dev",
-            Tags = Tags(sk, tk),
-        }, new CustomResourceOptions { Parent = this });
+        var stk = ""; // subtenantkey — empty for now (double dash in bucket name)
+        var webappBucketName = $"{prefix}-{stk}-webapp-storeapp-{suffix}";
+        var exploreBucketName = $"{prefix}-{stk}-webapp-explore-{suffix}";
+        var parkBucketName = $"{prefix}-{stk}-webapp-park-{suffix}";
 
-        // Block all public access — CloudFront uses OAC
-        var publicAccessBlock = new BucketPublicAccessBlock($"{prefix}-assets-block", new BucketPublicAccessBlockArgs
-        {
-            Bucket = assetsBucket.Id,
-            BlockPublicAcls = true,
-            BlockPublicPolicy = true,
-            IgnorePublicAcls = true,
-            RestrictPublicBuckets = true,
-        }, new CustomResourceOptions { Parent = this });
+        var webappBucket = CreateBucket(prefix, "webapp", webappBucketName, env, sk, tk);
+        var exploreBucket = CreateBucket(prefix, "explore", exploreBucketName, env, sk, tk);
+        var parkBucket = CreateBucket(prefix, "park", parkBucketName, env, sk, tk);
 
         // =====================================================================
         // CLOUDFRONT KEYVALUESTORE
@@ -211,8 +204,34 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // region-pref cookie and no ?region= param, redirects to
         // /AppApi/util/detect-region to geo-detect before the WASM app loads.
 
-        var viewerRequestFn = CreateViewerRequestFunction(prefix, domain, tenantConfig, kvs.Arn);
+        var viewerRequestFn = CreateViewerRequestFunction(
+            prefix, domain, tenantConfig, kvs.Arn,
+            exploreBucket.BucketRegionalDomainName,
+            parkBucket.BucketRegionalDomainName);
+        var viewerResponseFn = CreateViewerResponseFunction(prefix, tenantConfig.ConfigDirectory);
         var exploreRewriteFn = CreateExploreRewriteFunction(prefix, tenantConfig.ConfigDirectory);
+
+        // Build default-behavior function associations: viewer-request (auth gate,
+        // park, region detection) + optional viewer-response (e.g. inject
+        // Service-Worker-Allowed header for /service-worker.js). Both are
+        // attached to the default behavior which targets the webapp bucket.
+        var defaultFunctionAssociations = new List<DistributionDefaultCacheBehaviorFunctionAssociationArgs>();
+        if (viewerRequestFn != null)
+        {
+            defaultFunctionAssociations.Add(new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+            {
+                EventType = "viewer-request",
+                FunctionArn = viewerRequestFn.Arn,
+            });
+        }
+        if (viewerResponseFn != null)
+        {
+            defaultFunctionAssociations.Add(new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+            {
+                EventType = "viewer-response",
+                FunctionArn = viewerResponseFn.Arn,
+            });
+        }
 
         var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
         {
@@ -223,15 +242,15 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
 
-            // S3 origin for static assets + ALB origin for API/media paths
+            // S3 origins for webapp/explore/park + ALB origin for API/media paths
             // When PrivateLink is unavailable (cross-region), a separate origin
             // routes auth paths directly to the shared Keycloak public ALB.
-            Origins = BuildOrigins(tenantConfig, assetsBucket, oac, domain),
+            Origins = BuildOrigins(tenantConfig, webappBucket, exploreBucket, parkBucket, oac, domain),
 
-            // Default behavior → S3 (WASM app) with optional viewer-request function
+            // Default behavior → S3 webapp bucket (CF function switches origin for park/landing)
             DefaultCacheBehavior = new DistributionDefaultCacheBehaviorArgs
             {
-                TargetOriginId = "s3-assets",
+                TargetOriginId = "s3-webapp",
                 ViewerProtocolPolicy = "redirect-to-https",
                 AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                 CachedMethods = { "GET", "HEAD" },
@@ -239,16 +258,7 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 CachePolicyId = env == "dev"
                     ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"        // CachingDisabled (dev)
                     : "658327ea-f89d-4fab-a63d-7e88639e58f6",        // CachingOptimized
-                FunctionAssociations = viewerRequestFn != null
-                    ? new[]
-                    {
-                        new DistributionDefaultCacheBehaviorFunctionAssociationArgs
-                        {
-                            EventType = "viewer-request",
-                            FunctionArn = viewerRequestFn.Arn,
-                        },
-                    }
-                    : Array.Empty<DistributionDefaultCacheBehaviorFunctionAssociationArgs>(),
+                FunctionAssociations = defaultFunctionAssociations.ToArray(),
             },
 
             // Auth behaviors → Keycloak (via PrivateLink through ALB, or direct to shared ALB)
@@ -341,13 +351,13 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",        // CachingDisabled always
                     OriginRequestPolicyId = "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
                 },
-                // Published explore pages (crawlable) → S3 assets origin
+                // Published explore pages (crawlable) → S3 explore origin
                 // Uses a dedicated rewrite function for clean directory-style URLs
                 // No SPA fallback — missing pages should 404, not return Blazor index.html
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/explore/*",
-                    TargetOriginId = "s3-assets",
+                    TargetOriginId = "s3-explore",
                     ViewerProtocolPolicy = "redirect-to-https",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
@@ -429,31 +439,12 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
-        // S3 BUCKET POLICY — allow CloudFront OAC access
+        // S3 BUCKET POLICIES — allow CloudFront OAC access to all three buckets
         // =====================================================================
 
-        var bucketPolicy = new BucketPolicy($"{prefix}-assets-policy", new BucketPolicyArgs
-        {
-            Bucket = assetsBucket.Id,
-            Policy = Output.Tuple(assetsBucket.Arn, distribution.Arn).Apply(t =>
-                $@"{{
-                    ""Version"": ""2012-10-17"",
-                    ""Statement"": [{{
-                        ""Sid"": ""AllowCloudFrontServicePrincipal"",
-                        ""Effect"": ""Allow"",
-                        ""Principal"": {{
-                            ""Service"": ""cloudfront.amazonaws.com""
-                        }},
-                        ""Action"": ""s3:GetObject"",
-                        ""Resource"": ""{t.Item1}/*"",
-                        ""Condition"": {{
-                            ""StringEquals"": {{
-                                ""AWS:SourceArn"": ""{t.Item2}""
-                            }}
-                        }}
-                    }}]
-                }}"),
-        }, new CustomResourceOptions { Parent = this });
+        CreateBucketPolicy(prefix, "webapp", webappBucket, distribution);
+        CreateBucketPolicy(prefix, "explore", exploreBucket, distribution);
+        CreateBucketPolicy(prefix, "park", parkBucket, distribution);
 
         // DNS records are managed by AwsTenantDnsAndCertComponent (single owner
         // for all tenant DNS records). This avoids resource identity conflicts when
@@ -462,16 +453,19 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         return new AwsCloudFrontOutputs(
             distributionId: distribution.Id,
             domainName: distribution.DomainName,
-            assetsBucketId: assetsBucket.Id);
+            webappBucketId: webappBucket.Id,
+            exploreBucketId: exploreBucket.Id);
     }
 
     /// <summary>
-    /// Builds the list of CloudFront origins: S3 (WASM assets), ALB (API),
+    /// Builds the list of CloudFront origins: S3 webapp/explore/park, ALB (API),
     /// and shared-auth (Keycloak on shared public ALB).
     /// </summary>
     private static InputList<DistributionOriginArgs> BuildOrigins(
         TenantConfig tenantConfig,
-        BucketV2 assetsBucket,
+        BucketV2 webappBucket,
+        BucketV2 exploreBucket,
+        BucketV2 parkBucket,
         OriginAccessControl oac,
         string domain)
     {
@@ -479,8 +473,22 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         {
             new DistributionOriginArgs
             {
-                OriginId = "s3-assets",
-                DomainName = assetsBucket.BucketRegionalDomainName,
+                OriginId = "s3-webapp",
+                DomainName = webappBucket.BucketRegionalDomainName,
+                OriginAccessControlId = oac.Id,
+                OriginPath = "/wwwroot",
+            },
+            new DistributionOriginArgs
+            {
+                OriginId = "s3-explore",
+                DomainName = exploreBucket.BucketRegionalDomainName,
+                OriginAccessControlId = oac.Id,
+                OriginPath = "/wwwroot",
+            },
+            new DistributionOriginArgs
+            {
+                OriginId = "s3-park",
+                DomainName = parkBucket.BucketRegionalDomainName,
                 OriginAccessControlId = oac.Id,
                 OriginPath = "/wwwroot",
             },
@@ -529,7 +537,8 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
     /// Returns null if the JS file doesn't exist (graceful fallback).
     /// </summary>
     private Pulumi.Aws.CloudFront.Function? CreateViewerRequestFunction(
-        string prefix, string domain, TenantConfig tenantConfig, Output<string> kvsArn)
+        string prefix, string domain, TenantConfig tenantConfig, Output<string> kvsArn,
+        Output<string> exploreBucketDomain, Output<string> parkBucketDomain)
     {
         var jsPath = Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFViewerRequest.js");
         if (!File.Exists(jsPath))
@@ -545,16 +554,19 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             ? "[" + string.Join(",", tenantConfig.LegacyDomains.Select(d => $"\"{d}\"")) + "]"
             : "[]";
 
-        // Replace ${KvsId} placeholder with the KVS UUID (extracted from ARN).
-        // cf.kvs() requires the UUID, not the full ARN — using the ARN causes KVSNamespaceNotFound.
-        // See: https://github.com/pulumi/pulumi-aws/issues/3917
-        var jsCode = kvsArn.Apply(arn =>
+        // Replace template placeholders with actual values.
+        // ${KvsId} uses UUID extracted from ARN — cf.kvs() requires UUID, not full ARN.
+        // ${ExploreBucketDomain} and ${ParkBucketDomain} are S3 regional domain names
+        // used by cf.updateRequestOrigin() to switch origins dynamically.
+        var jsCode = Output.Tuple(kvsArn, exploreBucketDomain, parkBucketDomain).Apply(t =>
         {
-            var kvsUuid = arn.Contains('/') ? arn.Split('/').Last() : arn;
+            var kvsUuid = t.Item1.Contains('/') ? t.Item1.Split('/').Last() : t.Item1;
             var code = File.ReadAllText(jsPath)
                 .Replace("${RootDomainParameter}", domain)
                 .Replace("${LegacyDomainsJson}", legacyDomainsJson)
-                .Replace("${KvsId}", kvsUuid);
+                .Replace("${KvsId}", kvsUuid)
+                .Replace("${ExploreBucketDomain}", t.Item2)
+                .Replace("${ParkBucketDomain}", t.Item3);
 
             var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(code);
             const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
@@ -576,6 +588,35 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                 Comment = comment,
                 Publish = true,
                 KeyValueStoreAssociations = { kvsArn },
+            }, new CustomResourceOptions { Parent = this });
+    }
+
+    private Pulumi.Aws.CloudFront.Function? CreateViewerResponseFunction(
+        string prefix, string configDirectory)
+    {
+        var jsPath = Path.Combine(configDirectory, "CloudFront", "CFViewerResponse.js");
+        if (!File.Exists(jsPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Info: CloudFront viewer-response function not found at {jsPath} — skipping response header injection.");
+            Console.ResetColor();
+            return null;
+        }
+
+        var jsCode = File.ReadAllText(jsPath);
+        var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(jsCode);
+        const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
+        if (sizeBytes > maxBytes)
+            throw new InvalidOperationException(
+                $"CloudFront function 'CFViewerResponse.js' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit.");
+
+        return new Pulumi.Aws.CloudFront.Function(
+            $"{prefix}-viewer-response", new FunctionArgs
+            {
+                Runtime = "cloudfront-js-2.0",
+                Code = jsCode,
+                Comment = $"Response header injection for {prefix}",
+                Publish = true,
             }, new CustomResourceOptions { Parent = this });
     }
 
@@ -602,6 +643,59 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             }, new CustomResourceOptions { Parent = this });
     }
 
+    /// <summary>
+    /// Creates an S3 bucket with public access blocked (CloudFront uses OAC).
+    /// </summary>
+    private BucketV2 CreateBucket(string prefix, string label, string bucketName, string env, string sk, string tk)
+    {
+        var bucket = new BucketV2($"{prefix}-{label}-bucket", new BucketV2Args
+        {
+            Bucket = bucketName,
+            ForceDestroy = env == "dev",
+            Tags = Tags(sk, tk),
+        }, new CustomResourceOptions { Parent = this });
+
+        new BucketPublicAccessBlock($"{prefix}-{label}-block", new BucketPublicAccessBlockArgs
+        {
+            Bucket = bucket.Id,
+            BlockPublicAcls = true,
+            BlockPublicPolicy = true,
+            IgnorePublicAcls = true,
+            RestrictPublicBuckets = true,
+        }, new CustomResourceOptions { Parent = this });
+
+        return bucket;
+    }
+
+    /// <summary>
+    /// Creates an S3 bucket policy allowing CloudFront OAC access.
+    /// </summary>
+    private void CreateBucketPolicy(string prefix, string label, BucketV2 bucket, Distribution distribution)
+    {
+        new BucketPolicy($"{prefix}-{label}-policy", new BucketPolicyArgs
+        {
+            Bucket = bucket.Id,
+            Policy = Output.Tuple(bucket.Arn, distribution.Arn).Apply(t =>
+                $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Sid"": ""AllowCloudFrontServicePrincipal"",
+                        ""Effect"": ""Allow"",
+                        ""Principal"": {{
+                            ""Service"": ""cloudfront.amazonaws.com""
+                        }},
+                        ""Action"": ""s3:GetObject"",
+                        ""Resource"": ""{t.Item1}/*"",
+                        ""Condition"": {{
+                            ""StringEquals"": {{
+                                ""AWS:SourceArn"": ""{t.Item2}""
+                            }}
+                        }}
+                    }}]
+                }}"),
+        }, new CustomResourceOptions { Parent = this });
+    }
+
     private static InputMap<string> Tags(string systemKey, string tenantKey) => new()
     {
         { "System", systemKey },
@@ -615,15 +709,18 @@ internal class AwsCloudFrontOutputs : ICdnOutputs
 {
     public Output<string> DistributionId { get; }
     public Output<string> DomainName { get; }
-    public Output<string> AssetsBucketId { get; }
+    public Output<string> WebappBucketId { get; }
+    public Output<string> ExploreBucketId { get; }
 
     public AwsCloudFrontOutputs(
         Output<string> distributionId,
         Output<string> domainName,
-        Output<string> assetsBucketId)
+        Output<string> webappBucketId,
+        Output<string> exploreBucketId)
     {
         DistributionId = distributionId;
         DomainName = domainName;
-        AssetsBucketId = assetsBucketId;
+        WebappBucketId = webappBucketId;
+        ExploreBucketId = exploreBucketId;
     }
 }
