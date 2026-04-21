@@ -75,12 +75,12 @@ public class WebappDeployer
         // Ensure CloudFront OAC bucket policy exists (allow any CF distribution in account)
         await EnsureBucketPolicyAsync(bucketName, region, profile);
 
-        // 5. S3 sync
+        // 5. S3 sync with cache-control headers (prevents stale-cache issues
+        // for returning users — see SyncWithCacheControlAsync for details).
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Syncing to S3...");
         Console.ResetColor();
-        await RunAsync("aws",
-            $"s3 sync \"{publishPath}\" \"s3://{bucketName}/wwwroot\" --delete --quiet --region {region} {profileArg}");
+        await SyncWithCacheControlAsync(publishPath, bucketName, region, profileArg);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
@@ -161,12 +161,13 @@ public class WebappDeployer
         // Ensure CloudFront OAC bucket policy
         await EnsureBucketPolicyAsync(bucketName, region, profile);
 
-        // S3 sync — folder contents go to /wwwroot/ (matching CloudFront originPath)
+        // S3 sync with cache-control — folder contents go to /wwwroot/ (matching
+        // CloudFront originPath). SyncWithCacheControlAsync applies per-file
+        // cache-control to prevent stale-cache issues on returning users.
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Syncing to S3...");
         Console.ResetColor();
-        await RunAsync("aws",
-            $"s3 sync \"{sourceFolder}\" \"s3://{bucketName}/wwwroot\" --delete --quiet --region {region} {profileArg}");
+        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
@@ -242,6 +243,126 @@ public class WebappDeployer
     // ---------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Syncs the source folder to s3://{bucketName}/wwwroot with three passes
+    /// that apply appropriate Cache-Control headers per file category:
+    ///
+    ///   1) Full sync (--delete) with "public, max-age=3600" — baseline for
+    ///      all files; handles additions and removals.
+    ///   2) Override metadata on /_framework/* (except manifests) with
+    ///      "public, max-age=31536000, immutable" — these files are
+    ///      content-hashed, so they can be cached forever.
+    ///   3) Override metadata on manifest files (index.html, blazor.boot.json,
+    ///      blazor.webassembly.js, service-worker.js, etc.) with
+    ///      "no-cache, no-store, must-revalidate" — these files change every
+    ///      deploy and reference all other fingerprinted files. They must
+    ///      always be fetched fresh, otherwise returning users get stale
+    ///      manifests that reference old asset hashes (or vice versa),
+    ///      causing errors like "Could not find 'checkIfLoaded'".
+    ///
+    /// Passes 2 and 3 use `aws s3 cp --metadata-directive REPLACE` with
+    /// source == destination, which performs a server-side metadata update
+    /// without re-uploading file content. This ensures correct metadata even
+    /// on files that weren't re-uploaded (e.g. unchanged static assets on a
+    /// bucket that was previously deployed without cache-control).
+    /// </summary>
+    private static async Task SyncWithCacheControlAsync(
+        string sourcePath,
+        string bucketName,
+        string region,
+        string profileArg)
+    {
+        var s3Root = $"s3://{bucketName}/wwwroot";
+
+        // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
+        // on all files. Subsequent passes override specific categories.
+        await RunAsync("aws",
+            $"s3 sync \"{sourcePath}\" \"{s3Root}\" --delete --quiet --region {region} {profileArg} " +
+            $"--cache-control \"public, max-age=3600\"");
+
+        // Pass 2: Override /_framework/* (except manifest files) with immutable
+        // long-lived cache. Content-hashed names make indefinite caching safe.
+        //
+        // CRITICAL: `--metadata-directive REPLACE` drops ALL unspecified metadata.
+        // Without `--content-type`, AWS defaults Content-Type to binary/octet-
+        // stream, which breaks browser loading (modules rejected by strict MIME
+        // check; .json rejected by parsers).
+        //
+        // AWS `s3 cp --recursive` can only set ONE --content-type per call, but
+        // _framework/ mixes binary (.dll→.wasm in .NET 9, .pdb, .dat, .blat)
+        // with .wasm runtime and .js loader files. Solved with three recursive
+        // passes — each overrides the previous for its matching pattern, AWS
+        // runs each server-side in bulk. Three API calls total, not per-file.
+        //   2a: baseline → application/octet-stream (covers binary blobs)
+        //   2b: *.wasm  → application/wasm
+        //   2c: *.js    → application/javascript (excludes the 2 JS manifests)
+        string frameworkRoot = $"\"{s3Root}/_framework/\" \"{s3Root}/_framework/\"";
+        string immutableCache = "--cache-control \"public, max-age=31536000, immutable\"";
+        string manifestExcludes =
+            "--exclude \"blazor.boot.json\" " +
+            "--exclude \"blazor.webassembly.js\" " +
+            "--exclude \"service-worker-assets.js\"";
+
+        // 2a — octet-stream baseline for everything non-manifest
+        await RunAsync("aws",
+            $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {immutableCache} " +
+            $"--content-type \"application/octet-stream\" " +
+            manifestExcludes);
+
+        // 2b — *.wasm override. Pattern can't match the .json/.js manifests.
+        await RunAsync("aws",
+            $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {immutableCache} " +
+            $"--content-type \"application/wasm\" " +
+            $"--exclude \"*\" --include \"*.wasm\"");
+
+        // 2c — *.js override, excluding the two JS manifests (handled by Pass 3).
+        await RunAsync("aws",
+            $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {immutableCache} " +
+            $"--content-type \"application/javascript\" " +
+            $"--exclude \"*\" --include \"*.js\" " +
+            $"--exclude \"blazor.webassembly.js\" " +
+            $"--exclude \"service-worker-assets.js\"");
+
+        // Pass 3: Override manifest files with no-cache. These change every
+        // deploy and reference all fingerprinted assets by hash. A stale
+        // manifest paired with fresh assets (or vice versa) causes hard-to-
+        // diagnose runtime errors. Always revalidate.
+        //
+        // Same `--content-type` requirement as Pass 2 — hardcoded per file
+        // because we know each one's type.
+        // Notes on paths:
+        //   service-worker-assets.js lives at root (the Blazor SDK emits it
+        //   there, not under _framework/).
+        //   service-worker.published.js is NOT shipped at runtime — the publish
+        //   process copies its content over service-worker.js and drops the
+        //   .published variant. No entry needed here.
+        var manifests = new (string Path, string ContentType)[]
+        {
+            ("index.html",                       "text/html"),
+            ("_framework/blazor.boot.json",      "application/json"),
+            ("_framework/blazor.webassembly.js", "application/javascript"),
+            ("service-worker.js",                "application/javascript"),
+            ("service-worker-assets.js",         "application/javascript"),
+            ("appConfig.js",                     "application/javascript"),
+            ("indexinit.js",                     "application/javascript"),
+        };
+
+        foreach (var (path, contentType) in manifests)
+        {
+            // Use RunSilentAsync — some files may not exist in every deployment
+            // (e.g. static sites don't have blazor.boot.json). That's fine.
+            await RunSilentAsync("aws",
+                $"s3 cp \"{s3Root}/{path}\" \"{s3Root}/{path}\" " +
+                $"--quiet --region {region} {profileArg} " +
+                $"--metadata-directive REPLACE " +
+                $"--cache-control \"no-cache, no-store, must-revalidate\" " +
+                $"--content-type \"{contentType}\"");
+        }
+    }
 
     /// <summary>
     /// Finds the most recently modified publish/wwwroot directory under the Release build output.
