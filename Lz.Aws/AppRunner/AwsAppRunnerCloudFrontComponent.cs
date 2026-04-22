@@ -373,18 +373,12 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
             return null;
         }
 
-        // Replace ${KvsArn} placeholder with actual KVS ARN (similar to SAM !Sub)
+        // Read, substitute ${KvsArn}, minify (safe mode — strips comments +
+        // collapses whitespace, keeps identifiers), and validate against the
+        // 10 KB CloudFront Functions limit.
         var jsCode = kvsArn.Apply(arn =>
-        {
-            var code = File.ReadAllText(jsPath).Replace("${KvsArn}", arn);
-            var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(code);
-            const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
-            if (sizeBytes > maxBytes)
-                throw new InvalidOperationException(
-                    $"CloudFront function '{jsFileName}' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit. Remove comments or refactor.");
-            Console.WriteLine($"  CF function {jsFileName}: {sizeBytes:N0} / {maxBytes:N0} bytes");
-            return code;
-        });
+            Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+                jsPath, jsFileName, ("${KvsArn}", arn)));
 
         return new Pulumi.Aws.CloudFront.Function(
             $"{prefix}-{name}-fn", new FunctionArgs

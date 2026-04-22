@@ -305,13 +305,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             return null;
         }
 
-        var jsCode = File.ReadAllText(jsPath);
-        var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(jsCode);
-        const int maxBytes = 10240;
-        if (sizeBytes > maxBytes)
-            throw new InvalidOperationException(
-                $"CloudFront function '{jsFileName}' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit.");
-        Console.WriteLine($"  CF function {jsFileName}: {sizeBytes:N0} / {maxBytes:N0} bytes");
+        var jsCode = Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(jsPath, jsFileName);
 
         return new Pulumi.Aws.CloudFront.Function($"{prefix}-{name}-fn", new FunctionArgs
         {
@@ -337,18 +331,9 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var jsPath = Path.Combine(configDirectory, "CloudFront", jsFileName);
         if (!File.Exists(jsPath)) return null;
 
-        // Replace ${KvsArn} placeholder with actual KVS ARN (similar to SAM !Sub)
         var jsCode = kvsArn.Apply(arn =>
-        {
-            var code = File.ReadAllText(jsPath).Replace("${KvsArn}", arn);
-            var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(code);
-            const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
-            if (sizeBytes > maxBytes)
-                throw new InvalidOperationException(
-                    $"CloudFront function '{jsFileName}' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit. Remove comments or refactor.");
-            Console.WriteLine($"  CF function {jsFileName}: {sizeBytes:N0} / {maxBytes:N0} bytes");
-            return code;
-        });
+            Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+                jsPath, jsFileName, ("${KvsArn}", arn)));
 
         return new Pulumi.Aws.CloudFront.Function($"{prefix}-{name}-fn", new FunctionArgs
         {

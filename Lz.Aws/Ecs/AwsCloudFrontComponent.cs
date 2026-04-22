@@ -554,26 +554,21 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             ? "[" + string.Join(",", tenantConfig.LegacyDomains.Select(d => $"\"{d}\"")) + "]"
             : "[]";
 
-        // Replace template placeholders with actual values.
-        // ${KvsId} uses UUID extracted from ARN — cf.kvs() requires UUID, not full ARN.
-        // ${ExploreBucketDomain} and ${ParkBucketDomain} are S3 regional domain names
-        // used by cf.updateRequestOrigin() to switch origins dynamically.
+        // Replace template placeholders, minify, and validate against the 10 KB
+        // CloudFront Functions limit via the shared helper.
+        // ${KvsId} uses the UUID extracted from the ARN — cf.kvs() requires UUID,
+        // not the full ARN. ${ExploreBucketDomain}/${ParkBucketDomain} are S3
+        // regional domain names used by cf.updateRequestOrigin().
         var jsCode = Output.Tuple(kvsArn, exploreBucketDomain, parkBucketDomain).Apply(t =>
         {
             var kvsUuid = t.Item1.Contains('/') ? t.Item1.Split('/').Last() : t.Item1;
-            var code = File.ReadAllText(jsPath)
-                .Replace("${RootDomainParameter}", domain)
-                .Replace("${LegacyDomainsJson}", legacyDomainsJson)
-                .Replace("${KvsId}", kvsUuid)
-                .Replace("${ExploreBucketDomain}", t.Item2)
-                .Replace("${ParkBucketDomain}", t.Item3);
-
-            var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(code);
-            const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
-            if (sizeBytes > maxBytes)
-                throw new InvalidOperationException(
-                    $"CloudFront function 'CFViewerRequest.js' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit.");
-            return code;
+            return Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+                jsPath, "CFViewerRequest.js",
+                ("${RootDomainParameter}", domain),
+                ("${LegacyDomainsJson}", legacyDomainsJson),
+                ("${KvsId}", kvsUuid),
+                ("${ExploreBucketDomain}", t.Item2),
+                ("${ParkBucketDomain}", t.Item3));
         });
 
         var comment = tenantConfig.LegacyDomains?.Count > 0
@@ -603,12 +598,8 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             return null;
         }
 
-        var jsCode = File.ReadAllText(jsPath);
-        var sizeBytes = System.Text.Encoding.UTF8.GetByteCount(jsCode);
-        const int maxBytes = 10240; // CloudFront Functions limit: 10 KB
-        if (sizeBytes > maxBytes)
-            throw new InvalidOperationException(
-                $"CloudFront function 'CFViewerResponse.js' is {sizeBytes:N0} bytes — exceeds {maxBytes:N0} byte limit.");
+        var jsCode = Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+            jsPath, "CFViewerResponse.js");
 
         return new Pulumi.Aws.CloudFront.Function(
             $"{prefix}-viewer-response", new FunctionArgs

@@ -49,6 +49,7 @@
     <PackageReference Include="AWSSDK.SSOOIDC" Version="4.0.3.15" />
     <PackageReference Include="Pulumi.Aws" Version="6.*" />
     <PackageReference Include="Pulumi.Random" Version="4.*" />
+    <PackageReference Include="NUglify" Version="1.*" />
   </ItemGroup>
 
 </Project>
