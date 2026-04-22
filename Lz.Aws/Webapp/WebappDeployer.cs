@@ -132,7 +132,8 @@ public class WebappDeployer
         string distributionId,
         string profile,
         string region,
-        string environment)
+        string environment,
+        string? targetPrefix = null)
     {
         if (!Directory.Exists(sourceFolder))
             throw new DirectoryNotFoundException($"Static site folder not found: {sourceFolder}");
@@ -161,16 +162,23 @@ public class WebappDeployer
         // Ensure CloudFront OAC bucket policy
         await EnsureBucketPolicyAsync(bucketName, region, profile);
 
-        // S3 sync with cache-control — folder contents go to /wwwroot/ (matching
-        // CloudFront originPath). SyncWithCacheControlAsync applies per-file
-        // cache-control to prevent stale-cache issues on returning users.
+        // S3 sync with cache-control — folder contents go to /wwwroot/{prefix?}/
+        // (matching CloudFront originPath + per-behavior subpath). The optional
+        // prefix covers the /explore/* case: Hugo outputs a flat public/ that
+        // must land under /wwwroot/explore/ so the /explore/* CF behavior resolves
+        // /explore/home/ → /wwwroot/explore/home/index.html.
+        var normalizedPrefix = NormalizePrefix(targetPrefix);
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("Syncing to S3...");
+        Console.WriteLine(string.IsNullOrEmpty(normalizedPrefix)
+            ? "Syncing to S3..."
+            : $"Syncing to S3 under prefix '{normalizedPrefix}/'...");
         Console.ResetColor();
-        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg);
+        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg, normalizedPrefix);
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
+        Console.WriteLine(string.IsNullOrEmpty(normalizedPrefix)
+            ? $"  Synced to s3://{bucketName}/wwwroot"
+            : $"  Synced to s3://{bucketName}/wwwroot/{normalizedPrefix}");
         Console.ResetColor();
 
         // CloudFront invalidation (skip for dev)
@@ -267,13 +275,24 @@ public class WebappDeployer
     /// on files that weren't re-uploaded (e.g. unchanged static assets on a
     /// bucket that was previously deployed without cache-control).
     /// </summary>
+    /// <summary>
+    /// Normalizes a target-prefix argument: trims leading/trailing slashes and
+    /// returns null/empty for empty inputs. "/explore/" and "explore" both map
+    /// to "explore"; "" maps to "".
+    /// </summary>
+    private static string NormalizePrefix(string? raw) =>
+        string.IsNullOrWhiteSpace(raw) ? "" : raw.Trim().Trim('/');
+
     private static async Task SyncWithCacheControlAsync(
         string sourcePath,
         string bucketName,
         string region,
-        string profileArg)
+        string profileArg,
+        string targetPrefix = "")
     {
-        var s3Root = $"s3://{bucketName}/wwwroot";
+        var s3Root = string.IsNullOrEmpty(targetPrefix)
+            ? $"s3://{bucketName}/wwwroot"
+            : $"s3://{bucketName}/wwwroot/{targetPrefix}";
 
         // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
         // on all files. Subsequent passes override specific categories.
@@ -340,9 +359,13 @@ public class WebappDeployer
         //   service-worker.published.js is NOT shipped at runtime — the publish
         //   process copies its content over service-worker.js and drops the
         //   .published variant. No entry needed here.
+        //   authentication/login.html is the static OIDC initiator — we want
+        //   edits to propagate immediately, not sit in browser cache for an
+        //   hour, so it gets no-cache too.
         var manifests = new (string Path, string ContentType)[]
         {
             ("index.html",                       "text/html"),
+            ("authentication/login.html",        "text/html"),
             ("_framework/blazor.boot.json",      "application/json"),
             ("_framework/blazor.webassembly.js", "application/javascript"),
             ("service-worker.js",                "application/javascript"),
@@ -355,11 +378,19 @@ public class WebappDeployer
         {
             // Use RunSilentAsync — some files may not exist in every deployment
             // (e.g. static sites don't have blazor.boot.json). That's fine.
+            // no-cache + must-revalidate (WITHOUT no-store) means the browser
+            // revalidates on every request, AND is allowed to store the
+            // response. The "store" bit matters because our client-side
+            // recovery script uses `fetch(url, {cache: 'reload'})` to
+            // force-update stale cache entries — if the response has
+            // no-store, the browser discards it and the stale entry
+            // persists. With just no-cache, the recovery's force-fetch
+            // writes a fresh entry and stuck users self-unstick.
             await RunSilentAsync("aws",
                 $"s3 cp \"{s3Root}/{path}\" \"{s3Root}/{path}\" " +
                 $"--quiet --region {region} {profileArg} " +
                 $"--metadata-directive REPLACE " +
-                $"--cache-control \"no-cache, no-store, must-revalidate\" " +
+                $"--cache-control \"no-cache, must-revalidate\" " +
                 $"--content-type \"{contentType}\"");
         }
     }

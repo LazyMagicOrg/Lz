@@ -63,6 +63,7 @@ class Program
         RegisterDeployFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDeployContainerCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployWebappCommand(rootCommand, systemKeyOption, envOption);
+        RegisterDeployStaticSiteCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -388,13 +389,17 @@ class Program
             "Webapp solution folder name (e.g., 'StoreApp'). Not needed if running from inside the webapp folder.");
         var projectOption = new Option<string>("--project",
             () => "WASMApp", "Project subfolder and name within the webapp solution");
+        var targetPrefixOption = new Option<string?>("--target-prefix",
+            "Optional S3 key prefix under /wwwroot/ for static-site deploys (e.g. 'explore' → s3://bucket/wwwroot/explore/). " +
+            "Ignored for Blazor WASM deploys.");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
         cmd.AddOption(webappOption);
         cmd.AddOption(projectOption);
+        cmd.AddOption(targetPrefixOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey, webapp, project) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, webapp, project, targetPrefix) =>
         {
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -486,7 +491,8 @@ class Program
                         await deployer.DeployStaticAsync(
                             webappFolder,
                             bucketName, distributionId,
-                            profile, region, config.Environment);
+                            profile, region, config.Environment,
+                            targetPrefix);
                     }
                     else
                     {
@@ -497,7 +503,136 @@ class Program
                     }
                 }
             }
-        }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption);
+        }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption, targetPrefixOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // deploystaticsite
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeployStaticSiteCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deploystaticsite",
+            "Deploy a per-subtenant static site (e.g. Hugo output) to its subtenant S3 bucket. " +
+            "Source is the folder to sync (already built — this command does not run Hugo).");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key. Auto-detected if only one tenant matches the env.");
+        var subtenantKeyOption = new Option<string?>("--subtenantkey",
+            "Subtenant key. If omitted, deploys to every subtenant of the matched tenant(s).");
+        var webappOption = new Option<string?>("--webapp",
+            "Source folder relative to cwd (e.g. 'StaticSite', 'StaticSite/public'). " +
+            "Not needed if cwd contains index.html at the top level.");
+        var appNameOption = new Option<string>("--appname",
+            () => "explore",
+            "AppName segment used to form the bucket name and to match the YAML StaticSite behaviour. " +
+            "Default 'explore' produces {sk}-{tk}-{stk}-webapp-explore-{sts}.");
+        var prefixOption = new Option<string>("--prefix",
+            () => "explore",
+            "S3 key prefix under /wwwroot/ (i.e. the CloudFront behaviour path without slashes). " +
+            "Default 'explore' → s3://{bucket}/wwwroot/explore/.");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(subtenantKeyOption);
+        cmd.AddOption(webappOption);
+        cmd.AddOption(appNameOption);
+        cmd.AddOption(prefixOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, webapp, appName, prefix) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                // Resolve source folder (same logic as deploywebapp)
+                var cwd = Directory.GetCurrentDirectory();
+                string webappFolder;
+                if (!string.IsNullOrEmpty(webapp))
+                    webappFolder = Path.GetFullPath(Path.Combine(cwd, webapp));
+                else if (File.Exists(Path.Combine(cwd, "index.html")))
+                    webappFolder = cwd;
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(
+                        "Cannot locate static-site source. Pass --webapp <folder> or run from a folder containing index.html.");
+                    Console.ResetColor();
+                    return;
+                }
+
+                if (!Directory.Exists(webappFolder))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Source folder not found: {webappFolder}");
+                    Console.ResetColor();
+                    return;
+                }
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    // Resolve subtenants to deploy to.
+                    var subtenantKeys = !string.IsNullOrEmpty(subtenantKey)
+                        ? new[] { subtenantKey }
+                        : (tenantConfig.Subtenants?.Keys.ToArray() ?? Array.Empty<string>());
+
+                    if (subtenantKeys.Length == 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine(
+                            $"  No subtenants found for tenant '{tk}'. Static-site deploy requires a subtenant (bucket naming is subtenant-scoped).");
+                        Console.ResetColor();
+                        continue;
+                    }
+
+                    // Subtenant bucket suffix cascades from TenantSuffix (matches BCPlugin).
+                    var suffix = tenantConfig.TenantSuffix;
+                    if (string.IsNullOrEmpty(suffix))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("TenantSuffix not set in tenant config.");
+                        Console.ResetColor();
+                        return;
+                    }
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region ?? "us-west-2";
+
+                    foreach (var stk in subtenantKeys)
+                    {
+                        var bucketName = $"{config.SystemKey}-{tk}-{stk}-webapp-{appName}-{suffix}";
+
+                        // Look up CloudFront distribution ID for non-dev (cache invalidation)
+                        var distributionId = "";
+                        if (!config.Environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
+                        {
+                            distributionId = await WebappDeployer.FindDistributionIdAsync(
+                                tenantConfig.RootDomain, profile, region);
+                        }
+
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine(
+                            $"=== deploystaticsite: {tk}/{stk} → {bucketName} (prefix: {prefix}) ===");
+                        Console.ResetColor();
+
+                        var deployer = new WebappDeployer();
+                        await deployer.DeployStaticAsync(
+                            webappFolder,
+                            bucketName, distributionId,
+                            profile, region, config.Environment,
+                            prefix);
+                    }
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, webappOption, appNameOption, prefixOption);
 
         root.AddCommand(cmd);
     }
