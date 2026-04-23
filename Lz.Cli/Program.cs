@@ -9,6 +9,7 @@ using Lz.Aws;
 using Lz.Aws.Docker;
 using Lz.Aws.Ecs;
 using Lz.Aws.Webapp;
+using LzGen = Lz.Gen;
 
 namespace Lz.Cli;
 
@@ -73,6 +74,7 @@ class Program
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
+        RegisterGenCommand(rootCommand, plugin);
 
         // Plugin-specific commands (e.g., seed)
         plugin?.RegisterCommands(rootCommand);
@@ -1344,5 +1346,122 @@ class Program
             throw new InvalidOperationException(
                 $"The '{commandName}' command requires a system plugin. " +
                 "Build the Deploy/ project or create an lz.json file pointing to the plugin DLL.");
+    }
+
+    // ---------------------------------------------------------------
+    // gen — model-driven code generation (ported from LazyMagicMDD)
+    // ---------------------------------------------------------------
+
+    private static void RegisterGenCommand(RootCommand root, ILzPlugin? plugin)
+    {
+        var pathArg = new Argument<string?>("path", () => null,
+            "Solution directory containing LazyMagic.yaml (defaults to the current directory).");
+        var templatesOpt = new Option<string?>("--templates",
+            "Override the bundled template directory. If omitted, lz looks for "
+            + "ProjectTemplates/AWSTemplates alongside LazyMagic.yaml first, then "
+            + "falls back to templates shipped inside the Lz.Gen assembly.");
+
+        var cmd = new Command("gen",
+            "Generate code and AWS templates from LazyMagic.yaml + OpenAPI specs.");
+        cmd.AddArgument(pathArg);
+        cmd.AddOption(templatesOpt);
+
+        cmd.SetHandler(async (string? path, string? templatesOverride) =>
+        {
+            var solutionDir = Path.GetFullPath(path ?? Directory.GetCurrentDirectory());
+            if (!File.Exists(Path.Combine(solutionDir, "LazyMagic.yaml")))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(
+                    $"No LazyMagic.yaml found in '{solutionDir}'. " +
+                    "Run 'lz gen' from a folder containing LazyMagic.yaml, or pass the path as an argument.");
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            // Register custom directive/artifact types before parsing the YAML.
+            // Two independent plugin paths, either/both can be present:
+            //   1. Generate/bin/.../Generate.dll  — dedicated gen plugin (preferred)
+            //   2. Deploy/bin/.../Deploy.dll      — deploy plugin that also implements ILzGenPlugin
+            // The Deploy path is kept for backward compatibility; Generate is the new home
+            // for system-specific directive and artifact types.
+            LzGen.ILzGenPlugin? dedicatedGenPlugin = null;
+            try
+            {
+                dedicatedGenPlugin = GenPluginLoader.LoadGenPlugin(solutionDir);
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Error.WriteLine($"Warning: Generate plugin load failed: {ex.Message}");
+                Console.ResetColor();
+            }
+
+            void SafeRegister(LzGen.ILzGenPlugin? p, string source)
+            {
+                if (p == null) return;
+                try { p.RegisterGenExtensions(); }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.Error.WriteLine($"Warning: {source}.RegisterGenExtensions threw: {ex.Message}");
+                    Console.ResetColor();
+                }
+            }
+
+            SafeRegister(dedicatedGenPlugin, "Generate plugin");
+            if (plugin is LzGen.ILzGenPlugin genFromDeploy)
+                SafeRegister(genFromDeploy, "Deploy plugin");
+
+            var logger = new ConsoleGenLogger();
+            var bundled = templatesOverride is not null
+                ? Path.GetFullPath(templatesOverride)
+                : null; // null → LzGenSolution derives from Assembly.Location
+            try
+            {
+                var solution = new LzGen.LzGenSolution(logger, solutionDir, bundled);
+                await solution.ProcessAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine($"lz gen failed: {ex.Message}");
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+            }
+        }, pathArg, templatesOpt);
+
+        root.AddCommand(cmd);
+    }
+
+    /// <summary>
+    /// Bridges Lz.Gen.ILogger to the same Console/color pattern used elsewhere
+    /// in Lz.Cli. Kept internal so only Lz.Cli owns the user-facing output style.
+    /// </summary>
+    private sealed class ConsoleGenLogger : LzGen.ILogger
+    {
+        public void Info(string message) => Console.WriteLine(message);
+
+        public Task InfoAsync(string message)
+        {
+            Console.WriteLine(message);
+            return Task.CompletedTask;
+        }
+
+        public void Error(Exception ex, string message)
+        {
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine(message);
+            if (ex != null) Console.Error.WriteLine(ex);
+            Console.ForegroundColor = prev;
+        }
+
+        public Task ErrorAsync(Exception ex, string message)
+        {
+            Error(ex, message);
+            return Task.CompletedTask;
+        }
     }
 }

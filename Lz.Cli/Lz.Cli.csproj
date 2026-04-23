@@ -21,6 +21,7 @@
     <ProjectReference Include="..\Lz.Core\Lz.Core.csproj" />
     <ProjectReference Include="..\Lz.Aws\Lz.Aws.csproj" />
     <ProjectReference Include="..\Lz.Azure\Lz.Azure.csproj" />
+    <ProjectReference Include="..\Lz.Gen\Lz.Gen.csproj" />
   </ItemGroup>
 
   <ItemGroup>
