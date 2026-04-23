@@ -15,10 +15,35 @@ namespace Lz.Core.Config;
 /// </summary>
 public static class ConfigLoader
 {
-    private static readonly IDeserializer Deserializer = new DeserializerBuilder()
-        .WithNamingConvention(PascalCaseNamingConvention.Instance)
-        .IgnoreUnmatchedProperties()
-        .Build();
+    // Platform-contributed extensions (e.g. AWS type mappings). See IConfigExtensions.
+    // The PascalCase deserializer is rebuilt lazily whenever the list changes so
+    // registrations made at process startup are honoured by the first load.
+    private static readonly List<IConfigExtensions> _extensions = new();
+    private static IDeserializer? _deserializer;
+
+    private static IDeserializer Deserializer => _deserializer ??= BuildDeserializer();
+
+    private static IDeserializer BuildDeserializer()
+    {
+        var builder = new DeserializerBuilder()
+            .WithNamingConvention(PascalCaseNamingConvention.Instance)
+            .IgnoreUnmatchedProperties();
+        foreach (var ext in _extensions)
+            ext.Configure(builder);
+        return builder.Build();
+    }
+
+    /// <summary>
+    /// Register a platform-specific config extension. Platform libraries (Lz.Aws,
+    /// Lz.Azure) call this once during host startup, before any config is loaded,
+    /// to contribute YAML type mappings for their derived config types.
+    /// </summary>
+    public static void RegisterExtensions(IConfigExtensions extensions)
+    {
+        if (extensions == null) throw new ArgumentNullException(nameof(extensions));
+        _extensions.Add(extensions);
+        _deserializer = null; // invalidate so the next load rebuilds with the new mapping
+    }
 
     // Keycloak config YAML uses camelCase naming
     private static readonly IDeserializer CamelCaseDeserializer = new DeserializerBuilder()

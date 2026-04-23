@@ -108,15 +108,13 @@ namespace Lz.Gen
                 templateBuilder
                     .Replace("#LzOutputs#", outputsBuilder.ToString())
                     .Replace("__ResourceGenerator__", GetType().Name);
-                var templatePath = Path.Combine(solution.SolutionRootFolderPath, "AWSTemplates", "Generated", templateName);
 
-                ///////////////////////////////////////////////////////////////////////////////////////
-                /* Write Template */
-                WriteGeneratedFile(templatePath, templateBuilder.ToString());
-
-                ///////////////////////////////////////////////////////////////////////////////////////
-                // Exports
-                ExportedStackTemplatePath = templatePath;
+                // Note: sam.<service>.g.yaml is no longer written to disk. The
+                // lz deployment pipeline is Pulumi-based and never consumed the
+                // SAM output; templateBuilder above is kept so downstream gen
+                // extensions can still read the rendered text via AwsServiceConfig
+                // if a SAM path is ever resurrected.
+                ExportedStackTemplatePath = null;
                 AwsServiceConfig = new AwsServiceConfig()
                 {
                     Name = service.Key

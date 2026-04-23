@@ -6,6 +6,7 @@ using Lz.Core.Orchestration;
 using Lz.Core.Plugin;
 using Lz.Core.Validation;
 using Lz.Aws;
+using Lz.Aws.Config;
 using Lz.Aws.Docker;
 using Lz.Aws.Ecs;
 using Lz.Aws.Webapp;
@@ -40,6 +41,12 @@ class Program
         };
 
         var rootCommand = new RootCommand("Lz infrastructure deployment tool");
+
+        // Register platform-specific config extensions before any config load.
+        // Each platform library contributes YAML type mappings for its derived
+        // config types (see Lz.Core.Config.IConfigExtensions). Adding a new
+        // platform (Azure, GCP, ...) means registering its extensions here.
+        ConfigLoader.RegisterExtensions(new AwsConfigExtensions());
 
         // Load plugin (optional — core commands work without one)
         ILzPlugin? plugin = null;

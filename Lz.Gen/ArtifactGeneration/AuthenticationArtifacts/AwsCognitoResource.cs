@@ -31,22 +31,13 @@ namespace Lz.Gen
         {
             Authentication directive = (Authentication)directiveArg;    
 
-            // set the stack name 
+            // set the stack name
             var resourceName = directive.Key + NameSuffix ?? "";
             await InfoAsync($"Generating {directive.Key} {resourceName}");
-            var deploymentConfigYamlFile = Path.Combine(solution.SolutionRootFolderPath, "AwsTemplates", "Generated", "deploymentconfig.g.yaml");
-            var deploymentConfig = new AwsDeploymentConfig();  
-            if (File.Exists(deploymentConfigYamlFile))
-            {
 
-                var deploymentConfigYaml = File.ReadAllText(deploymentConfigYamlFile);
-                using (var reader = new StringReader(deploymentConfigYaml))
-                {
-                    var deserializer = new Deserializer();
-                    deploymentConfig = deserializer.Deserialize<AwsDeploymentConfig>(reader);
-                }
-            }
-            // Add this authenticator to the deployment config
+            // Populate the exported config from directive values (the result is
+            // aggregated later by AwsDeploymentConfigContent via the in-memory
+            // artifact graph — no intermediate YAML handshake is needed).
             ExportedConfig = new AwsAuthenticationConfig()
             {
                 Name = directiveArg.Key,

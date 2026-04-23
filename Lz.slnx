@@ -5,4 +5,5 @@
   <Project Path="Lz.Gen/Lz.Gen.csproj" />
   <Project Path="Lz.Tests/Lz.Tests.csproj" />
   <Project Path="Lz.Cli/Lz.Cli.csproj" />
+  <Project Path="Lz.Runner/Lz.Runner.csproj" />
 </Solution>

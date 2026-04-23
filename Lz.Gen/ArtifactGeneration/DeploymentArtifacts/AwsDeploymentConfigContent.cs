@@ -39,10 +39,10 @@ namespace Lz.Gen
                 {
                     deploymentConfig.Authentications.Add(cognitoAuth.ExportedConfig);
                 }
-                var AuthConfigYamlFile = Path.Combine(solution.SolutionRootFolderPath, "AwsTemplates", "Generated", "deploymentconfig.g.yaml");
-                var serializer = new SerializerBuilder().Build();
-                var yaml = serializer.Serialize(deploymentConfig);
-                File.WriteAllText(AuthConfigYamlFile, yaml);
+                // Note: deploymentconfig.g.yaml is no longer written. The lz
+                // deployment pipeline is Pulumi-based and never consumed this
+                // file; the in-memory `deploymentConfig` graph above is left
+                // in place so future gen extensions can aggregate over it.
             }
             catch (Exception ex)
             {
