@@ -26,17 +26,24 @@ public static class SubtenantBucketManager
 
     /// <summary>
     /// Ensure the bucket exists with the standard policy (BlockPublicAccess +
-    /// versioning). Returns true if the bucket was newly created, false if
-    /// it already existed. Re-applies policy on every call so settings don't
-    /// drift from the AWS console.
+    /// versioning + SSE + tags + CloudFront OAC GetObject grant). Returns
+    /// true if the bucket was newly created, false if it already existed.
+    /// Re-applies policy on every call so settings don't drift from the AWS
+    /// console.
     /// </summary>
+    /// <param name="accountId">AWS account ID — used in the bucket policy's
+    /// <c>AWS:SourceAccount</c> condition that scopes the CloudFront OAC
+    /// grant to this account's distributions. Required because Pulumi-
+    /// managed buckets (system, tenant) get this policy from their
+    /// component; subtenant buckets are created imperatively here and need
+    /// the same trust applied so OAC-signed requests aren't denied.</param>
     public static async Task<bool> EnsureBucketAsync(
-        string profile, string region, string bucketName,
+        string profile, string region, string bucketName, string accountId,
         Dictionary<string, string>? tags = null)
     {
         using var client = CreateClient(profile, region);
         var created = await EnsureBucketCreatedAsync(client, bucketName);
-        await ApplyStandardPolicyAsync(client, bucketName, tags);
+        await ApplyStandardPolicyAsync(client, bucketName, accountId, tags);
         return created;
     }
 
@@ -97,7 +104,7 @@ public static class SubtenantBucketManager
     }
 
     private static async Task ApplyStandardPolicyAsync(
-        IAmazonS3 client, string bucketName, Dictionary<string, string>? tags)
+        IAmazonS3 client, string bucketName, string accountId, Dictionary<string, string>? tags)
     {
         // Block all public access.
         await client.PutPublicAccessBlockAsync(new PutPublicAccessBlockRequest
@@ -110,6 +117,27 @@ public static class SubtenantBucketManager
                 IgnorePublicAcls = true,
                 RestrictPublicBuckets = true,
             },
+        });
+
+        // CloudFront OAC GetObject grant — without this, OAC-signed reads
+        // from any CF distribution in this account are denied with 403.
+        // Mirrors the policy Pulumi attaches to system/tenant assets buckets.
+        // SourceAccount (rather than SourceArn naming a specific distribution)
+        // means any CF distribution in the account can read; the assets are
+        // public via CloudFront by design, so account-wide trust is fine.
+        var policyJson =
+            $"{{\"Version\":\"2012-10-17\",\"Statement\":[{{" +
+                $"\"Sid\":\"AllowCloudFrontRead\"," +
+                $"\"Effect\":\"Allow\"," +
+                $"\"Principal\":{{\"Service\":\"cloudfront.amazonaws.com\"}}," +
+                $"\"Action\":\"s3:GetObject\"," +
+                $"\"Resource\":\"arn:aws:s3:::{bucketName}/*\"," +
+                $"\"Condition\":{{\"StringEquals\":{{\"AWS:SourceAccount\":\"{accountId}\"}}}}" +
+            $"}}]}}";
+        await client.PutBucketPolicyAsync(new PutBucketPolicyRequest
+        {
+            BucketName = bucketName,
+            Policy = policyJson,
         });
 
         // Enable versioning.

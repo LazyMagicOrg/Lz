@@ -1,6 +1,7 @@
 using Lz.Core.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
+using Lz.Aws;
 using Lz.Aws.DynamoDB;
 
 namespace Lz.Aws.EcsExpress;
@@ -96,8 +97,11 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
         // handled by the shared provisioner so the same logic runs here and
         // from `lz deploysubtenants`.
         if (_tenantConfig != null)
+        {
+            var accountId = await AwsAccountResolver.ResolveAccountIdAsync(profile, region);
             await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
-                _config, _tenantConfig, profile, region);
+                _config, _tenantConfig, profile, region, accountId);
+        }
     }
 
     /// <summary>

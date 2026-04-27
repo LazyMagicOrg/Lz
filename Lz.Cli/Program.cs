@@ -798,8 +798,9 @@ class Program
                     // the tenant Pulumi up so first-time deploy is a single command.
                     var subProfile = tenantConfig.Profile ?? config.Profile;
                     var subRegion = tenantConfig.Region ?? config.Region;
+                    var subAccountId = await AwsAccountResolver.ResolveAccountIdAsync(subProfile, subRegion);
                     await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
-                        config, tenantConfig, subProfile, subRegion);
+                        config, tenantConfig, subProfile, subRegion, subAccountId);
 
                     // Plugin-owned runtime refresh (typically CloudFront KVS).
                     await plugin!.RefreshTenantRuntimeAsync(config, tenantConfig);
@@ -862,10 +863,11 @@ class Program
 
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
+                    var accountId = await AwsAccountResolver.ResolveAccountIdAsync(profile, region);
 
                     // Provision S3 buckets + DynamoDB tables
                     await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
-                        config, tenantConfig, profile, region);
+                        config, tenantConfig, profile, region, accountId);
 
                     // Plugin refresh — typically writes CloudFront KVS entries
                     if (plugin != null)

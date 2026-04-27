@@ -26,14 +26,17 @@ public static class SubtenantProvisioner
     /// on <paramref name="tenant"/> exist. Idempotent — existing resources
     /// have their policy/tags re-applied so console-side drift is corrected.
     /// </summary>
+    /// <param name="accountId">AWS account ID — used in the subtenant bucket
+    /// policy's CloudFront OAC trust condition. Without it, OAC-signed
+    /// CloudFront reads return 403.</param>
     public static async Task EnsureAllAsync(
         SystemConfig system, TenantConfig tenant,
-        string profile, string region)
+        string profile, string region, string accountId)
     {
         if (tenant.Subtenants == null || tenant.Subtenants.Count == 0) return;
 
         foreach (var (subtenantKey, _) in tenant.Subtenants)
-            await EnsureOneAsync(system, tenant, subtenantKey, profile, region);
+            await EnsureOneAsync(system, tenant, subtenantKey, profile, region, accountId);
     }
 
     /// <summary>
@@ -41,7 +44,7 @@ public static class SubtenantProvisioner
     /// </summary>
     public static async Task EnsureOneAsync(
         SystemConfig system, TenantConfig tenant, string subtenantKey,
-        string profile, string region)
+        string profile, string region, string accountId)
     {
         var sk = system.SystemKey;
         var tk = tenant.TenantKey;
@@ -57,7 +60,7 @@ public static class SubtenantProvisioner
             sk, tk, subtenantKey, system.SystemSuffix);
         Console.WriteLine($"  subtenant '{subtenantKey}': ensuring bucket {bucketName}");
         var created = await SubtenantBucketManager.EnsureBucketAsync(
-            profile, region, bucketName,
+            profile, region, bucketName, accountId,
             new Dictionary<string, string>(tags) { { "Purpose", $"{subtenantKey}-assets" } });
         Console.WriteLine(created
             ? $"    {bucketName} — created"
