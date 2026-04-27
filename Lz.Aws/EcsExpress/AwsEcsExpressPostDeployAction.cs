@@ -134,7 +134,11 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
                 return;
             }
 
-            using var r53 = new Amazon.Route53.AmazonRoute53Client(credentials);
+            // Route 53 is a global service routed through us-east-1. Pin
+            // explicitly so the check works on machines whose AWS profile
+            // doesn't set a DefaultRegion.
+            using var r53 = new Amazon.Route53.AmazonRoute53Client(
+                credentials, Amazon.RegionEndpoint.USEast1);
 
             // Find the hosted zone. ListHostedZonesByName matches as a prefix
             // search; verify the returned zone's name matches our root.
