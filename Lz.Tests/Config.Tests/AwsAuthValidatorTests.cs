@@ -38,6 +38,67 @@ public class AwsAuthValidatorTests
     }
 
     [Fact]
+    public void Validate_RejectsWebAppAuthConfigReferencingUndeclaredPool()
+    {
+        var cfg = new AwsSystemConfig
+        {
+            Platform = "aws",
+            AuthConfigs = new Dictionary<string, AuthConfigEntry> { ["plannerauth"] = new AwsAuthConfigEntry() },
+            Behaviors = new BehaviorsConfig
+            {
+                WebApps = new List<WebAppBehavior>
+                {
+                    new() { Path = "/", AppName = "eventit", AuthConfig = "noSuchPool" },
+                },
+            },
+        };
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(cfg, errs);
+        Assert.Contains(errs, e => e.Contains("WebApps[0]") && e.Contains("noSuchPool") && e.Contains("plannerauth"));
+    }
+
+    [Fact]
+    public void Validate_AllowsNullAuthConfigAsPublic()
+    {
+        var cfg = new AwsSystemConfig
+        {
+            Platform = "aws",
+            AuthConfigs = new Dictionary<string, AuthConfigEntry> { ["plannerauth"] = new AwsAuthConfigEntry() },
+            Behaviors = new BehaviorsConfig
+            {
+                WebApps = new List<WebAppBehavior>
+                {
+                    new() { Path = "/free/", AppName = "freeapp", AuthConfig = null },
+                    new() { Path = "/free2/", AppName = "freeapp2", AuthConfig = "" },
+                },
+            },
+        };
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(cfg, errs);
+        Assert.DoesNotContain(errs, e => e.Contains("WebApps"));
+    }
+
+    [Fact]
+    public void Validate_AllowsKnownAuthConfig()
+    {
+        var cfg = new AwsSystemConfig
+        {
+            Platform = "aws",
+            AuthConfigs = new Dictionary<string, AuthConfigEntry> { ["plannerauth"] = new AwsAuthConfigEntry() },
+            Behaviors = new BehaviorsConfig
+            {
+                WebApps = new List<WebAppBehavior>
+                {
+                    new() { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" },
+                },
+            },
+        };
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(cfg, errs);
+        Assert.DoesNotContain(errs, e => e.Contains("WebApps"));
+    }
+
+    [Fact]
     public void Validate_RejectsSmsMfaWithoutSnsRole()
     {
         var errs = new List<string>();

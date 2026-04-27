@@ -88,4 +88,106 @@ public class ConfigMergerTests : IDisposable
         Assert.True(result!.Services.ContainsKey("store"));
     }
 
+    // ─── ResolveWebApps cascade ──────────────────────────────────────────────
+
+    private static SystemConfig SystemWithWebApps(params WebAppBehavior[] apps)
+        => new AwsSystemConfig
+        {
+            Platform = "aws",
+            Behaviors = new BehaviorsConfig { WebApps = apps.ToList() },
+        };
+
+    private static TenantConfig TenantWithWebApps(params WebAppBehavior[] apps)
+        => new AwsTenantConfig
+        {
+            Behaviors = new BehaviorsConfig { WebApps = apps.ToList() },
+        };
+
+    private static BehaviorsConfig SubtenantWithWebApps(params WebAppBehavior[] apps)
+        => new BehaviorsConfig { WebApps = apps.ToList() };
+
+    [Fact]
+    public void ResolveWebApps_SystemOnly_ReturnsSystemEntries()
+    {
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant: null, subtenantBehaviors: null);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("/", app.Path);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal("plannerauth", app.AuthConfig);
+        Assert.Equal(0, app.Level);
+    }
+
+    [Fact]
+    public void ResolveWebApps_TenantOverridesAuthConfig_PreservesAppNameAndLevel()
+    {
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var tenant = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AuthConfig = "tenantauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant, subtenantBehaviors: null);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal("tenantauth", app.AuthConfig);
+        Assert.Equal(0, app.Level); // bucket stays at system level
+    }
+
+    [Fact]
+    public void ResolveWebApps_SubtenantOverridesTenantOverridesSystem()
+    {
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var tenant = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AuthConfig = "tenantauth" });
+        var subtenant = SubtenantWithWebApps(
+            new WebAppBehavior { Path = "/", AuthConfig = "systemauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant, subtenant);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("systemauth", app.AuthConfig);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal(0, app.Level);
+    }
+
+    [Fact]
+    public void ResolveWebApps_NullAuthConfigInherits_EmptyStringOverridesToPublic()
+    {
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+
+        // Tenant declares Path with AuthConfig=null → inherit from system
+        var tenantInherit = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AuthConfig = null });
+        var inherited = ConfigMerger.ResolveWebApps(system, tenantInherit, null);
+        Assert.Equal("plannerauth", Assert.Single(inherited).AuthConfig);
+
+        // Tenant declares Path with AuthConfig="" → explicit public
+        var tenantPublic = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AuthConfig = "" });
+        var madePublic = ConfigMerger.ResolveWebApps(system, tenantPublic, null);
+        Assert.Equal("", Assert.Single(madePublic).AuthConfig);
+    }
+
+    [Fact]
+    public void ResolveWebApps_SubtenantDeclaresOwnPath_LevelIsSubtenant()
+    {
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var subtenant = SubtenantWithWebApps(
+            new WebAppBehavior { Path = "/admin/", AppName = "admin", AuthConfig = "systemauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant: null, subtenant);
+
+        Assert.Equal(2, resolved.Count);
+        var rootApp = resolved.Single(a => a.Path == "/");
+        var adminApp = resolved.Single(a => a.Path == "/admin/");
+        Assert.Equal(0, rootApp.Level);
+        Assert.Equal(2, adminApp.Level); // bucket lives at subtenant level
+        Assert.Equal("admin", adminApp.AppName);
+    }
 }

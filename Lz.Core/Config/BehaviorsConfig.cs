@@ -29,16 +29,34 @@ public class WebAppBehavior
     public string AppName { get; set; } = string.Empty;
 
     /// <summary>
-    /// Whether unauthenticated access to this app should be redirected to the
-    /// public landing page / login initiator at the CloudFront edge. Default
-    /// <c>true</c> preserves the historical gate behavior for any config that
-    /// pre-dates this property. Plugins that consume this (e.g. BCPlugin)
-    /// emit it as a trailing element on the webapp behavior tuple so the
-    /// CloudFront viewer-request function can apply it without a second KVS
-    /// read. Subtenants typically host multiple apps, each with their own
-    /// auth requirement — that's why this flag is per-app, not per-subtenant.
+    /// Name of the auth pool that authenticates this app. Must match a key in
+    /// <c>SystemConfig.AuthConfigs</c> (e.g. <c>"plannerauth"</c>,
+    /// <c>"tenantauth"</c>, <c>"systemauth"</c>) or be <c>null</c>/empty for
+    /// "no authentication required" (public access).
+    ///
+    /// Cascade rule: leaf-dominant by <see cref="Path"/>. Tenant config can
+    /// override the system value for a given path; subtenant config can
+    /// override the tenant value. Tenant/subtenant entries may supply only
+    /// <c>(Path, AuthConfig)</c> — they don't redeclare <see cref="AppName"/>.
+    ///
+    /// Plugins (e.g. BCPlugin) consume this to emit:
+    /// <list type="bullet">
+    ///   <item><description>A <c>gated</c> bit (0|1) at position 5 of the
+    ///     webapp behavior tuple in the per-host KVS routing entry — derived
+    ///     from <c>AuthConfig != null</c>. CFRequest reads this to decide
+    ///     whether to redirect unauthenticated traffic; it does not read the
+    ///     auth name from this position.</description></item>
+    ///   <item><description>The full resolved <c>{ path, name, authConfig }</c>
+    ///     mapping in a separate per-host <c>{host}-auth</c> KVS entry. Read
+    ///     by auth-related CF functions (CFAuthConfig) to surface
+    ///     <c>apps[].authConfig</c> in the <c>/config</c> response.</description></item>
+    /// </list>
+    ///
+    /// Subtenants can override which pool authenticates the same app — this
+    /// is the architectural reason the property exists at this granularity
+    /// and not just at the system level.
     /// </summary>
-    public bool AuthRequired { get; set; } = true;
+    public string? AuthConfig { get; set; }
 }
 
 /// <summary>

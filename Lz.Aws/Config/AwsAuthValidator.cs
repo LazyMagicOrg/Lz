@@ -40,6 +40,46 @@ public static class AwsAuthValidator
                     "was loaded before the systemconfig was parsed.");
             }
         }
+
+        ValidateWebAppAuthConfigs(config, errs);
+    }
+
+    /// <summary>
+    /// For every system-level <c>Behaviors.WebApps[]</c> entry whose
+    /// <c>AuthConfig</c> is non-empty, verify the named pool exists in
+    /// <c>AuthConfigs</c>. <c>null</c> / empty means "public" (no auth gate)
+    /// and is left alone.
+    /// </summary>
+    /// <remarks>
+    /// Tenant- and subtenant-level overrides aren't visible from a SystemConfig
+    /// alone, so they're validated when the cascade is resolved at deploy
+    /// time (see BCPlugin).
+    /// </remarks>
+    private static void ValidateWebAppAuthConfigs(SystemConfig config, List<string> errs)
+    {
+        var webApps = config.Behaviors?.WebApps;
+        if (webApps is null || webApps.Count == 0) return;
+
+        var poolNames = new HashSet<string>(
+            config.AuthConfigs?.Keys ?? Enumerable.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < webApps.Count; i++)
+        {
+            var app = webApps[i];
+            if (string.IsNullOrEmpty(app.AuthConfig)) continue; // public — fine
+            if (!poolNames.Contains(app.AuthConfig))
+            {
+                var available = poolNames.Count > 0
+                    ? string.Join(", ", poolNames)
+                    : "(none declared)";
+                errs.Add(
+                    $"Behaviors.WebApps[{i}] (Path='{app.Path}', AppName='{app.AppName}') " +
+                    $"references AuthConfig '{app.AuthConfig}' which is not declared in " +
+                    $"AuthConfigs. Available pools: {available}. Either remove the " +
+                    "AuthConfig (= public access) or declare the pool in AuthConfigs.");
+            }
+        }
     }
 
     private static void ValidatePool(string poolName, AwsAuthConfigEntry pool, List<string> errs)
