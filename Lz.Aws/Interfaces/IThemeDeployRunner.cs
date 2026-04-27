@@ -1,4 +1,4 @@
-namespace Lz.Core.Interfaces;
+namespace Lz.Aws.Interfaces;
 
 /// <summary>
 /// Deploys Keycloak theme files to EFS by uploading a tarball to S3 and

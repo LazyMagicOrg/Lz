@@ -37,10 +37,17 @@ public class AwsAppRunnerTenantDataComponent : ComponentResource, ITenantDataCom
         // =====================================================================
 
         var secretPrefix = tenantConfig.SecretsManager?.SecretPrefix ?? $"{sk}/{tk}";
+        // RecoveryWindowInDays = 0 on non-prod skips the 7–30-day AWS
+        // deletion-window tombstone, so `destroytenant` followed by
+        // `deploytenant` with the same name doesn't hit
+        // "InvalidRequestException: already scheduled for deletion".
+        // Prod/staging keep the default 30-day window as a safety net.
+        var recoveryWindow = env is "prod" or "staging" ? 30 : 0;
         var tenantSecret = new Secret($"{prefix}-secret", new SecretArgs
         {
             Name = secretPrefix,
             Description = $"Tenant credentials for {sk}/{tk} ({env})",
+            RecoveryWindowInDays = recoveryWindow,
             Tags =
             {
                 { "System", sk },
@@ -82,22 +89,11 @@ public class AwsAppRunnerTenantDataComponent : ComponentResource, ITenantDataCom
         }, new CustomResourceOptions { Parent = this });
         BlockPublicAccess($"{prefix}-tenant-assets-block", tenantBucket);
 
-        // Subtenant asset buckets
-        if (tenantConfig.Subtenants != null)
-        {
-            foreach (var sub in tenantConfig.Subtenants)
-            {
-                var stk = sub.Key;
-                var subBucketName = $"{sk}-{tk}-{stk}-assets-{suffix}";
-                var subBucket = new BucketV2($"{prefix}-{stk}-assets", new BucketV2Args
-                {
-                    Bucket = subBucketName,
-                    ForceDestroy = env == "dev",
-                    Tags = Tags(sk, tk, $"{stk}-assets"),
-                }, new CustomResourceOptions { Parent = this });
-                BlockPublicAccess($"{prefix}-{stk}-assets-block", subBucket);
-            }
-        }
+        // Subtenant asset buckets are NOT provisioned via Pulumi. They are
+        // created imperatively by SubtenantBucketManager — invoked by
+        // `lz deploytenant` post-deploy and by `lz deploysubtenants`. This
+        // decoupling lets operators add subtenants without a Pulumi run.
+        // See Design/Subtenants.md for the split.
 
         // Webapp buckets are created on-demand by `lz deploywebapp` (not here).
         // Webapps can be system-level or tenant-level, so bucket creation

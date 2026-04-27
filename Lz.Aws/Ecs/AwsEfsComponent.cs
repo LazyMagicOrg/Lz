@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -54,7 +55,7 @@ public class AwsEfsComponent : ComponentResource, IFileStorageComponent
         });
 
         // Keycloak Theme Access Point
-        var ecs = config.ECS ?? new EcsConfig();
+        var ecs = config.Aws().ECS ?? new EcsConfig();
         var themePath = ecs.KeycloakThemePath;
         var themeLabel = themePath.TrimStart('/').Replace("/", "-");
         var keycloakThemeAp = new AccessPoint($"{prefix}-keycloak-theme-ap", new AccessPointArgs

@@ -130,38 +130,36 @@ public class AwsAppRunnerServiceComponent : ComponentResource, IServiceComponent
             }",
         }, new CustomResourceOptions { Parent = this });
 
-        // Cognito access (for user pool management)
+        // Cognito + CloudFront access, scoped to this AWS account (Cognito also
+        // to the service's region). Bedrock stays at Resource: "*" because
+        // cross-region foundation-model ARNs aren't known at policy time.
+        var callerIdAr = Pulumi.Aws.GetCallerIdentity.Invoke();
+        var awsRegionAr = Pulumi.Aws.GetRegion.Invoke();
         new RolePolicy($"{prefix}-cognito", new RolePolicyArgs
         {
             Role = instanceRole.Id,
-            Policy = @"{
-                ""Version"": ""2012-10-17"",
-                ""Statement"": [{
-                    ""Effect"": ""Allow"",
-                    ""Action"": [
-                        ""cognito-idp:AdminCreateUser"",
-                        ""cognito-idp:AdminDeleteUser"",
-                        ""cognito-idp:AdminGetUser"",
-                        ""cognito-idp:AdminUpdateUserAttributes"",
-                        ""cognito-idp:ListUsers""
-                    ],
-                    ""Resource"": ""*""
-                }]
-            }",
+            Policy = Output.Tuple(callerIdAr.Apply(c => c.AccountId), awsRegionAr.Apply(r => r.Name))
+                .Apply(ids => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers""],
+                        ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*""
+                    }}]
+                }}"),
         }, new CustomResourceOptions { Parent = this });
 
-        // CloudFront invalidation
         new RolePolicy($"{prefix}-cloudfront", new RolePolicyArgs
         {
             Role = instanceRole.Id,
-            Policy = @"{
+            Policy = callerIdAr.Apply(c => $@"{{
                 ""Version"": ""2012-10-17"",
-                ""Statement"": [{
+                ""Statement"": [{{
                     ""Effect"": ""Allow"",
                     ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""],
-                    ""Resource"": ""*""
-                }]
-            }",
+                    ""Resource"": ""arn:aws:cloudfront::{c.AccountId}:distribution/*""
+                }}]
+            }}"),
         }, new CustomResourceOptions { Parent = this });
 
         return new AwsAppRunnerServiceOutputs

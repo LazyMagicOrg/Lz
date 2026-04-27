@@ -144,15 +144,11 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
         // ALIASES
         // =====================================================================
 
+        // Apex + wildcard cover every first-level subtenant domain
+        // (e.g. cerulean.{domain}). Subtenants are NOT enumerated here — adding
+        // one requires no CloudFront change. ConfigValidator enforces that each
+        // subtenant SubDomain is first-level under the tenant RootDomain.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
-        if (tenantConfig.Subtenants != null)
-        {
-            foreach (var sub in tenantConfig.Subtenants)
-            {
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    aliases.Add(sub.Value.SubDomain);
-            }
-        }
 
         // =====================================================================
         // CLOUDFRONT DISTRIBUTION
@@ -322,32 +318,10 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
             },
         }, new CustomResourceOptions { Parent = this });
 
-        // Subtenant-specific records
-        if (tenantConfig.Subtenants != null)
-        {
-            foreach (var sub in tenantConfig.Subtenants)
-            {
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                {
-                    new Pulumi.Aws.Route53.Record($"{prefix}-cf-alias-{sub.Key}", new Pulumi.Aws.Route53.RecordArgs
-                    {
-                        ZoneId = zoneId,
-                        Name = sub.Value.SubDomain,
-                        Type = "A",
-                        AllowOverwrite = true,
-                        Aliases =
-                        {
-                            new RecordAliasArgs
-                            {
-                                Name = distribution.DomainName,
-                                ZoneId = distribution.HostedZoneId,
-                                EvaluateTargetHealth = false,
-                            },
-                        },
-                    }, new CustomResourceOptions { Parent = this });
-                }
-            }
-        }
+        // Per-subtenant Route 53 records are NOT created here. The wildcard
+        // A-alias (`*.{domain}` → distribution) created above covers every
+        // first-level subtenant domain. Adding a subtenant requires no DNS
+        // change. See ConfigValidator for the first-level-SubDomain constraint.
 
         return new AwsCloudFrontOutputs(
             distributionId: distribution.Id,

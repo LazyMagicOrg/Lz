@@ -66,4 +66,4 @@ Write-Host "Setup complete!" -ForegroundColor Green
 Write-Host "  bin/psql  - PostgreSQL client binary (Amazon Linux 2023)" -ForegroundColor White
 Write-Host "  lib/      - Shared libraries for psql" -ForegroundColor White
 Write-Host ""
-Write-Host "These will be bundled into the Lambda package on next 'lz deployfoundation'." -ForegroundColor Yellow
+Write-Host "These will be bundled into the Lambda package on next 'lz deploysystem'." -ForegroundColor Yellow

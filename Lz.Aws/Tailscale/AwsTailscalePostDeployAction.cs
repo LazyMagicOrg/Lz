@@ -1,3 +1,5 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -9,6 +11,8 @@ using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Lz.Core.Config;
+using Lz.Core.Tailscale;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Task = System.Threading.Tasks.Task;
@@ -438,8 +442,8 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     /// </summary>
     private async Task<Dictionary<string, string>> GetSharedSecretAsync()
     {
-        var profile = _config.SharedProfile ?? _config.Profile;
-        var region = !string.IsNullOrEmpty(_config.SharedRegion) ? _config.SharedRegion : _config.Region;
+        var profile = _config.Aws().SharedProfile ?? _config.Profile;
+        var region = !string.IsNullOrEmpty(_config.Aws().SharedRegion) ? _config.Aws().SharedRegion : _config.Region;
         var smClient = CreateSecretsManagerClient(region, profile);
 
         var response = await smClient.GetSecretValueAsync(new GetSecretValueRequest
@@ -486,8 +490,8 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     {
         var newJson = JsonSerializer.Serialize(secret);
 
-        var profile = _config.SharedProfile ?? _config.Profile;
-        var region = !string.IsNullOrEmpty(_config.SharedRegion) ? _config.SharedRegion : _config.Region;
+        var profile = _config.Aws().SharedProfile ?? _config.Profile;
+        var region = !string.IsNullOrEmpty(_config.Aws().SharedRegion) ? _config.Aws().SharedRegion : _config.Region;
         var smClient = CreateSecretsManagerClient(region, profile);
 
         await smClient.PutSecretValueAsync(new PutSecretValueRequest

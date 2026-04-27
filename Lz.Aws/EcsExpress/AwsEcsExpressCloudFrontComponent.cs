@@ -89,6 +89,24 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             ?? throw new FileNotFoundException(
                 $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFRequest.js")}");
 
+        // Explore static-site routing — split from CFRequest.js to keep
+        // the main request function under the 10 KB CloudFront limit.
+        // Handles /explore* (bare-prefix redirects + S3 origin rewrite to
+        // the per-subtenant explore bucket).
+        var exploreFn = CreateFunctionFromFile(prefix, "explore", "CFExplore.js",
+            $"Explore static-site routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            ?? throw new FileNotFoundException(
+                $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFExplore.js")}");
+
+        // Auth routing — /auth/{pool}/... (OIDC façade) and /authentication/...
+        // (login/logout flow + WASM passthrough). Split from CFRequest.js to
+        // consolidate auth-flow routing in one auditable place and to give
+        // CFRequest more headroom under the 10 KB CloudFront limit.
+        var authFn = CreateFunctionFromFile(prefix, "auth", "CFAuth.js",
+            $"Auth routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            ?? throw new FileNotFoundException(
+                $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFAuth.js")}");
+
         // Auth callback function — no KVS needed, just redirects based on state param
         var authCallbackFn = CreateSimpleFunctionFromFile(prefix, "auth-callback", "CFAuthCallback.js",
             $"OAuth callback redirect for {domain}", tenantConfig.ConfigDirectory);
@@ -120,11 +138,9 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // ALIASES
         // =====================================================================
 
+        // Apex + wildcard cover every first-level subtenant domain; subtenants
+        // are not enumerated here. ConfigValidator enforces first-level SubDomain.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
-        if (tenantConfig.Subtenants != null)
-            foreach (var sub in tenantConfig.Subtenants)
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    aliases.Add(sub.Value.SubDomain);
 
         // =====================================================================
         // CLOUDFRONT DISTRIBUTION — ALB origin + S3 origin
@@ -249,6 +265,85 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         },
                     },
                 },
+                // Explore static-site behavior — /explore*
+                // CFExplore.js short-circuits bare-prefix redirects and does
+                // dynamic S3 origin rewrite to the per-subtenant explore
+                // bucket. Pattern matches /explore, /explore/, /explore/home,
+                // /explore/{slug}/... — caveat: also matches /exploration,
+                // which we don't have today; if such a path is ever added,
+                // either rename or move it to its own behavior ahead of this.
+                // Static content benefits from edge caching in non-dev envs.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/explore*",
+                    TargetOriginId = "s3-assets", // placeholder; CFExplore overrides
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = env == "dev"
+                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  // CachingDisabled
+                        : "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = exploreFn.Arn,
+                        },
+                    },
+                },
+                // OIDC façade behavior — /auth/{pool}/...
+                // CFAuth.js dispatches by sub-path:
+                //   /.well-known/openid-configuration → 200 with synthetic discovery doc
+                //   /.well-known/jwks.json            → origin rewrite to cognito-idp.{region}.amazonaws.com
+                //   /oauth2/{token,userInfo,revoke}   → origin rewrite to auth-{pool}.{domain}
+                //   /oauth2/authorize, /logout        → 302 to Cognito Hosted UI
+                // CachingDisabled is mandatory — token/userInfo responses MUST NOT
+                // be cached at the edge. AllViewerExceptHostHeader rewrites Host to
+                // the dynamically-selected origin (Cognito validates Host strictly).
+                // TargetOriginId is a placeholder; cf.updateRequestOrigin overrides
+                // it for proxied sub-paths and the inline-200/302 sub-paths never
+                // reach an origin.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/auth/*",
+                    TargetOriginId = "alb-origin",
+                    ViewerProtocolPolicy = "https-only",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = false,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = authFn.Arn,
+                        },
+                    },
+                },
+                // Authentication-flow behavior — /authentication/...
+                // CFAuth.js handles login/logout intercepts and passes through
+                // the rest to the root webapp's S3 bucket via dynamic origin
+                // rewrite. Same policies as /auth/* for consistency.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/authentication/*",
+                    TargetOriginId = "s3-assets",
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = authFn.Arn,
+                        },
+                    },
+                },
             },
             CustomErrorResponses =
             {
@@ -278,14 +373,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 $@"{{ ""Version"": ""2012-10-17"", ""Statement"": [{{ ""Sid"": ""AllowCloudFrontRead"", ""Effect"": ""Allow"", ""Principal"": {{ ""Service"": ""cloudfront.amazonaws.com"" }}, ""Action"": ""s3:GetObject"", ""Resource"": ""{t.Item1}/*"", ""Condition"": {{ ""StringEquals"": {{ ""AWS:SourceAccount"": ""{t.Item2}"" }} }} }}] }}"),
         }, new CustomResourceOptions { Parent = this });
 
-        // Route 53 aliases
+        // Route 53 aliases — apex + wildcard only. The wildcard covers every
+        // first-level subtenant domain, so subtenants are not enumerated here.
         var zoneId = publicZone.Apply(z => z.ZoneId);
         CreateAliasRecord($"{prefix}-cf-alias", zoneId, domain, distribution);
         CreateAliasRecord($"{prefix}-cf-alias-wildcard", zoneId, $"*.{domain}", distribution);
-        if (tenantConfig.Subtenants != null)
-            foreach (var sub in tenantConfig.Subtenants)
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    CreateAliasRecord($"{prefix}-cf-alias-{sub.Key}", zoneId, sub.Value.SubDomain, distribution);
 
         return new AwsCloudFrontOutputs(distribution.Id, distribution.DomainName, assetsBucket.Id, assetsBucket.Id);
     }

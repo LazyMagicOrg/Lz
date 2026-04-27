@@ -1,4 +1,7 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -36,7 +39,7 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
     {
         var prefix = config.SystemKey;
         var awsNetwork = (AwsNetworkOutputs)network;
-        var ecs = config.ECS ?? new EcsConfig();
+        var ecs = config.Aws().ECS ?? new EcsConfig();
         var instanceType = ecs.TailscaleInstanceType;
         var desiredCapacity = ecs.TailscaleDesiredCapacity;
 
@@ -49,20 +52,20 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
         // - Shared deployments: the system secret uses a custom KMS key
         //   (alias/shared-secrets-key); look it up via data source.
         Input<string> iamPolicy;
-        if (!string.IsNullOrEmpty(config.SharedKmsKeyArn))
+        if (!string.IsNullOrEmpty(config.Aws().SharedKmsKeyArn))
         {
-            iamPolicy = BuildTailscaleIamPolicy(prefix, config.SharedSecretArn, config.SharedKmsKeyArn);
+            iamPolicy = BuildTailscaleIamPolicy(prefix, config.Aws().SharedSecretArn, config.Aws().SharedKmsKeyArn);
         }
-        else if (config.TrustedAccountIds.Count > 0)
+        else if (config.Aws().TrustedAccountIds.Count > 0)
         {
             iamPolicy = Pulumi.Aws.Kms.GetAlias.Invoke(new Pulumi.Aws.Kms.GetAliasInvokeArgs
             {
                 Name = "alias/shared-secrets-key",
-            }).Apply(a => BuildTailscaleIamPolicy(prefix, config.SharedSecretArn, a.TargetKeyArn));
+            }).Apply(a => BuildTailscaleIamPolicy(prefix, config.Aws().SharedSecretArn, a.TargetKeyArn));
         }
         else
         {
-            iamPolicy = BuildTailscaleIamPolicy(prefix, config.SharedSecretArn, null);
+            iamPolicy = BuildTailscaleIamPolicy(prefix, config.Aws().SharedSecretArn, null);
         }
 
         var role = new Role($"{prefix}-tailscale-role", new RoleArgs
@@ -263,11 +266,11 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
         var efsRegion = config.Region; // EFS is always in the deployment region
 
         // Tailscale keys always live in shared/system — use ARN for cross-account access
-        var secretId = !string.IsNullOrEmpty(config.SharedSecretArn)
-            ? config.SharedSecretArn
+        var secretId = !string.IsNullOrEmpty(config.Aws().SharedSecretArn)
+            ? config.Aws().SharedSecretArn
             : "shared/system";
-        var secretRegion = !string.IsNullOrEmpty(config.SharedRegion)
-            ? config.SharedRegion
+        var secretRegion = !string.IsNullOrEmpty(config.Aws().SharedRegion)
+            ? config.Aws().SharedRegion
             : config.Region;
 
         return $@"#!/bin/bash

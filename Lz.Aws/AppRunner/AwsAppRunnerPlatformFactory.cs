@@ -3,6 +3,7 @@ using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Lz.Aws.Ecs;
+using Lz.Aws.Interfaces;
 
 namespace Lz.Aws.AppRunner;
 
@@ -12,7 +13,7 @@ namespace Lz.Aws.AppRunner;
 /// Uses DynamoDB (not RDS), Cognito (not Keycloak), S3 (not EFS).
 /// Reuses SES email component from ECS topology.
 /// </summary>
-public class AwsAppRunnerPlatformFactory : IPlatformFactory
+public class AwsAppRunnerPlatformFactory : IAwsPlatformFactory
 {
     private readonly SystemConfig _config;
 
@@ -21,53 +22,53 @@ public class AwsAppRunnerPlatformFactory : IPlatformFactory
         _config = config;
     }
 
-    public ISystemNetworkComponent CreateNetwork()
+    public virtual ISystemNetworkComponent CreateNetwork()
         => new AwsAppRunnerNetworkComponent();
 
-    public IDatabaseComponent CreateDatabase()
+    public virtual IDatabaseComponent CreateDatabase()
         => new AwsAppRunnerDynamoDbComponent();
 
-    public IFileStorageComponent CreateFileStorage()
+    public virtual IFileStorageComponent CreateFileStorage()
         => new AwsAppRunnerFileStorageComponent();
 
-    public IComputeEnvironmentComponent CreateComputeEnvironment()
+    public virtual IComputeEnvironmentComponent CreateComputeEnvironment()
         => new AwsAppRunnerComputeComponent();
 
-    public IServiceComponent CreateService()
+    public virtual IServiceComponent CreateService()
         => new AwsAppRunnerServiceComponent(_config);
 
-    public IAuthServiceComponent CreateAuthService()
+    public virtual IAuthServiceComponent CreateAuthService()
         => new AwsAppRunnerCognitoComponent();
 
-    public IEmailComponent CreateEmail()
+    public virtual IEmailComponent CreateEmail()
         => new AwsSesComponent();
 
-    public ITenantCdnComponent CreateTenantCdn()
+    public virtual ITenantCdnComponent CreateTenantCdn()
         => new AwsAppRunnerCloudFrontComponent();
 
-    public ITenantDataComponent CreateTenantData()
+    public virtual ITenantDataComponent CreateTenantData()
         => new AwsAppRunnerTenantDataComponent();
 
-    public ITenantServiceComponent CreateTenantService()
+    public virtual ITenantServiceComponent CreateTenantService()
         => new AwsAppRunnerTenantServiceComponent();
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
-    public Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
+    public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
+    public virtual Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
 
     // AppRunner doesn't use Tailscale VPN
-    public ITailscaleComponent? CreateTailscale() => null;
+    public virtual ITailscaleComponent? CreateTailscale() => null;
 
     // Foundation post-deploy: create system-level DynamoDB table
-    public IPostDeployAction? GetFoundationPostDeployAction()
+    public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new Lz.Aws.EcsExpress.AwsEcsExpressFoundationPostDeployAction(_config);
 
     // No Tailscale
-    public IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
-    public ITailscaleKeyManager? GetTailscaleKeyManager() => null;
+    public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
+    public virtual ITailscaleKeyManager? GetTailscaleKeyManager() => null;
 
     // No Keycloak — uses Cognito
-    public ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
+    public virtual ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
 
-    public IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system)
+    public virtual IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system)
     {
         var foundationServices = system.FoundationLayerServices;
         if (foundationServices.Count == 0 || !foundationServices.Any(s => s.Docker != null))
@@ -75,35 +76,35 @@ public class AwsAppRunnerPlatformFactory : IPlatformFactory
         return new AwsAppRunnerPostDeployAction(_config, system, foundationServices);
     }
 
-    public IPostDeployAction? GetServiceDeployAction(
+    public virtual IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system,
         IReadOnlyList<ServiceDefinition> services,
         string? tenantKey = null,
         TenantConfig? tenantConfig = null)
         => new AwsAppRunnerPostDeployAction(_config, system, services, tenantKey, tenantConfig);
 
-    public ITransitionChecker CreateTransitionChecker()
+    public virtual ITransitionChecker CreateTransitionChecker()
         => new AwsAppRunnerTransitionChecker(_config);
 
     // No Lambda gate-checker needed (no EFS/RDS to verify)
-    public IGateCheckerComponent? CreateGateChecker() => null;
+    public virtual IGateCheckerComponent? CreateGateChecker() => null;
 
     // No config init needed (no EFS config files, no RDS tenant databases)
-    public IConfigInitRunner? GetConfigInitRunner() => null;
+    public virtual IConfigInitRunner? GetConfigInitRunner() => null;
 
     // No post-seed runner (no seed process for DynamoDB)
-    public IPostSeedRunner? GetPostSeedRunner() => null;
+    public virtual IPostSeedRunner? GetPostSeedRunner() => null;
 
     // No admin setup runner (handled differently for Cognito)
-    public IAdminSetupRunner? GetAdminSetupRunner() => null;
+    public virtual IAdminSetupRunner? GetAdminSetupRunner() => null;
 
     // No seed task (no EFS/RDS seed infrastructure)
-    public ISeedTaskComponent? CreateSeedTask() => null;
+    public virtual ISeedTaskComponent? CreateSeedTask() => null;
 
     // No shared seed bucket needed
-    public string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey) => null;
+    public virtual string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey) => null;
 
-    public (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
+    public virtual (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
         IDatabaseOutputs Database, IFileStorageOutputs FileStorage)
         LookupFoundation(SystemConfig config)
         => AwsAppRunnerFoundationLookup.Lookup(config);

@@ -2,7 +2,7 @@ namespace Lz.Core.Config;
 
 /// <summary>
 /// Configuration for building and pushing container images to a registry.
-/// Maps to servicesconfig.{systemkey}.{env}.yaml files.
+/// Maps to containersbuild.{systemkey}.{env}.yaml files.
 /// </summary>
 public class ContainerServiceConfig
 {

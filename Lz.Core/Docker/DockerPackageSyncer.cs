@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 
-namespace Lz.Aws.Docker;
+namespace Lz.Core.Docker;
 
 /// <summary>
 /// Synchronizes NuGet packages from the local cache into a DockerPackages folder

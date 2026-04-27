@@ -1,3 +1,5 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using System.IO.Compression;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;

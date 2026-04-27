@@ -1,9 +1,19 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 
 namespace Lz.Tests.Config.Tests;
 
-public class ConfigMergerTests
+[Collection("ConfigLoaderStaticState")]
+public class ConfigMergerTests : IDisposable
 {
+    public ConfigMergerTests()
+    {
+        ConfigLoader.ResetForTests();
+        ConfigLoader.RegisterExtensions(new AwsConfigExtensions());
+    }
+
+    public void Dispose() => ConfigLoader.ResetForTests();
+
     private static string TestDataPath(string filename)
         => Path.Combine("Config.Tests", "testdata", filename);
 
@@ -44,7 +54,7 @@ public class ConfigMergerTests
     public void GetEffectiveEcsConfig_MergesCorrectly()
     {
         var (system, tenant) = LoadTestConfigs();
-        var result = ConfigMerger.GetEffectiveEcsConfig(system, tenant);
+        var result = AwsConfigMerger.GetEffectiveEcsConfig(system, tenant);
         Assert.Equal(512, result.SmartStoreCpu);
         Assert.Equal(1024, result.SmartStoreMemory);
         Assert.Equal(256, result.AppHostCpu);
@@ -78,12 +88,4 @@ public class ConfigMergerTests
         Assert.True(result!.Services.ContainsKey("store"));
     }
 
-    [Fact]
-    public void GetEffectiveAuthConfigs_ReturnsTenant_WhenPresent()
-    {
-        var (system, tenant) = LoadTestConfigs();
-        var result = ConfigMerger.GetEffectiveAuthConfigs(system, tenant);
-        Assert.NotNull(result);
-        Assert.True(result!.ContainsKey("usersauth"));
-    }
 }

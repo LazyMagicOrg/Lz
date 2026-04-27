@@ -1,4 +1,4 @@
-namespace Lz.Core.Config;
+namespace Lz.Core.Keycloak;
 
 /// <summary>
 /// Deserialization model for credsconfig.{systemkey}.{env}.yaml.

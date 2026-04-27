@@ -25,17 +25,7 @@ Integrations:
       Scheme: "https"
       Description: "Keycloak authentication server"
 
-AuthConfigs:
-  usersauth:
-    HostedUIDomain: "https://testdev.click/realms/usersauth"
-    MetadataUrl: "https://testdev.click/realms/usersauth/.well-known/openid-configuration"
-    ClientId: "test-client"
-    ValidateAudience: false
-  adminsauth:
-    HostedUIDomain: "https://auth.testdev.click/realms/adminsauth"
-    MetadataUrl: "https://auth.testdev.click/realms/adminsauth/.well-known/openid-configuration"
-    ValidateAudience: false
-    ClientId: "test-client"
+# AuthConfigs block omitted: pool declarations live on systemconfig only.
 
 DefaultTenant: "testdev.click"
 

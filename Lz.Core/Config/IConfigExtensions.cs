@@ -20,6 +20,16 @@ namespace Lz.Core.Config;
 public interface IConfigExtensions
 {
     /// <summary>
+    /// The platform this extension targets, matched against the active
+    /// platform (from <c>SystemConfig.Platform</c> or a pre-scan of the
+    /// loaded YAML) case-insensitively. Only extensions whose
+    /// <see cref="Platform"/> matches the active platform contribute type
+    /// mappings to the deserializer. Conventional values: <c>"aws"</c>,
+    /// <c>"azure"</c>, <c>"gcp"</c>.
+    /// </summary>
+    string Platform { get; }
+
+    /// <summary>
     /// Invoked by <see cref="ConfigLoader"/> while building the PascalCase
     /// deserializer used for systemconfig/tenantconfig YAML. Implementations
     /// typically call <c>builder.WithTypeMapping&lt;TBase, TDerived&gt;()</c>

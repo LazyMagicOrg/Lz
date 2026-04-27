@@ -4,13 +4,14 @@ using Lz.Core.Interfaces.Outputs;
 using Pulumi;
 using Pulumi.Aws.Ecs;
 using Pulumi.Aws.Ecs.Inputs;
-using Pulumi.Aws.Ecr;
 using Pulumi.Aws.ServiceDiscovery;
 
 namespace Lz.Aws.EcsExpress;
 
 /// <summary>
-/// ECSExpress compute — ECS cluster, Cloud Map namespace, and ECR repository.
+/// ECSExpress compute — ECS cluster and Cloud Map namespace. ECR repos are
+/// per-tenant and are created on first <c>lz deploycontainer</c>, not by
+/// Pulumi, matching the ecs-fargate-keycloak convention.
 /// </summary>
 public class AwsEcsExpressComputeComponent : ComponentResource, IComputeEnvironmentComponent
 {
@@ -62,40 +63,6 @@ public class AwsEcsExpressComputeComponent : ComponentResource, IComputeEnvironm
                 },
             }, new CustomResourceOptions { Parent = this });
 
-        // =====================================================================
-        // ECR REPOSITORY
-        // =====================================================================
-
-        var ecrRepo = new Repository($"{prefix}-ecr", new RepositoryArgs
-        {
-            Name = $"{sk}-{suffix}-{env}-apphost",
-            ImageTagMutability = "MUTABLE",
-            ForceDelete = env == "dev",
-            Tags =
-            {
-                { "System", sk },
-                { "Environment", env },
-                { "ManagedBy", "lz-pulumi" },
-            },
-        }, new CustomResourceOptions { Parent = this });
-
-        new LifecyclePolicy($"{prefix}-ecr-lifecycle", new LifecyclePolicyArgs
-        {
-            Repository = ecrRepo.Name,
-            Policy = @"{
-                ""rules"": [{
-                    ""rulePriority"": 1,
-                    ""description"": ""Keep only 5 untagged images"",
-                    ""selection"": {
-                        ""tagStatus"": ""untagged"",
-                        ""countType"": ""imageCountMoreThan"",
-                        ""countNumber"": 5
-                    },
-                    ""action"": { ""type"": ""expire"" }
-                }]
-            }",
-        }, new CustomResourceOptions { Parent = this });
-
         var networkOutputs = (AwsEcsExpressNetworkOutputs)network;
 
         return new AwsEcsExpressComputeOutputs
@@ -105,8 +72,6 @@ public class AwsEcsExpressComputeComponent : ComponentResource, IComputeEnvironm
             InternalIngressEndpoint = Output.Create(""), // No internal ALB
             ClusterArn = cluster.Arn,
             CloudMapNamespaceId = cloudMapNamespace.Id,
-            EcrRepositoryUrl = ecrRepo.RepositoryUrl,
-            EcrRepositoryArn = ecrRepo.Arn,
         };
     }
 }

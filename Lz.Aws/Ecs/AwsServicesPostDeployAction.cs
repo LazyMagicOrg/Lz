@@ -2,6 +2,7 @@ using Amazon.ECS;
 using Amazon.ECS.Model;
 using Amazon.Runtime.CredentialManagement;
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Task = System.Threading.Tasks.Task;
@@ -43,7 +44,7 @@ public class AwsServicesPostDeployAction : IPostDeployAction
         var env = _config.Environment;
         var region = _config.Region;
         var profile = _config.Profile;
-        var ecs = _config.ECS ?? new EcsConfig();
+        var ecs = _config.Aws().ECS ?? new EcsConfig();
 
         // Upload tenant config to SSM Parameter Store (if deploying a tenant)
         if (_tenantKey != null)

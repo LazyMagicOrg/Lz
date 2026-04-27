@@ -111,7 +111,7 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
         catch (Amazon.Lambda.Model.ResourceNotFoundException)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"  Warning: Lambda '{functionName}' not found. Deploy foundation first.");
+            Console.WriteLine($"  Warning: Lambda '{functionName}' not found. Run `lz deploysystem` first.");
             Console.ResetColor();
             return false;
         }

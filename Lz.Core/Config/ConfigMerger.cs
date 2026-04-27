@@ -21,40 +21,6 @@ public static class ConfigMerger
         => tenant.Region ?? system.Region;
 
     /// <summary>
-    /// Resolve ECS config for a tenant deployment.
-    /// Uses tenant ECS values where specified, falls back to system defaults.
-    /// </summary>
-    public static EcsConfig GetEffectiveEcsConfig(SystemConfig system, TenantConfig tenant)
-    {
-        var systemEcs = system.ECS ?? new EcsConfig();
-        var tenantEcs = tenant.ECS;
-        if (tenantEcs == null) return systemEcs;
-
-        return new EcsConfig
-        {
-            SmartStoreCpu = tenantEcs.SmartStoreCpu > 0 ? tenantEcs.SmartStoreCpu : systemEcs.SmartStoreCpu,
-            SmartStoreMemory = tenantEcs.SmartStoreMemory > 0 ? tenantEcs.SmartStoreMemory : systemEcs.SmartStoreMemory,
-            AppHostCpu = tenantEcs.AppHostCpu > 0 ? tenantEcs.AppHostCpu : systemEcs.AppHostCpu,
-            AppHostMemory = tenantEcs.AppHostMemory > 0 ? tenantEcs.AppHostMemory : systemEcs.AppHostMemory,
-            ServiceDesiredCount = tenantEcs.ServiceDesiredCount > 0 ? tenantEcs.ServiceDesiredCount : systemEcs.ServiceDesiredCount,
-            LogRetentionDays = tenantEcs.LogRetentionDays > 0 ? tenantEcs.LogRetentionDays : systemEcs.LogRetentionDays,
-            EnableEfsMountInstance = tenantEcs.EnableEfsMountInstance ?? systemEcs.EnableEfsMountInstance,
-            SmartStoreVpnAccess = systemEcs.SmartStoreVpnAccess, // system-level only
-            SmartStoreImage = tenantEcs.SmartStoreImage ?? systemEcs.SmartStoreImage,
-            AppHostImage = tenantEcs.AppHostImage ?? systemEcs.AppHostImage,
-            // Per-tenant isolation fields
-            EfsSmartStoreDataPath = tenantEcs.EfsSmartStoreDataPath,
-            EfsSmartStoreConfigPath = tenantEcs.EfsSmartStoreConfigPath,
-            EfsSmartStoreDataProtectionPath = tenantEcs.EfsSmartStoreDataProtectionPath,
-            EfsAppHostConfigPath = tenantEcs.EfsAppHostConfigPath,
-            DatabaseName = tenantEcs.DatabaseName,
-            SmartStoreServiceDiscoveryName = tenantEcs.SmartStoreServiceDiscoveryName,
-            AppHostServiceDiscoveryName = tenantEcs.AppHostServiceDiscoveryName,
-            ListenerPriorities = tenantEcs.ListenerPriorities,
-        };
-    }
-
-    /// <summary>
     /// Resolve CDN config for a tenant deployment.
     /// Tenant can override system CDN settings.
     /// </summary>
@@ -83,12 +49,6 @@ public static class ConfigMerger
     /// </summary>
     public static IntegrationsConfig? GetEffectiveIntegrations(SystemConfig system, TenantConfig tenant)
         => tenant.Integrations ?? system.Integrations;
-
-    /// <summary>
-    /// Merge runtime AuthConfigs — tenant overrides system.
-    /// </summary>
-    public static Dictionary<string, AuthConfigEntry>? GetEffectiveAuthConfigs(SystemConfig system, TenantConfig tenant)
-        => tenant.AuthConfigs ?? system.AuthConfigs;
 
     /// <summary>
     /// Merge runtime RequestRewriter — tenant overrides system.

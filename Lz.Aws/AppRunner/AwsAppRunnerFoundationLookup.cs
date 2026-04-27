@@ -2,14 +2,14 @@ using System.Collections.Immutable;
 using Lz.Core.Config;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
-using Pulumi.Aws.Ecr;
 
 namespace Lz.Aws.AppRunner;
 
 /// <summary>
-/// Looks up existing foundation resources created by deployfoundation.
-/// Minimal for AppRunner — no VPC to look up. Resolves Route 53 zone,
-/// ECR repository, and DynamoDB endpoint for the tenant phase.
+/// Looks up existing foundation resources created by deploysystem.
+/// Minimal for AppRunner — no VPC to look up. Resolves Route 53 zone and
+/// DynamoDB endpoint for the tenant phase. ECR repos are per-tenant and
+/// imperatively created by <c>lz deploycontainer</c>, not looked up here.
 /// </summary>
 public static class AwsAppRunnerFoundationLookup
 {
@@ -24,13 +24,6 @@ public static class AwsAppRunnerFoundationLookup
 
         var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
             new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = config.SystemDomain });
-
-        // Look up the ECR repository created during deployfoundation
-        var ecrRepoName = $"{sk}-{suffix}-{env}-apphost";
-        var ecrRepo = GetRepository.Invoke(new GetRepositoryInvokeArgs
-        {
-            Name = ecrRepoName,
-        });
 
         // Look up the auto-scaling configuration
         // AppRunner auto-scaling configs are looked up by name convention
@@ -54,8 +47,6 @@ public static class AwsAppRunnerFoundationLookup
             PublicIngressEndpoint = Output.Create(""),
             InternalIngressEndpoint = Output.Create(""),
             AutoScalingConfigArn = Output.Create(""), // Looked up at service creation time
-            EcrRepositoryUrl = ecrRepo.Apply(r => r.RepositoryUrl),
-            EcrRepositoryArn = ecrRepo.Apply(r => r.Arn),
         };
 
         // DynamoDB table ARN prefix for IAM policies

@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Lz.Aws.Keycloak;
+namespace Lz.Core.Keycloak;
 
 /// <summary>
 /// HTTP client for the Keycloak Admin REST API.

@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
@@ -35,9 +36,18 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
         var sk = tenantConfig.SystemKey;
         var tk = tenantConfig.TenantKey;
         var env = tenantConfig.Environment;
+        var suffix = tenantConfig.TenantSuffix;
         var prefix = $"{sk}-{tk}-{serviceName}";
         var computeOutputs = (AwsAppRunnerComputeOutputs)compute;
         var container = definition.Container ?? new ContainerOptions();
+
+        // Per-tenant ECR image URI, matching the ecs-fargate-keycloak convention.
+        // Repo is created on first `lz deploycontainer`, not by Pulumi.
+        var ecrName = $"{sk}-{suffix}-{env}-{tk}-{serviceName}";
+        var appRunnerRegion = tenantConfig.Region ?? "us-west-2";
+        var appRunnerIdentity = Pulumi.Aws.GetCallerIdentity.Invoke();
+        var imageIdentifier = appRunnerIdentity.Apply(id =>
+            $"{id.AccountId}.dkr.ecr.{appRunnerRegion}.amazonaws.com/{ecrName}:latest");
 
         // =====================================================================
         // LOG GROUP
@@ -46,7 +56,7 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
         var logGroup = new LogGroup($"{prefix}-logs", new LogGroupArgs
         {
             Name = $"/aws/apprunner/{prefix}",
-            RetentionInDays = tenantConfig.AppRunner?.LogRetentionDays ?? 3,
+            RetentionInDays = tenantConfig.Aws().AppRunner?.LogRetentionDays ?? 3,
             Tags =
             {
                 { "System", sk },
@@ -151,33 +161,29 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
             }}",
         }, new CustomResourceOptions { Parent = this });
 
+        // Bedrock stays at Resource: "*" (cross-region foundation-model ARNs
+        // unknown at policy time). Cognito + CloudFront scoped to this account.
+        var callerIdAr = Pulumi.Aws.GetCallerIdentity.Invoke();
+        var awsRegionAr = Pulumi.Aws.GetRegion.Invoke();
         new RolePolicy($"{prefix}-extra", new RolePolicyArgs
         {
             Role = instanceRole.Id,
-            Policy = @"{
-                ""Version"": ""2012-10-17"",
-                ""Statement"": [
-                    {
-                        ""Effect"": ""Allow"",
-                        ""Action"": [""bedrock:InvokeModel"", ""bedrock:InvokeModelWithResponseStream""],
-                        ""Resource"": ""*""
-                    },
-                    {
-                        ""Effect"": ""Allow"",
-                        ""Action"": [
-                            ""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"",
-                            ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"",
-                            ""cognito-idp:ListUsers"", ""cognito-identity:*""
-                        ],
-                        ""Resource"": ""*""
-                    },
-                    {
-                        ""Effect"": ""Allow"",
-                        ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""],
-                        ""Resource"": ""*""
-                    }
-                ]
-            }",
+            Policy = Output.Tuple(callerIdAr.Apply(c => c.AccountId), awsRegionAr.Apply(r => r.Name))
+                .Apply(ids => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [
+                        {{ ""Effect"": ""Allow"", ""Action"": [""bedrock:InvokeModel"", ""bedrock:InvokeModelWithResponseStream""], ""Resource"": ""*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers""],
+                           ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cognito-identity:GetId"", ""cognito-identity:GetCredentialsForIdentity"", ""cognito-identity:GetOpenIdTokenForDeveloperIdentity""],
+                           ""Resource"": ""arn:aws:cognito-identity:{ids.Item2}:{ids.Item1}:identitypool/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""],
+                           ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:distribution/*"" }}
+                    ]
+                }}"),
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
@@ -195,7 +201,7 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
                 },
                 ImageRepository = new ServiceSourceConfigurationImageRepositoryArgs
                 {
-                    ImageIdentifier = computeOutputs.EcrRepositoryUrl.Apply(url => $"{url}:latest"),
+                    ImageIdentifier = imageIdentifier,
                     ImageRepositoryType = "ECR",
                     ImageConfiguration = new ServiceSourceConfigurationImageRepositoryImageConfigurationArgs
                     {
