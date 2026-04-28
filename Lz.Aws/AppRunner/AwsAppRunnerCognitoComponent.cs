@@ -294,16 +294,36 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             // COGNITO CUSTOM DOMAIN
             // =================================================================
 
+            // ManagedLoginVersion=2 selects the new "Managed Login Pages"
+            // hosted UI; version 1 is the legacy Hosted UI. We pin to 2
+            // because the legacy version has a broken post-signup-confirm
+            // OAuth continuation: the form's first Confirm Account click
+            // succeeds (user → CONFIRMED, email_verified=true), but the
+            // OAuth code-grant follow-up silently fails and the page
+            // re-renders with a misleading "Invalid verification code"
+            // error. Managed Login Pages handles the same flow correctly.
+            // Verified empirically against this codebase's plannerauth
+            // pool — see Platform/test/tests/diag-signup-confirm.spec.js.
             var userPoolDomain = new UserPoolDomain($"{poolPrefix}-domain", new UserPoolDomainArgs
             {
                 Domain = customDomain,
                 UserPoolId = userPool.Id,
                 CertificateArn = certValidation.CertificateArn,
+                ManagedLoginVersion = 2,
             }, new CustomResourceOptions
             {
                 Parent = this,
                 DependsOn = { apexPlaceholder },
             });
+
+            // ManagedLoginVersion=2 requires a per-client branding to be
+            // present, otherwise the hosted UI returns errors trying to
+            // render the Sign-in / Sign-up / Confirm pages. The Pulumi.Aws
+            // 6.x package we're on doesn't ship the ManagedLoginBranding
+            // resource (only added in 7.x), so the branding is created
+            // imperatively in AwsEcsExpressFoundationPostDeployAction
+            // using the AWS SDK, idempotent on the
+            // ResourceAlreadyExistsException.
 
             // Route 53 alias: auth.{domain} → Cognito's managed CloudFront distribution
             new Pulumi.Aws.Route53.Record($"{poolPrefix}-dns", new Pulumi.Aws.Route53.RecordArgs

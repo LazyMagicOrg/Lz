@@ -33,6 +33,7 @@
     <PackageReference Include="AWSSDK.AutoScaling" Version="4.*" />
     <PackageReference Include="AWSSDK.CloudFront" Version="4.*" />
     <PackageReference Include="AWSSDK.CloudFrontKeyValueStore" Version="4.*" />
+    <PackageReference Include="AWSSDK.CognitoIdentityProvider" Version="4.*" />
     <PackageReference Include="AWSSDK.Extensions.CrtIntegration" Version="4.*" />
     <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.*" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
