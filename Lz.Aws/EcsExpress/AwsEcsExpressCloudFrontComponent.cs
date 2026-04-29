@@ -294,6 +294,36 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         },
                     },
                 },
+                // Venues static-site behavior — /venues*
+                // Same CFExplore.js function (it's generic over staticsite
+                // path now — matches the longest-prefix `staticsite` tuple
+                // in KVS). The /venues/ static site is tenant-level (lives
+                // in Tenancies/{tk}/staticsite/public/venues/), so the
+                // `StaticSites: /venues/` entry in tenantconfig cascades
+                // into every per-host KVS entry and CFExplore resolves it
+                // to the same `bcs-bcs--webapp-venues-{ts}` bucket on
+                // every request, regardless of which subtenant subdomain
+                // serves the request. Pattern caveat same as /explore* —
+                // /venues* also matches hypothetical /venuesabc paths.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/venues*",
+                    TargetOriginId = "s3-assets", // placeholder; CFExplore overrides
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = env == "dev"
+                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  // CachingDisabled
+                        : "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = exploreFn.Arn,
+                        },
+                    },
+                },
                 // OIDC façade behavior — /auth/{pool}/...
                 // CFAuth.js dispatches by sub-path:
                 //   /.well-known/openid-configuration → 200 with synthetic discovery doc

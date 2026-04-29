@@ -93,8 +93,8 @@ public static class ConfigValidator
         {
             foreach (var (key, entry) in config.Subtenants)
             {
-                if (string.IsNullOrWhiteSpace(entry.SubDomain)) continue;
-                if (!_dnsLabelPattern.IsMatch(entry.SubDomain))
+                if (!string.IsNullOrWhiteSpace(entry.SubDomain)
+                    && !_dnsLabelPattern.IsMatch(entry.SubDomain))
                     errors.Add(
                         $"Subtenants[{key}].SubDomain ('{entry.SubDomain}') is not a valid " +
                         $"single DNS label. Expected 1-63 chars, alphanumeric or hyphens, " +
@@ -103,6 +103,24 @@ public static class ConfigValidator
                         $"just the leftmost label (e.g. '{key}'), and the FQDN is built " +
                         $"from RootDomain at consumption time. Omit this field entirely " +
                         $"when the subtenant key already matches the desired label.");
+
+                // LogoUrl: when non-empty, must be either a host-rooted
+                // path (starts with "/" but not "//") or an absolute
+                // https URL. Anything else is suspicious enough to flag —
+                // the value is rendered as <img src="…"> on the central
+                // venues page, so a malformed URL becomes a broken image.
+                if (!string.IsNullOrWhiteSpace(entry.LogoUrl))
+                {
+                    var u = entry.LogoUrl.Trim();
+                    var isHostRooted = u.StartsWith("/", StringComparison.Ordinal)
+                                    && !u.StartsWith("//", StringComparison.Ordinal);
+                    var isHttps = u.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                    if (!isHostRooted && !isHttps)
+                        errors.Add(
+                            $"Subtenants[{key}].LogoUrl ('{entry.LogoUrl}') must be a " +
+                            $"host-rooted path (e.g. '/subtenancy/.../logo.png') or an " +
+                            $"absolute https URL.");
+                }
             }
         }
 
