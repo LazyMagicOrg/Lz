@@ -190,4 +190,108 @@ public class ConfigMergerTests : IDisposable
         Assert.Equal(2, adminApp.Level); // bucket lives at subtenant level
         Assert.Equal("admin", adminApp.AppName);
     }
+
+    // ─── Restating-vs-changing-AppName cascade rule ──────────────────────────
+    //
+    // These tests pin the rule introduced when the cascade was decoupled
+    // from AppName re-declaration. Before the fix, ANY non-empty AppName at
+    // a child level promoted Level to that level — forcing the user to OMIT
+    // AppName at override sites to avoid pointing the routing tuple at a
+    // non-existent per-subtenant bucket. After the fix, restating the same
+    // AppName is a no-op for ownership, and only a *different* AppName
+    // promotes Level.
+
+    [Fact]
+    public void ResolveWebApps_SubtenantRestatesSameAppName_LevelStaysAtParent()
+    {
+        // The exact scenario that motivated the fix: `free` subtenant wants to
+        // override AuthConfig to "" (public) but restates AppName for clarity.
+        // The bundle still lives in the system bucket, so Level must stay 0.
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var subtenant = SubtenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant: null, subtenant);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal("", app.AuthConfig);
+        Assert.Equal(0, app.Level); // bucket stays at system level — restating is a no-op
+    }
+
+    [Fact]
+    public void ResolveWebApps_SubtenantChangesAppName_LevelPromotesToSubtenant()
+    {
+        // The "subtenant truly owns its own bucket for this path" case. The
+        // child level declares a DIFFERENT AppName, signalling a per-subtenant
+        // bundle (e.g. a customized eventit fork). Level promotes to 2 so
+        // BCPlugin emits {sts} and points at the subtenant bucket.
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var subtenant = SubtenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit-cerulean", AuthConfig = "plannerauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant: null, subtenant);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit-cerulean", app.AppName);
+        Assert.Equal(2, app.Level); // child OWNS this path
+    }
+
+    [Fact]
+    public void ResolveWebApps_TenantRestatesSameAppName_LevelStaysAtSystem()
+    {
+        // Same rule applies at the tenant level: restating the system's
+        // AppName while overriding AuthConfig keeps Level=0.
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var tenant = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "tenantauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant, subtenantBehaviors: null);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal("tenantauth", app.AuthConfig);
+        Assert.Equal(0, app.Level);
+    }
+
+    [Fact]
+    public void ResolveWebApps_TenantChangesAppName_LevelPromotesToTenant()
+    {
+        // Tenant introduces a different bundle at the same path → tenant owns.
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var tenant = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit-bcs", AuthConfig = "plannerauth" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant, subtenantBehaviors: null);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit-bcs", app.AppName);
+        Assert.Equal(1, app.Level);
+    }
+
+    [Fact]
+    public void ResolveWebApps_SubtenantOverridesTenantOverride_RestatingPreservesOriginalLevel()
+    {
+        // Three-level cascade: system declares /, tenant restates with a
+        // different auth, subtenant restates again with yet another auth.
+        // All three say AppName=eventit. Level must stay at 0 across the
+        // whole chain — every entry is "I'm only changing AuthConfig".
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "plannerauth" });
+        var tenant = TenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "tenantauth" });
+        var subtenant = SubtenantWithWebApps(
+            new WebAppBehavior { Path = "/", AppName = "eventit", AuthConfig = "" });
+
+        var resolved = ConfigMerger.ResolveWebApps(system, tenant, subtenant);
+
+        var app = Assert.Single(resolved);
+        Assert.Equal("eventit", app.AppName);
+        Assert.Equal("", app.AuthConfig);
+        Assert.Equal(0, app.Level);
+    }
 }

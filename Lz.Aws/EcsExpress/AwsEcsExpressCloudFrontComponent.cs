@@ -139,7 +139,9 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // =====================================================================
 
         // Apex + wildcard cover every first-level subtenant domain; subtenants
-        // are not enumerated here. ConfigValidator enforces first-level SubDomain.
+        // are not enumerated here. SubDomain is a single DNS label (see
+        // ConfigValidator); the FQDN is {SubDomain}.{RootDomain}, so
+        // first-level is structurally guaranteed by the schema.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
 
         // =====================================================================

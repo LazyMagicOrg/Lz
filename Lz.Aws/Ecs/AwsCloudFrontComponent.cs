@@ -181,7 +181,9 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // Collect aliases: root domain + wildcard (covers every first-level
         // subtenant) + legacy domains. Subtenants are NOT enumerated — the
         // wildcard alias + wildcard Route 53 record handle first-level
-        // subdomains. ConfigValidator enforces first-level SubDomain.
+        // subdomains. SubDomain is a single DNS label (validated by
+        // ConfigValidator); the FQDN is built as {SubDomain}.{RootDomain}
+        // at consumption time, so first-level is guaranteed by the schema.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
         if (tenantConfig.LegacyDomains != null)
         {

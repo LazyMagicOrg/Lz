@@ -146,8 +146,10 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
 
         // Apex + wildcard cover every first-level subtenant domain
         // (e.g. cerulean.{domain}). Subtenants are NOT enumerated here — adding
-        // one requires no CloudFront change. ConfigValidator enforces that each
-        // subtenant SubDomain is first-level under the tenant RootDomain.
+        // one requires no CloudFront change. SubDomain is a single DNS label
+        // (validated by ConfigValidator); the FQDN is built at consumption
+        // time as {SubDomain}.{RootDomain}, so first-level is structurally
+        // guaranteed by the schema.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
 
         // =====================================================================
@@ -321,7 +323,8 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
         // Per-subtenant Route 53 records are NOT created here. The wildcard
         // A-alias (`*.{domain}` → distribution) created above covers every
         // first-level subtenant domain. Adding a subtenant requires no DNS
-        // change. See ConfigValidator for the first-level-SubDomain constraint.
+        // change. SubDomain is a single DNS label (see ConfigValidator);
+        // multi-label values are unrepresentable.
 
         return new AwsCloudFrontOutputs(
             distributionId: distribution.Id,

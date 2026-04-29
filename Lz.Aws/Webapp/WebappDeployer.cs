@@ -337,13 +337,25 @@ public class WebappDeployer
             $"--content-type \"application/wasm\" " +
             $"--exclude \"*\" --include \"*.wasm\"");
 
-        // 2c — *.js override, excluding the two JS manifests (handled by Pass 3).
+        // 2c — *.js override, excluding non-hashed loaders/manifests
+        // (handled by Pass 3 with no-cache). Three loaders here are
+        // non-fingerprinted but rewritten on every Blazor publish — must
+        // NOT be marked immutable, or browsers freeze on the previously-
+        // cached copy for a year and never see new builds:
+        //   blazor.webassembly.js
+        //   dotnet.js                  ← MS rewrites this per build; the
+        //                                hashed dotnet.runtime.{h}.js and
+        //                                dotnet.native.{h}.js it loads ARE
+        //                                immutable, but the loader itself
+        //                                isn't.
+        //   service-worker-assets.js
         await RunAsync("aws",
             $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
             $"--metadata-directive REPLACE {immutableCache} " +
             $"--content-type \"application/javascript\" " +
             $"--exclude \"*\" --include \"*.js\" " +
             $"--exclude \"blazor.webassembly.js\" " +
+            $"--exclude \"dotnet.js\" " +
             $"--exclude \"service-worker-assets.js\"");
 
         // Pass 3: Override manifest files with no-cache. These change every
@@ -368,6 +380,7 @@ public class WebappDeployer
             ("authentication/login.html",        "text/html"),
             ("_framework/blazor.boot.json",      "application/json"),
             ("_framework/blazor.webassembly.js", "application/javascript"),
+            ("_framework/dotnet.js",             "application/javascript"),
             ("service-worker.js",                "application/javascript"),
             ("service-worker-assets.js",         "application/javascript"),
             ("appConfig.js",                     "application/javascript"),

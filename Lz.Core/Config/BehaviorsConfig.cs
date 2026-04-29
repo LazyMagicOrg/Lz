@@ -36,8 +36,23 @@ public class WebAppBehavior
     ///
     /// Cascade rule: leaf-dominant by <see cref="Path"/>. Tenant config can
     /// override the system value for a given path; subtenant config can
-    /// override the tenant value. Tenant/subtenant entries may supply only
-    /// <c>(Path, AuthConfig)</c> — they don't redeclare <see cref="AppName"/>.
+    /// override the tenant value.
+    /// <list type="bullet">
+    ///   <item><description><see cref="AuthConfig"/> is <c>null</c> →
+    ///     inherit from the next-higher level.</description></item>
+    ///   <item><description><see cref="AuthConfig"/> is <c>""</c> (empty
+    ///     string) → explicit-public override, regardless of what the parent
+    ///     specified.</description></item>
+    ///   <item><description><see cref="AuthConfig"/> is non-empty → gated
+    ///     by the named pool.</description></item>
+    /// </list>
+    ///
+    /// At override sites, restating <see cref="AppName"/> is allowed and is
+    /// a no-op for cascade ownership — see
+    /// <see cref="ConfigMerger.ResolveWebApps"/> for the full rule. The
+    /// previous schema documented "tenant/subtenant entries may supply only
+    /// (Path, AuthConfig) — they don't redeclare AppName"; that constraint
+    /// no longer exists. Restate AppName for clarity if you like.
     ///
     /// Plugins (e.g. BCPlugin) consume this to emit:
     /// <list type="bullet">

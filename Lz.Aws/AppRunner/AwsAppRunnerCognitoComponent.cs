@@ -74,6 +74,16 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
         // it doesn't serve anything and is trivially overridable by whatever
         // tenant stack later wants the apex to point somewhere real.
         // AllowOverwrite = true so re-applies on existing records are no-ops.
+        //
+        // Idempotence note: the tenant stack
+        // (AwsEcsExpressCloudFrontComponent) overwrites this record with
+        // an A-alias to its CloudFront distribution. The foundation must
+        // NOT revert that on subsequent `lz deploysystem` runs — doing so
+        // breaks the apex /oauth2/callback redirect that the auth flow
+        // depends on (`https://{apex}` would resolve to 127.0.0.1 and
+        // ECONNREFUSED). IgnoreChanges tells Pulumi to seed the record
+        // on first create and then leave records/aliases/ttl alone on
+        // every subsequent up. The tenant's alias survives.
         var apexPlaceholder = new Pulumi.Aws.Route53.Record($"{prefix}-apex-placeholder",
             new Pulumi.Aws.Route53.RecordArgs
             {
@@ -83,7 +93,11 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 Ttl = 300,
                 Records = { "127.0.0.1" },
                 AllowOverwrite = true,
-            }, new CustomResourceOptions { Parent = this });
+            }, new CustomResourceOptions
+            {
+                Parent = this,
+                IgnoreChanges = { "records", "aliases", "ttl" },
+            });
 
         var poolOutputs = new Dictionary<string, CognitoPoolOutputs>();
 
@@ -318,12 +332,35 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
 
             // ManagedLoginVersion=2 requires a per-client branding to be
             // present, otherwise the hosted UI returns errors trying to
-            // render the Sign-in / Sign-up / Confirm pages. The Pulumi.Aws
-            // 6.x package we're on doesn't ship the ManagedLoginBranding
-            // resource (only added in 7.x), so the branding is created
-            // imperatively in AwsEcsExpressFoundationPostDeployAction
-            // using the AWS SDK, idempotent on the
-            // ResourceAlreadyExistsException.
+            // render the Sign-in / Sign-up / Confirm pages.
+            //
+            // Branding source-of-truth: a `Cognito/{authType}/` directory
+            // at the working directory root (the consumer repo's root —
+            // BCProjNew, etc.). Layout:
+            //
+            //   Cognito/{authType}/
+            //     settings.json              ← JSON document for Settings
+            //     assets/{light|dark|dynamic}/{category-kebab}.{ext}
+            //
+            // If no folder for this authType exists (or settings.json is
+            // empty/`{}` and no assets), we fall back to
+            // UseCognitoProvidedValues=true — Cognito's stock look.
+            var brandingArgs = BuildBrandingArgsFromConventionFolder(
+                userPool.Id, userPoolClient.Id, authType);
+            new ManagedLoginBranding($"{poolPrefix}-branding", brandingArgs,
+                new CustomResourceOptions
+                {
+                    Parent = this,
+                    DependsOn = { userPoolDomain },
+                    // Cognito enforces one branding per client. Toggling
+                    // settings or assets is treated by the Pulumi/Terraform
+                    // provider as a replacement, and the default
+                    // create-before-replace order trips
+                    // ManagedLoginBrandingExistsException because the slot
+                    // is already taken. Force delete-before-create so the
+                    // old branding is gone before the new one is created.
+                    DeleteBeforeReplace = true,
+                });
 
             // Route 53 alias: auth.{domain} → Cognito's managed CloudFront distribution
             new Pulumi.Aws.Route53.Record($"{poolPrefix}-dns", new Pulumi.Aws.Route53.RecordArgs
@@ -462,6 +499,119 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             throw new InvalidOperationException(
                 $"Pool '{authType}' has MfaConfiguration={poolConfig.MfaConfiguration} but no MFA " +
                 "factor enabled. Set SoftwareTokenMfa: true (or SmsMfa: true once SMS is supported).");
+    }
+
+    /// <summary>
+    /// Build <see cref="ManagedLoginBrandingArgs"/> from the convention
+    /// folder <c>Cognito/{authType}/</c> at the current working directory.
+    /// If the folder doesn't exist (or contains nothing meaningful), falls
+    /// back to <c>UseCognitoProvidedValues = true</c> — Cognito's stock look.
+    /// <para>
+    /// Layout the folder is expected to follow:
+    /// <code>
+    ///   Cognito/{authType}/
+    ///     settings.json                   ← optional, JSON document
+    ///     assets/{light|dark|dynamic}/{category-kebab}.{ext}
+    /// </code>
+    /// where <c>category-kebab</c> is the kebab-case lowercase form of a
+    /// Cognito asset category (e.g. <c>page-header-logo</c> →
+    /// <c>PAGE_HEADER_LOGO</c>) and the parent directory provides the
+    /// <c>ColorMode</c>.
+    /// </para>
+    /// </summary>
+    private static ManagedLoginBrandingArgs BuildBrandingArgsFromConventionFolder(
+        Input<string> userPoolId, Input<string> clientId, string authType)
+    {
+        var brandingDir = Path.Combine(
+            Directory.GetCurrentDirectory(), "Cognito", authType);
+
+        if (!Directory.Exists(brandingDir))
+        {
+            return new ManagedLoginBrandingArgs
+            {
+                UserPoolId = userPoolId,
+                ClientId = clientId,
+                UseCognitoProvidedValues = true,
+            };
+        }
+
+        // Read settings.json. Empty/missing → null → defer to defaults.
+        string? settingsJson = null;
+        var settingsPath = Path.Combine(brandingDir, "settings.json");
+        if (File.Exists(settingsPath))
+        {
+            var raw = File.ReadAllText(settingsPath).Trim();
+            // Empty file or `{}` is treated as "no custom settings"; using
+            // UseCognitoProvidedValues=true keeps the stock Cognito look
+            // and avoids sending a no-op Settings doc.
+            if (raw.Length > 0 && raw != "{}")
+                settingsJson = raw;
+        }
+
+        // Walk assets/. Each immediate child directory's name is the
+        // ColorMode (LIGHT / DARK / DYNAMIC). Each file inside is named
+        // after its category (kebab-case → SNAKE_CASE on the API side).
+        var assetList = new List<Pulumi.Aws.Cognito.Inputs.ManagedLoginBrandingAssetArgs>();
+        var assetsDir = Path.Combine(brandingDir, "assets");
+        if (Directory.Exists(assetsDir))
+        {
+            foreach (var colorModeDir in Directory.GetDirectories(assetsDir))
+            {
+                var colorMode = Path.GetFileName(colorModeDir).ToUpperInvariant();
+                if (colorMode != "LIGHT" && colorMode != "DARK" && colorMode != "DYNAMIC")
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine(
+                        $"  Skipping unrecognised ColorMode dir '{colorMode}' under " +
+                        $"Cognito/{authType}/assets/ (expected light|dark|dynamic).");
+                    Console.ResetColor();
+                    continue;
+                }
+                foreach (var file in Directory.GetFiles(colorModeDir))
+                {
+                    var name = Path.GetFileName(file);
+                    // Skip Git placeholders.
+                    if (name == ".gitkeep" || name.StartsWith('.')) continue;
+
+                    var stem = Path.GetFileNameWithoutExtension(file);
+                    var ext = Path.GetExtension(file).TrimStart('.').ToUpperInvariant();
+                    var category = stem.Replace('-', '_').ToUpperInvariant();
+                    var bytesB64 = Convert.ToBase64String(File.ReadAllBytes(file));
+
+                    assetList.Add(new Pulumi.Aws.Cognito.Inputs.ManagedLoginBrandingAssetArgs
+                    {
+                        Bytes = bytesB64,
+                        Category = category,
+                        ColorMode = colorMode,
+                        Extension = ext,
+                    });
+                }
+            }
+        }
+
+        // If neither real settings nor assets were found, defer to defaults.
+        if (settingsJson is null && assetList.Count == 0)
+        {
+            return new ManagedLoginBrandingArgs
+            {
+                UserPoolId = userPoolId,
+                ClientId = clientId,
+                UseCognitoProvidedValues = true,
+            };
+        }
+
+        var args = new ManagedLoginBrandingArgs
+        {
+            UserPoolId = userPoolId,
+            ClientId = clientId,
+        };
+        // Settings and UseCognitoProvidedValues are mutually exclusive on
+        // the AWS API. We set Settings if we have any real customisation;
+        // otherwise we leave Settings unset (and add UseCognitoProvidedValues=true
+        // when neither Settings nor Assets are present, handled above).
+        if (settingsJson is not null) args.Settings = settingsJson;
+        if (assetList.Count > 0) args.Assets = assetList;
+        return args;
     }
 }
 

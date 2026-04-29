@@ -26,8 +26,12 @@ public class SubtenantConfig
 
     /// <summary>
     /// Subtenants keyed by subtenant-key (e.g. <c>cerulean</c>). Each entry
-    /// carries a <c>SubDomain</c> (must be first-level under the tenant's
-    /// <c>RootDomain</c>) and optional <c>Behaviors</c> overrides.
+    /// optionally carries a <c>SubDomain</c> (the leftmost DNS label of the
+    /// first-level subdomain under the tenant's <c>RootDomain</c>; defaults
+    /// to the subtenant key when omitted) and optional <c>Behaviors</c>
+    /// overrides. The full host is constructed as
+    /// <c>{SubDomain ?? key}.{RootDomain}</c> at consumption sites — never
+    /// spell the FQDN out in YAML.
     /// </summary>
     public Dictionary<string, SubtenantEntry> Subtenants { get; set; } = new();
 }

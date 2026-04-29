@@ -78,44 +78,35 @@ public static class ConfigValidator
 
         if (config.CDN != null) ValidateCdn(config.CDN, errors);
 
-        // Subtenant domains must be exactly one label above the tenant's
-        // RootDomain. The tenant distribution's TLS cert is {RootDomain} +
-        // wildcard `*.{RootDomain}` — only first-level subdomains are covered.
-        // Deeper subdomains (e.g. team-a.cerulean.example.com) would need a
-        // separate cert and distribution-level changes, which this topology
-        // doesn't support via the deploysubtenants fast path.
-        if (config.Subtenants != null && !string.IsNullOrEmpty(config.RootDomain))
+        // Subtenant SubDomain (when non-empty) is the leftmost DNS label of
+        // the first-level subdomain under RootDomain. The full host is
+        // constructed at consumption sites as {SubDomain}.{RootDomain}.
+        //
+        // Only first-level subdomains are supported — the tenant
+        // distribution's TLS cert is {RootDomain} + wildcard `*.{RootDomain}`,
+        // which doesn't cover deeper labels (team-a.cerulean.{root} would
+        // need a separate cert and distribution-level changes). Enforcing
+        // a single-label format here makes that constraint impossible to
+        // violate — there's no way to spell a multi-label name in a single-
+        // label field.
+        if (config.Subtenants != null)
         {
             foreach (var (key, entry) in config.Subtenants)
             {
                 if (string.IsNullOrWhiteSpace(entry.SubDomain)) continue;
-                if (!IsFirstLevelSubdomainOf(entry.SubDomain, config.RootDomain))
+                if (!_dnsLabelPattern.IsMatch(entry.SubDomain))
                     errors.Add(
-                        $"Subtenants[{key}].SubDomain ('{entry.SubDomain}') is not a first-level " +
-                        $"subdomain of the tenant's RootDomain ('{config.RootDomain}'). " +
-                        $"Expected exactly one label above the root (e.g. '{key}.{config.RootDomain}').");
+                        $"Subtenants[{key}].SubDomain ('{entry.SubDomain}') is not a valid " +
+                        $"single DNS label. Expected 1-63 chars, alphanumeric or hyphens, " +
+                        $"starting and ending alphanumeric, no dots. The previous schema " +
+                        $"accepted FQDNs like '{key}.{config.RootDomain}'; new schema is " +
+                        $"just the leftmost label (e.g. '{key}'), and the FQDN is built " +
+                        $"from RootDomain at consumption time. Omit this field entirely " +
+                        $"when the subtenant key already matches the desired label.");
             }
         }
 
         ThrowIfErrors(errors, "TenantConfig", sourceFile);
-    }
-
-    /// <summary>
-    /// True if <paramref name="sub"/> is exactly one DNS label above
-    /// <paramref name="root"/>. Comparison is case-insensitive; both arguments
-    /// are treated as bare domain names (no scheme or path).
-    /// </summary>
-    private static bool IsFirstLevelSubdomainOf(string sub, string root)
-    {
-        var subLabels = sub.Trim().TrimEnd('.').Split('.');
-        var rootLabels = root.Trim().TrimEnd('.').Split('.');
-        if (subLabels.Length != rootLabels.Length + 1) return false;
-        for (int i = 0; i < rootLabels.Length; i++)
-        {
-            if (!string.Equals(subLabels[i + 1], rootLabels[i], StringComparison.OrdinalIgnoreCase))
-                return false;
-        }
-        return true;
     }
 
     private static void ValidateFqdn(string domain, string fieldName, List<string> errors)

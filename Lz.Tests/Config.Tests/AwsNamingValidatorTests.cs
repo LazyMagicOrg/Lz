@@ -59,7 +59,7 @@ public class AwsNamingValidatorTests
             RootDomain = "example.com",
             Subtenants = new Dictionary<string, SubtenantEntry>
             {
-                ["abcdefghij"] = new() { SubDomain = "x.example.com" },
+                ["abcdefghij"] = new() { SubDomain = "x" },
             },
         };
         var errs = new List<string>();
@@ -85,7 +85,7 @@ public class AwsNamingValidatorTests
             RootDomain = "example.com",
             Subtenants = new Dictionary<string, SubtenantEntry>
             {
-                ["cerulean"] = new() { SubDomain = "cerulean.example.com" },
+                ["cerulean"] = new() { SubDomain = "cerulean" },
             },
         };
         var errs = new List<string>();
@@ -110,7 +110,7 @@ public class AwsNamingValidatorTests
             RootDomain = "example.com",
             Subtenants = new Dictionary<string, SubtenantEntry>
             {
-                ["cerulean"] = new() { SubDomain = "cerulean.example.com" },
+                ["cerulean"] = new() { SubDomain = "cerulean" },
             },
         };
         var errs = new List<string>();
