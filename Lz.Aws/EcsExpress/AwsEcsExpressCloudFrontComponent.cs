@@ -134,6 +134,64 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             OriginAccessControlOriginType = "s3", SigningBehavior = "always", SigningProtocol = "sigv4",
         }, new CustomResourceOptions { Parent = this });
 
+        // ─────────────────────────────────────────────────────────────────────
+        // CACHE POLICY — host-keyed
+        // ─────────────────────────────────────────────────────────────────────
+        // Mirrors the AWS-managed CachingOptimized policy (gzip+brotli, MaxTtl
+        // 1 year) but adds the x-custom-cache-key header to the cache key.
+        // CFRequest.js and CFExplore.js compute that header as
+        // {bucket}-{originPath}-{request.uri} so the cache key is 1:1 with the
+        // resolved S3 response (host-disambiguated through the bucket name,
+        // which contains the tenant/subtenant keys via the KVS lookup).
+        // CFAuthConfig sets it as 'config-{host}' on its inline response.
+        //
+        // Without a custom policy, CloudFront's default cache key is
+        // (URI, query string) — Host is NOT included — and any function-driven
+        // origin rewrite collapses cross-host onto a single entry. That is
+        // the cross-tenant cache poisoning that bit on test the first time
+        // CachingOptimized went live.
+        //
+        // Wired into the default (/*) behavior plus /explore* and /venues*.
+        // /config stays on CachingDisabled today; the function emits the same
+        // header anyway so the migration to this policy is a one-line config
+        // change when desired.
+        var hostKeyedCachePolicy = new CachePolicy($"{prefix}-cache-host-keyed",
+            new CachePolicyArgs
+            {
+                Name = $"{prefix}-cache-host-keyed-{env}",
+                Comment = "Cache key includes x-custom-cache-key header so " +
+                          "function-driven per-host origin rewrites do not collide.",
+                DefaultTtl = 86400,
+                MinTtl = 1,
+                MaxTtl = 31536000,
+                ParametersInCacheKeyAndForwardedToOrigin =
+                    new CachePolicyParametersInCacheKeyAndForwardedToOriginArgs
+                    {
+                        EnableAcceptEncodingGzip = true,
+                        EnableAcceptEncodingBrotli = true,
+                        HeadersConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginHeadersConfigArgs
+                            {
+                                HeaderBehavior = "whitelist",
+                                Headers =
+                                    new CachePolicyParametersInCacheKeyAndForwardedToOriginHeadersConfigHeadersArgs
+                                    {
+                                        Items = { "x-custom-cache-key" },
+                                    },
+                            },
+                        QueryStringsConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginQueryStringsConfigArgs
+                            {
+                                QueryStringBehavior = "none",
+                            },
+                        CookiesConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginCookiesConfigArgs
+                            {
+                                CookieBehavior = "none",
+                            },
+                    },
+            }, new CustomResourceOptions { Parent = this });
+
         // =====================================================================
         // ALIASES
         // =====================================================================
@@ -182,9 +240,16 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                 CachedMethods = { "GET", "HEAD" },
                 Compress = true,
+                // Dev: CachingDisabled for fast iteration. Other envs: the
+                // host-keyed policy declared above — does NOT use the AWS-
+                // managed CachingOptimized because that policy keys only on
+                // (URI, query string) and CFRequest's per-host bucket
+                // rewrites would poison the cache cross-tenant. The
+                // function emits x-custom-cache-key for every webapp/asset
+                // response and this policy includes that header in the key.
                 CachePolicyId = env == "dev"
-                    ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-                    : "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                    ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                    : hostKeyedCachePolicy.Id,
                 FunctionAssociations =
                 {
                     new DistributionDefaultCacheBehaviorFunctionAssociationArgs
@@ -283,9 +348,18 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
                     Compress = true,
+                    // Host-keyed in non-dev so per-subtenant explore buckets
+                    // don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Host-keyed in non-dev so per-subtenant explore/venues
+                    // buckets don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Dev stays on CachingDisabled for fast iteration; the
+                    // host-keyed policy was validated against dev under a
+                    // temporary flip — see Platform/test/tests/caching.spec.js.
                     CachePolicyId = env == "dev"
-                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  // CachingDisabled
-                        : "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                        : hostKeyedCachePolicy.Id,
                     FunctionAssociations =
                     {
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
@@ -313,9 +387,20 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
                     Compress = true,
+                    // Host-keyed for parity with /explore* even though
+                    // /venues/ resolves to the same tenant-level bucket on
+                    // every host today. Future-safe: if /venues/ ever
+                    // diverges per host (tenant-specific listings, A/B
+                    // testing), this is the right key shape already.
+                    // Host-keyed in non-dev so per-subtenant explore/venues
+                    // buckets don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Dev stays on CachingDisabled for fast iteration; the
+                    // host-keyed policy was validated against dev under a
+                    // temporary flip — see Platform/test/tests/caching.spec.js.
                     CachePolicyId = env == "dev"
-                        ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  // CachingDisabled
-                        : "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                        : hostKeyedCachePolicy.Id,
                     FunctionAssociations =
                     {
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
