@@ -98,6 +98,7 @@ class Program
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
+        RegisterGetTenantsCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
@@ -1424,6 +1425,198 @@ class Program
                 Environment.ExitCode = 1;
             }
         });
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // gettenants — print the tenants + subtenants discovered from
+    // local YAML configs as JSON. Source-of-truth output: reads the
+    // exact same systemconfig/tenantconfig/subtenantconfig files that
+    // a deploy would, no AWS calls, no network. Intended for build
+    // systems (e.g. WASMApp.csproj's Pre-Build target) that need the
+    // tenant directory at compile time without depending on a live
+    // CDN deployment.
+    //
+    // Schema (see also EventIt/WASMApp/wwwroot/index.local.html which
+    // consumes this output):
+    //   {
+    //     "systemKey": "bcs",
+    //     "env": "dev",
+    //     "tenants": [
+    //       {
+    //         "key": "bcs",
+    //         "rootDomain": "eventitdev.click",
+    //         "subtenants": [
+    //           { "key": "cerulean", "host": "cerulean.eventitdev.click",
+    //             "displayName": "Cerulean Beach Resort",
+    //             "requiresAuth": true, "includeOnVenuesPage": true },
+    //           ...
+    //         ]
+    //       }
+    //     ]
+    //   }
+    //
+    // requiresAuth is the cascade-resolved value of WebApps[/].AuthConfig
+    // (system → tenant → subtenant) — null/empty AuthConfig means public.
+    // includeOnVenuesPage mirrors SubtenantEntry.IncludeOnVenuesPage; the
+    // /venues/ page filters hidden ones, but the local-dev picker shows
+    // them all so devs can QA hidden subtenants before public launch.
+    //
+    // No --tenant filter: a single system can have multiple tenants
+    // (bcs is the only tenant today, but the schema is multi-tenant)
+    // and the picker wants the whole directory.
+    // ---------------------------------------------------------------
+    private static void RegisterGetTenantsCommand(RootCommand root)
+    {
+        var cmd = new Command("gettenants",
+            "Print tenants + subtenants (from local YAML configs).");
+        var envOpt = new Option<string?>("--env", "Environment override (otherwise auto-detected from cwd).");
+        var prettyOpt = new Option<bool>("--pretty", () => false, "Pretty-print JSON with indent (no effect if --html-cards).");
+        var htmlCardsOpt = new Option<bool>("--html-cards", () => false,
+            "Emit HTML markup for the local-dev picker (anchors per subtenant) instead of JSON. " +
+            "Each card is an <a href='/?sub={key}'> with name/host/badges. The picker template " +
+            "in WASMApp/wwwroot is server-rendered with the output, eliminating dependency on " +
+            "client-side JS to populate cards (works around Browser Refresh middleware response " +
+            "stream encoding bugs that block inline-script execution in some VS dev configurations).");
+        cmd.AddOption(envOpt);
+        cmd.AddOption(prettyOpt);
+        cmd.AddOption(htmlCardsOpt);
+
+        cmd.SetHandler((string? envOverride, bool pretty, bool htmlCards) =>
+        {
+            try
+            {
+                var env = ConfigResolver.ResolveEnvironment(envOverride);
+                var systems = ConfigResolver.ResolveSystemConfigs(env);
+
+                // BCS today has one system; multi-system installs would
+                // get multiple JSON outputs (one per system) if we
+                // looped here. We emit one at a time, keyed by
+                // systemKey — the single-system case is the expected
+                // shape and the multi-system case becomes "run twice
+                // with --systemkey", consistent with how other lz
+                // commands disambiguate.
+                if (systems.Count > 1)
+                {
+                    Console.Error.WriteLine(
+                        $"Multiple systemconfigs found for env '{env}'. " +
+                        "Use --systemkey to disambiguate (not yet implemented for gettenants).");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+                var system = systems[0];
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(system.SystemKey, env);
+                var output = new
+                {
+                    systemKey = system.SystemKey,
+                    env,
+                    tenants = tenants.Select(pair =>
+                    {
+                        var (tk, tc) = pair;
+                        var subs = (tc.Subtenants ?? new Dictionary<string, SubtenantEntry>())
+                            .Select(kv =>
+                            {
+                                var (stk, se) = (kv.Key, kv.Value);
+                                var label = string.IsNullOrEmpty(se.SubDomain) ? stk : se.SubDomain;
+                                var host = $"{label}.{tc.RootDomain}";
+                                // Cascade-resolve AuthConfig for "/" — same logic
+                                // BCPlugin uses for the venues page, kept consistent
+                                // here so the picker's badge matches what CFRequest
+                                // actually enforces.
+                                var resolved = ConfigMerger.ResolveWebApps(system, tc, se.Behaviors);
+                                var rootApp = resolved.FirstOrDefault(r => r.Path == "/");
+                                var requiresAuth = !string.IsNullOrEmpty(rootApp?.AuthConfig);
+                                return new
+                                {
+                                    key = stk,
+                                    host,
+                                    displayName = string.IsNullOrEmpty(se.DisplayName) ? null : se.DisplayName,
+                                    requiresAuth,
+                                    includeOnVenuesPage = se.IncludeOnVenuesPage,
+                                };
+                            }).ToList();
+                        return new
+                        {
+                            key = tk,
+                            rootDomain = tc.RootDomain,
+                            subtenants = subs,
+                        };
+                    }).ToList(),
+                };
+
+                if (htmlCards)
+                {
+                    // Emit a single line of HTML — one anchor per
+                    // subtenant. Designed to be substituted into
+                    // wwwroot/index.local.template.html by the
+                    // WASMApp.csproj Pre-Build target as a single-line
+                    // block (MSBuild's WriteLinesToFile + escaping is
+                    // happier with single lines). The template wraps
+                    // the output in a #cards container so the CSS
+                    // styling already in the picker applies as-is.
+                    //
+                    // Each card is a static <a> — no JS needed on the
+                    // picker page. Click navigates to /?sub={key};
+                    // indexinit.js's localhost branch handles the rest.
+                    var html = new System.Text.StringBuilder();
+                    foreach (var pair in tenants)
+                    {
+                        var (_, tc) = pair;
+                        if (tc.Subtenants is null) continue;
+                        foreach (var (stk, se) in tc.Subtenants)
+                        {
+                            var label = string.IsNullOrEmpty(se.SubDomain) ? stk : se.SubDomain;
+                            var host = $"{label}.{tc.RootDomain}";
+                            var displayName = string.IsNullOrEmpty(se.DisplayName) ? stk : se.DisplayName;
+                            var resolved = ConfigMerger.ResolveWebApps(system, tc, se.Behaviors);
+                            var rootApp = resolved.FirstOrDefault(r => r.Path == "/");
+                            var requiresAuth = !string.IsNullOrEmpty(rootApp?.AuthConfig);
+
+                            // System.Net.WebUtility.HtmlEncode covers
+                            // <>&"' — sufficient for both element body
+                            // and attribute values in the simple
+                            // anchor structure we're emitting.
+                            html.Append("<a class=\"sub-card\" href=\"/?sub=")
+                                .Append(System.Net.WebUtility.UrlEncode(stk))
+                                .Append("\" role=\"listitem\" aria-label=\"Use subtenant ")
+                                .Append(System.Net.WebUtility.HtmlEncode(displayName))
+                                .Append("\">")
+                                .Append("<p class=\"sub-name\">")
+                                .Append(System.Net.WebUtility.HtmlEncode(displayName))
+                                .Append("</p>")
+                                .Append("<p class=\"sub-host\">")
+                                .Append(System.Net.WebUtility.HtmlEncode(host))
+                                .Append("</p>");
+                            if (requiresAuth || !se.IncludeOnVenuesPage)
+                            {
+                                html.Append("<div class=\"badges\">");
+                                if (requiresAuth)
+                                    html.Append("<span class=\"badge auth\">auth required</span>");
+                                if (!se.IncludeOnVenuesPage)
+                                    html.Append("<span class=\"badge hidden\">hidden from /venues/</span>");
+                                html.Append("</div>");
+                            }
+                            html.Append("</a>");
+                        }
+                    }
+                    Console.Out.WriteLine(html.ToString());
+                }
+                else
+                {
+                    var json = System.Text.Json.JsonSerializer.Serialize(output,
+                        new System.Text.Json.JsonSerializerOptions { WriteIndented = pretty });
+                    Console.Out.WriteLine(json);
+                }
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+            }
+        }, envOpt, prettyOpt, htmlCardsOpt);
 
         root.AddCommand(cmd);
     }

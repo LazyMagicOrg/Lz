@@ -121,6 +121,24 @@ public static class ConfigValidator
                             $"host-rooted path (e.g. '/subtenancy/.../logo.png') or an " +
                             $"absolute https URL.");
                 }
+
+                // VenuesLinkMode: case-insensitive enum-like string.
+                // Reject typos at config load — a misspelled "ap" or
+                // "lannding" would otherwise silently fall through to
+                // "app" behavior at the renderer and the operator
+                // wouldn't notice they're not getting the dual-button
+                // layout they configured.
+                if (!string.IsNullOrWhiteSpace(entry.VenuesLinkMode))
+                {
+                    var m = entry.VenuesLinkMode.Trim();
+                    if (!m.Equals("app", StringComparison.OrdinalIgnoreCase)
+                        && !m.Equals("landing", StringComparison.OrdinalIgnoreCase)
+                        && !m.Equals("both", StringComparison.OrdinalIgnoreCase))
+                        errors.Add(
+                            $"Subtenants[{key}].VenuesLinkMode ('{entry.VenuesLinkMode}') " +
+                            $"must be one of 'app' (default — straight to /), 'landing' " +
+                            $"(to /explore/home/), or 'both' (two buttons).");
+                }
             }
         }
 

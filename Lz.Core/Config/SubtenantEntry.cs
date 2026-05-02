@@ -52,4 +52,59 @@ public class SubtenantEntry
     /// without resolving the path itself.
     /// </summary>
     public string LogoUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether to include this subtenant on the central tenant-level
+    /// <c>/venues/</c> listing page. Default <c>true</c> — set to
+    /// <c>false</c> to hide a subtenant (e.g. internal/demo accounts,
+    /// soft-launched venues, customers under NDA). The subtenant still
+    /// resolves correctly when visited directly; only its presence in
+    /// the venues directory is suppressed.
+    /// </summary>
+    public bool IncludeOnVenuesPage { get; set; } = true;
+
+    /// <summary>
+    /// Controls the CTA layout for this subtenant on the central
+    /// <c>/venues/</c> listing page. The renderer combines this setting
+    /// with the visitor's auth state and the resolved
+    /// <c>WebApps[/].AuthConfig</c> (cascade-resolved at deploy time)
+    /// to choose between three button labels:
+    /// <list type="bullet">
+    ///   <item><description><b>"Visit"</b> — always
+    ///     <c>/explore/home/</c> (the subtenant's branded landing
+    ///     page).</description></item>
+    ///   <item><description><b>"Use App"</b> — <c>/</c> (the WASM
+    ///     app), shown when the subtenant is public OR the visitor is
+    ///     already authenticated cross-subtenant.</description></item>
+    ///   <item><description><b>"Login"</b> —
+    ///     <c>/authentication/login?returnUrl=/</c>, shown for gated
+    ///     subtenants when the visitor isn't authed yet.</description></item>
+    /// </list>
+    /// <c>VenuesLinkMode</c> picks WHICH of these to render. Case-
+    /// insensitive; one of:
+    /// <list type="bullet">
+    ///   <item>
+    ///     <term><c>"both"</c> (default)</term>
+    ///     <description>"Visit" primary + contextual secondary
+    ///     ("Use App" or "Login"). Best general-purpose choice — the
+    ///     visitor always has a path through the marketing pitch AND
+    ///     a direct shortcut when applicable.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term><c>"app"</c></term>
+    ///     <description>Only the contextual button — "Use App" or
+    ///     "Login". Use when you don't want to surface
+    ///     <c>/explore/home/</c> on the venues page at all.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term><c>"landing"</c></term>
+    ///     <description>Only "Visit". Use when every visitor should
+    ///     see the subtenant's branded landing page before entering
+    ///     the app, regardless of auth state.</description>
+    ///   </item>
+    /// </list>
+    /// Validated by <see cref="ConfigValidator"/>; an unrecognized
+    /// value rejects the config at load time.
+    /// </summary>
+    public string VenuesLinkMode { get; set; } = "both";
 }

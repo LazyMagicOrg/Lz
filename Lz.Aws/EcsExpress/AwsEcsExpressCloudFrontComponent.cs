@@ -111,6 +111,38 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var authCallbackFn = CreateSimpleFunctionFromFile(prefix, "auth-callback", "CFAuthCallback.js",
             $"OAuth callback redirect for {domain}", tenantConfig.ConfigDirectory);
 
+        // Viewer-response CORS function. CFRequest.js handles OPTIONS
+        // preflights; this handles the simple-GET case (browser skips
+        // preflight, response just needs Access-Control-Allow-Origin).
+        //
+        // The allowlist is operator-controlled via tenantconfig.CDN.Cors:
+        //   AllowLocalhostDev: true     → echo http(s)://localhost(:port)?
+        //   AllowedOrigins: [...]       → echo exact-match strings
+        // Both default to false/empty; prod with no Cors block echoes
+        // nothing. Values are baked in here at deploy time via string
+        // substitution — no live KVS lookup per response.
+        var corsCfg = (tenantConfig.CDN ?? new CdnConfig()).Cors ?? new CorsConfig();
+        var allowLocalhostJs = corsCfg.AllowLocalhostDev ? "true" : "false";
+        var allowedOriginsJson = System.Text.Json.JsonSerializer.Serialize(
+            corsCfg.AllowedOrigins ?? new List<string>());
+
+        var responseFnPath = Path.Combine(
+            tenantConfig.ConfigDirectory, "CloudFront", "CFResponse.js");
+        if (!File.Exists(responseFnPath))
+            throw new FileNotFoundException($"Required: {responseFnPath}");
+        var responseFnCode = Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+            responseFnPath, "CFResponse.js",
+            ("__ALLOW_LOCALHOST_DEV__", allowLocalhostJs),
+            ("__ALLOWED_ORIGINS_JSON__", allowedOriginsJson));
+        var responseFn = new Pulumi.Aws.CloudFront.Function($"{prefix}-response-fn",
+            new FunctionArgs
+            {
+                Runtime = "cloudfront-js-2.0",
+                Code = responseFnCode,
+                Comment = $"CORS response headers for {domain}",
+                Publish = true,
+            }, new CustomResourceOptions { Parent = this });
+
         // =====================================================================
         // S3 BUCKET + OAC
         // =====================================================================
@@ -256,6 +288,13 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     {
                         EventType = "viewer-request", FunctionArn = requestFn.Arn,
                     },
+                    // viewer-response: echoes CORS headers for localhost
+                    // origins so VS-hosted local WASM apps can fetch
+                    // cloud assets (system + tenant + subtenant + framework).
+                    new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                    },
                 },
             },
             OrderedCacheBehaviors =
@@ -329,6 +368,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
                         {
                             EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                        },
+                        // CORS for localhost dev — same rationale as default behavior.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
                         },
                     },
                 },
