@@ -9,7 +9,7 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   ├── Lz.slnx
   ├── LzVersion.props                       # Single shared version for all Lz.* packages
   ├── Lz.Core/                              # Platform-neutral: speaks in shapes, never AWS/Azure
-  │   ├── Lz.Core.csproj                    # net9.0
+  │   ├── Lz.Core.csproj                    # net10.0
   │   ├── Config/
   │   │   ├── SystemConfig.cs               # Base; AWS fields live on AwsSystemConfig
   │   │   ├── TenantConfig.cs               # Base; AWS fields live on AwsTenantConfig
@@ -31,7 +31,7 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   │   └── ILzPlugin.cs                  # Plugin contract for system-specific DLLs
   │   └── Validation/                       # TopologyValidator
   ├── Lz.Aws/                               # AWS-specific: ECS/AppRunner, Cognito, Tailscale, Keycloak
-  │   ├── Lz.Aws.csproj                     # net9.0, depends on Lz.Core + Pulumi.Aws
+  │   ├── Lz.Aws.csproj                     # net10.0, depends on Lz.Core + Pulumi.Aws
   │   ├── Config/
   │   │   ├── AwsSystemConfig.cs            # ECS/AppRunner/SharedSecretArn/TrustedAccountIds/...
   │   │   ├── AwsTenantConfig.cs            # ECS/AppRunner/AcmCertificateArn/HostedZoneId/...
@@ -582,8 +582,8 @@ All commands resolve `env`, `systemkey`, and `tenantkey` automatically:
 
 The tool searches upward from cwd using two mechanisms:
 
-1. **lz.json marker file** — explicit path to the plugin DLL (e.g., `{"plugin": "Deploy/bin/Debug/net9.0/Deploy.dll"}`)
-2. **Convention** — looks for `Deploy/bin/{Debug|Release}/net9.0/Deploy.dll`
+1. **lz.json marker file** — explicit path to the plugin DLL (e.g., `{"plugin": "Deploy/bin/Debug/net10.0/Deploy.dll"}`)
+2. **Convention** — looks for `Deploy/bin/{Debug|Release}/net10.0/Deploy.dll`
 
 Convention-based discovery makes `lz.json` optional — just name your plugin project `Deploy/` and it's found automatically.
 

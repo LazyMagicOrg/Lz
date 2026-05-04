@@ -160,6 +160,48 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             IgnorePublicAcls = true, RestrictPublicBuckets = true,
         }, new CustomResourceOptions { Parent = this });
 
+        // S3-level CORS configuration. The CFResponse CloudFront Function
+        // adds Access-Control-Allow-Origin to *successful* origin responses
+        // routed through the default '/*' behavior — but CloudFront's
+        // CustomErrorResponses flow can short-circuit viewer-response on
+        // origin 4xx errors (the SPA-fallback /index.html recursion fails
+        // when CFRequest's dynamic origin rewrite picks a bucket without
+        // /index.html, falling back to the raw S3 error which never gets
+        // CORS injected). Configuring CORS at the S3 level means S3 itself
+        // emits Access-Control-Allow-Origin on its responses including
+        // 403/404 — CloudFront passes those headers through. Net effect:
+        // browsers see clean 4xx responses with CORS, the WASM client's
+        // fetch sees the 4xx instead of a CORS-blocked failure, and JS-
+        // side fall-through (e.g. subtenancy overlay missing → fall back
+        // to system default) works as designed.
+        var s3CorsOrigins = new List<string>();
+        if (corsCfg.AllowLocalhostDev)
+        {
+            s3CorsOrigins.Add("http://localhost:*");
+            s3CorsOrigins.Add("https://localhost:*");
+        }
+        if (corsCfg.AllowedOrigins != null)
+            s3CorsOrigins.AddRange(corsCfg.AllowedOrigins);
+        if (s3CorsOrigins.Count > 0)
+        {
+            new Pulumi.Aws.S3.BucketCorsConfigurationV2($"{prefix}-assets-cors",
+                new Pulumi.Aws.S3.BucketCorsConfigurationV2Args
+                {
+                    Bucket = assetsBucket.Id,
+                    CorsRules =
+                    {
+                        new Pulumi.Aws.S3.Inputs.BucketCorsConfigurationV2CorsRuleArgs
+                        {
+                            AllowedHeaders = { "*" },
+                            AllowedMethods = { "GET", "HEAD" },
+                            AllowedOrigins = s3CorsOrigins.ToArray(),
+                            ExposeHeaders = { "ETag" },
+                            MaxAgeSeconds = 3000,
+                        }
+                    }
+                }, new CustomResourceOptions { Parent = this });
+        }
+
         var oac = new OriginAccessControl($"{prefix}-oac", new OriginAccessControlArgs
         {
             Name = $"{prefix}-oac", Description = $"OAC for {domain}",
@@ -481,6 +523,18 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         {
                             EventType = "viewer-request", FunctionArn = authFn.Arn,
                         },
+                        // CORS for localhost dev — same rationale as default + /*Api/*.
+                        // CFAuth proxies /auth/{pool}/oauth2/{token,userInfo,revoke}
+                        // upstream to Cognito; the WASM OIDC client at localhost
+                        // exchanges auth codes for tokens here, and needs
+                        // Access-Control-Allow-Origin on the response from
+                        // upstream. Function-generated 200/302 sub-paths
+                        // (.well-known/openid-configuration, authorize, logout)
+                        // bypass viewer-response and add CORS inline in CFAuth.js.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
                     },
                 },
                 // Authentication-flow behavior — /authentication/...
@@ -502,6 +556,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
                         {
                             EventType = "viewer-request", FunctionArn = authFn.Arn,
+                        },
+                        // CORS for localhost dev — same rationale as /auth/*.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
                         },
                     },
                 },

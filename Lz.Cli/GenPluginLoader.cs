@@ -13,7 +13,7 @@ namespace Lz.Cli;
 ///
 /// Resolution order (same as PluginLoader):
 ///   1. lz.json marker file (searched upward from cwd) — "genPlugin" field
-///   2. Convention: Generate/bin/{Debug|Release}/net9.0/Generate.dll (searched upward from cwd)
+///   2. Convention: Generate/bin/{Debug|Release}/net10.0/Generate.dll (searched upward from cwd)
 ///
 /// Returns null if neither is found — <c>lz gen</c> still works with only
 /// built-in directives/artifacts.
@@ -86,11 +86,11 @@ public static class GenPluginLoader
             if (Directory.Exists(generateDir))
             {
                 // Probe Debug first, then Release
-                var debugPath = Path.Combine(generateDir, "bin", "Debug", "net9.0", ConventionDll);
+                var debugPath = Path.Combine(generateDir, "bin", "Debug", "net10.0", ConventionDll);
                 if (File.Exists(debugPath))
                     return debugPath;
 
-                var releasePath = Path.Combine(generateDir, "bin", "Release", "net9.0", ConventionDll);
+                var releasePath = Path.Combine(generateDir, "bin", "Release", "net10.0", ConventionDll);
                 if (File.Exists(releasePath))
                     return releasePath;
             }

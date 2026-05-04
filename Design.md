@@ -1159,11 +1159,11 @@ lz status                          # env=dev, sk=med, shows foundation + all ten
 
 The `lz` tool discovers system-specific plugins by searching upward from the current working directory. Two discovery mechanisms are supported:
 
-1. **Convention (default):** A `Deploy/` folder containing a built plugin DLL at `Deploy/bin/{Debug|Release}/net9.0/Deploy.dll`. No marker file needed.
+1. **Convention (default):** A `Deploy/` folder containing a built plugin DLL at `Deploy/bin/{Debug|Release}/net10.0/Deploy.dll`. No marker file needed.
 
 2. **Explicit (lz.json):** A `lz.json` marker file pointing to a custom plugin DLL path:
    ```json
-   {"plugin": "MyPlugin/bin/Debug/net9.0/MyPlugin.dll"}
+   {"plugin": "MyPlugin/bin/Debug/net10.0/MyPlugin.dll"}
    ```
    The DLL path is relative to the `lz.json` file.
 

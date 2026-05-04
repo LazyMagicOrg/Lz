@@ -9,7 +9,7 @@ namespace Lz.Cli;
 /// Discovers and loads plugin assemblies.
 /// Resolution order:
 ///   1. lz.json marker file (searched upward from cwd) — explicit plugin path
-///   2. Convention: Deploy/bin/{Debug|Release}/net9.0/Deploy.dll (searched upward from cwd)
+///   2. Convention: Deploy/bin/{Debug|Release}/net10.0/Deploy.dll (searched upward from cwd)
 /// Returns null if neither is found (core commands still work without a plugin).
 /// </summary>
 public static class PluginLoader
@@ -78,11 +78,11 @@ public static class PluginLoader
             if (Directory.Exists(deployDir))
             {
                 // Probe Debug first, then Release
-                var debugPath = Path.Combine(deployDir, "bin", "Debug", "net9.0", ConventionDll);
+                var debugPath = Path.Combine(deployDir, "bin", "Debug", "net10.0", ConventionDll);
                 if (File.Exists(debugPath))
                     return debugPath;
 
-                var releasePath = Path.Combine(deployDir, "bin", "Release", "net9.0", ConventionDll);
+                var releasePath = Path.Combine(deployDir, "bin", "Release", "net10.0", ConventionDll);
                 if (File.Exists(releasePath))
                     return releasePath;
             }

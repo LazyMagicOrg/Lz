@@ -330,7 +330,7 @@ internal static class Program
     {
         var cacheRoot = GetCacheRoot();
         var cacheDir = Path.Combine(cacheRoot, version.ToString());
-        var dllPath = Path.Combine(cacheDir, "tools", "net9.0", "any", "Lz.Cli.dll");
+        var dllPath = Path.Combine(cacheDir, "tools", "net10.0", "any", "Lz.Cli.dll");
 
         if (File.Exists(dllPath)) return dllPath;
 
