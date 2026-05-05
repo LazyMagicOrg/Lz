@@ -282,6 +282,34 @@ for i in 1 2 3 4 5; do
     sleep $(( i * 15 ))
 done
 
+# ===================================================================
+# SSM Agent — enables AWS Console -> Connect -> SSM Session Manager.
+# AL2023 minimal does NOT include amazon-ssm-agent by default and the
+# package isn't always in the minimal AMI's enabled dnf repos, so we
+# install from the official AWS RPM URL (works on any AL/RHEL variant).
+# Architecture is detected so the same script runs on x86_64 or arm64.
+# The IAM role already carries AmazonSSMManagedInstanceCore; once the
+# agent starts it registers and the SSM tab goes Online within ~60s.
+# Failure here is non-fatal — Tailscale + EFS setup must still proceed.
+# ===================================================================
+ARCH=$(uname -m)
+case ""$ARCH"" in
+    x86_64) SSM_RPM_ARCH=linux_amd64 ;;
+    aarch64) SSM_RPM_ARCH=linux_arm64 ;;
+    *) SSM_RPM_ARCH= ;;
+esac
+
+if [ -n ""$SSM_RPM_ARCH"" ]; then
+    SSM_RPM_URL=""https://s3.{efsRegion}.amazonaws.com/amazon-ssm-{efsRegion}/latest/$SSM_RPM_ARCH/amazon-ssm-agent.rpm""
+    if dnf install -y ""$SSM_RPM_URL""; then
+        systemctl enable --now amazon-ssm-agent && echo 'SSM agent installed and started'
+    else
+        echo 'WARNING: SSM agent install failed; continuing without it'
+    fi
+else
+    echo ""WARNING: unknown arch $ARCH; skipping SSM agent install""
+fi
+
 # Install Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
 
