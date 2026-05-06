@@ -55,13 +55,31 @@ public static class SubtenantProvisioner
             { "Subtenant", subtenantKey },
         };
 
+        // Build CORS allowed-origins list from tenantconfig.CDN.Cors. Same
+        // semantics as the Pulumi-managed tenant bucket
+        // (AwsEcsExpressCloudFrontComponent.cs): AllowLocalhostDev=true
+        // injects http(s)://localhost:* and AllowedOrigins entries are
+        // passed through verbatim. When neither is set, the list is empty
+        // and SubtenantBucketManager skips PutCORSConfiguration so an
+        // existing manual config isn't dropped silently.
+        var corsCfg = (tenant.CDN ?? new CdnConfig()).Cors ?? new CorsConfig();
+        var corsOrigins = new List<string>();
+        if (corsCfg.AllowLocalhostDev)
+        {
+            corsOrigins.Add("http://localhost:*");
+            corsOrigins.Add("https://localhost:*");
+        }
+        if (corsCfg.AllowedOrigins != null)
+            corsOrigins.AddRange(corsCfg.AllowedOrigins);
+
         // S3 assets bucket — {sk}-{tk}-{stk}-assets-{systemSuffix}
         var bucketName = SubtenantBucketManager.BucketName(
             sk, tk, subtenantKey, system.SystemSuffix);
         Console.WriteLine($"  subtenant '{subtenantKey}': ensuring bucket {bucketName}");
         var created = await SubtenantBucketManager.EnsureBucketAsync(
             profile, region, bucketName, accountId,
-            new Dictionary<string, string>(tags) { { "Purpose", $"{subtenantKey}-assets" } });
+            new Dictionary<string, string>(tags) { { "Purpose", $"{subtenantKey}-assets" } },
+            corsOrigins);
         Console.WriteLine(created
             ? $"    {bucketName} — created"
             : $"    {bucketName} — exists (policy re-applied)");

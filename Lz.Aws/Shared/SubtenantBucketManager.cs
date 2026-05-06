@@ -37,13 +37,27 @@ public static class SubtenantBucketManager
     /// managed buckets (system, tenant) get this policy from their
     /// component; subtenant buckets are created imperatively here and need
     /// the same trust applied so OAC-signed requests aren't denied.</param>
+    /// <param name="corsAllowedOrigins">Optional list of origins to allow
+    /// in the bucket's CORS configuration. When non-empty, the bucket emits
+    /// <c>Access-Control-Allow-Origin</c> on its own responses (including
+    /// 4xx errors) — CloudFront passes these through. Used to unblock VS-
+    /// hosted localhost dev WASM apps fetching cloud assets where
+    /// CloudFront's CFResponse function doesn't fire (e.g. on origin 4xx
+    /// that fails CustomErrorResponse SPA-fallback). When null/empty, no
+    /// CORS configuration is set — bucket-level CORS responses won't carry
+    /// the header, and CloudFront-level CORS via CFResponse remains the
+    /// only path. Pulumi-managed tenant bucket gets the same configuration
+    /// in <c>AwsEcsExpressCloudFrontComponent.cs</c> via
+    /// <c>BucketCorsConfigurationV2</c>; this parameter is the imperative
+    /// equivalent for subtenant buckets which Pulumi doesn't manage.</param>
     public static async Task<bool> EnsureBucketAsync(
         string profile, string region, string bucketName, string accountId,
-        Dictionary<string, string>? tags = null)
+        Dictionary<string, string>? tags = null,
+        IReadOnlyList<string>? corsAllowedOrigins = null)
     {
         using var client = CreateClient(profile, region);
         var created = await EnsureBucketCreatedAsync(client, bucketName);
-        await ApplyStandardPolicyAsync(client, bucketName, accountId, tags);
+        await ApplyStandardPolicyAsync(client, bucketName, accountId, tags, corsAllowedOrigins);
         return created;
     }
 
@@ -104,7 +118,8 @@ public static class SubtenantBucketManager
     }
 
     private static async Task ApplyStandardPolicyAsync(
-        IAmazonS3 client, string bucketName, string accountId, Dictionary<string, string>? tags)
+        IAmazonS3 client, string bucketName, string accountId, Dictionary<string, string>? tags,
+        IReadOnlyList<string>? corsAllowedOrigins = null)
     {
         // Block all public access.
         await client.PutPublicAccessBlockAsync(new PutPublicAccessBlockRequest
@@ -180,6 +195,37 @@ public static class SubtenantBucketManager
             BucketName = bucketName,
             TagSet = tagList,
         });
+
+        // CORS — when origins were supplied, configure bucket-level CORS so
+        // S3 itself emits Access-Control-Allow-Origin on responses. Critical
+        // for the localhost-dev WASM-app flow where CloudFront's CFResponse
+        // function doesn't run on 4xx origin errors that fall through
+        // CustomErrorResponses. PutCORSConfiguration *replaces* the existing
+        // configuration; calling with no origins effectively no-ops (we
+        // skip the call entirely so we don't drop a manually-applied config
+        // when CORS is later disabled in tenantconfig). Operators who want
+        // to remove CORS should run an explicit aws s3api delete-bucket-cors.
+        if (corsAllowedOrigins != null && corsAllowedOrigins.Count > 0)
+        {
+            await client.PutCORSConfigurationAsync(new PutCORSConfigurationRequest
+            {
+                BucketName = bucketName,
+                Configuration = new CORSConfiguration
+                {
+                    Rules = new List<CORSRule>
+                    {
+                        new CORSRule
+                        {
+                            AllowedMethods = new List<string> { "GET", "HEAD" },
+                            AllowedOrigins = corsAllowedOrigins.ToList(),
+                            AllowedHeaders = new List<string> { "*" },
+                            ExposeHeaders = new List<string> { "ETag" },
+                            MaxAgeSeconds = 3000,
+                        }
+                    }
+                }
+            });
+        }
     }
 
     private static async Task EmptyBucketAsync(IAmazonS3 client, string bucketName)
