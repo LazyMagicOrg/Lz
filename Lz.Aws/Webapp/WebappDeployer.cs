@@ -40,7 +40,40 @@ public class WebappDeployer
         Console.WriteLine($"Publishing {projectName}...");
         Console.ResetColor();
 
-        // 2. dotnet publish (quiet — only show errors)
+        // 2a. Clean stale publish output before publishing.
+        //     `dotnet publish` does NOT clean its output directory between runs,
+        //     so framework files from prior SDK versions (e.g.
+        //     dotnet.runtime.<old-hash>.js) accumulate alongside the current
+        //     build's output. The S3 sync uploads all of them, leaving orphan
+        //     hash-suffixed files in the bucket. blazor.boot.json only references
+        //     the current set so the orphans are harmless at the framework level,
+        //     but they bloat the bucket and add ambiguity for users debugging
+        //     deploy state. Wipe the publish dir for a clean rebuild.
+        var preCleanPublishBase = Path.Combine(webappFolder, projectFolder, "bin", "Release");
+        if (Directory.Exists(preCleanPublishBase))
+        {
+            foreach (var tfmDir in Directory.GetDirectories(preCleanPublishBase))
+            {
+                var stalePublish = Path.Combine(tfmDir, "publish");
+                if (Directory.Exists(stalePublish))
+                {
+                    try
+                    {
+                        Directory.Delete(stalePublish, recursive: true);
+                        Console.WriteLine($"  Cleaned stale publish output: {stalePublish}");
+                    }
+                    catch (Exception ex)
+                    {
+                        // Non-fatal: a locked file (e.g. an editor with the
+                        // file open) shouldn't abort the deploy. The build
+                        // will overwrite what it can; orphans may persist.
+                        Console.WriteLine($"  Warning: could not clean {stalePublish}: {ex.Message}");
+                    }
+                }
+            }
+        }
+
+        // 2b. dotnet publish (quiet — only show errors)
         // Pass AppEnvironment through so build-time config generation
         // (see BlazorUI.csproj's GenerateAppConfig target) picks the right
         // overlay file. The csproj can still resolve env via `lz getenv`
