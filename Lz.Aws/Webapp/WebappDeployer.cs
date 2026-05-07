@@ -253,44 +253,50 @@ public class WebappDeployer
     // ---------------------------------------------------------------
 
     /// <summary>
-    /// Syncs the source folder to s3://{bucketName}/wwwroot with five passes
-    /// that apply appropriate Cache-Control / Content-Encoding headers per
-    /// file category:
+    /// Syncs the source folder to s3://{bucketName}/wwwroot with metadata
+    /// passes that apply appropriate Cache-Control / Content-Type headers
+    /// per file category:
     ///
-    ///   1) Full sync (--delete) with "public, max-age=3600" — baseline for
-    ///      all files; handles additions and removals.
+    ///   1) Full sync (--delete) with "public, max-age=3600" — baseline
+    ///      for all files; handles additions and removals. Excludes
+    ///      .br/.gz precompressed siblings (see "Compression" below).
     ///   2) Override metadata on /_framework/* (except manifests) with
     ///      "public, max-age=31536000, immutable" — these files are
     ///      content-hashed, so they can be cached forever.
-    ///   3) Override metadata on manifest files (index.html, blazor.boot.json,
-    ///      blazor.webassembly.js, service-worker.js, etc.) with
-    ///      "no-cache, no-store, must-revalidate" — these files change every
-    ///      deploy and reference all other fingerprinted files. They must
-    ///      always be fetched fresh, otherwise returning users get stale
-    ///      manifests that reference old asset hashes (or vice versa),
-    ///      causing errors like "Could not find 'checkIfLoaded'".
-    ///   4) Override metadata on hashed pre-compressed siblings
-    ///      (/_framework/*.HASH.{wasm,js,dat}.{br,gz}, excluding the three
-    ///      non-hashed manifest .js files) — sets Content-Encoding +
-    ///      Content-Type matching the underlying media + immutable cache.
-    ///      These are emitted by Blazor publish to enable Brotli/gzip
-    ///      transfer; CFRequest.js rewrites the URI to the .br/.gz sibling
-    ///      when Accept-Encoding allows it. Without proper Content-Encoding
-    ///      metadata at the origin, the browser receives compressed bytes
-    ///      labeled as octet-stream and fails to decompress.
-    ///   5) Override metadata on the manifest .br/.gz siblings
-    ///      (blazor.webassembly.js.{br,gz}, dotnet.js.{br,gz},
-    ///      blazor.boot.json.{br,gz}) — same Content-Encoding and
-    ///      Content-Type rules, but Cache-Control is no-cache since these
-    ///      track the underlying non-hashed manifest files. Without this,
-    ///      a returning user whose browser cached the old .br loops on
-    ///      stale boot config until edge cache invalidates.
+    ///   3) Override metadata on manifest files (index.html,
+    ///      blazor.boot.json, blazor.webassembly.js, service-worker.js,
+    ///      etc.) with "no-cache, no-store, must-revalidate" — these
+    ///      change every deploy and reference all other fingerprinted
+    ///      files. They must always be fetched fresh, otherwise
+    ///      returning users get stale manifests that reference old
+    ///      asset hashes (or vice versa).
+    ///   3b) Override metadata on /_content/*.{js,css} with no-cache
+    ///       — Razor Class Library static assets used by the SW and
+    ///       app shell.
     ///
-    /// Passes 2-5 use `aws s3 cp --metadata-directive REPLACE` with
-    /// source == destination, which performs a server-side metadata update
-    /// without re-uploading file content. This ensures correct metadata even
-    /// on files that weren't re-uploaded (e.g. unchanged static assets on a
-    /// bucket that was previously deployed without cache-control).
+    /// Passes 2-3b use `aws s3 cp --metadata-directive REPLACE` with
+    /// source == destination, which performs a server-side metadata
+    /// update without re-uploading file content. This ensures correct
+    /// metadata even on files that weren't re-uploaded.
+    ///
+    /// ── Compression strategy ────────────────────────────────────────
+    /// Earlier this method had two more passes (4 + 5) that set
+    /// Content-Encoding metadata on Blazor's pre-compressed
+    /// .{wasm,js,dat}.{br,gz} siblings, paired with CFRequest.js
+    /// rewriting the request URI to the .br/.gz sibling based on
+    /// Accept-Encoding. The combination interacted badly with the SW
+    /// + Subresource Integrity pipeline in Chromium: SRI was computed
+    /// against the encoded body instead of the decoded one, blocking
+    /// every _framework/*.wasm whose request had an integrity hash.
+    /// See Platform/AssetDeliveryReview.md for the full diagnosis.
+    ///
+    /// Replaced with CloudFront's edge auto-compression (Compress=true
+    /// on the relevant cache behaviors). The Pass 1 sync now excludes
+    /// .br/.gz files entirely — Blazor publish still emits them, but
+    /// they're never uploaded. CloudFront compresses dynamically at
+    /// the edge based on Accept-Encoding, sets Content-Encoding, and
+    /// the browser decompresses through its native fetch pipeline
+    /// where SRI works correctly.
     /// </summary>
     /// <summary>
     /// Normalizes a target-prefix argument: trims leading/trailing slashes and
@@ -313,9 +319,20 @@ public class WebappDeployer
 
         // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
         // on all files. Subsequent passes override specific categories.
+        //
+        // .br and .gz files are EXCLUDED. Blazor publish emits them as
+        // precompressed siblings of every framework asset; we used to
+        // upload + serve them via CFRequest URI-rewriting, but that
+        // interacted badly with SW + SRI (see method-level docs). Now
+        // CloudFront's edge auto-compression handles compression
+        // dynamically — the precompressed siblings on disk are unused.
+        // Excluding from the sync keeps S3 lean and prevents the
+        // .br/.gz files from being served by accident if any future
+        // routing rule accidentally points at them.
         await RunAsync("aws",
             $"s3 sync \"{sourcePath}\" \"{s3Root}\" --delete --quiet --region {region} {profileArg} " +
-            $"--cache-control \"public, max-age=3600\"");
+            $"--cache-control \"public, max-age=3600\" " +
+            $"--exclude \"*.br\" --exclude \"*.gz\"");
 
         // Pass 2: Override /_framework/* (except manifest files) with immutable
         // long-lived cache. Content-hashed names make indefinite caching safe.
@@ -462,84 +479,21 @@ public class WebappDeployer
             $"--content-type \"text/css\" " +
             $"--exclude \"*\" --include \"*.css\"");
 
-        // ── Pass 4: hashed pre-compressed siblings ─────────────────────
-        // Blazor publish emits .br and .gz alongside every asset under
-        // /_framework/. CFRequest.js rewrites the request URI to the
-        // .br/.gz sibling when the client's Accept-Encoding allows it,
-        // so the actual bytes the browser receives are the compressed
-        // ones. For the browser to know to decompress, the response
-        // MUST carry Content-Encoding: br/gzip — set as origin metadata
-        // here. Content-Type must match the underlying media (Pass 1's
-        // sync left .br/.gz as application/octet-stream, which would
-        // make the browser refuse to compile WASM modules).
+        // ── One-time orphan cleanup ───────────────────────────────────
+        // Pre-compressed .br/.gz siblings from earlier deploys (when
+        // CFRequest.js rewrote URIs to point at them) are now orphans.
+        // S3 sync's --exclude on Pass 1 keeps them from being deleted
+        // by the --delete sweep, so left alone they'd persist forever.
+        // A single bulk `aws s3 rm` per deploy cleans them up.
+        // Idempotent: after the first deploy that runs this, subsequent
+        // deploys find nothing to remove.
         //
-        // Three content-types × two encodings = six sub-passes. Each is
-        // a single bulk operation (server-side metadata copy in S3, not
-        // per-file network round trips).
-        //
-        // Manifest .br/.gz files (blazor.webassembly.js.{br,gz},
-        // dotnet.js.{br,gz}, blazor.boot.json.{br,gz}) are EXCLUDED —
-        // they're handled in Pass 5 with no-cache cache-control because
-        // they track non-hashed manifest siblings that change every deploy.
-        string manifestBrGzExcludes =
-            "--exclude \"blazor.boot.json.br\" " +
-            "--exclude \"blazor.boot.json.gz\" " +
-            "--exclude \"blazor.webassembly.js.br\" " +
-            "--exclude \"blazor.webassembly.js.gz\" " +
-            "--exclude \"dotnet.js.br\" " +
-            "--exclude \"dotnet.js.gz\"";
-
-        var compressed = new (string Pattern, string ContentType, string Encoding)[]
-        {
-            ("*.wasm.br",  "application/wasm",         "br"),
-            ("*.wasm.gz",  "application/wasm",         "gzip"),
-            ("*.js.br",    "application/javascript",   "br"),
-            ("*.js.gz",    "application/javascript",   "gzip"),
-            ("*.dat.br",   "application/octet-stream", "br"),
-            ("*.dat.gz",   "application/octet-stream", "gzip"),
-        };
-
-        foreach (var (pattern, contentType, encoding) in compressed)
-        {
-            await RunAsync("aws",
-                $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
-                $"--metadata-directive REPLACE {immutableCache} " +
-                $"--content-type \"{contentType}\" " +
-                $"--content-encoding \"{encoding}\" " +
-                $"--exclude \"*\" --include \"{pattern}\" " +
-                manifestBrGzExcludes);
-        }
-
-        // ── Pass 5: manifest pre-compressed siblings ───────────────────
-        // Same Content-Type + Content-Encoding rules as Pass 4, but the
-        // underlying file is non-hashed and changes every deploy, so the
-        // .br/.gz must also be no-cache. Without this, a returning user
-        // whose browser cached the old .br loops on stale boot config
-        // until edge cache invalidates manually — exactly the failure
-        // mode Pass 3 exists to prevent for the uncompressed siblings.
-        var compressedManifests = new (string Path, string ContentType, string Encoding)[]
-        {
-            ("_framework/blazor.boot.json.br",      "application/json",       "br"),
-            ("_framework/blazor.boot.json.gz",      "application/json",       "gzip"),
-            ("_framework/blazor.webassembly.js.br", "application/javascript", "br"),
-            ("_framework/blazor.webassembly.js.gz", "application/javascript", "gzip"),
-            ("_framework/dotnet.js.br",             "application/javascript", "br"),
-            ("_framework/dotnet.js.gz",             "application/javascript", "gzip"),
-        };
-
-        foreach (var (path, contentType, encoding) in compressedManifests)
-        {
-            // RunSilentAsync because not every publish produces every
-            // manifest .br/.gz (depends on framework version + flags).
-            // Treat absence as a non-issue, same as Pass 3.
-            await RunSilentAsync("aws",
-                $"s3 cp \"{s3Root}/{path}\" \"{s3Root}/{path}\" " +
-                $"--quiet --region {region} {profileArg} " +
-                $"--metadata-directive REPLACE " +
-                $"--cache-control \"no-cache, must-revalidate\" " +
-                $"--content-type \"{contentType}\" " +
-                $"--content-encoding \"{encoding}\"");
-        }
+        // RunSilentAsync because the rm reports success even when no
+        // matches exist; we don't want the empty-result line cluttering
+        // output once orphans are gone.
+        await RunSilentAsync("aws",
+            $"s3 rm \"{s3Root}/\" --recursive --quiet --region {region} {profileArg} " +
+            $"--exclude \"*\" --include \"*.br\" --include \"*.gz\"");
     }
 
     /// <summary>

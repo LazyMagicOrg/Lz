@@ -26,8 +26,8 @@
          definition does not match the assembly reference"). Pin both packages
          so the host and any plugin restored against this Lz.Core nupkg always
          agree. Bump deliberately when you intend to. -->
-    <PackageReference Include="Pulumi" Version="[3.104.0]" />
-    <PackageReference Include="Pulumi.Automation" Version="[3.104.0]" />
+    <PackageReference Include="Pulumi" Version="[3.105.0]" />
+    <PackageReference Include="Pulumi.Automation" Version="[3.105.0]" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
     <PackageReference Include="YamlDotNet" Version="16.*" />
   </ItemGroup>
