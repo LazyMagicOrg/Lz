@@ -424,6 +424,44 @@ public class WebappDeployer
                 $"--content-type \"{contentType}\"");
         }
 
+        // ── Pass 3b: /_content/* RCL static assets ─────────────────────
+        // Razor Class Library static assets ship under /_content/. Most
+        // are unfingerprinted (appConfig.js, staticContentSettings.js,
+        // lzserviceworker.js, staticContentModule.js, indexhead/body.js,
+        // localized resources, etc.). Some Blazor scoped-CSS bundles get
+        // a hashed filename (BaseApp.BlazorUI.h2eqakxwyu.bundle.scp.css),
+        // but treating all as no-cache is correct — fingerprinted
+        // bundles re-fetch via 304 If-None-Match when unchanged.
+        //
+        // The Pass 1 baseline (max-age=3600) was the wrong default for
+        // this tree: a fix to any RCL JS file (the SW source itself, the
+        // app's bundled config, static content settings) could sit in a
+        // browser's HTTP cache for an hour after the post-deploy
+        // CloudFront invalidation. service-worker.published.js statically
+        // imports four of these files at parse time, so SW byte-content
+        // depends on them being fresh when the SW script revalidates.
+        //
+        // Per-extension passes mirror Pass 2's pattern. Image and font
+        // assets under /_content/* (rare, e.g. icon SVG) are LEFT at the
+        // Pass 1 default — they're rarely changing and not security-
+        // critical to invalidate quickly.
+        string contentRoot = $"\"{s3Root}/_content/\" \"{s3Root}/_content/\"";
+        string noCacheControl = "--cache-control \"no-cache, must-revalidate\"";
+
+        // 3b.1 — *.js
+        await RunAsync("aws",
+            $"s3 cp {contentRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {noCacheControl} " +
+            $"--content-type \"application/javascript\" " +
+            $"--exclude \"*\" --include \"*.js\"");
+
+        // 3b.2 — *.css
+        await RunAsync("aws",
+            $"s3 cp {contentRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {noCacheControl} " +
+            $"--content-type \"text/css\" " +
+            $"--exclude \"*\" --include \"*.css\"");
+
         // ── Pass 4: hashed pre-compressed siblings ─────────────────────
         // Blazor publish emits .br and .gz alongside every asset under
         // /_framework/. CFRequest.js rewrites the request URI to the
