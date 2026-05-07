@@ -395,12 +395,21 @@ public class WebappDeployer
         //   authentication/login.html is the static OIDC initiator — we want
         //   edits to propagate immediately, not sit in browser cache for an
         //   hour, so it gets no-cache too.
+        // _framework/dotnet.js is a NON-fingerprinted entry-point that changes
+        // between SDK builds. It MUST be a manifest. Pre-fix it was getting
+        // immutable cache from Pass 2c (the *.js bulk pass), so returning users
+        // were stuck on stale dotnet.js for up to a year — the runtime/native
+        // sister files are fingerprinted and updated freely on each deploy, so
+        // the user ended up loading a new dotnet.runtime.<hash>.js paired with
+        // an old dotnet.js, producing the MONO_WASM "version mismatch" warning
+        // and an "Could not find 'checkIfLoaded'" boot failure. Adding it here.
         var manifests = new (string Path, string ContentType)[]
         {
             ("index.html",                       "text/html"),
             ("authentication/login.html",        "text/html"),
             ("_framework/blazor.boot.json",      "application/json"),
             ("_framework/blazor.webassembly.js", "application/javascript"),
+            ("_framework/dotnet.js",             "application/javascript"),
             ("service-worker.js",                "application/javascript"),
             ("service-worker-assets.js",         "application/javascript"),
             ("appConfig.js",                     "application/javascript"),
@@ -409,22 +418,51 @@ public class WebappDeployer
 
         foreach (var (path, contentType) in manifests)
         {
-            // Use RunSilentAsync — some files may not exist in every deployment
-            // (e.g. static sites don't have blazor.boot.json). That's fine.
-            // no-cache + must-revalidate (WITHOUT no-store) means the browser
-            // revalidates on every request, AND is allowed to store the
+            // Each manifest may exist in three forms in the bucket:
+            //   path           — uncompressed (served when client lacks
+            //                    Accept-Encoding: br/gzip; rare on modern web)
+            //   path + ".br"   — Brotli (Chrome/Firefox/Safari/Edge default)
+            //   path + ".gz"   — Gzip fallback
+            // CloudFront content-negotiates between these by Accept-Encoding.
+            // If we set no-cache only on the uncompressed variant, modern
+            // browsers (which always negotiate br) would still receive the
+            // compressed variant with whatever Cache-Control Pass 2 set —
+            // typically `immutable`. That's the bug we just hit on prod.
+            // Apply no-cache to all three variants and tag the compressed
+            // ones with Content-Encoding so CloudFront serves them correctly.
+            //
+            // RunSilentAsync — some files may not exist (no-compression
+            // builds, static sites without blazor.boot.json, etc.). That's
+            // fine; missing-source 404s from the cp are swallowed.
+            //
+            // no-cache + must-revalidate (WITHOUT no-store) means the
+            // browser revalidates on every request AND may store the
             // response. The "store" bit matters because our client-side
             // recovery script uses `fetch(url, {cache: 'reload'})` to
-            // force-update stale cache entries — if the response has
-            // no-store, the browser discards it and the stale entry
-            // persists. With just no-cache, the recovery's force-fetch
-            // writes a fresh entry and stuck users self-unstick.
-            await RunSilentAsync("aws",
-                $"s3 cp \"{s3Root}/{path}\" \"{s3Root}/{path}\" " +
-                $"--quiet --region {region} {profileArg} " +
-                $"--metadata-directive REPLACE " +
-                $"--cache-control \"no-cache, must-revalidate\" " +
-                $"--content-type \"{contentType}\"");
+            // force-update stale cache entries — if the response had
+            // no-store, the browser would discard it and the stale entry
+            // would persist.
+            var variants = new (string Suffix, string Encoding)[]
+            {
+                ("",    null),
+                (".br", "br"),
+                (".gz", "gzip"),
+            };
+
+            foreach (var (suffix, encoding) in variants)
+            {
+                var encodingArg = encoding == null
+                    ? ""
+                    : $"--content-encoding \"{encoding}\" ";
+
+                await RunSilentAsync("aws",
+                    $"s3 cp \"{s3Root}/{path}{suffix}\" \"{s3Root}/{path}{suffix}\" " +
+                    $"--quiet --region {region} {profileArg} " +
+                    $"--metadata-directive REPLACE " +
+                    $"--cache-control \"no-cache, must-revalidate\" " +
+                    $"--content-type \"{contentType}\" " +
+                    encodingArg);
+            }
         }
     }
 
