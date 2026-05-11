@@ -80,7 +80,7 @@ public class WebappDeployer
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Syncing to S3...");
         Console.ResetColor();
-        await SyncWithCacheControlAsync(publishPath, bucketName, region, profileArg);
+        await SyncWithCacheControlAsync(publishPath, bucketName, region, profileArg, environment: environment);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
@@ -173,7 +173,7 @@ public class WebappDeployer
             ? "Syncing to S3..."
             : $"Syncing to S3 under prefix '{normalizedPrefix}/'...");
         Console.ResetColor();
-        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg, normalizedPrefix);
+        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg, normalizedPrefix, environment: environment);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(string.IsNullOrEmpty(normalizedPrefix)
@@ -311,14 +311,39 @@ public class WebappDeployer
         string bucketName,
         string region,
         string profileArg,
-        string targetPrefix = "")
+        string targetPrefix = "",
+        string environment = "prod")
     {
         var s3Root = string.IsNullOrEmpty(targetPrefix)
             ? $"s3://{bucketName}/wwwroot"
             : $"s3://{bucketName}/wwwroot/{targetPrefix}";
 
-        // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
-        // on all files. Subsequent passes override specific categories.
+        // Pass 1 baseline max-age is env-tunable.
+        //
+        // prod: max-age=3600 (1 hour). CDN-friendly default — browsers re-
+        //       request at most once per hour after initial fetch. Hashed
+        //       _framework/* assets are overridden to `immutable` by Pass 2
+        //       so the 1-hour value only applies to images/fonts/etc. that
+        //       legitimately rarely change.
+        //
+        // dev/test: max-age=60 (1 minute). Recovering from cache-poisoning
+        //       failure modes (response cached without ACAO before a CORS
+        //       deploy, response cached with a stale config before a code
+        //       deploy, etc.) should not require operators to wait an hour
+        //       or hand-run "Empty Cache and Hard Reload" through DevTools.
+        //       60s is short enough that any cache desync self-heals
+        //       between coffee sips. The cost is one extra round trip per
+        //       client per minute per asset — irrelevant for dev/test
+        //       traffic volume, meaningful for prod CDN economics.
+        //
+        // Anything other than dev/test falls through to the prod default.
+        var baselineMaxAge = environment.Equals("dev", StringComparison.OrdinalIgnoreCase)
+                          || environment.Equals("test", StringComparison.OrdinalIgnoreCase)
+            ? "60" : "3600";
+
+        // Pass 1: Full sync with --delete. Sets the env-tunable baseline
+        // cache-control on all files. Subsequent passes override specific
+        // categories.
         //
         // .br and .gz files are EXCLUDED. Blazor publish emits them as
         // precompressed siblings of every framework asset; we used to
@@ -331,7 +356,7 @@ public class WebappDeployer
         // routing rule accidentally points at them.
         await RunAsync("aws",
             $"s3 sync \"{sourcePath}\" \"{s3Root}\" --delete --quiet --region {region} {profileArg} " +
-            $"--cache-control \"public, max-age=3600\" " +
+            $"--cache-control \"public, max-age={baselineMaxAge}\" " +
             $"--exclude \"*.br\" --exclude \"*.gz\"");
 
         // Pass 2: Override /_framework/* (except manifest files) with immutable

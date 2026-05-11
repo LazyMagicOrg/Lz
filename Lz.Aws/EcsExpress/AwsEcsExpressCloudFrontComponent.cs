@@ -79,20 +79,49 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             Comment = $"Config for {sk}/{tk} ({env})",
         }, new CustomResourceOptions { Parent = this });
 
+        // CORS allowlist substitutions, applied to every CF function that
+        // echoes Access-Control-Allow-Origin: CFRequest (preflight 204s),
+        // CFResponse (viewer-response on cached objects), CFAuthConfig
+        // (inline 200 on /config), and CFAuth (inline 200 on the synthetic
+        // OIDC discovery doc). Substituting the same values into all four
+        // means one operator-facing knob (tenantconfig.CDN.Cors) drives
+        // every CORS evaluation point — no drift, no per-function regex
+        // edits required to add a custom dev hostname.
+        //
+        //   AllowLocalhostDev: true     → echo http(s)://localhost(:port)?
+        //   AllowedOrigins: [...]       → echo exact-match strings
+        //
+        // Both default to false/empty; prod with no Cors block echoes
+        // nothing (the default substitution emits `false` and `[]`).
+        // CFResponse.js's header has the canonical commentary; the same
+        // applies to the other three. Values are baked in at deploy time
+        // via string substitution — no live KVS lookup per request.
+        var corsCfg = (tenantConfig.CDN ?? new CdnConfig()).Cors ?? new CorsConfig();
+        var allowLocalhostJs = corsCfg.AllowLocalhostDev ? "true" : "false";
+        var allowedOriginsJson = System.Text.Json.JsonSerializer.Serialize(
+            corsCfg.AllowedOrigins ?? new List<string>());
+        var corsSubstitutions = new (string, string)[]
+        {
+            ("__ALLOW_LOCALHOST_DEV__", allowLocalhostJs),
+            ("__ALLOWED_ORIGINS_JSON__", allowedOriginsJson),
+        };
+
         var authConfigFn = CreateFunctionFromFile(prefix, "authconfig", "CFAuthConfig.js",
-            $"Auth config for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            $"Auth config for {domain}", tenantConfig.ConfigDirectory, kvs.Arn,
+            corsSubstitutions)
             ?? throw new FileNotFoundException(
                 $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFAuthConfig.js")}");
 
         var requestFn = CreateFunctionFromFile(prefix, "request", "CFRequest.js",
-            $"Request routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            $"Request routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn,
+            corsSubstitutions)
             ?? throw new FileNotFoundException(
                 $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFRequest.js")}");
 
         // Explore static-site routing — split from CFRequest.js to keep
         // the main request function under the 10 KB CloudFront limit.
         // Handles /explore* (bare-prefix redirects + S3 origin rewrite to
-        // the per-subtenant explore bucket).
+        // the per-subtenant explore bucket). No CORS — same-origin only.
         var exploreFn = CreateFunctionFromFile(prefix, "explore", "CFExplore.js",
             $"Explore static-site routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
             ?? throw new FileNotFoundException(
@@ -103,28 +132,14 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // consolidate auth-flow routing in one auditable place and to give
         // CFRequest more headroom under the 10 KB CloudFront limit.
         var authFn = CreateFunctionFromFile(prefix, "auth", "CFAuth.js",
-            $"Auth routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            $"Auth routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn,
+            corsSubstitutions)
             ?? throw new FileNotFoundException(
                 $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFAuth.js")}");
 
         // Auth callback function — no KVS needed, just redirects based on state param
         var authCallbackFn = CreateSimpleFunctionFromFile(prefix, "auth-callback", "CFAuthCallback.js",
             $"OAuth callback redirect for {domain}", tenantConfig.ConfigDirectory);
-
-        // Viewer-response CORS function. CFRequest.js handles OPTIONS
-        // preflights; this handles the simple-GET case (browser skips
-        // preflight, response just needs Access-Control-Allow-Origin).
-        //
-        // The allowlist is operator-controlled via tenantconfig.CDN.Cors:
-        //   AllowLocalhostDev: true     → echo http(s)://localhost(:port)?
-        //   AllowedOrigins: [...]       → echo exact-match strings
-        // Both default to false/empty; prod with no Cors block echoes
-        // nothing. Values are baked in here at deploy time via string
-        // substitution — no live KVS lookup per response.
-        var corsCfg = (tenantConfig.CDN ?? new CdnConfig()).Cors ?? new CorsConfig();
-        var allowLocalhostJs = corsCfg.AllowLocalhostDev ? "true" : "false";
-        var allowedOriginsJson = System.Text.Json.JsonSerializer.Serialize(
-            corsCfg.AllowedOrigins ?? new List<string>());
 
         var responseFnPath = Path.Combine(
             tenantConfig.ConfigDirectory, "CloudFront", "CFResponse.js");
@@ -638,14 +653,30 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
     }
 
     private Pulumi.Aws.CloudFront.Function? CreateFunctionFromFile(
-        string prefix, string name, string jsFileName, string comment, string configDirectory, Output<string> kvsArn)
+        string prefix, string name, string jsFileName, string comment,
+        string configDirectory, Output<string> kvsArn,
+        params (string Placeholder, string Replacement)[] extraSubstitutions)
     {
         var jsPath = Path.Combine(configDirectory, "CloudFront", jsFileName);
         if (!File.Exists(jsPath)) return null;
 
+        // kvsArn is an Output<string> that resolves at apply time; the static
+        // CORS substitutions are plain strings already in scope. Combine both
+        // into a single substitution list passed to CfFunctionCodePrep so each
+        // function file gets exactly the placeholders it references.
+        // Functions that don't reference a given placeholder are unaffected
+        // (PrepareAndValidate's text replace is a no-op when the literal
+        // isn't present in the file).
         var jsCode = kvsArn.Apply(arn =>
-            Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
-                jsPath, jsFileName, ("${KvsArn}", arn)));
+        {
+            var subs = new List<(string, string)>(extraSubstitutions.Length + 1)
+            {
+                ("${KvsArn}", arn)
+            };
+            foreach (var s in extraSubstitutions) subs.Add((s.Placeholder, s.Replacement));
+            return Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+                jsPath, jsFileName, subs.ToArray());
+        });
 
         return new Pulumi.Aws.CloudFront.Function($"{prefix}-{name}-fn", new FunctionArgs
         {
