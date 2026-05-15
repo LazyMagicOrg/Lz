@@ -139,6 +139,19 @@ public static class ConfigValidator
                             $"must be one of 'app' (default — straight to /), 'landing' " +
                             $"(to /explore/home/), or 'both' (two buttons).");
                 }
+
+                // AutoNavSeconds: integer in [1, 60]. Outside that range
+                // the auto-nav widget is either useless (sub-1s gives the
+                // visitor no time to react) or hostile (>60s is UI litter
+                // and the operator should disable AutoNav instead). The
+                // default (4) lives on the property setter; only validate
+                // explicit values.
+                if (entry.AutoNavSeconds < 1 || entry.AutoNavSeconds > 60)
+                    errors.Add(
+                        $"Subtenants[{key}].AutoNavSeconds ({entry.AutoNavSeconds}) " +
+                        $"must be in [1, 60]. Set AutoNav: false if you want to " +
+                        $"disable the auto-launch widget entirely instead of " +
+                        $"setting an extreme countdown.");
             }
         }
 

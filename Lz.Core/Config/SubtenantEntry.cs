@@ -107,4 +107,40 @@ public class SubtenantEntry
     /// value rejects the config at load time.
     /// </summary>
     public string VenuesLinkMode { get; set; } = "both";
+
+    /// <summary>
+    /// Whether the subtenant's <c>/explore/home/</c> static landing page
+    /// should auto-navigate to the WASM app after a short countdown on
+    /// the visitor's FIRST visit. Default <c>true</c> — set to
+    /// <c>false</c> to disable the auto-nav widget for this subtenant
+    /// (the page still renders the regular Use-App button so the visitor
+    /// proceeds at their own pace).
+    /// <para>
+    /// "First visit" is per-origin and gated by either a localStorage
+    /// marker (<c>lz-explore-seen</c>) or the host-scoped
+    /// <c>lz-explored</c> cookie set by the Use-App click handler;
+    /// returning visitors never see the auto-nav regardless of this
+    /// setting (rule 5 of the original auto-launch spec).
+    /// </para>
+    /// <para>
+    /// Surfaced to the static page via the <c>/config</c> endpoint
+    /// (CFAuthConfig.js) by way of the per-host <c>{host}-auth</c> KVS
+    /// entry BCPlugin writes at deploy time.
+    /// </para>
+    /// </summary>
+    public bool AutoNav { get; set; } = true;
+
+    /// <summary>
+    /// Countdown duration in whole seconds before the auto-nav fires.
+    /// Default <c>4</c>. Only honored when <see cref="AutoNav"/> is
+    /// <c>true</c>; ignored otherwise.
+    /// <para>
+    /// Validated by <see cref="ConfigValidator"/> to the inclusive
+    /// range <c>[1, 60]</c>. Below 1s the visitor can't read anything
+    /// before being bounced; above 60s they've definitely lost interest
+    /// and the timer becomes UI litter — set <see cref="AutoNav"/> to
+    /// <c>false</c> instead if you want a non-trivial pause.
+    /// </para>
+    /// </summary>
+    public int AutoNavSeconds { get; set; } = 4;
 }
