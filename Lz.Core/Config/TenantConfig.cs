@@ -25,6 +25,16 @@ public class TenantConfig
 
     // --- Deployment Settings ---
     public string RootDomain { get; set; } = string.Empty;
+
+    /// <summary>
+    /// When true, lz does NOT create or manage the apex (RootDomain) DNS
+    /// record and excludes the apex from the CDN TLS certificate — the apex
+    /// is served by an external host (e.g. a Wix marketing site). lz still
+    /// owns and manages the wildcard *.RootDomain for every subtenant.
+    /// Default false: lz claims both the apex and the wildcard.
+    /// </summary>
+    public bool ApexHostedExternally { get; set; } = false;
+
     public string? DisplayName { get; set; }
     public BehaviorsConfig? Behaviors { get; set; }
     public Dictionary<string, SubtenantEntry>? Subtenants { get; set; }

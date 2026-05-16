@@ -121,6 +121,13 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
             return;
         }
 
+        if (_tenantConfig!.ApexHostedExternally)
+        {
+            Console.WriteLine($"  Apex DNS check skipped — {rootDomain} apex is hosted " +
+                              "externally (ApexHostedExternally=true); lz does not manage it.");
+            return;
+        }
+
         Console.WriteLine($"  Verifying apex DNS for {rootDomain}...");
 
         try

@@ -48,6 +48,7 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
         var suffix = config.SystemSuffix;
         var region = config.Region;
         var systemDomain = config.SystemDomain;
+        var apexHostedExternally = config.ApexHostedExternally;
         var prefix = $"{sk}-{env}";
 
         if (config.AuthConfigs is null || config.AuthConfigs.Count == 0)
@@ -84,20 +85,27 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
         // ECONNREFUSED). IgnoreChanges tells Pulumi to seed the record
         // on first create and then leave records/aliases/ttl alone on
         // every subsequent up. The tenant's alias survives.
-        var apexPlaceholder = new Pulumi.Aws.Route53.Record($"{prefix}-apex-placeholder",
-            new Pulumi.Aws.Route53.RecordArgs
-            {
-                ZoneId = publicZone.Apply(z => z.ZoneId),
-                Name = systemDomain,
-                Type = "A",
-                Ttl = 300,
-                Records = { "127.0.0.1" },
-                AllowOverwrite = true,
-            }, new CustomResourceOptions
-            {
-                Parent = this,
-                IgnoreChanges = { "records", "aliases", "ttl" },
-            });
+        // Skipped when the apex is hosted externally — that host already
+        // provides a resolvable apex A record, so Cognito's parent-domain
+        // requirement is met without planting (and clobbering) a placeholder.
+        Pulumi.Aws.Route53.Record? apexPlaceholder = null;
+        if (!apexHostedExternally)
+        {
+            apexPlaceholder = new Pulumi.Aws.Route53.Record($"{prefix}-apex-placeholder",
+                new Pulumi.Aws.Route53.RecordArgs
+                {
+                    ZoneId = publicZone.Apply(z => z.ZoneId),
+                    Name = systemDomain,
+                    Type = "A",
+                    Ttl = 300,
+                    Records = { "127.0.0.1" },
+                    AllowOverwrite = true,
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    IgnoreChanges = { "records", "aliases", "ttl" },
+                });
+        }
 
         var poolOutputs = new Dictionary<string, CognitoPoolOutputs>();
 
@@ -318,17 +326,18 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             // error. Managed Login Pages handles the same flow correctly.
             // Verified empirically against this codebase's plannerauth
             // pool — see Platform/test/tests/diag-signup-confirm.spec.js.
+            // Depend on the apex placeholder only when lz planted one; with
+            // an externally-hosted apex there is no placeholder resource.
+            var domainOptions = new CustomResourceOptions { Parent = this };
+            if (apexPlaceholder != null)
+                domainOptions.DependsOn.Add(apexPlaceholder);
             var userPoolDomain = new UserPoolDomain($"{poolPrefix}-domain", new UserPoolDomainArgs
             {
                 Domain = customDomain,
                 UserPoolId = userPool.Id,
                 CertificateArn = certValidation.CertificateArn,
                 ManagedLoginVersion = 2,
-            }, new CustomResourceOptions
-            {
-                Parent = this,
-                DependsOn = { apexPlaceholder },
-            });
+            }, domainOptions);
 
             // ManagedLoginVersion=2 requires a per-client branding to be
             // present, otherwise the hosted UI returns errors trying to

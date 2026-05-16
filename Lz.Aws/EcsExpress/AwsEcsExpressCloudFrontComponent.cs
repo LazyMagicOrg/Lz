@@ -32,6 +32,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var prefix = $"{sk}-{tk}";
         var suffix = tenantConfig.TenantSuffix;
         var domain = tenantConfig.RootDomain;
+        var apexExternal = tenantConfig.ApexHostedExternally;
         var cdn = tenantConfig.CDN ?? new CdnConfig();
 
         // =====================================================================
@@ -41,13 +42,20 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var usEast1 = new Provider($"{prefix}-us-east-1", new ProviderArgs { Region = "us-east-1" },
             new CustomResourceOptions { Parent = this });
 
-        var cert = new Certificate($"{prefix}-cdn-cert", new CertificateArgs
+        // When the apex is hosted externally, the cert is wildcard-only.
+        // *.{domain} does NOT cover the bare apex — intentional: nothing in
+        // this distribution serves the apex. Every distribution alias must
+        // be covered by this cert, so the alias list below moves in lockstep.
+        var certArgs = new CertificateArgs
         {
-            DomainName = domain,
-            SubjectAlternativeNames = { $"*.{domain}" },
+            DomainName = apexExternal ? $"*.{domain}" : domain,
             ValidationMethod = "DNS",
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
-        }, new CustomResourceOptions { Parent = this, Provider = usEast1 });
+        };
+        if (!apexExternal)
+            certArgs.SubjectAlternativeNames.Add($"*.{domain}");
+        var cert = new Certificate($"{prefix}-cdn-cert", certArgs,
+            new CustomResourceOptions { Parent = this, Provider = usEast1 });
 
         var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
             new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = domain });
@@ -285,11 +293,15 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // ALIASES
         // =====================================================================
 
-        // Apex + wildcard cover every first-level subtenant domain; subtenants
+        // Wildcard covers every first-level subtenant domain; subtenants
         // are not enumerated here. SubDomain is a single DNS label (see
         // ConfigValidator); the FQDN is {SubDomain}.{RootDomain}, so
-        // first-level is structurally guaranteed by the schema.
-        var aliases = new InputList<string> { domain, $"*.{domain}" };
+        // first-level is structurally guaranteed by the schema. The apex is
+        // included only when lz owns it (ApexHostedExternally == false) —
+        // it must match the cert's domain coverage above.
+        var aliases = apexExternal
+            ? new InputList<string> { $"*.{domain}" }
+            : new InputList<string> { domain, $"*.{domain}" };
 
         // =====================================================================
         // CLOUDFRONT DISTRIBUTION — ALB origin + S3 origin
@@ -608,10 +620,14 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 $@"{{ ""Version"": ""2012-10-17"", ""Statement"": [{{ ""Sid"": ""AllowCloudFrontRead"", ""Effect"": ""Allow"", ""Principal"": {{ ""Service"": ""cloudfront.amazonaws.com"" }}, ""Action"": ""s3:GetObject"", ""Resource"": ""{t.Item1}/*"", ""Condition"": {{ ""StringEquals"": {{ ""AWS:SourceAccount"": ""{t.Item2}"" }} }} }}] }}"),
         }, new CustomResourceOptions { Parent = this });
 
-        // Route 53 aliases — apex + wildcard only. The wildcard covers every
-        // first-level subtenant domain, so subtenants are not enumerated here.
+        // Route 53 aliases — wildcard always; apex only when lz owns it.
+        // The wildcard covers every first-level subtenant domain, so
+        // subtenants are not enumerated here. When ApexHostedExternally is
+        // true the apex record is left untouched — it belongs to whatever
+        // external host (e.g. a marketing site) serves the bare domain.
         var zoneId = publicZone.Apply(z => z.ZoneId);
-        CreateAliasRecord($"{prefix}-cf-alias", zoneId, domain, distribution);
+        if (!apexExternal)
+            CreateAliasRecord($"{prefix}-cf-alias", zoneId, domain, distribution);
         CreateAliasRecord($"{prefix}-cf-alias-wildcard", zoneId, $"*.{domain}", distribution);
 
         return new AwsCloudFrontOutputs(distribution.Id, distribution.DomainName, assetsBucket.Id, assetsBucket.Id);

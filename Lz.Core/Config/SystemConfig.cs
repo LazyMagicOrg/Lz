@@ -22,6 +22,16 @@ public class SystemConfig
     public string Profile { get; set; } = string.Empty;
     public string Region { get; set; } = string.Empty;
     public string? SystemDomain { get; set; }
+
+    /// <summary>
+    /// When true, lz does NOT plant the apex (SystemDomain) placeholder A
+    /// record — the apex is served by an external host that already
+    /// provides a resolvable A record. The apex MUST already resolve before
+    /// `lz deploysystem` runs, because Cognito's CreateUserPoolDomain
+    /// requires a resolvable parent domain. Default false: lz plants a
+    /// 127.0.0.1 placeholder at the apex.
+    /// </summary>
+    public bool ApexHostedExternally { get; set; } = false;
     public string? DefaultTenant { get; set; }
 
     // Network

@@ -43,6 +43,7 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
         var prefix = $"{sk}-{tk}";
         var suffix = tenantConfig.TenantSuffix;
         var domain = tenantConfig.RootDomain;
+        var apexExternal = tenantConfig.ApexHostedExternally;
         var cdn = tenantConfig.CDN ?? new CdnConfig();
 
         // =====================================================================
@@ -54,13 +55,19 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
             Region = "us-east-1",
         }, new CustomResourceOptions { Parent = this });
 
-        var cert = new Certificate($"{prefix}-cdn-cert", new CertificateArgs
+        // When the apex is hosted externally the cert is wildcard-only;
+        // *.{domain} does not cover the bare apex, and the distribution
+        // alias list + apex Route 53 record below move in lockstep.
+        var certArgs = new CertificateArgs
         {
-            DomainName = domain,
-            SubjectAlternativeNames = { $"*.{domain}" },
+            DomainName = apexExternal ? $"*.{domain}" : domain,
             ValidationMethod = "DNS",
             Tags = Tags(sk, tk),
-        }, new CustomResourceOptions { Parent = this, Provider = usEast1 });
+        };
+        if (!apexExternal)
+            certArgs.SubjectAlternativeNames.Add($"*.{domain}");
+        var cert = new Certificate($"{prefix}-cdn-cert", certArgs,
+            new CustomResourceOptions { Parent = this, Provider = usEast1 });
 
         var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
             new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = domain });
@@ -144,13 +151,16 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
         // ALIASES
         // =====================================================================
 
-        // Apex + wildcard cover every first-level subtenant domain
+        // Wildcard covers every first-level subtenant domain
         // (e.g. cerulean.{domain}). Subtenants are NOT enumerated here — adding
         // one requires no CloudFront change. SubDomain is a single DNS label
         // (validated by ConfigValidator); the FQDN is built at consumption
         // time as {SubDomain}.{RootDomain}, so first-level is structurally
-        // guaranteed by the schema.
-        var aliases = new InputList<string> { domain, $"*.{domain}" };
+        // guaranteed by the schema. The apex is included only when lz owns
+        // it (ApexHostedExternally == false) — it must match the cert above.
+        var aliases = apexExternal
+            ? new InputList<string> { $"*.{domain}" }
+            : new InputList<string> { domain, $"*.{domain}" };
 
         // =====================================================================
         // CLOUDFRONT DISTRIBUTION
@@ -284,23 +294,28 @@ public class AwsAppRunnerCloudFrontComponent : ComponentResource, ITenantCdnComp
 
         var zoneId = publicZone.Apply(z => z.ZoneId);
 
-        // Root domain
-        new Pulumi.Aws.Route53.Record($"{prefix}-cf-alias", new Pulumi.Aws.Route53.RecordArgs
+        // Root domain — created only when lz owns the apex. When
+        // ApexHostedExternally is true the apex record is left untouched;
+        // it belongs to whatever external host serves the bare domain.
+        if (!apexExternal)
         {
-            ZoneId = zoneId,
-            Name = domain,
-            Type = "A",
-            AllowOverwrite = true,
-            Aliases =
+            new Pulumi.Aws.Route53.Record($"{prefix}-cf-alias", new Pulumi.Aws.Route53.RecordArgs
             {
-                new RecordAliasArgs
+                ZoneId = zoneId,
+                Name = domain,
+                Type = "A",
+                AllowOverwrite = true,
+                Aliases =
                 {
-                    Name = distribution.DomainName,
-                    ZoneId = distribution.HostedZoneId,
-                    EvaluateTargetHealth = false,
+                    new RecordAliasArgs
+                    {
+                        Name = distribution.DomainName,
+                        ZoneId = distribution.HostedZoneId,
+                        EvaluateTargetHealth = false,
+                    },
                 },
-            },
-        }, new CustomResourceOptions { Parent = this });
+            }, new CustomResourceOptions { Parent = this });
+        }
 
         // Wildcard
         new Pulumi.Aws.Route53.Record($"{prefix}-cf-alias-wildcard", new Pulumi.Aws.Route53.RecordArgs
