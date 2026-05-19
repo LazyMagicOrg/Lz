@@ -44,6 +44,14 @@ public class TenantConfig
     /// </summary>
     public string? MediaBucket { get; set; }
 
+    /// <summary>
+    /// SmartStore media storage backend: "s3" or "filesystem" (default).
+    /// When "s3", tenant deploy seeds media directly into the media bucket and
+    /// sets Media.Storage.Provider to the Smartstore.AmazonS3 provider, so the
+    /// tenant comes up on S3 with no manual configuration or migration.
+    /// </summary>
+    public string MediaStorage { get; set; } = "filesystem";
+
     // Cross-account shared services — propagated from SystemConfig at runtime
     public string? SharedSecretArn { get; set; }
     public string? SharedKmsKeyArn { get; set; }

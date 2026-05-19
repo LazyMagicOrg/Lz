@@ -214,6 +214,18 @@ public class AwsGateCheckerLambdaComponent : ComponentResource, IGateCheckerComp
         ""s3:GetObject""
       ],
       ""Resource"": ""arn:aws:s3:::{themesBucketName}/*""
+    }},
+    {{
+      ""Effect"": ""Allow"",
+      ""Action"": [
+        ""s3:ListBucket"",
+        ""s3:GetObject"",
+        ""s3:PutObject""
+      ],
+      ""Resource"": [
+        ""arn:aws:s3:::{prefix}-*--media--*"",
+        ""arn:aws:s3:::{prefix}-*--media--*/*""
+      ]
     }}
   ]
 }}"),

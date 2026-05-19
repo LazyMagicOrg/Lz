@@ -284,11 +284,19 @@ public class SystemDeployment
             var appUser = $"{_config.SystemKey}_{tenantKey}_app";
             var platformDbName = ecs.PlatformDatabaseName; // null if not configured — Lambda skips platform DB creation
 
+            // S3-native media seed: when the tenant opts into "s3" storage, the
+            // Lambda seeds media straight into the bucket and activates the provider.
+            var mediaStorage = tenantConfig.MediaStorage ?? "filesystem";
+            var mediaBucket = tenantConfig.MediaBucket
+                ?? $"{_config.SystemKey}-{tenantKey}--media--{tenantConfig.TenantSuffix}";
+
             Console.WriteLine();
             Console.WriteLine("Initializing tenant config (database + EFS config files)...");
             var initOk = await configInit.RunInitConfigAsync(tenantKey, dbName, appUser,
                 userSettings: tenantConfig.Smartstore,
-                platformDatabaseName: platformDbName);
+                platformDatabaseName: platformDbName,
+                mediaBucket: mediaBucket,
+                mediaStorage: mediaStorage);
             if (!initOk)
             {
                 Console.ForegroundColor = ConsoleColor.Red;

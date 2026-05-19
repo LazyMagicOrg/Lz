@@ -584,6 +584,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "AWS_REGION", value = region },
                     new { name = "APPHOST_DATA_PATH", value = "/app" },
                     new { name = "LZ_EXPLORE_BUCKET", value = $"{sk}-{tk}--webapp-explore-{suffix}" },
+                    new { name = "LZ_MEDIA_BUCKET", value = $"{sk}-{tk}--media--{suffix}" },
                 };
 
                 if (definition.RequiresDatabase)
