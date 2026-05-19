@@ -268,6 +268,29 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             }}",
         });
 
+        // S3 access for the Smartstore.AmazonS3 media storage provider.
+        // Only SmartStore reads/writes tenant media; AppHost does not need it.
+        // Bucket is created by AwsTenantDataComponent ({sk}-{tk}-{stk}-media--{suffix}).
+        if (serviceName == "smartstore")
+        {
+            var mediaBucketName = $"{sk}-{tk}--media--{suffix}";
+            taskRoleInlinePolicies.Add(new RoleInlinePolicyArgs
+            {
+                Name = "S3Media",
+                Policy = $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [""s3:GetObject"", ""s3:PutObject"", ""s3:DeleteObject"", ""s3:ListBucket""],
+                        ""Resource"": [
+                            ""arn:aws:s3:::{mediaBucketName}"",
+                            ""arn:aws:s3:::{mediaBucketName}/*""
+                        ]
+                    }}]
+                }}",
+            });
+        }
+
         var taskRole = new Role($"{prefix}-{serviceName}-task-role", new RoleArgs
         {
             Name = $"{prefix}-{serviceName}-task-role",

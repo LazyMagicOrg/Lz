@@ -37,6 +37,13 @@ public class TenantConfig
     public string? Profile { get; set; }
     public string? Region { get; set; }
 
+    /// <summary>
+    /// Optional override for the per-tenant media S3 bucket name. When unset,
+    /// the name is derived by convention: {sk}-{tk}-{stk}-media--{suffix}.
+    /// Backs the Smartstore.AmazonS3 media storage provider.
+    /// </summary>
+    public string? MediaBucket { get; set; }
+
     // Cross-account shared services — propagated from SystemConfig at runtime
     public string? SharedSecretArn { get; set; }
     public string? SharedKmsKeyArn { get; set; }
