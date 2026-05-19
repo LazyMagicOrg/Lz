@@ -388,6 +388,23 @@ def init_config(event):
     )
     steps.extend(db_restore_steps)
 
+    # --- S3-native media seed (when the tenant opts into "s3" storage) ---
+    # Seeds media straight into the S3 bucket and activates the
+    # Smartstore.AmazonS3 provider, so the tenant comes up on S3 with no
+    # manual configuration and no migration. Media is seeded first; the
+    # provider is only switched if that succeeds (avoids broken images).
+    media_storage = (event.get("media_storage") or "filesystem").lower()
+    media_bucket = event.get("media_bucket") or ""
+    if media_storage == "s3" and media_bucket:
+        try:
+            steps.append(_seed_media_to_s3(smartstore_data, media_bucket))
+            steps.append(_set_media_storage_provider(
+                rds_host, rds_port, db_name, master_user, master_password))
+        except Exception as e:
+            steps.append(f"S3 media seed FAILED (left on filesystem): {e}")
+    elif media_storage == "s3":
+        steps.append("media_storage=s3 but no media_bucket provided — skipped S3 seed")
+
     # --- Write config files to EFS ---
     user_settings = event.get("user_settings")
     file_steps = _write_config_files(
@@ -590,6 +607,68 @@ def _write_config_files(mount_path, sk, tk, env, rds_host, db_name, app_user, ap
     steps.append(f"Wrote usersettings.json to {efs_prefix}/smartstore-config/")
 
     return steps
+
+
+def _seed_media_to_s3(smartstore_data_dir, bucket):
+    """
+    Upload seed media (Default/Media/Storage) to the S3 media bucket that
+    backs the Smartstore.AmazonS3 provider. The EFS Storage layout maps 1:1
+    to the provider's S3 keys, so this is a straight copy. Skips if the
+    bucket already has objects (one-time seed; safe to re-run).
+    """
+    import boto3
+
+    storage_dir = os.path.join(smartstore_data_dir, "Default", "Media", "Storage")
+    if not os.path.isdir(storage_dir):
+        return f"No media at Default/Media/Storage — skipped S3 media seed"
+
+    s3 = boto3.client("s3")
+    existing = s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+    if existing.get("KeyCount", 0) > 0:
+        return f"S3 bucket {bucket} already populated — skipped media seed"
+
+    count = 0
+    for root, _, files in os.walk(storage_dir):
+        for fn in files:
+            local = os.path.join(root, fn)
+            key = os.path.relpath(local, storage_dir).replace(os.sep, "/")
+            s3.upload_file(local, bucket, key)
+            count += 1
+
+    return f"Seeded {count} media file(s) to s3://{bucket}/"
+
+
+def _set_media_storage_provider(rds_host, rds_port, db_name, master_user, master_password):
+    """
+    Set Media.Storage.Provider = MediaStorage.AmazonS3 in the SmartStore
+    Setting table so the tenant uses S3 on first boot. Idempotent. Skips
+    gracefully if the Setting table does not exist yet (no seed dump).
+    """
+    import pg8000.native
+
+    conn = pg8000.native.Connection(
+        user=master_user, password=master_password,
+        host=rds_host, port=int(rds_port), database=db_name,
+    )
+    try:
+        regclass = conn.run("SELECT to_regclass('public.\"Setting\"')")
+        if not regclass or regclass[0][0] is None:
+            return "Setting table not present — skipped Media.Storage.Provider"
+
+        conn.run(
+            'UPDATE "Setting" SET "Value" = :v WHERE "Name" = :n',
+            v="MediaStorage.AmazonS3", n="Media.Storage.Provider",
+        )
+        if conn.row_count == 0:
+            conn.run(
+                'INSERT INTO "Setting" ("Name", "Value", "StoreId") '
+                'VALUES (:n, :v, 0)',
+                n="Media.Storage.Provider", v="MediaStorage.AmazonS3",
+            )
+            return "Inserted Media.Storage.Provider = MediaStorage.AmazonS3"
+        return "Set Media.Storage.Provider = MediaStorage.AmazonS3"
+    finally:
+        conn.close()
 
 
 # -------------------------------------------------------------------------

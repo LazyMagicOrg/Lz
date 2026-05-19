@@ -24,7 +24,8 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
     public async Task<bool> RunInitConfigAsync(
         string tenantKey, string dbName, string appUser,
         string appVersion = "6.3.0.0", Dictionary<string, object>? userSettings = null,
-        string? platformDatabaseName = null)
+        string? platformDatabaseName = null,
+        string? mediaBucket = null, string? mediaStorage = null)
     {
         var functionName = $"{_config.SystemKey}-gate-checker";
 
@@ -44,6 +45,8 @@ public class AwsLambdaConfigInitRunner : IConfigInitRunner
             user_settings = userSettings,
             platform_db_name = platformDatabaseName,
             platform_app_user = platformAppUser,
+            media_bucket = mediaBucket,
+            media_storage = mediaStorage ?? "filesystem",
         };
 
         try
