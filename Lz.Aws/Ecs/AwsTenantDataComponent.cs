@@ -53,6 +53,61 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
         var ahConfigAp = CreateAccessPoint($"{prefix}-ah-config", awsFileStorage.FileSystemId, ahConfigPath);
 
         // =====================================================================
+        // MEDIA S3 BUCKET
+        // =====================================================================
+        // Private per-tenant bucket backing the Smartstore.AmazonS3 media storage
+        // provider (product images, downloads, attachments). Accessed directly by
+        // the SmartStore ECS task role — not a CloudFront origin, so no OAC or
+        // bucket policy. Naming: {sk}-{tk}-{stk}-media--{suffix} (stk empty for now,
+        // producing a double dash, consistent with the webapp/explore/park buckets).
+
+        var stk = ""; // subtenantkey — empty for now (double dash in bucket name)
+        var mediaBucketName = tenantConfig.MediaBucket
+            ?? $"{prefix}-{stk}-media--{tenantConfig.TenantSuffix}";
+
+        var mediaBucket = new Pulumi.Aws.S3.BucketV2($"{prefix}-media-bucket", new Pulumi.Aws.S3.BucketV2Args
+        {
+            Bucket = mediaBucketName,
+            ForceDestroy = env == "dev",
+            Tags = Tags(sk, tk),
+        }, new CustomResourceOptions { Parent = this });
+
+        new Pulumi.Aws.S3.BucketPublicAccessBlock($"{prefix}-media-block", new Pulumi.Aws.S3.BucketPublicAccessBlockArgs
+        {
+            Bucket = mediaBucket.Id,
+            BlockPublicAcls = true,
+            BlockPublicPolicy = true,
+            IgnorePublicAcls = true,
+            RestrictPublicBuckets = true,
+        }, new CustomResourceOptions { Parent = this });
+
+        new Pulumi.Aws.S3.BucketServerSideEncryptionConfigurationV2($"{prefix}-media-sse",
+            new Pulumi.Aws.S3.BucketServerSideEncryptionConfigurationV2Args
+            {
+                Bucket = mediaBucket.Id,
+                Rules =
+                {
+                    new Pulumi.Aws.S3.Inputs.BucketServerSideEncryptionConfigurationV2RuleArgs
+                    {
+                        ApplyServerSideEncryptionByDefault =
+                            new Pulumi.Aws.S3.Inputs.BucketServerSideEncryptionConfigurationV2RuleApplyServerSideEncryptionByDefaultArgs
+                            {
+                                SseAlgorithm = "AES256",
+                            },
+                    },
+                },
+            }, new CustomResourceOptions { Parent = this });
+
+        new Pulumi.Aws.S3.BucketVersioningV2($"{prefix}-media-versioning", new Pulumi.Aws.S3.BucketVersioningV2Args
+        {
+            Bucket = mediaBucket.Id,
+            VersioningConfiguration = new Pulumi.Aws.S3.Inputs.BucketVersioningV2VersioningConfigurationArgs
+            {
+                Status = "Enabled",
+            },
+        }, new CustomResourceOptions { Parent = this });
+
+        // =====================================================================
         // TENANT SECRET
         // =====================================================================
 
