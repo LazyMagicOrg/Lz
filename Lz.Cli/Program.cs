@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Reflection;
 using Lz.Core.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
@@ -61,6 +62,18 @@ class Program
             Console.ResetColor();
         }
 
+        // Intercept --version BEFORE System.CommandLine sees it. The default
+        // handler only prints the running assembly's InformationalVersion,
+        // which would conflate the three distinct version axes (runner +
+        // cli + plugin) into one number. The custom output below names each
+        // axis explicitly with provenance — see Platform/LzRunnerSplit.md
+        // in the Monro repo for design rationale.
+        if (args.Length == 1 && (args[0] == "--version" || args[0] == "-v"))
+        {
+            PrintVersionInfo(plugin);
+            return 0;
+        }
+
         // Shared options used across multiple commands
         var systemKeyOption = new Option<string?>("--systemkey",
             "System key (auto-detected if only one systemconfig exists for the env)");
@@ -87,6 +100,82 @@ class Program
         plugin?.RegisterCommands(rootCommand);
 
         return await rootCommand.InvokeAsync(args);
+    }
+
+    // ---------------------------------------------------------------
+    // --version handler
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Renders the 3-line <c>lz --version</c> output: dispatcher (lz.runner),
+    /// infrastructure logic (lz.cli), and tenant plugin. Each line includes
+    /// provenance so the user can tell at a glance WHERE each piece was
+    /// resolved from.
+    ///
+    /// Reads runner info from env vars set by Lz.Runner before it spawned us
+    /// (see LzRunner/Lz.Runner/Program.cs). If those env vars are absent the
+    /// process wasn't launched via the runner; falls back to "(unknown)".
+    /// </summary>
+    private static void PrintVersionInfo(ILzPlugin? plugin)
+    {
+        // -- Line 1: the dispatcher
+        var runnerVersion = Environment.GetEnvironmentVariable("LZ_RUNNER_VERSION") ?? "(unknown — not launched via lz.runner)";
+        var toolStoreHint = ResolveToolStorePath(runnerVersion);
+        Console.WriteLine($"lz.runner:     {runnerVersion}");
+        if (!string.IsNullOrEmpty(toolStoreHint))
+            Console.WriteLine($"               installed: {toolStoreHint}");
+
+        Console.WriteLine();
+
+        // -- Line 2: the infrastructure logic (this assembly)
+        var cliAsm = typeof(Program).Assembly;
+        var cliVer = cliAsm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                     ?? cliAsm.GetName().Version?.ToString()
+                     ?? "(unknown)";
+        var resolvedNupkg = Environment.GetEnvironmentVariable("LZ_RUNNER_NUPKG_PATH");
+        var resolvedFeed  = Environment.GetEnvironmentVariable("LZ_RUNNER_FEED");
+        Console.WriteLine($"lz.cli:        {cliVer}");
+        if (!string.IsNullOrEmpty(resolvedNupkg))
+            Console.WriteLine($"               resolved:  {resolvedNupkg}");
+        if (!string.IsNullOrEmpty(resolvedFeed))
+            Console.WriteLine($"               feed:      {resolvedFeed}");
+
+        Console.WriteLine();
+
+        // -- Line 3: the tenant plugin (if any)
+        if (plugin != null)
+        {
+            var pluginAsm = plugin.GetType().Assembly;
+            var pluginName = pluginAsm.GetName().Name ?? "(unnamed)";
+            var pluginVer  = pluginAsm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                             ?? pluginAsm.GetName().Version?.ToString()
+                             ?? "(unknown)";
+            Console.WriteLine($"deploy plugin: {pluginName} {pluginVer}");
+            if (!string.IsNullOrEmpty(pluginAsm.Location))
+                Console.WriteLine($"               loaded:    {pluginAsm.Location}");
+        }
+        else
+        {
+            Console.WriteLine("deploy plugin: (none — no lz.json marker or Deploy/bin/.../Deploy.dll in scope)");
+        }
+    }
+
+    /// <summary>
+    /// Best-effort guess at the <c>dotnet tool</c> store path for the running
+    /// Lz.Runner version. Pure cosmetics for the --version output; if we can't
+    /// find it, return empty and let the caller skip the line.
+    /// </summary>
+    private static string ResolveToolStorePath(string runnerVersion)
+    {
+        // Strip any +commit-hash suffix that InformationalVersion carries.
+        var clean = runnerVersion.Split('+')[0];
+        if (string.IsNullOrEmpty(clean) || clean.Contains(' ')) return string.Empty;
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(userProfile)) return string.Empty;
+
+        var candidate = Path.Combine(userProfile, ".dotnet", "tools", ".store", "lz.runner", clean);
+        return Directory.Exists(candidate) ? candidate : string.Empty;
     }
 
     // ---------------------------------------------------------------

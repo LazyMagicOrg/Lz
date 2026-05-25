@@ -327,11 +327,23 @@ public class WebappDeployer
             ? $"s3://{bucketName}/wwwroot"
             : $"s3://{bucketName}/wwwroot/{targetPrefix}";
 
+        // Preserve namespaces owned by other producers from --delete wiping
+        // them out. The explore bucket has the `products/*` subtree generated
+        // by Smartstore.StaticProductPages running on a separate cron; if the
+        // Hugo sync below ran without an exclude, every deploy would erase
+        // those product pages until the next 24-hour Smartstore run.
+        //
+        // Excludes apply ONLY to the explore-prefix sync. Other buckets
+        // (webapp, park) own their entire wwwroot; nothing to preserve.
+        var deleteExcludes = string.Equals(targetPrefix, "explore", StringComparison.OrdinalIgnoreCase)
+            ? " --exclude \"products/*\""
+            : "";
+
         // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
         // on all files. Subsequent passes override specific categories.
         await RunAsync("aws",
             $"s3 sync \"{sourcePath}\" \"{s3Root}\" --delete --quiet --region {region} {profileArg} " +
-            $"--cache-control \"public, max-age=3600\"");
+            $"--cache-control \"public, max-age=3600\"{deleteExcludes}");
 
         // Pass 2: Override /_framework/* (except manifest files) with immutable
         // long-lived cache. Content-hashed names make indefinite caching safe.
