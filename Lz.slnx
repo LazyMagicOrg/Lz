@@ -1,3 +1,11 @@
+<!--
+  Lz solution — the infrastructure logic that the `lz` dispatcher loads.
+  As of LzVersion 0.9.218, Lz.Runner has been split into its own repo
+  (https://github.com/LazyMagicOrg/LzRunner) and is no longer part of this
+  solution. The runner is installed globally via `dotnet tool install -g
+  Lz.Runner` and consumes the packages this solution produces.
+  See Platform/LzRunnerSplit.md in any Monro working copy for the rationale.
+-->
 <Solution>
   <Project Path="Lz.Aws/Lz.Aws.csproj" />
   <Project Path="Lz.Azure/Lz.Azure.csproj" />
@@ -5,5 +13,4 @@
   <Project Path="Lz.Gen/Lz.Gen.csproj" />
   <Project Path="Lz.Tests/Lz.Tests.csproj" />
   <Project Path="Lz.Cli/Lz.Cli.csproj" />
-  <Project Path="Lz.Runner/Lz.Runner.csproj" />
 </Solution>
