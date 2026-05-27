@@ -524,6 +524,15 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             IpAddressType = "ipv4",
             Subnets = { publicSubnet1.Id, publicSubnet2.Id },
             SecurityGroups = { albSg.Id },
+            // Default 60s 504s the Hugo-build upload (554+ MB → Smartstore
+            // unzips into ECS task memory while the ALB waits for any byte
+            // from the target). 10 min covers the realistic worst case for
+            // legitimate uploads at typical office bandwidth, and the
+            // increase only matters for connections that genuinely sit
+            // idle — normal request traffic still completes well under 60s.
+            // Will become moot once the Hugo-builder ECS task replaces
+            // workstation uploads (planned arch change).
+            IdleTimeout = 600,
             Tags = Tags(config, "alb"),
         }, opts);
 
