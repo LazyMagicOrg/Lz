@@ -250,7 +250,12 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             }),
         });
 
-        // S3 write access for Explore Pages publish (SmartStore → explore S3 bucket)
+        // S3 write access for Explore Pages publish (SmartStore → explore S3 bucket).
+        // s3:DeleteObject is required by the in-container Hugo build's
+        // S3Syncer delete-orphans pass (Smartstore.ExplorePages.S3Syncer),
+        // which removes stale objects no longer present in the Hugo output.
+        // The legacy upload-only ExplorePublishService never deleted, so this
+        // permission was historically absent.
         var exploreBucketName = $"{sk}-{tk}--webapp-explore-{suffix}";
         taskRoleInlinePolicies.Add(new RoleInlinePolicyArgs
         {
@@ -259,7 +264,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                 ""Version"": ""2012-10-17"",
                 ""Statement"": [{{
                     ""Effect"": ""Allow"",
-                    ""Action"": [""s3:PutObject"", ""s3:GetObject"", ""s3:ListBucket""],
+                    ""Action"": [""s3:PutObject"", ""s3:GetObject"", ""s3:DeleteObject"", ""s3:ListBucket""],
                     ""Resource"": [
                         ""arn:aws:s3:::{exploreBucketName}"",
                         ""arn:aws:s3:::{exploreBucketName}/wwwroot/explore/*""
@@ -598,6 +603,22 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "DB_USERNAME", valueFrom = $"{masterSecretArn}:username::" },
                     new { name = "DB_PASSWORD", valueFrom = $"{masterSecretArn}:password::" },
                 };
+
+                // Per-tenant GitHub App credentials — used by
+                // Smartstore.ExplorePages.HugoBuildService and
+                // StaticSiteRepository to clone the StaticSite repo for
+                // in-container builds via git-over-HTTPS with a short-lived
+                // installation token. The container signs a JWT with the
+                // App private key and exchanges it at
+                // /app/installations/{id}/access_tokens. Stored in the
+                // {sk}/{tk} tenant secret (AwsTenantDataComponent seeds
+                // the three slots; operators populate actual values
+                // post-deploy). IAM read coverage on tenantSecretId is
+                // already granted by the task-role policy at the top of
+                // this component.
+                secrets.Add(new { name = "LZ_GITHUB_APP_ID", valueFrom = $"{tenantSecretId}:github-app-id::" });
+                secrets.Add(new { name = "LZ_GITHUB_APP_INSTALLATION_ID", valueFrom = $"{tenantSecretId}:github-app-installation-id::" });
+                secrets.Add(new { name = "LZ_GITHUB_APP_PRIVATE_KEY", valueFrom = $"{tenantSecretId}:github-app-private-key::" });
 
                 // Cross-account Keycloak admin credentials from shared secret
                 if (!string.IsNullOrEmpty(tenantConfig.SharedSecretArn))
