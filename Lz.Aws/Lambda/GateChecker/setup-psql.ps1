@@ -29,30 +29,23 @@ if (Test-Path $libDir) { Remove-Item -Recurse -Force $libDir }
 New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 New-Item -ItemType Directory -Path $libDir -Force | Out-Null
 
+# Bash script as a single-line && chain. Avoids the CRLF-pollution that
+# bites multi-line PowerShell here-strings when they're passed to a Linux
+# bash via `docker run ... bash -c`. Each `&&` carries the failure mode
+# of `set -e` without needing a separate statement.
+$bashScript = "dnf install -y postgresql15 > /dev/null 2>&1 && " +
+              "cp /usr/bin/psql /out/bin/ && " +
+              "chmod +x /out/bin/psql && " +
+              "for lib in `$(ldd /usr/bin/psql | grep '=> /' | awk '{print `$3}'); do cp `"`$lib`" /out/lib/ 2>/dev/null || true; done && " +
+              "echo psql:`$(psql --version) && " +
+              "echo libs:`$(ls /out/lib/ | wc -l)"
+
 # Run Docker container to install postgresql15 and extract binaries
 docker run --rm --platform linux/amd64 `
     -v "${binDir}:/out/bin" `
     -v "${libDir}:/out/lib" `
     amazonlinux:2023 `
-    bash -c @'
-set -e
-echo "Installing postgresql15..."
-dnf install -y postgresql15 > /dev/null 2>&1
-
-echo "Copying psql binary..."
-cp /usr/bin/psql /out/bin/
-chmod +x /out/bin/psql
-
-echo "Copying shared libraries..."
-for lib in $(ldd /usr/bin/psql | grep '=> /' | awk '{print $3}'); do
-    cp "$lib" /out/lib/ 2>/dev/null || true
-done
-
-echo ""
-echo "psql version: $(psql --version)"
-echo "Libraries copied:"
-ls -la /out/lib/
-'@
+    bash -c $bashScript
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""

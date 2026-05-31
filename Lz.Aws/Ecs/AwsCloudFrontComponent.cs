@@ -310,9 +310,18 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
                     AllowedMethods = { "GET", "HEAD", "OPTIONS" },
                     CachedMethods = { "GET", "HEAD" },
                     Compress = true,
+                    // Smartstore sizes media via the ?size=N query string. The
+                    // cache key MUST include the query string or CloudFront
+                    // caches ONE variant per path and serves it for every size
+                    // (the "muddy image" bug: a small/full variant gets reused
+                    // for all requested sizes). CachingOptimized excludes query
+                    // strings from the key; UseOriginCacheControlHeaders-
+                    // QueryStrings keys on the query string AND honors
+                    // Smartstore's Cache-Control TTL. AllViewer (below) already
+                    // forwards ?size to the origin. dev stays CachingDisabled.
                     CachePolicyId = env == "dev"
                         ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"        // CachingDisabled (dev)
-                        : "658327ea-f89d-4fab-a63d-7e88639e58f6",        // CachingOptimized
+                        : "4cc15a8a-d715-48a4-82b8-cc0b614638fe",        // UseOriginCacheControlHeaders-QueryStrings (qs=all)
                     OriginRequestPolicyId = "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
                 },
                 // AppHost API behaviors → ALB origin

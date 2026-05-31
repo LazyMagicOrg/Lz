@@ -123,7 +123,26 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
             Protect = env is "prod" or "staging",
         });
 
-        // Seed with empty JSON — post-deploy actions populate the actual values
+        // Seed-only secret version. Pulumi WRITES this JSON on initial creation
+        // (so the field shape is in place from day one), then NEVER overwrites
+        // the secret's contents on subsequent deploys. After first deploy, the
+        // secret is "owned" by the operator — populate via
+        // `aws secretsmanager put-secret-value` and restart the tenant ECS task
+        // to pick up new env vars.
+        //
+        // IgnoreChanges = { "secretString" } is what enforces the seed-once
+        // semantics: without it, every `pulumi up` would diff the literal
+        // placeholder dict below against AWS's current encrypted value, see a
+        // change, and push the placeholders back — silently destroying any
+        // operator-set credentials (which is exactly what bit us once).
+        //
+        // Consequences operators should know:
+        //   - Editing/adding fields in this dict only affects FRESH tenants.
+        //     Existing tenants keep whatever secret payload they already have.
+        //     If you add a new field here, operators must manually
+        //     `put-secret-value` to add it to existing tenants' secrets.
+        //   - If a secret is recreated (e.g. deleted in AWS console), this
+        //     seed runs again and operator-set values are lost. Don't delete.
         var tenantSecretVersion = new SecretVersion($"{prefix}-tenant-secret-version", new SecretVersionArgs
         {
             SecretId = tenantSecret.Id,
@@ -131,8 +150,29 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
             {
                 ["tenant-key"] = tk,
                 ["environment"] = env,
+                // GitHub App credentials for the in-container Hugo build
+                // service (Smartstore.ExplorePages.HugoBuildService /
+                // StaticSiteRepository). The org disables Deploy Keys by
+                // policy, so we authenticate via a GitHub App installed on
+                // monromeadows/StaticSite with Contents:Read. The container
+                // signs a JWT with the App's RSA private key and exchanges
+                // it at /app/installations/{id}/access_tokens for a 1-hour
+                // installation token used as Basic-auth credentials on
+                // git-over-HTTPS clones. Operators replace the placeholders
+                // post-deploy via `aws secretsmanager put-secret-value`,
+                // then restart the tenant ECS task to pick up the new
+                // LZ_GITHUB_APP_* env vars. The private key value must be
+                // the full PEM including the BEGIN/END RSA PRIVATE KEY
+                // lines (newlines preserved via JSON `\n` escaping).
+                ["github-app-id"] = "PLACEHOLDER_SET_VIA_AWS_CLI",
+                ["github-app-installation-id"] = "PLACEHOLDER_SET_VIA_AWS_CLI",
+                ["github-app-private-key"] = "PLACEHOLDER_SET_VIA_AWS_CLI",
             }),
-        }, new CustomResourceOptions { Parent = this });
+        }, new CustomResourceOptions
+        {
+            Parent = this,
+            IgnoreChanges = { "secretString" },
+        });
 
         // =====================================================================
         // DATABASE NAME (convention-based, actual DB created by post-deploy)
