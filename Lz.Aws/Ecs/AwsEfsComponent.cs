@@ -38,6 +38,27 @@ public class AwsEfsComponent : ComponentResource, IFileStorageComponent
             },
         }, new CustomResourceOptions { Parent = this, Protect = config.Environment is "prod" or "staging" });
 
+        // AWS Backup automatic backups for the EFS file system.
+        // Defaults to enabled in prod/staging (matching the Protect policy above)
+        // and disabled elsewhere. Override per-environment via systemconfig YAML:
+        //   Backup:
+        //     Enabled: true   # or false
+        // When enabled, AWS Backup uses its default EFS vault
+        // (aws/efs/automatic-backup-vault) on a daily schedule, 35-day retention.
+        var backupEnabled = config.Backup?.Enabled
+            ?? config.Environment is "prod" or "staging";
+        if (backupEnabled)
+        {
+            new BackupPolicy($"{prefix}-efs-backup", new BackupPolicyArgs
+            {
+                FileSystemId = fs.Id,
+                BackupPolicyDetails = new BackupPolicyBackupPolicyArgs
+                {
+                    Status = "ENABLED",
+                },
+            }, opts);
+        }
+
         // Mount Targets (one per private subnet / AZ)
         network.PrivateSubnetIds.Apply(subnetIds =>
         {
