@@ -586,6 +586,13 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "LZ_TENANT_KEY", value = tk },
                     new { name = "LZ_ENVIRONMENT", value = env },
                     new { name = "LZ_SERVICE_NAME", value = serviceName },
+                    // Public root domain (e.g. "harmover.com"). The explore static-page
+                    // generator (ExploreBucketLocator.GetPublicDomain) reads this as the
+                    // AUTHORITATIVE host for canonical/OG/JSON-LD/sitemap URLs during
+                    // off-request generation (cron, save hooks, publish regen), where no
+                    // usable request host exists — without it, an internal caller IP
+                    // leaked into those URLs.
+                    new { name = "LZ_SYSTEM_DOMAIN", value = tenantConfig.RootDomain },
                     new { name = "AWS_REGION", value = region },
                     new { name = "APPHOST_DATA_PATH", value = "/app" },
                     new { name = "LZ_EXPLORE_BUCKET", value = $"{sk}-{tk}--webapp-explore-{suffix}" },
