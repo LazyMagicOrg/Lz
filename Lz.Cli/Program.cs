@@ -86,6 +86,7 @@ class Program
         RegisterDeployWebappCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployStaticSiteCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -863,6 +864,159 @@ class Program
         }, systemKeyOption, envOption, tenantKeyOption, refreshOption);
 
         root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // updatecontainer
+    //
+    // Zero-downtime alternative to deploytenant for the common case of "just
+    // ship the new container image". deploytenant scales the ECS service to 0
+    // during the Pulumi 'up' (AwsEcsTenantServiceComponent starts at
+    // DesiredCount=0) and the post-deploy action scales it back — that gap is
+    // the outage. updatecontainer instead issues a rolling UpdateService
+    // (ForceNewDeployment=true) with DesiredCount untouched, so ECS replaces
+    // the task with no downtime. It only forces a deploy when the running
+    // image digest differs from the latest in ECR (unless --force), and by
+    // default it waits until the new task is healthy (or reports a rollback);
+    // pass --no-wait for fire-and-forget.
+    //
+    // Intended flow:  lz deploycontainer  →  lz updatecontainer
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateContainerCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updatecontainer",
+            "Zero-downtime rolling redeploy of tenant container(s) to pick up the latest ECR image. " +
+            "Run after 'lz deploycontainer'. Skips services already on the latest image unless --force. " +
+            "Waits for the rollout to complete by default; pass --no-wait for fire-and-forget.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var containerOption = new Option<string?>("--container",
+            "Container name to update (updates all if not specified)");
+        var forceOption = new Option<bool>("--force",
+            "Force a redeploy even if the running image already matches the latest in ECR");
+        var noWaitOption = new Option<bool>("--no-wait",
+            "Fire-and-forget: return as soon as the rolling deploy is requested, " +
+            "instead of waiting for the new task to become healthy (the default)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would be redeployed without making any changes");
+        var tagOption = new Option<string>("--tag",
+            () => "latest", "ECR image tag to compare and deploy");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(containerOption);
+        cmd.AddOption(forceOption);
+        cmd.AddOption(noWaitOption);
+        cmd.AddOption(dryRunOption);
+        cmd.AddOption(tagOption);
+
+        // Use the InvocationContext handler (8 options exceeds the typed
+        // SetHandler overloads cleanly) and pull each value from the parse result.
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var container = ctx.ParseResult.GetValueForOption(containerOption);
+            var force = ctx.ParseResult.GetValueForOption(forceOption);
+            var wait = !ctx.ParseResult.GetValueForOption(noWaitOption); // wait by default
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+            var tag = ctx.ParseResult.GetValueForOption(tagOption) ?? "latest";
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var containerServiceConfig = ConfigLoader
+                    .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+                var containersToProcess = container != null
+                    ? containerServiceConfig.Containers
+                        .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary(c => c.Key, c => c.Value)
+                    : containerServiceConfig.Containers;
+
+                if (container != null && containersToProcess.Count == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
+                    Console.ResetColor();
+                    continue;
+                }
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+                    var cluster = $"{config.SystemKey}-cluster";
+                    var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updatecontainer: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    foreach (var (svcName, _) in containersToProcess)
+                    {
+                        // Must match AwsEcsTenantServiceComponent (service) and
+                        // deploycontainer/deploytenant (ECR repo) naming.
+                        var ecsService = $"{config.SystemKey}-{tk}-{svcName}";
+                        var ecrRepo =
+                            $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+
+                        try
+                        {
+                            var result = await updater.UpdateIfNewerAsync(
+                                cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token);
+                            PrintUpdateResult(result);
+                            if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                                anyFailure = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            anyFailure = true;
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"  [error] {ecsService}: {ex.Message}");
+                            Console.ResetColor();
+                        }
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    private static void PrintUpdateResult(Lz.Aws.Ecs.ContainerUpdateResult r)
+    {
+        var (color, label) = r.Outcome switch
+        {
+            Lz.Aws.Ecs.UpdateOutcome.UpToDate       => (ConsoleColor.DarkGray, "up-to-date"),
+            Lz.Aws.Ecs.UpdateOutcome.Deployed       => (ConsoleColor.Green,    "deploying "),
+            Lz.Aws.Ecs.UpdateOutcome.Verified       => (ConsoleColor.Green,    "verified  "),
+            Lz.Aws.Ecs.UpdateOutcome.WouldDeploy    => (ConsoleColor.Yellow,   "would-depl"),
+            Lz.Aws.Ecs.UpdateOutcome.NoEcrImage     => (ConsoleColor.Yellow,   "no-image  "),
+            Lz.Aws.Ecs.UpdateOutcome.NoRunningTasks => (ConsoleColor.Yellow,   "not-running"),
+            Lz.Aws.Ecs.UpdateOutcome.Failed         => (ConsoleColor.Red,      "FAILED    "),
+            _                                       => (ConsoleColor.Gray,     "?         "),
+        };
+        Console.ForegroundColor = color;
+        Console.WriteLine($"  [{label}] {r.Service}: {r.Detail}");
+        Console.ResetColor();
     }
 
     // ---------------------------------------------------------------
