@@ -87,6 +87,7 @@ class Program
         RegisterDeployStaticSiteCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -1016,6 +1017,116 @@ class Program
         };
         Console.ForegroundColor = color;
         Console.WriteLine($"  [{label}] {r.Service}: {r.Detail}");
+        Console.ResetColor();
+    }
+
+    // ---------------------------------------------------------------
+    // updateedge — in-place CloudFront Function update (zero downtime)
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateEdgeCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updateedge",
+            "In-place update of a tenant's CloudFront Functions (viewer-request, " +
+            "viewer-response, explore-rewrite) from the repo's CloudFront/*.js files. " +
+            "Zero downtime — no Pulumi, no container restart. Run after editing a " +
+            "CFViewerRequest.js etc. Skips functions whose live code already matches.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var functionOption = new Option<string?>("--function",
+            "Which function to update: viewer-request | viewer-response | explore-rewrite " +
+            "(all present functions if not specified)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would change without publishing any function");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(functionOption);
+        cmd.AddOption(dryRunOption);
+
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var function = ctx.ParseResult.GetValueForOption(functionOption);
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updateedge: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    try
+                    {
+                        var updater = new Lz.Aws.Ecs.AwsEdgeUpdater(
+                            config.SystemKey, profile, region);
+                        var results = await updater.UpdateAsync(
+                            tk,
+                            tenantConfig.TenantSuffix,
+                            config.Environment,
+                            tenantConfig.RootDomain,
+                            tenantConfig.ConfigDirectory,
+                            tenantConfig.LegacyDomains,
+                            function,
+                            dryRun,
+                            Cts.Token);
+
+                        foreach (var r in results)
+                            PrintEdgeResult(r);
+
+                        if (results.Any(r => r.Outcome == Lz.Aws.Ecs.EdgeUpdateOutcome.Failed))
+                            anyFailure = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        anyFailure = true;
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"  [error] {tk}: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    private static void PrintEdgeResult(Lz.Aws.Ecs.EdgeFunctionResult r)
+    {
+        var (color, label) = r.Outcome switch
+        {
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Updated  => (ConsoleColor.Green,    "published "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Skipped  => (ConsoleColor.DarkGray, "skipped   "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.NotFound => (ConsoleColor.Yellow,   "not-found "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Failed   => (ConsoleColor.Red,      "FAILED    "),
+            _                                      => (ConsoleColor.Gray,     "?         "),
+        };
+        Console.ForegroundColor = color;
+        var detail = r.Detail != null ? $": {r.Detail}" : "";
+        Console.WriteLine($"  [{label}] {r.FunctionType}{detail}");
         Console.ResetColor();
     }
 
