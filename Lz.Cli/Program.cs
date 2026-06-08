@@ -88,6 +88,7 @@ class Program
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
         RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -1128,6 +1129,91 @@ class Program
         var detail = r.Detail != null ? $": {r.Detail}" : "";
         Console.WriteLine($"  [{label}] {r.FunctionType}{detail}");
         Console.ResetColor();
+    }
+
+    // ---------------------------------------------------------------
+    // updateconfig — publish tenant config to SSM out-of-band (no restart)
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateConfigCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updateconfig",
+            "Publish a tenant's runtime config (tenantconfig.*.yaml) to SSM Parameter Store " +
+            "without a full deploytenant. The AppHost's refreshing config provider picks it up " +
+            "within its poll interval (~60s) — no container restart. Pass --invalidate to also " +
+            "invalidate the /config CloudFront path (only needed if /config is cached).");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var invalidateOption = new Option<bool>("--invalidate",
+            "Also invalidate the /config CloudFront path (no-op while /config is CachingDisabled)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would be written without making any changes");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(invalidateOption);
+        cmd.AddOption(dryRunOption);
+
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var invalidate = ctx.ParseResult.GetValueForOption(invalidateOption);
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var monorepoRoot = ConfigLoader.DiscoverMonorepoRoot(
+                    config.SystemKey, config.Environment);
+                if (monorepoRoot == null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine("Cannot find monorepo root (no systemconfig found).");
+                    Console.ResetColor();
+                    anyFailure = true;
+                    continue;
+                }
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updateconfig: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    try
+                    {
+                        await Lz.Aws.Ecs.AwsTenantConfigPublisher.PublishAsync(
+                            monorepoRoot, config, tk, tenantConfig, invalidate, dryRun);
+                    }
+                    catch (Exception ex)
+                    {
+                        anyFailure = true;
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"  [error] {tk}: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
+
+        root.AddCommand(cmd);
     }
 
     // ---------------------------------------------------------------
