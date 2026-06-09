@@ -13,7 +13,8 @@ namespace Lz.Cli;
 ///
 /// Resolution order (same as PluginLoader):
 ///   1. lz.json marker file (searched upward from cwd) — "genPlugin" field
-///   2. Convention: Generate/bin/{Debug|Release}/net9.0/Generate.dll (searched upward from cwd)
+///   2. Convention: Generate/bin/{Debug|Release}/&lt;tfm&gt;/Generate.dll
+///      (searched upward from cwd; tfm discovered dynamically)
 ///
 /// Returns null if neither is found — <c>lz gen</c> still works with only
 /// built-in directives/artifacts.
@@ -75,7 +76,9 @@ public static class GenPluginLoader
 
     /// <summary>
     /// Search upward for a Generate/ folder containing the built gen plugin DLL.
-    /// Probes both Debug and Release configurations.
+    /// Probes both Debug and Release configurations, discovering the target
+    /// framework directory dynamically so the same code path works for
+    /// net8.0, net9.0, net10.0, and onwards.
     /// </summary>
     private static string? DiscoverViaConvention(string startDir)
     {
@@ -85,18 +88,41 @@ public static class GenPluginLoader
             var generateDir = Path.Combine(dir.FullName, ConventionFolder);
             if (Directory.Exists(generateDir))
             {
-                // Probe Debug first, then Release
-                var debugPath = Path.Combine(generateDir, "bin", "Debug", "net9.0", ConventionDll);
-                if (File.Exists(debugPath))
-                    return debugPath;
+                var debugPath = FindBuiltDll(Path.Combine(generateDir, "bin", "Debug"));
+                if (debugPath != null) return debugPath;
 
-                var releasePath = Path.Combine(generateDir, "bin", "Release", "net9.0", ConventionDll);
-                if (File.Exists(releasePath))
-                    return releasePath;
+                var releasePath = FindBuiltDll(Path.Combine(generateDir, "bin", "Release"));
+                if (releasePath != null) return releasePath;
             }
             dir = dir.Parent;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Enumerate target-framework subdirectories under <paramref name="configDir"/>
+    /// (e.g. <c>bin/Debug/{net8.0,net10.0,...}</c>) and pick the highest TFM
+    /// containing the convention DLL. Newer TFMs sort lexicographically last
+    /// in the framework-moniker convention, which gives the right "prefer
+    /// newest" behavior for net8 → net10 and beyond.
+    /// </summary>
+    private static string? FindBuiltDll(string configDir)
+    {
+        if (!Directory.Exists(configDir)) return null;
+        string? best = null;
+        string? bestTfm = null;
+        foreach (var tfmDir in Directory.EnumerateDirectories(configDir))
+        {
+            var tfm = Path.GetFileName(tfmDir);
+            var candidate = Path.Combine(tfmDir, ConventionDll);
+            if (!File.Exists(candidate)) continue;
+            if (bestTfm == null || string.Compare(tfm, bestTfm, StringComparison.OrdinalIgnoreCase) > 0)
+            {
+                best = candidate;
+                bestTfm = tfm;
+            }
+        }
+        return best;
     }
 
     /// <summary>

@@ -8,7 +8,7 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   Lzm/
   ├── Lz.slnx
   ├── Lz.Core/
-  │   ├── Lz.Core.csproj                  # net9.0
+  │   ├── Lz.Core.csproj                  # net10.0
   │   ├── Config/
   │   │   ├── SystemConfig.cs             # Full model for systemconfig.{systemkey}.{env}.yaml
   │   │   ├── TenantConfig.cs             # Full model for tenantconfig.{systemkey}.{tenantkey}.{env}.yaml
@@ -30,7 +30,7 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   │   └── ILzPlugin.cs               # Plugin contract for system-specific DLLs
   │   └── Validation/                      # TopologyValidator
   ├── Lz.Aws/
-  │   ├── Lz.Aws.csproj                   # net9.0, depends on Lz.Core + Pulumi.Aws
+  │   ├── Lz.Aws.csproj                   # net10.0, depends on Lz.Core + Pulumi.Aws
   │   ├── Ecs/                             # All ECS topology components
   │   │   ├── AwsEcsPlatformFactory.cs
   │   │   ├── AwsEcsNetworkComponent.cs        # VPC, subnets, ALBs, SGs, DNS, certs
@@ -55,7 +55,7 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   ├── Lambda/                          # Lambda topology (Phase 4 — planned)
   │   └── Auth/                            # AwsSsoValidator
   ├── Lz.Azure/
-  │   ├── Lz.Azure.csproj                 # net9.0, depends on Lz.Core + Pulumi.AzureNative
+  │   ├── Lz.Azure.csproj                 # net10.0, depends on Lz.Core + Pulumi.AzureNative
   │   ├── ContainerApps/                   # AzureContainerAppsPlatformFactory + components
   │   ├── Functions/                       # AzureFunctionsPlatformFactory + components
   │   └── Shared/                          # AzurePostgresComponent, AzureFrontDoorComponent, etc.
@@ -583,8 +583,8 @@ All commands resolve `env`, `systemkey`, and `tenantkey` automatically:
 
 The tool searches upward from cwd using two mechanisms:
 
-1. **lz.json marker file** — explicit path to the plugin DLL (e.g., `{"plugin": "Deploy/bin/Debug/net9.0/Deploy.dll"}`)
-2. **Convention** — looks for `Deploy/bin/{Debug|Release}/net9.0/Deploy.dll`
+1. **lz.json marker file** — explicit path to the plugin DLL (e.g., `{"plugin": "Deploy/bin/Debug/net10.0/Deploy.dll"}`)
+2. **Convention** — looks for `Deploy/bin/{Debug|Release}/net10.0/Deploy.dll`
 
 Convention-based discovery makes `lz.json` optional — just name your plugin project `Deploy/` and it's found automatically.
 

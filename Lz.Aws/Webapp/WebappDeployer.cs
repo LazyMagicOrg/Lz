@@ -480,7 +480,7 @@ public class WebappDeployer
 
     /// <summary>
     /// Finds the most recently modified publish/wwwroot directory under the Release build output.
-    /// Searches across all framework target directories (e.g., net9.0/).
+    /// Searches across all framework target directories (e.g., net10.0/).
     /// </summary>
     private static string FindPublishWwwroot(string publishBasePath)
     {
