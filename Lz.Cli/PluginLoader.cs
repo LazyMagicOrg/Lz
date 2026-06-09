@@ -9,7 +9,9 @@ namespace Lz.Cli;
 /// Discovers and loads plugin assemblies.
 /// Resolution order:
 ///   1. lz.json marker file (searched upward from cwd) — explicit plugin path
-///   2. Convention: Deploy/bin/{Debug|Release}/net9.0/Deploy.dll (searched upward from cwd)
+///   2. Convention: Deploy/bin/{Debug|Release}/<tfm>/Deploy.dll where <tfm>
+///      is discovered dynamically (highest-numbered netN.0 directory present),
+///      searched upward from cwd
 /// Returns null if neither is found (core commands still work without a plugin).
 /// </summary>
 public static class PluginLoader
@@ -67,7 +69,10 @@ public static class PluginLoader
 
     /// <summary>
     /// Search upward for a Deploy/ folder containing the built plugin DLL.
-    /// Probes both Debug and Release configurations.
+    /// Probes both Debug and Release configurations. The TFM segment
+    /// (<c>net9.0</c>, <c>net10.0</c>, ...) is discovered dynamically by
+    /// enumerating <c>bin/{Config}/</c> rather than being hardcoded, so the
+    /// loader survives plugin TFM bumps without itself needing a release.
     /// </summary>
     private static string? DiscoverViaConvention(string startDir)
     {
@@ -77,18 +82,42 @@ public static class PluginLoader
             var deployDir = Path.Combine(dir.FullName, ConventionFolder);
             if (Directory.Exists(deployDir))
             {
-                // Probe Debug first, then Release
-                var debugPath = Path.Combine(deployDir, "bin", "Debug", "net9.0", ConventionDll);
-                if (File.Exists(debugPath))
-                    return debugPath;
+                // Probe Debug first, then Release.
+                var debugPath = FindBuiltDll(Path.Combine(deployDir, "bin", "Debug"));
+                if (debugPath != null) return debugPath;
 
-                var releasePath = Path.Combine(deployDir, "bin", "Release", "net9.0", ConventionDll);
-                if (File.Exists(releasePath))
-                    return releasePath;
+                var releasePath = FindBuiltDll(Path.Combine(deployDir, "bin", "Release"));
+                if (releasePath != null) return releasePath;
             }
             dir = dir.Parent;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Inside a <c>bin/{Config}/</c> directory, find the plugin DLL under
+    /// any <c>net*.0</c> TFM subdirectory. Picks the highest-numbered TFM
+    /// when more than one is present (defensive — only one is expected).
+    /// </summary>
+    private static string? FindBuiltDll(string configDir)
+    {
+        if (!Directory.Exists(configDir)) return null;
+
+        string? best = null;
+        string? bestTfm = null;
+        foreach (var tfmDir in Directory.EnumerateDirectories(configDir))
+        {
+            var tfm = Path.GetFileName(tfmDir);
+            var candidate = Path.Combine(tfmDir, ConventionDll);
+            if (!File.Exists(candidate)) continue;
+
+            if (bestTfm == null || string.Compare(tfm, bestTfm, StringComparison.OrdinalIgnoreCase) > 0)
+            {
+                best = candidate;
+                bestTfm = tfm;
+            }
+        }
+        return best;
     }
 
     /// <summary>
