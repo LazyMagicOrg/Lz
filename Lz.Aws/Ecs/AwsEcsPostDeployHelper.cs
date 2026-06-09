@@ -75,9 +75,12 @@ public static class AwsEcsPostDeployHelper
             },
         });
 
-        if (response.Tasks.Count == 0)
+        // AWS SDK v4 returns null for empty collection properties (v3 returned an empty list).
+        if (response.Tasks is null || response.Tasks.Count == 0)
         {
-            var failures = string.Join(", ", response.Failures.Select(f => $"{f.Reason}: {f.Detail}"));
+            var failures = response.Failures is null
+                ? "(no failure details)"
+                : string.Join(", ", response.Failures.Select(f => $"{f.Reason}: {f.Detail}"));
             throw new InvalidOperationException($"Failed to start init task: {failures}");
         }
 
@@ -101,12 +104,12 @@ public static class AwsEcsPostDeployHelper
                 Tasks = [taskArn],
             });
 
-            var task = response.Tasks.FirstOrDefault()
+            var task = response.Tasks?.FirstOrDefault()
                 ?? throw new InvalidOperationException("Init task not found");
 
             if (task.LastStatus == "STOPPED")
             {
-                var container = task.Containers.FirstOrDefault();
+                var container = task.Containers?.FirstOrDefault();
                 return container?.ExitCode ?? -1;
             }
 

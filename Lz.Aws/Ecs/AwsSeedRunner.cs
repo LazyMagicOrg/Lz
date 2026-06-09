@@ -1,3 +1,5 @@
+using Amazon.ECR;
+using Amazon.ECR.Model;
 using Amazon.ECS;
 using Amazon.ECS.Model;
 using Amazon.Runtime.CredentialManagement;
@@ -91,6 +93,13 @@ public class AwsSeedRunner
         List<string>? subnetIds,
         string? securityGroupId)
     {
+        // Pre-flight: verify the seeder image is actually in ECR. ECS will
+        // surface a CannotPullContainerError in CloudWatch otherwise, which
+        // is opaque from the caller's perspective. Bail with a clear message
+        // pointing to `lz deployseeder`.
+        if (!await EnsureSeederImageInEcrAsync())
+            return false;
+
         var client = CreateEcsClient(_config.Region, _config.Profile);
 
         // Discover cluster and network config from existing ECS services if not provided
@@ -246,12 +255,13 @@ public class AwsSeedRunner
                 Tasks = [taskArn],
             });
 
-            var task = response.Tasks.FirstOrDefault()
+            // AWS SDK v4 returns null for empty collection properties (v3 returned an empty list).
+            var task = response.Tasks?.FirstOrDefault()
                 ?? throw new InvalidOperationException("Seed task not found");
 
             if (task.LastStatus == "STOPPED")
             {
-                var container = task.Containers.FirstOrDefault();
+                var container = task.Containers?.FirstOrDefault();
                 var exitCode = container?.ExitCode ?? -1;
 
                 if (task.StoppedReason is not null)
@@ -279,5 +289,69 @@ public class AwsSeedRunner
         }
 
         return new AmazonECSClient(regionEndpoint);
+    }
+
+    private static AmazonECRClient CreateEcrClient(string region, string? profile)
+    {
+        var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+
+        if (!string.IsNullOrEmpty(profile))
+        {
+            var chain = new CredentialProfileStoreChain();
+            if (chain.TryGetAWSCredentials(profile, out var credentials))
+                return new AmazonECRClient(credentials, regionEndpoint);
+        }
+
+        return new AmazonECRClient(regionEndpoint);
+    }
+
+    /// <summary>
+    /// Verify that <c>{SystemKey}-seeder:latest</c> exists in ECR before
+    /// launching the ECS task. The ECS task definition references the image
+    /// by tag — if it's missing the task starts, fails to pull, and stops
+    /// with <c>CannotPullContainerError</c> only visible in CloudWatch.
+    /// </summary>
+    /// <returns>true if the image exists; false (with error already printed) otherwise.</returns>
+    private async Task<bool> EnsureSeederImageInEcrAsync()
+    {
+        var repoName = $"{_config.SystemKey}-seeder";
+        using var ecr = CreateEcrClient(_config.Region, _config.Profile);
+
+        try
+        {
+            await ecr.DescribeImagesAsync(new DescribeImagesRequest
+            {
+                RepositoryName = repoName,
+                ImageIds = [new ImageIdentifier { ImageTag = "latest" }],
+            });
+            return true;
+        }
+        catch (ImageNotFoundException)
+        {
+            PrintSeederImageMissingError(repoName, "tag 'latest' not found in repository");
+            return false;
+        }
+        catch (RepositoryNotFoundException)
+        {
+            PrintSeederImageMissingError(repoName, "repository does not exist");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            // Don't block on transient ECR / permission errors — let ECS try to
+            // pull and surface its own diagnostic if there's a real problem.
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Warning: could not verify seeder image in ECR ({ex.GetType().Name}: {ex.Message}). Continuing.");
+            Console.ResetColor();
+            return true;
+        }
+    }
+
+    private static void PrintSeederImageMissingError(string repoName, string detail)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine($"  Error: Seeder image '{repoName}:latest' not available in ECR ({detail}).");
+        Console.Error.WriteLine($"  Run 'lz deployseeder' to build the ETL Dockerfile and push it to ECR, then retry.");
+        Console.ResetColor();
     }
 }
