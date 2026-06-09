@@ -49,6 +49,10 @@ public class SystemConfig
     // Seed data — shared S3 bucket for EFS + database seeding/refresh
     public SeedDataConfig? SeedData { get; set; }
 
+    // Backup — AWS Backup configuration for foundation EFS (see BackupConfig).
+    // When omitted, defaults apply: enabled in prod/staging, disabled elsewhere.
+    public BackupConfig? Backup { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 

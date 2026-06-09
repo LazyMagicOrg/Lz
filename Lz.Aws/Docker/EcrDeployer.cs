@@ -175,6 +175,35 @@ public class EcrDeployer
         }
     }
 
+    /// <summary>
+    /// Resolve the image digest of a specific tag in an ECR repository (e.g.
+    /// the digest that <c>:latest</c> currently points at). Returns null if the
+    /// repo or tag doesn't exist. Used by <c>lz updatecontainer</c> to decide
+    /// whether a running service is already on the newest image.
+    /// </summary>
+    public static async Task<string?> GetImageDigestAsync(
+        string profile, string region, string repoName, string tag)
+    {
+        try
+        {
+            var output = await RunCaptureAsync("aws",
+                $"ecr describe-images --profile {profile} --region {region} " +
+                $"--repository-name {repoName} --image-ids imageTag={tag} " +
+                $"--query \"imageDetails[0].imageDigest\" --output text");
+
+            var digest = output.Trim();
+            return string.IsNullOrWhiteSpace(digest) ||
+                   digest.Equals("None", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : digest;
+        }
+        catch
+        {
+            // Repository or tag not found, or CLI error.
+            return null;
+        }
+    }
+
     // ---------------------------------------------------------------
     // Process helpers
     // ---------------------------------------------------------------

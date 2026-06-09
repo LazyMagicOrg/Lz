@@ -86,6 +86,9 @@ class Program
         RegisterDeployWebappCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployStaticSiteCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -861,6 +864,354 @@ class Program
                 }
             }
         }, systemKeyOption, envOption, tenantKeyOption, refreshOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // updatecontainer
+    //
+    // Zero-downtime alternative to deploytenant for the common case of "just
+    // ship the new container image". deploytenant scales the ECS service to 0
+    // during the Pulumi 'up' (AwsEcsTenantServiceComponent starts at
+    // DesiredCount=0) and the post-deploy action scales it back — that gap is
+    // the outage. updatecontainer instead issues a rolling UpdateService
+    // (ForceNewDeployment=true) with DesiredCount untouched, so ECS replaces
+    // the task with no downtime. It only forces a deploy when the running
+    // image digest differs from the latest in ECR (unless --force), and by
+    // default it waits until the new task is healthy (or reports a rollback);
+    // pass --no-wait for fire-and-forget.
+    //
+    // Intended flow:  lz deploycontainer  →  lz updatecontainer
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateContainerCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updatecontainer",
+            "Zero-downtime rolling redeploy of tenant container(s) to pick up the latest ECR image. " +
+            "Run after 'lz deploycontainer'. Skips services already on the latest image unless --force. " +
+            "Waits for the rollout to complete by default; pass --no-wait for fire-and-forget.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var containerOption = new Option<string?>("--container",
+            "Container name to update (updates all if not specified)");
+        var forceOption = new Option<bool>("--force",
+            "Force a redeploy even if the running image already matches the latest in ECR");
+        var noWaitOption = new Option<bool>("--no-wait",
+            "Fire-and-forget: return as soon as the rolling deploy is requested, " +
+            "instead of waiting for the new task to become healthy (the default)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would be redeployed without making any changes");
+        var tagOption = new Option<string>("--tag",
+            () => "latest", "ECR image tag to compare and deploy");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(containerOption);
+        cmd.AddOption(forceOption);
+        cmd.AddOption(noWaitOption);
+        cmd.AddOption(dryRunOption);
+        cmd.AddOption(tagOption);
+
+        // Use the InvocationContext handler (8 options exceeds the typed
+        // SetHandler overloads cleanly) and pull each value from the parse result.
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var container = ctx.ParseResult.GetValueForOption(containerOption);
+            var force = ctx.ParseResult.GetValueForOption(forceOption);
+            var wait = !ctx.ParseResult.GetValueForOption(noWaitOption); // wait by default
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+            var tag = ctx.ParseResult.GetValueForOption(tagOption) ?? "latest";
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var containerServiceConfig = ConfigLoader
+                    .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+                var containersToProcess = container != null
+                    ? containerServiceConfig.Containers
+                        .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary(c => c.Key, c => c.Value)
+                    : containerServiceConfig.Containers;
+
+                if (container != null && containersToProcess.Count == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
+                    Console.ResetColor();
+                    continue;
+                }
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+                    var cluster = $"{config.SystemKey}-cluster";
+                    var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updatecontainer: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    foreach (var (svcName, _) in containersToProcess)
+                    {
+                        // Must match AwsEcsTenantServiceComponent (service) and
+                        // deploycontainer/deploytenant (ECR repo) naming.
+                        var ecsService = $"{config.SystemKey}-{tk}-{svcName}";
+                        var ecrRepo =
+                            $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+
+                        try
+                        {
+                            var result = await updater.UpdateIfNewerAsync(
+                                cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token);
+                            PrintUpdateResult(result);
+                            if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                                anyFailure = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            anyFailure = true;
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"  [error] {ecsService}: {ex.Message}");
+                            Console.ResetColor();
+                        }
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    private static void PrintUpdateResult(Lz.Aws.Ecs.ContainerUpdateResult r)
+    {
+        var (color, label) = r.Outcome switch
+        {
+            Lz.Aws.Ecs.UpdateOutcome.UpToDate       => (ConsoleColor.DarkGray, "up-to-date"),
+            Lz.Aws.Ecs.UpdateOutcome.Deployed       => (ConsoleColor.Green,    "deploying "),
+            Lz.Aws.Ecs.UpdateOutcome.Verified       => (ConsoleColor.Green,    "verified  "),
+            Lz.Aws.Ecs.UpdateOutcome.WouldDeploy    => (ConsoleColor.Yellow,   "would-depl"),
+            Lz.Aws.Ecs.UpdateOutcome.NoEcrImage     => (ConsoleColor.Yellow,   "no-image  "),
+            Lz.Aws.Ecs.UpdateOutcome.NoRunningTasks => (ConsoleColor.Yellow,   "not-running"),
+            Lz.Aws.Ecs.UpdateOutcome.Failed         => (ConsoleColor.Red,      "FAILED    "),
+            _                                       => (ConsoleColor.Gray,     "?         "),
+        };
+        Console.ForegroundColor = color;
+        Console.WriteLine($"  [{label}] {r.Service}: {r.Detail}");
+        Console.ResetColor();
+    }
+
+    // ---------------------------------------------------------------
+    // updateedge — in-place CloudFront Function update (zero downtime)
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateEdgeCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updateedge",
+            "In-place update of a tenant's CloudFront Functions (viewer-request, " +
+            "viewer-response, explore-rewrite) from the repo's CloudFront/*.js files. " +
+            "Zero downtime — no Pulumi, no container restart. Run after editing a " +
+            "CFViewerRequest.js etc. Skips functions whose live code already matches.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var functionOption = new Option<string?>("--function",
+            "Which function to update: viewer-request | viewer-response | explore-rewrite " +
+            "(all present functions if not specified)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would change without publishing any function");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(functionOption);
+        cmd.AddOption(dryRunOption);
+
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var function = ctx.ParseResult.GetValueForOption(functionOption);
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updateedge: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    try
+                    {
+                        var updater = new Lz.Aws.Ecs.AwsEdgeUpdater(
+                            config.SystemKey, profile, region);
+                        var results = await updater.UpdateAsync(
+                            tk,
+                            tenantConfig.TenantSuffix,
+                            config.Environment,
+                            tenantConfig.RootDomain,
+                            tenantConfig.ConfigDirectory,
+                            tenantConfig.LegacyDomains,
+                            function,
+                            dryRun,
+                            Cts.Token);
+
+                        foreach (var r in results)
+                            PrintEdgeResult(r);
+
+                        if (results.Any(r => r.Outcome == Lz.Aws.Ecs.EdgeUpdateOutcome.Failed))
+                            anyFailure = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        anyFailure = true;
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"  [error] {tk}: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
+
+        root.AddCommand(cmd);
+    }
+
+    private static void PrintEdgeResult(Lz.Aws.Ecs.EdgeFunctionResult r)
+    {
+        var (color, label) = r.Outcome switch
+        {
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Updated  => (ConsoleColor.Green,    "published "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Skipped  => (ConsoleColor.DarkGray, "skipped   "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.NotFound => (ConsoleColor.Yellow,   "not-found "),
+            Lz.Aws.Ecs.EdgeUpdateOutcome.Failed   => (ConsoleColor.Red,      "FAILED    "),
+            _                                      => (ConsoleColor.Gray,     "?         "),
+        };
+        Console.ForegroundColor = color;
+        var detail = r.Detail != null ? $": {r.Detail}" : "";
+        Console.WriteLine($"  [{label}] {r.FunctionType}{detail}");
+        Console.ResetColor();
+    }
+
+    // ---------------------------------------------------------------
+    // updateconfig — publish tenant config to SSM out-of-band (no restart)
+    // ---------------------------------------------------------------
+
+    private static void RegisterUpdateConfigCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("updateconfig",
+            "Publish a tenant's runtime config (tenantconfig.*.yaml) to SSM Parameter Store " +
+            "without a full deploytenant. The AppHost's refreshing config provider picks it up " +
+            "within its poll interval (~60s) — no container restart. Pass --invalidate to also " +
+            "invalidate the /config CloudFront path (only needed if /config is cached).");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (updates all tenants if not specified — matches deploytenant)");
+        var invalidateOption = new Option<bool>("--invalidate",
+            "Also invalidate the /config CloudFront path (no-op while /config is CachingDisabled)");
+        var dryRunOption = new Option<bool>("--dry-run",
+            "Report what would be written without making any changes");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(invalidateOption);
+        cmd.AddOption(dryRunOption);
+
+        cmd.SetHandler(async (System.CommandLine.Invocation.InvocationContext ctx) =>
+        {
+            var systemKey = ctx.ParseResult.GetValueForOption(systemKeyOption);
+            var env = ctx.ParseResult.GetValueForOption(envOption);
+            var tenantKey = ctx.ParseResult.GetValueForOption(tenantKeyOption);
+            var invalidate = ctx.ParseResult.GetValueForOption(invalidateOption);
+            var dryRun = ctx.ParseResult.GetValueForOption(dryRunOption);
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            var anyFailure = false;
+
+            foreach (var config in configs)
+            {
+                var monorepoRoot = ConfigLoader.DiscoverMonorepoRoot(
+                    config.SystemKey, config.Environment);
+                if (monorepoRoot == null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine("Cannot find monorepo root (no systemconfig found).");
+                    Console.ResetColor();
+                    anyFailure = true;
+                    continue;
+                }
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine(
+                        $"=== updateconfig: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
+                    Console.ResetColor();
+
+                    try
+                    {
+                        await Lz.Aws.Ecs.AwsTenantConfigPublisher.PublishAsync(
+                            monorepoRoot, config, tk, tenantConfig, invalidate, dryRun);
+                    }
+                    catch (Exception ex)
+                    {
+                        anyFailure = true;
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"  [error] {tk}: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                }
+            }
+
+            if (anyFailure)
+                Environment.ExitCode = 1;
+        });
 
         root.AddCommand(cmd);
     }
