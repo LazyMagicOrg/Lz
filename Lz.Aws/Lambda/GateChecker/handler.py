@@ -519,16 +519,35 @@ def _chown_tree(root_path, uid, gid):
     """Recursively set ownership on a directory tree.
     Skips files already owned by the target uid:gid to avoid
     expensive no-op chown syscalls over NFS (EFS).
+
+    Uses lstat/lchown rather than stat/chown so we never follow symlinks.
+    Symlinks on the EFS volume may point at absolute paths that are
+    meaningful only inside the Smartstore container (e.g. the /explore
+    symlink created by SymlinkBootstrap points at the container's
+    absolute TenantRoot path, which doesn't resolve in this Lambda's
+    filesystem view). Following such a link would crash the walk with
+    FileNotFoundError. We just chown the symlink inode itself.
     """
     for dirpath, dirnames, filenames in os.walk(root_path):
-        st = os.stat(dirpath)
-        if st.st_uid != uid or st.st_gid != gid:
-            os.chown(dirpath, uid, gid)
+        try:
+            st = os.lstat(dirpath)
+            if st.st_uid != uid or st.st_gid != gid:
+                os.lchown(dirpath, uid, gid)
+        except FileNotFoundError:
+            # Raced against another writer; the path went away between
+            # os.walk's listing and our lstat. Skip and continue.
+            continue
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
-            st = os.stat(fpath)
+            try:
+                st = os.lstat(fpath)
+            except FileNotFoundError:
+                continue
             if st.st_uid != uid or st.st_gid != gid:
-                os.chown(fpath, uid, gid)
+                try:
+                    os.lchown(fpath, uid, gid)
+                except FileNotFoundError:
+                    continue
 
 
 def _ensure_tenant_dirs(mount_path, efs_prefix):

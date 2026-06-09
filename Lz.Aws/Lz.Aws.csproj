@@ -15,12 +15,43 @@
     <ProjectReference Include="..\Lz.Core\Lz.Core.csproj" />
   </ItemGroup>
 
-  <!-- Pre-built Lambda package — ships with the tool so FindProjectRoot() is unnecessary -->
+  <!-- Pre-built Lambda package. AwsGateCheckerLambdaComponent looks for
+       Lambda/gate-checker.zip relative to Assembly.Location of the loaded
+       Lz.Aws.dll. Depending on the host process's assembly load behavior,
+       Assembly.Location can resolve to one of two places. We ship the zip
+       into BOTH so both paths work, since which one wins at runtime
+       depends on subtleties of .NET's load context probing order.
+
+       Path A: NuGet cache, when AssemblyDependencyResolver.Resolving
+       fires (deps.json based resolution to the cache).
+         lib/$(TargetFramework)/Lambda/gate-checker.zip in the nupkg
+         -> mirrored to
+            ~/.nuget/packages/lz.aws/{ver}/lib/net10.0/Lambda/gate-checker.zip
+
+       Path B: Consumer's local bin, when .NET's default ALC LoadFrom
+       probing finds the locally-copied Lz.Aws.dll alongside the
+       LoadFrom'd plugin Deploy.dll (default probing succeeds before
+       Resolving fires).
+         contentFiles/any/$(TargetFramework)/Lambda/gate-checker.zip
+         with PackageCopyToOutput=true
+         -> flowed to Deploy/bin/{Config}/net10.0/Lambda/gate-checker.zip
+
+       The source <None> with CopyToOutputDirectory handles a third
+       scenario: ProjectReference within the lz solution itself
+       (Lz.Cli -> Lz.Aws), where the zip flows from Lz.Aws's own bin
+       into Lz.Cli's bin via normal MSBuild copy. -->
   <ItemGroup>
-    <Content Include="Lambda\gate-checker.zip" Condition="Exists('Lambda\gate-checker.zip')">
+    <None Include="Lambda\gate-checker.zip" Condition="Exists('Lambda\gate-checker.zip')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Lambda\gate-checker.zip</Link>
-    </Content>
+      <Pack>false</Pack>
+    </None>
+    <None Include="Lambda\gate-checker.zip" Condition="Exists('Lambda\gate-checker.zip')"
+          Pack="true" PackagePath="lib\$(TargetFramework)\Lambda\gate-checker.zip" />
+    <None Include="Lambda\gate-checker.zip" Condition="Exists('Lambda\gate-checker.zip')"
+          Pack="true" PackagePath="contentFiles\any\$(TargetFramework)\Lambda\gate-checker.zip">
+      <PackageCopyToOutput>true</PackageCopyToOutput>
+      <BuildAction>None</BuildAction>
+    </None>
   </ItemGroup>
 
   <Target Name="WarnMissingGateChecker" BeforeTargets="Build"
