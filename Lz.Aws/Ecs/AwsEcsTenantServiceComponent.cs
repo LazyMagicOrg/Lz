@@ -564,7 +564,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             Volumes = taskVolumes,
             ContainerDefinitions = Output.Tuple(
                 imageUri, database.Endpoint, awsDatabase.MasterSecretArn, tenantData.TenantSecretId
-            ).Apply(t =>
+            ).Apply(async t =>
             {
                 var (image, dbHost, masterSecretArn, tenantSecretId) = t;
 
@@ -615,17 +615,33 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                 // Smartstore.ExplorePages.HugoBuildService and
                 // StaticSiteRepository to clone the StaticSite repo for
                 // in-container builds via git-over-HTTPS with a short-lived
-                // installation token. The container signs a JWT with the
-                // App private key and exchanges it at
-                // /app/installations/{id}/access_tokens. Stored in the
-                // {sk}/{tk} tenant secret (AwsTenantDataComponent seeds
-                // the three slots; operators populate actual values
-                // post-deploy). IAM read coverage on tenantSecretId is
-                // already granted by the task-role policy at the top of
-                // this component.
-                secrets.Add(new { name = "LZ_GITHUB_APP_ID", valueFrom = $"{tenantSecretId}:github-app-id::" });
-                secrets.Add(new { name = "LZ_GITHUB_APP_INSTALLATION_ID", valueFrom = $"{tenantSecretId}:github-app-installation-id::" });
-                secrets.Add(new { name = "LZ_GITHUB_APP_PRIVATE_KEY", valueFrom = $"{tenantSecretId}:github-app-private-key::" });
+                // installation token.
+                //
+                // Inject each as an ECS `secrets` entry ONLY IF the matching key
+                // exists in the tenant secret. ECS resolves `valueFrom` at task
+                // START and FAILS THE TASK (ResourceInitializationError) if a
+                // referenced JSON key is absent — which is exactly how a tenant
+                // whose secret predates these keys (AwsTenantDataComponent uses
+                // IgnoreChanges, so the seed never backfills them into an existing
+                // secret) ends up unable to start the container at all.
+                //
+                // The Smartstore app already degrades gracefully when the env vars
+                // are missing (GitHubAppTokenProvider returns null; the Deploy page
+                // greys out the build buttons and reports "GitHub App not
+                // configured"), so skipping the absent keys lets the container
+                // launch and simply disables the in-container build UI until an
+                // operator populates the secret. ReadSecretEntriesAsync returns
+                // null for missing keys AND on any read failure, so the fallback
+                // deliberately favors a launchable container over the build feature.
+                var ghKeys = await AwsAccountResolver.ReadSecretEntriesAsync(
+                    tenantConfig.Profile ?? string.Empty, region, tenantSecretId,
+                    "github-app-id", "github-app-installation-id", "github-app-private-key");
+                if (ghKeys["github-app-id"] != null)
+                    secrets.Add(new { name = "LZ_GITHUB_APP_ID", valueFrom = $"{tenantSecretId}:github-app-id::" });
+                if (ghKeys["github-app-installation-id"] != null)
+                    secrets.Add(new { name = "LZ_GITHUB_APP_INSTALLATION_ID", valueFrom = $"{tenantSecretId}:github-app-installation-id::" });
+                if (ghKeys["github-app-private-key"] != null)
+                    secrets.Add(new { name = "LZ_GITHUB_APP_PRIVATE_KEY", valueFrom = $"{tenantSecretId}:github-app-private-key::" });
 
                 // Cross-account Keycloak admin credentials from shared secret
                 if (!string.IsNullOrEmpty(tenantConfig.SharedSecretArn))
