@@ -1,9 +1,11 @@
+using Lz.Core.Keycloak;
 using System.Text.Json;
 using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
-using Lz.Aws.Keycloak;
 using Lz.Core.Config;
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
 using Lz.Core.Interfaces;
 
 namespace Lz.Aws.Ecs;
@@ -154,8 +156,8 @@ public class AwsTenantKeycloakSeeder : ITenantKeycloakSeeder
     private async Task<(string username, string password)> GetAdminCredentialsAsync()
     {
         var smClient = CreateSecretsManagerClient(
-            _config.SharedRegion ?? _config.Region,
-            _config.SharedProfile ?? _config.Profile);
+            _config.Aws().SharedRegion ?? _config.Region,
+            _config.Aws().SharedProfile ?? _config.Profile);
 
         var response = await smClient.GetSecretValueAsync(new GetSecretValueRequest
         {

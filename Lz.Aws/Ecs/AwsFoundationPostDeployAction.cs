@@ -1,10 +1,11 @@
+using Lz.Core.Keycloak;
+using Lz.Aws.Config;
 using System.Text.Json;
 using Amazon.ECS;
 using Amazon.ECS.Model;
 using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
-using Lz.Aws.Keycloak;
 using Lz.Aws.Lambda;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;
@@ -80,7 +81,7 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
     private async Task SeedKeycloakAsync()
     {
         // Discover keycloakconfig.{systemkey}.{env}.yaml
-        var seedConfig = ConfigLoader.DiscoverKeycloakSeedConfig(
+        var seedConfig = AwsKeycloakConfigLoader.DiscoverKeycloakSeedConfig(
             _config.SystemKey, _config.Environment);
 
         if (seedConfig == null)
@@ -94,7 +95,7 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
         }
 
         // Discover optional bootstrap credentials (credsconfig.{systemkey}.{env}.yaml)
-        var credsConfig = ConfigLoader.DiscoverBootstrapCredsConfig(
+        var credsConfig = AwsKeycloakConfigLoader.DiscoverBootstrapCredsConfig(
             _config.SystemKey, _config.Environment);
 
         if (credsConfig != null)
@@ -171,7 +172,7 @@ public class AwsFoundationPostDeployAction : IPostDeployAction
         }
 
         // Load the YAML to read themeSource (top-level field)
-        var seedConfig = ConfigLoader.LoadKeycloakSeedConfig(configPath);
+        var seedConfig = AwsKeycloakConfigLoader.LoadKeycloakSeedConfig(configPath);
         if (seedConfig?.ThemeSource == null)
         {
             Console.ForegroundColor = ConsoleColor.DarkGray;

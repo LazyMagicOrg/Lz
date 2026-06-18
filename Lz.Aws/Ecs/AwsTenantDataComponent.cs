@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -30,7 +31,7 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
         var env = tenantConfig.Environment;
         var prefix = $"{sk}-{tk}";
         var awsFileStorage = (Shared.AwsFileStorageOutputs)systemFileStorage;
-        var ecs = tenantConfig.ECS ?? new EcsConfig();
+        var ecs = tenantConfig.Aws().ECS ?? new EcsConfig();
 
         // =====================================================================
         // EFS ACCESS POINTS

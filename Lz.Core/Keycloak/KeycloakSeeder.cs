@@ -1,7 +1,6 @@
 using System.Text.Json;
-using Lz.Core.Config;
 
-namespace Lz.Aws.Keycloak;
+namespace Lz.Core.Keycloak;
 
 /// <summary>
 /// Orchestrates Keycloak configuration seeding from a KeycloakSeedConfig model.

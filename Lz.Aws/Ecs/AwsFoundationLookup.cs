@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces.Outputs;
 using Lz.Aws.Shared;
 using Pulumi;
@@ -12,7 +13,7 @@ using Pulumi.Aws.ServiceDiscovery;
 namespace Lz.Aws.Ecs;
 
 /// <summary>
-/// Looks up existing foundation resources (created by deployfoundation) using
+/// Looks up existing foundation resources (created by deploysystem) using
 /// Pulumi AWS data-source invocations. Returns the same typed output interfaces
 /// so tenant components can use them transparently.
 ///
@@ -30,12 +31,12 @@ public static class AwsFoundationLookup
 
         // CentralAuthDomain zone may be in a different account (shared-services)
         Pulumi.Aws.Provider? sharedProvider = null;
-        if (!string.IsNullOrEmpty(config.SharedProfile))
+        if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
         {
             sharedProvider = new Pulumi.Aws.Provider($"lookup-shared-provider", new Pulumi.Aws.ProviderArgs
             {
-                Region = config.SharedRegion ?? config.Region,
-                Profile = config.SharedProfile,
+                Region = config.Aws().SharedRegion ?? config.Region,
+                Profile = config.Aws().SharedProfile,
             });
         }
 

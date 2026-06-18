@@ -1,6 +1,6 @@
 using Pulumi;
 
-namespace Lz.Core.Interfaces.Outputs;
+namespace Lz.Aws.Interfaces.Outputs;
 
 /// <summary>
 /// Outputs from the Tailscale subnet router deployment.

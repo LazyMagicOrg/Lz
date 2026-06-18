@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -70,7 +71,7 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
         // VPC FLOW LOGS
         // =====================================================================
 
-        var logRetention = config.ECS?.LogRetentionDays ?? 3;
+        var logRetention = config.Aws().ECS?.LogRetentionDays ?? 3;
 
         var flowLogsLogGroup = new LogGroup($"{prefix}-vpc-flow-logs", new LogGroupArgs
         {
@@ -444,14 +445,14 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
 
         // CentralAuthDomain zone may be in a different account (shared-services).
         // Use a cross-account provider when SharedProfile is set.
-        var isCrossAccount = !string.IsNullOrEmpty(config.SharedProfile);
+        var isCrossAccount = !string.IsNullOrEmpty(config.Aws().SharedProfile);
         Provider? sharedProvider = null;
         if (isCrossAccount)
         {
             sharedProvider = new Provider($"{prefix}-shared-provider", new ProviderArgs
             {
-                Region = config.SharedRegion ?? config.Region,
-                Profile = config.SharedProfile,
+                Region = config.Aws().SharedRegion ?? config.Region,
+                Profile = config.Aws().SharedProfile,
             }, opts);
         }
         var sharedOpts = sharedProvider != null

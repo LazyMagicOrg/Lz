@@ -4,8 +4,9 @@ using Pulumi;
 namespace Lz.Aws.EcsExpress;
 
 /// <summary>
-/// Compute outputs for ECSExpress topology.
-/// ECS cluster + Cloud Map namespace + ECR repository.
+/// Compute outputs for ECSExpress topology. ECS cluster + Cloud Map namespace.
+/// ECR repos are per-tenant and imperatively created by
+/// <c>lz deploycontainer</c>; they are not surfaced on compute outputs.
 /// </summary>
 public class AwsEcsExpressComputeOutputs : IComputeEnvironmentOutputs
 {
@@ -16,6 +17,4 @@ public class AwsEcsExpressComputeOutputs : IComputeEnvironmentOutputs
     // ECSExpress-specific
     public required Output<string> ClusterArn { get; init; }
     public required Output<string> CloudMapNamespaceId { get; init; }
-    public required Output<string> EcrRepositoryUrl { get; init; }
-    public required Output<string> EcrRepositoryArn { get; init; }
 }

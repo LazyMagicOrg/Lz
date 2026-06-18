@@ -111,10 +111,21 @@ public static class DynamoDbTableCreator
 
         await client.CreateTableAsync(createRequest);
 
-        // Wait for table to become ACTIVE
+        // Wait for table to become ACTIVE. 5-minute ceiling — pay-per-request
+        // tables typically activate in <30s; anything longer means something is
+        // wrong (throttling, region issue, AWS incident) and failing loudly is
+        // better than hanging the deploy.
         Console.Write($"    Waiting for {tableName}...");
+        var deadline = DateTime.UtcNow.AddMinutes(5);
         while (true)
         {
+            if (DateTime.UtcNow > deadline)
+            {
+                Console.WriteLine();
+                throw new TimeoutException(
+                    $"DynamoDB table '{tableName}' did not become ACTIVE within 5 minutes. " +
+                    "Check the AWS console for the table status and retry.");
+            }
             await Task.Delay(3000);
             var desc = await client.DescribeTableAsync(tableName);
             if (desc.Table.TableStatus == TableStatus.ACTIVE)

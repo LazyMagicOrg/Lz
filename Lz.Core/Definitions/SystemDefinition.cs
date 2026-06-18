@@ -25,7 +25,7 @@ public abstract class SystemDefinition
 
     /// <summary>
     /// Foundation-level services — shared across all tenants.
-    /// Deployed during deployfoundation, not per-tenant.
+    /// Deployed during deploysystem, not per-tenant.
     /// </summary>
     public IReadOnlyList<ServiceDefinition> FoundationLayerServices
         => Services.Where(s => s.Layer == ServiceLayer.Foundation).ToList();
@@ -56,25 +56,20 @@ public abstract class SystemDefinition
     protected ServiceDefinition? GetService(string name)
         => Services.FirstOrDefault(s => s.Name == name);
 
-    protected void UseKeycloak(string[] realms)
+    /// <summary>
+    /// Declare that this system uses an auth service with the given realms/pools.
+    /// The platform library decides what "realm" means — Cognito user pools,
+    /// Keycloak realms, Azure AD B2C tenants, etc. Core stays vendor-neutral.
+    /// </summary>
+    protected void UseAuth(string[] realms)
     {
         Auth = new AuthDefinition
         {
-            Provider = "keycloak",
             Realms = realms.ToList()
         };
     }
 
-    protected void UseCognito(string[] pools)
-    {
-        Auth = new AuthDefinition
-        {
-            Provider = "cognito",
-            Realms = pools.ToList()  // "Realms" maps to pool names for Cognito
-        };
-    }
-
-    protected void UseTailscale()
+    protected void UseVpn()
     {
         UsesVpn = true;
     }
@@ -82,6 +77,11 @@ public abstract class SystemDefinition
 
 public class AuthDefinition
 {
+    /// <summary>
+    /// Opaque platform-populated identifier. Core never sets this; platforms
+    /// may fill it in from their own config if they need to distinguish auth
+    /// providers at runtime.
+    /// </summary>
     public string Provider { get; set; } = string.Empty;
     public List<string> Realms { get; set; } = new();
 }

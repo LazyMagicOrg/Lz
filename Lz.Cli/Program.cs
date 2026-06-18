@@ -4,6 +4,7 @@ using Lz.Core.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Orchestration;
+using Lz.Aws.Orchestration;
 using Lz.Core.Plugin;
 using Lz.Core.Validation;
 using Lz.Aws;
@@ -74,6 +75,21 @@ class Program
             return 0;
         }
 
+        // Let the plugin contribute or override platform topology descriptors
+        // (new topologies, derived variants, plugin-specific factory wiring).
+        // Must run before any CreateFactory call.
+        try
+        {
+            plugin?.RegisterTopologies();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"Plugin topology registration failed: {ex.Message}");
+            Console.ResetColor();
+            return 1;
+        }
+
         // Shared options used across multiple commands
         var systemKeyOption = new Option<string?>("--systemkey",
             "System key (auto-detected if only one systemconfig exists for the env)");
@@ -89,6 +105,8 @@ class Program
         RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
         RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
         RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
+        RegisterDeploySubtenantsCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterDestroySubtenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -96,6 +114,7 @@ class Program
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
+        RegisterGetTenantsCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
@@ -212,11 +231,12 @@ class Program
                     return;
                 }
 
-                // Build a minimal SystemConfig with shared-account credentials
-                var config = new SystemConfig
+                // Build a minimal AwsSystemConfig with shared-account credentials
+                var config = new AwsSystemConfig
                 {
                     SystemKey = "shared",
                     Environment = "shared",
+                    Topology = Lz.Aws.Topologies.AwsTopologies.EcsFargateKeycloak.Name,
                     Profile = sharedConfig.Profile,
                     Region = sharedConfig.Region,
                     SharedProfile = sharedConfig.Profile,
@@ -245,18 +265,18 @@ class Program
                 await AwsStateBootstrapper.BootstrapAsync(
                     sharedConfig.Profile, sharedConfig.Region, sharedConfig.State);
 
-            var factory = CreateFactory(new SystemConfig
+            var factory = CreateFactory(new AwsSystemConfig
             {
                 SystemKey = "shared",
                 Environment = "shared",
                 Platform = "aws",
-                Topology = "ecs",
+                Topology = Lz.Aws.Topologies.AwsTopologies.EcsFargateKeycloak.Name,
                 Profile = sharedConfig.Profile,
                 Region = sharedConfig.Region,
                 CentralAuthDomain = sharedConfig.Domain,
                 VpcCidr = sharedConfig.VpcCidr,
                 AdminAuth = "adminsauth",
-                TrustedAccountIds = sharedConfig.TrustedAccountIds,
+                TrustedAccountIds = sharedConfig.Aws().TrustedAccountIds,
             });
             var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
             await deployment.RunAsync();
@@ -266,15 +286,15 @@ class Program
     }
 
     // ---------------------------------------------------------------
-    // deployfoundation
+    // deploysystem
     // ---------------------------------------------------------------
 
     private static void RegisterDeployFoundationCommand(
         RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
-        var cmd = new Command("deployfoundation",
-            "Deploy foundation infrastructure (VPC, ECS, RDS, EFS)");
+        var cmd = new Command("deploysystem",
+            "Deploy system-level infrastructure (VPC, ECS, RDS, EFS, etc.)");
 
         var platformOption = new Option<string?>("--platform", "Override platform from config");
         var topologyOption = new Option<string?>("--topology", "Override topology from config");
@@ -285,7 +305,7 @@ class Program
 
         cmd.SetHandler(async (systemKey, env, platform, topology) =>
         {
-            RequirePlugin(plugin, "deployfoundation");
+            RequirePlugin(plugin, "deploysystem");
 
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -297,26 +317,26 @@ class Program
 
                 // Resolve cross-account shared services references
                 SharedConfig? sharedConfig = null;
-                if (!string.IsNullOrEmpty(config.SharedProfile))
+                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
                 {
                     // Use the shared account's region from sharedconfig.yaml, not the system's region
                     sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
                     var sharedRegion = sharedConfig.Region;
 
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.SharedProfile, sharedRegion);
-                    config.SharedSecretArn =
+                        config.Aws().SharedProfile, sharedRegion);
+                    config.Aws().SharedSecretArn =
                         $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
-                    config.SharedRegion = sharedRegion;
+                    config.Aws().SharedRegion = sharedRegion;
 
                     // Resolve actual KMS key ARN — alias ARNs can't be used in IAM policy resources
-                    config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
+                    config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                        config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
 
                     Console.WriteLine($"  Shared account: {sharedAccountId}");
-                    Console.WriteLine($"  Shared secret:  {config.SharedSecretArn}");
-                    if (config.SharedKmsKeyArn != null)
-                        Console.WriteLine($"  Shared KMS key: {config.SharedKmsKeyArn}");
+                    Console.WriteLine($"  Shared secret:  {config.Aws().SharedSecretArn}");
+                    if (config.Aws().SharedKmsKeyArn != null)
+                        Console.WriteLine($"  Shared KMS key: {config.Aws().SharedKmsKeyArn}");
                 }
 
                 // Propagate seed bucket config from shared account (only if shared config exists)
@@ -404,7 +424,7 @@ class Program
                         var ecrName = $"{config.SystemKey}-{config.SystemSuffix}-{config.Environment}-{svcName}";
 
                         Console.ForegroundColor = ConsoleColor.Cyan;
-                        Console.WriteLine($"=== {svcName} (foundation) ===");
+                        Console.WriteLine($"=== {svcName} (system) ===");
                         Console.ResetColor();
 
                         await deployer.DeployAsync(
@@ -421,37 +441,37 @@ class Program
                         continue;
                 }
 
-                // --- Tenant containers (tenant-scoped ECR) ---
+                // --- Tenant containers ---
                 // Skip if the requested container was already handled as foundation
                 if (isFoundation)
                     continue;
 
+                var containersToProcess = container != null
+                    ? tenantServiceConfig.Containers
+                        .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary(c => c.Key, c => c.Value)
+                    : tenantServiceConfig.Containers;
+
+                if (container != null && containersToProcess.Count == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Warning: Container '{container}' not found in containersbuild.");
+                    Console.ResetColor();
+                    continue;
+                }
+
+                // Per-tenant ECR (uniform across all topologies). The repo is
+                // created on first push by EcrDeployer; Pulumi never owns it.
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
 
                 foreach (var (tk, tenantConfig) in tenants)
                 {
-                    var containersToProcess = container != null
-                        ? tenantServiceConfig.Containers
-                            .Where(c => c.Key.Equals(container, StringComparison.OrdinalIgnoreCase))
-                            .ToDictionary(c => c.Key, c => c.Value)
-                        : tenantServiceConfig.Containers;
-
-                    if (container != null && containersToProcess.Count == 0)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
-                        Console.ResetColor();
-                        continue;
-                    }
-
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
 
                     foreach (var (svcName, def) in containersToProcess)
                     {
-                        // ECR repo is tenant-scoped: {sk}-{suffix}-{env}-{tk}-{container}
-                        // Must match AwsEcsTenantServiceComponent.cs line 73
                         var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
 
                         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -563,16 +583,17 @@ class Program
                     }
 
                     string bucketName;
-                    if (config.Topology is "ecsexpress" or "apprunner")
+                    // Topologies without centralized Keycloak use a system-wide webapp
+                    // bucket ({sk}---webapp-{appName}-{ss}). The Keycloak topology uses
+                    // per-tenant webapp buckets ({sk}-{tk}-...-webapp-{name}-{suffix}).
+                    var topology = Lz.Aws.Topologies.AwsTopologies.Get(config.Topology);
+                    if (!topology.UsesCentralAuth)
                     {
-                        // Webapp bucket: {sk}---webapp-{appName}-{ss}
-                        // appName derived from webapp folder name, lowercased
                         var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
                         bucketName = $"{config.SystemKey}---webapp-{webappName}-{config.SystemSuffix}";
                     }
                     else
                     {
-                        // ECS convention: {sk}-{tk}-{stk}-webapp-{name}-{suffix}
                         bucketName = $"{config.SystemKey}-{tk}--webapp-storeapp-{suffix}";
                     }
                     var profile = tenantConfig.Profile ?? config.Profile;
@@ -772,18 +793,18 @@ class Program
 
                 // Resolve cross-account shared services references
                 SharedConfig? sharedConfigTenant = null;
-                if (!string.IsNullOrEmpty(config.SharedProfile))
+                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
                 {
                     sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig();
                     var sharedRegion = sharedConfigTenant.Region;
 
                     var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.SharedProfile, sharedRegion);
-                    config.SharedSecretArn =
+                        config.Aws().SharedProfile, sharedRegion);
+                    config.Aws().SharedSecretArn =
                         $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
-                    config.SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.SharedProfile, sharedRegion, "alias/shared-secrets-key");
-                    config.SharedRegion = sharedRegion;
+                    config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                        config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
+                    config.Aws().SharedRegion = sharedRegion;
                 }
 
                 // Propagate seed bucket config from shared account (only if shared config exists)
@@ -797,22 +818,27 @@ class Program
 
                 // Read SES SMTP secrets from shared/system for keycloak template replacements
                 Dictionary<string, string?> smtpSecrets = new();
-                if (!string.IsNullOrEmpty(config.SharedProfile))
+                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
                 {
                     smtpSecrets = await AwsAccountResolver.ReadSecretEntriesAsync(
-                        config.SharedProfile, config.SharedRegion!, "shared/system",
+                        config.Aws().SharedProfile, config.Aws().SharedRegion!, "shared/system",
                         "SES_SMTP_USER", "SES_SMTP_PASSWORD", "SES_SMTP_DOMAIN", "SES_SMTP_URL");
                 }
 
                 var (system, factory) = PrepareSystem(plugin!, config);
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
 
+                await Lz.Core.Orchestration.StackOutputReader.EnsureFoundationDeployedAsync(config);
+
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
 
                 foreach (var (tk, tenantConfig) in tenants)
                 {
-                    // Pre-flight: verify ECR images exist for all containers
+                    ValidateTenantConfig(config, tk, tenantConfig);
+
+                    // Pre-flight: verify ECR images exist for all containers.
+                    // Per-tenant ECR naming is uniform across topologies.
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
                     var missingImages = new List<string>();
@@ -820,8 +846,6 @@ class Program
                     Console.WriteLine("Checking ECR images...");
                     foreach (var (svcName, _) in containerServiceConfig.Containers)
                     {
-                        // ECR repo is tenant-scoped: {sk}-{tenantSuffix}-{env}-{tk}-{container}
-                        // Must match AwsEcsTenantServiceComponent.cs line 73
                         var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
                         var exists = await EcrDeployer.CheckEcrImageExistsAsync(
                             profile, region, ecrName);
@@ -853,14 +877,26 @@ class Program
                     }
 
                     // Propagate shared-services context to tenant config
-                    tenantConfig.SharedSecretArn = config.SharedSecretArn;
-                    tenantConfig.SharedKmsKeyArn = config.SharedKmsKeyArn;
+                    tenantConfig.Aws().SharedSecretArn = config.Aws().SharedSecretArn;
+                    tenantConfig.Aws().SharedKmsKeyArn = config.Aws().SharedKmsKeyArn;
                     tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
 
                     Console.WriteLine(
                         $"Deploying tenant '{tk}' for system " +
                         $"'{config.SystemKey}' ({config.Environment})");
                     await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
+
+                    // Per-subtenant infrastructure (S3 buckets + DynamoDB tables)
+                    // is managed imperatively, outside Pulumi. This runs after
+                    // the tenant Pulumi up so first-time deploy is a single command.
+                    var subProfile = tenantConfig.Profile ?? config.Profile;
+                    var subRegion = tenantConfig.Region ?? config.Region;
+                    var subAccountId = await AwsAccountResolver.ResolveAccountIdAsync(subProfile, subRegion);
+                    await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
+                        config, tenantConfig, subProfile, subRegion, subAccountId);
+
+                    // Plugin-owned runtime refresh (typically CloudFront KVS).
+                    await plugin!.RefreshTenantRuntimeAsync(config, tenantConfig);
                 }
             }
         }, systemKeyOption, envOption, tenantKeyOption, refreshOption);
@@ -1216,6 +1252,147 @@ class Program
         root.AddCommand(cmd);
     }
 
+    // deploysubtenants / destroysubtenant — fast path for adding and
+    // removing subtenants without re-running Pulumi on the tenant stack.
+    // Works because the tenant CloudFront distribution carries a wildcard
+    // TLS cert + wildcard alias, and the tenant's Route 53 zone has a
+    // wildcard A-alias record pointing at the distribution — all subtenant
+    // first-level subdomains route automatically. Per-subtenant S3 buckets
+    // and DynamoDB tables are managed imperatively via SubtenantProvisioner.
+    // ---------------------------------------------------------------
+
+    private static void RegisterDeploySubtenantsCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("deploysubtenants",
+            "Create missing subtenant S3 buckets + DynamoDB tables and refresh " +
+            "runtime state (KVS). Fast path for adding subtenants without a " +
+            "full `lz deploytenant` Pulumi run. Distribution-level resources " +
+            "(CloudFront, Route 53) are covered by tenant-level wildcards.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (applies to all tenants if not specified)");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    ValidateTenantConfig(config, tk, tenantConfig);
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine($"=== deploysubtenants: {config.SystemKey}/{tk} ({config.Environment}) ===");
+                    Console.ResetColor();
+
+                    if (tenantConfig.Subtenants == null || tenantConfig.Subtenants.Count == 0)
+                    {
+                        Console.WriteLine("  No subtenants declared. Nothing to do.");
+                        continue;
+                    }
+
+                    var profile = tenantConfig.Profile ?? config.Profile;
+                    var region = tenantConfig.Region ?? config.Region;
+                    var accountId = await AwsAccountResolver.ResolveAccountIdAsync(profile, region);
+
+                    // Provision S3 buckets + DynamoDB tables
+                    await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
+                        config, tenantConfig, profile, region, accountId);
+
+                    // Plugin refresh — typically writes CloudFront KVS entries
+                    if (plugin != null)
+                        await plugin.RefreshTenantRuntimeAsync(config, tenantConfig);
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption);
+
+        root.AddCommand(cmd);
+    }
+
+    private static void RegisterDestroySubtenantCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("destroysubtenant",
+            "Destroy one subtenant's S3 bucket and DynamoDB table. After " +
+            "running, remove the subtenant from subtenantconfig and run " +
+            "`lz deploysubtenants` to refresh KVS. The CloudFront KVS entry " +
+            "for the removed subtenant is NOT cleared — clean it up via the " +
+            "AWS console or CLI if its presence would be misleading.");
+
+        var tenantKeyOption = new Option<string>("--tenantkey", "Tenant key") { IsRequired = true };
+        var subtenantKeyOption = new Option<string>("--subtenantkey", "Subtenant key to destroy") { IsRequired = true };
+        var forceOption = new Option<bool>("--force",
+            "Empty the S3 bucket before deleting (data loss). Without --force, " +
+            "deletion fails if the bucket is non-empty.");
+        var yesOption = new Option<bool>("--yes", "Skip the confirmation prompt.");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(subtenantKeyOption);
+        cmd.AddOption(forceOption);
+        cmd.AddOption(yesOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, force, yes) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var tenantConfig = ConfigLoader.DiscoverAndLoadTenantConfig(
+                    config.SystemKey, tenantKey, config.Environment);
+
+                if (!yes)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine(
+                        $"About to destroy subtenant '{subtenantKey}' under " +
+                        $"{config.SystemKey}/{tenantKey} ({config.Environment}).");
+                    Console.WriteLine(
+                        "  - S3 bucket " +
+                        $"{Lz.Aws.Shared.SubtenantBucketManager.BucketName(config.SystemKey, tenantKey, subtenantKey, config.SystemSuffix)} " +
+                        $"will be deleted{(force ? " (emptied first — DATA LOSS)" : "")}.");
+                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS).");
+                    Console.Write("Type 'yes' to confirm: ");
+                    Console.ResetColor();
+                    var response = Console.ReadLine();
+                    if (!string.Equals(response, "yes", StringComparison.Ordinal))
+                    {
+                        Console.WriteLine("Aborted.");
+                        return;
+                    }
+                }
+
+                var profile = tenantConfig.Profile ?? config.Profile;
+                var region = tenantConfig.Region ?? config.Region;
+
+                await Lz.Aws.Shared.SubtenantProvisioner.DeleteOneAsync(
+                    config, tenantConfig, subtenantKey, profile, region, force);
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"Subtenant '{subtenantKey}' destroyed.");
+                Console.ResetColor();
+                Console.WriteLine(
+                    "Next: remove the subtenant from subtenantconfig.yaml and " +
+                    "run `lz deploysubtenants` to refresh KVS. The KVS entry " +
+                    "for the destroyed subtenant's domain will need manual cleanup.");
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, forceOption, yesOption);
+
+        root.AddCommand(cmd);
+    }
+
     // ---------------------------------------------------------------
     // destroyshared
     // ---------------------------------------------------------------
@@ -1245,16 +1422,16 @@ class Program
                 await AwsStateBootstrapper.BootstrapAsync(
                     sharedConfig.Profile, sharedConfig.Region, sharedConfig.State);
 
-            var factory = CreateFactory(new SystemConfig
+            var factory = CreateFactory(new AwsSystemConfig
             {
                 SystemKey = "shared",
                 Environment = "shared",
-                Platform = "aws", Topology = "ecs",
+                Platform = "aws", Topology = Lz.Aws.Topologies.AwsTopologies.EcsFargateKeycloak.Name,
                 Profile = sharedConfig.Profile, Region = sharedConfig.Region,
                 CentralAuthDomain = sharedConfig.Domain,
                 VpcCidr = sharedConfig.VpcCidr,
                 AdminAuth = "adminsauth",
-                TrustedAccountIds = sharedConfig.TrustedAccountIds,
+                TrustedAccountIds = sharedConfig.Aws().TrustedAccountIds,
             });
             var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
             await deployment.DestroyAsync();
@@ -1264,22 +1441,22 @@ class Program
     }
 
     // ---------------------------------------------------------------
-    // destroyfoundation
+    // destroysystem
     // ---------------------------------------------------------------
 
     private static void RegisterDestroyFoundationCommand(
         RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
-        var cmd = new Command("destroyfoundation",
-            "Destroy foundation infrastructure (VPC, ECS, RDS, EFS)");
+        var cmd = new Command("destroysystem",
+            "Destroy system-level infrastructure (VPC, ECS, RDS, EFS, etc.)");
 
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
 
         cmd.SetHandler(async (systemKey, env) =>
         {
-            RequirePlugin(plugin, "destroyfoundation");
+            RequirePlugin(plugin, "destroysystem");
 
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -1563,20 +1740,102 @@ class Program
             throw new InvalidOperationException("Topology validation failed.");
         }
 
+        ValidateTopologyConfig(config);
         var factory = CreateFactory(config);
         return (system, factory);
     }
 
     private static IPlatformFactory CreateFactory(SystemConfig config)
     {
-        return (config.Platform, config.Topology) switch
+        return config.Platform switch
         {
-            ("aws", "ecs") => new AwsEcsPlatformFactory(config),
-            ("aws", "apprunner") => new Lz.Aws.AppRunner.AwsAppRunnerPlatformFactory(config),
-            ("aws", "ecsexpress") => new Lz.Aws.EcsExpress.AwsEcsExpressPlatformFactory(config),
+            "aws" => Lz.Aws.Topologies.AwsTopologies.Get(config.Topology).CreateFactory(config),
             _ => throw new ArgumentException(
-                $"Unsupported platform/topology: {config.Platform}/{config.Topology}")
+                $"Unsupported platform: '{config.Platform}'. Known: aws.")
         };
+    }
+
+    /// <summary>
+    /// Run topology-specific config validation and abort with a combined error
+    /// message if any checks fail. Factory construction happens afterwards.
+    /// </summary>
+    private static void ValidateTopologyConfig(SystemConfig config)
+    {
+        if (config.Platform != "aws") return;
+
+        // Platform-mismatch: if Platform is aws but the loaded config isn't the
+        // AWS-derived type, the AWS YamlDotNet extensions weren't active at load
+        // time. Catch this clearly rather than letting downstream code NRE.
+        if (config is not Lz.Aws.Config.AwsSystemConfig)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine(
+                $"Platform is 'aws' but SystemConfig did not resolve to AwsSystemConfig " +
+                $"(got '{config.GetType().Name}'). AWS config extensions were not registered " +
+                "at YAML load time — this is a tool packaging bug.");
+            Console.ResetColor();
+            throw new InvalidOperationException("Platform extensions not loaded.");
+        }
+
+        Lz.Aws.Topologies.AwsTopology topology;
+        try
+        {
+            topology = Lz.Aws.Topologies.AwsTopologies.Get(config.Topology);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine(ex.Message);
+            Console.ResetColor();
+            throw new InvalidOperationException("Unknown topology.");
+        }
+
+        var errors = new List<string>();
+        topology.ValidateConfig?.Invoke(config, errors);
+        if (errors.Count == 0) return;
+
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine(
+            $"Topology '{topology.Name}' validation failed for system '{config.SystemKey}' ({config.Environment}):");
+        foreach (var err in errors)
+            Console.Error.WriteLine($"  - {err}");
+        Console.ResetColor();
+        throw new InvalidOperationException(
+            $"Topology '{topology.Name}' config validation failed.");
+    }
+
+    /// <summary>
+    /// Tenant-scoped preflight: validate sizings and other per-tenant settings
+    /// that depend on both system and tenant config. Called from tenant-level
+    /// commands (deploytenant, deploysubtenants) before any Pulumi work.
+    /// </summary>
+    private static void ValidateTenantConfig(SystemConfig system, string tenantKey, TenantConfig tenant)
+    {
+        if (system.Platform != "aws") return;
+
+        var errors = new List<string>();
+        var topology = Lz.Aws.Topologies.AwsTopologies.Get(system.Topology);
+
+        // Tenant-key charset + subtenant-key + combined S3 bucket length.
+        Lz.Aws.Config.AwsNamingValidator.ValidateTenantKeys(system, tenantKey, tenant, errors);
+
+        // Fargate sizing — only for topologies that run Fargate tasks.
+        if (topology.Compute is Lz.Aws.Topologies.AwsComputeKind.FargatePrivate
+                             or Lz.Aws.Topologies.AwsComputeKind.FargatePublic)
+        {
+            var fargate = Lz.Aws.Config.AwsConfigMerger.GetEffectiveFargateConfig(system, tenant);
+            Lz.Aws.Config.FargateValidator.Validate(fargate, errors, $"tenant '{tenantKey}'");
+        }
+
+        if (errors.Count == 0) return;
+
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine(
+            $"Tenant config validation failed for '{tenantKey}' ({system.SystemKey}/{system.Environment}):");
+        foreach (var err in errors)
+            Console.Error.WriteLine($"  - {err}");
+        Console.ResetColor();
+        throw new InvalidOperationException("Tenant config validation failed.");
     }
 
     // ---------------------------------------------------------------
@@ -1605,6 +1864,198 @@ class Program
                 Environment.ExitCode = 1;
             }
         });
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // gettenants — print the tenants + subtenants discovered from
+    // local YAML configs as JSON. Source-of-truth output: reads the
+    // exact same systemconfig/tenantconfig/subtenantconfig files that
+    // a deploy would, no AWS calls, no network. Intended for build
+    // systems (e.g. WASMApp.csproj's Pre-Build target) that need the
+    // tenant directory at compile time without depending on a live
+    // CDN deployment.
+    //
+    // Schema (see also EventIt/WASMApp/wwwroot/index.local.html which
+    // consumes this output):
+    //   {
+    //     "systemKey": "bcs",
+    //     "env": "dev",
+    //     "tenants": [
+    //       {
+    //         "key": "bcs",
+    //         "rootDomain": "eventitdev.click",
+    //         "subtenants": [
+    //           { "key": "cerulean", "host": "cerulean.eventitdev.click",
+    //             "displayName": "Cerulean Beach Resort",
+    //             "requiresAuth": true, "includeOnVenuesPage": true },
+    //           ...
+    //         ]
+    //       }
+    //     ]
+    //   }
+    //
+    // requiresAuth is the cascade-resolved value of WebApps[/].AuthConfig
+    // (system → tenant → subtenant) — null/empty AuthConfig means public.
+    // includeOnVenuesPage mirrors SubtenantEntry.IncludeOnVenuesPage; the
+    // /venues/ page filters hidden ones, but the local-dev picker shows
+    // them all so devs can QA hidden subtenants before public launch.
+    //
+    // No --tenant filter: a single system can have multiple tenants
+    // (bcs is the only tenant today, but the schema is multi-tenant)
+    // and the picker wants the whole directory.
+    // ---------------------------------------------------------------
+    private static void RegisterGetTenantsCommand(RootCommand root)
+    {
+        var cmd = new Command("gettenants",
+            "Print tenants + subtenants (from local YAML configs).");
+        var envOpt = new Option<string?>("--env", "Environment override (otherwise auto-detected from cwd).");
+        var prettyOpt = new Option<bool>("--pretty", () => false, "Pretty-print JSON with indent (no effect if --html-cards).");
+        var htmlCardsOpt = new Option<bool>("--html-cards", () => false,
+            "Emit HTML markup for the local-dev picker (anchors per subtenant) instead of JSON. " +
+            "Each card is an <a href='/?sub={key}'> with name/host/badges. The picker template " +
+            "in WASMApp/wwwroot is server-rendered with the output, eliminating dependency on " +
+            "client-side JS to populate cards (works around Browser Refresh middleware response " +
+            "stream encoding bugs that block inline-script execution in some VS dev configurations).");
+        cmd.AddOption(envOpt);
+        cmd.AddOption(prettyOpt);
+        cmd.AddOption(htmlCardsOpt);
+
+        cmd.SetHandler((string? envOverride, bool pretty, bool htmlCards) =>
+        {
+            try
+            {
+                var env = ConfigResolver.ResolveEnvironment(envOverride);
+                var systems = ConfigResolver.ResolveSystemConfigs(env);
+
+                // BCS today has one system; multi-system installs would
+                // get multiple JSON outputs (one per system) if we
+                // looped here. We emit one at a time, keyed by
+                // systemKey — the single-system case is the expected
+                // shape and the multi-system case becomes "run twice
+                // with --systemkey", consistent with how other lz
+                // commands disambiguate.
+                if (systems.Count > 1)
+                {
+                    Console.Error.WriteLine(
+                        $"Multiple systemconfigs found for env '{env}'. " +
+                        "Use --systemkey to disambiguate (not yet implemented for gettenants).");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+                var system = systems[0];
+
+                var tenants = ConfigResolver.ResolveTenantConfigs(system.SystemKey, env);
+                var output = new
+                {
+                    systemKey = system.SystemKey,
+                    env,
+                    tenants = tenants.Select(pair =>
+                    {
+                        var (tk, tc) = pair;
+                        var subs = (tc.Subtenants ?? new Dictionary<string, SubtenantEntry>())
+                            .Select(kv =>
+                            {
+                                var (stk, se) = (kv.Key, kv.Value);
+                                var label = string.IsNullOrEmpty(se.SubDomain) ? stk : se.SubDomain;
+                                var host = $"{label}.{tc.RootDomain}";
+                                // Cascade-resolve AuthConfig for "/" — same logic
+                                // BCPlugin uses for the venues page, kept consistent
+                                // here so the picker's badge matches what CFRequest
+                                // actually enforces.
+                                var resolved = ConfigMerger.ResolveWebApps(system, tc, se.Behaviors);
+                                var rootApp = resolved.FirstOrDefault(r => r.Path == "/");
+                                var requiresAuth = !string.IsNullOrEmpty(rootApp?.AuthConfig);
+                                return new
+                                {
+                                    key = stk,
+                                    host,
+                                    displayName = string.IsNullOrEmpty(se.DisplayName) ? null : se.DisplayName,
+                                    requiresAuth,
+                                    includeOnVenuesPage = se.IncludeOnVenuesPage,
+                                };
+                            }).ToList();
+                        return new
+                        {
+                            key = tk,
+                            rootDomain = tc.RootDomain,
+                            subtenants = subs,
+                        };
+                    }).ToList(),
+                };
+
+                if (htmlCards)
+                {
+                    // Emit a single line of HTML — one anchor per
+                    // subtenant. Designed to be substituted into
+                    // wwwroot/index.local.template.html by the
+                    // WASMApp.csproj Pre-Build target as a single-line
+                    // block (MSBuild's WriteLinesToFile + escaping is
+                    // happier with single lines). The template wraps
+                    // the output in a #cards container so the CSS
+                    // styling already in the picker applies as-is.
+                    //
+                    // Each card is a static <a> — no JS needed on the
+                    // picker page. Click navigates to /?sub={key};
+                    // indexinit.js's localhost branch handles the rest.
+                    var html = new System.Text.StringBuilder();
+                    foreach (var pair in tenants)
+                    {
+                        var (_, tc) = pair;
+                        if (tc.Subtenants is null) continue;
+                        foreach (var (stk, se) in tc.Subtenants)
+                        {
+                            var label = string.IsNullOrEmpty(se.SubDomain) ? stk : se.SubDomain;
+                            var host = $"{label}.{tc.RootDomain}";
+                            var displayName = string.IsNullOrEmpty(se.DisplayName) ? stk : se.DisplayName;
+                            var resolved = ConfigMerger.ResolveWebApps(system, tc, se.Behaviors);
+                            var rootApp = resolved.FirstOrDefault(r => r.Path == "/");
+                            var requiresAuth = !string.IsNullOrEmpty(rootApp?.AuthConfig);
+
+                            // System.Net.WebUtility.HtmlEncode covers
+                            // <>&"' — sufficient for both element body
+                            // and attribute values in the simple
+                            // anchor structure we're emitting.
+                            html.Append("<a class=\"sub-card\" href=\"/?sub=")
+                                .Append(System.Net.WebUtility.UrlEncode(stk))
+                                .Append("\" role=\"listitem\" aria-label=\"Use subtenant ")
+                                .Append(System.Net.WebUtility.HtmlEncode(displayName))
+                                .Append("\">")
+                                .Append("<p class=\"sub-name\">")
+                                .Append(System.Net.WebUtility.HtmlEncode(displayName))
+                                .Append("</p>")
+                                .Append("<p class=\"sub-host\">")
+                                .Append(System.Net.WebUtility.HtmlEncode(host))
+                                .Append("</p>");
+                            if (requiresAuth || !se.IncludeOnVenuesPage)
+                            {
+                                html.Append("<div class=\"badges\">");
+                                if (requiresAuth)
+                                    html.Append("<span class=\"badge auth\">auth required</span>");
+                                if (!se.IncludeOnVenuesPage)
+                                    html.Append("<span class=\"badge hidden\">hidden from /venues/</span>");
+                                html.Append("</div>");
+                            }
+                            html.Append("</a>");
+                        }
+                    }
+                    Console.Out.WriteLine(html.ToString());
+                }
+                else
+                {
+                    var json = System.Text.Json.JsonSerializer.Serialize(output,
+                        new System.Text.Json.JsonSerializerOptions { WriteIndented = pretty });
+                    Console.Out.WriteLine(json);
+                }
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+            }
+        }, envOpt, prettyOpt, htmlCardsOpt);
 
         root.AddCommand(cmd);
     }

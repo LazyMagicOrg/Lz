@@ -89,9 +89,59 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             ?? throw new FileNotFoundException(
                 $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFRequest.js")}");
 
+        // Explore static-site routing — split from CFRequest.js to keep
+        // the main request function under the 10 KB CloudFront limit.
+        // Handles /explore* (bare-prefix redirects + S3 origin rewrite to
+        // the per-subtenant explore bucket).
+        var exploreFn = CreateFunctionFromFile(prefix, "explore", "CFExplore.js",
+            $"Explore static-site routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            ?? throw new FileNotFoundException(
+                $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFExplore.js")}");
+
+        // Auth routing — /auth/{pool}/... (OIDC façade) and /authentication/...
+        // (login/logout flow + WASM passthrough). Split from CFRequest.js to
+        // consolidate auth-flow routing in one auditable place and to give
+        // CFRequest more headroom under the 10 KB CloudFront limit.
+        var authFn = CreateFunctionFromFile(prefix, "auth", "CFAuth.js",
+            $"Auth routing for {domain}", tenantConfig.ConfigDirectory, kvs.Arn)
+            ?? throw new FileNotFoundException(
+                $"Required: {Path.Combine(tenantConfig.ConfigDirectory, "CloudFront", "CFAuth.js")}");
+
         // Auth callback function — no KVS needed, just redirects based on state param
         var authCallbackFn = CreateSimpleFunctionFromFile(prefix, "auth-callback", "CFAuthCallback.js",
             $"OAuth callback redirect for {domain}", tenantConfig.ConfigDirectory);
+
+        // Viewer-response CORS function. CFRequest.js handles OPTIONS
+        // preflights; this handles the simple-GET case (browser skips
+        // preflight, response just needs Access-Control-Allow-Origin).
+        //
+        // The allowlist is operator-controlled via tenantconfig.CDN.Cors:
+        //   AllowLocalhostDev: true     → echo http(s)://localhost(:port)?
+        //   AllowedOrigins: [...]       → echo exact-match strings
+        // Both default to false/empty; prod with no Cors block echoes
+        // nothing. Values are baked in here at deploy time via string
+        // substitution — no live KVS lookup per response.
+        var corsCfg = (tenantConfig.CDN ?? new CdnConfig()).Cors ?? new CorsConfig();
+        var allowLocalhostJs = corsCfg.AllowLocalhostDev ? "true" : "false";
+        var allowedOriginsJson = System.Text.Json.JsonSerializer.Serialize(
+            corsCfg.AllowedOrigins ?? new List<string>());
+
+        var responseFnPath = Path.Combine(
+            tenantConfig.ConfigDirectory, "CloudFront", "CFResponse.js");
+        if (!File.Exists(responseFnPath))
+            throw new FileNotFoundException($"Required: {responseFnPath}");
+        var responseFnCode = Lz.Aws.Shared.CfFunctionCodePrep.PrepareAndValidate(
+            responseFnPath, "CFResponse.js",
+            ("__ALLOW_LOCALHOST_DEV__", allowLocalhostJs),
+            ("__ALLOWED_ORIGINS_JSON__", allowedOriginsJson));
+        var responseFn = new Pulumi.Aws.CloudFront.Function($"{prefix}-response-fn",
+            new FunctionArgs
+            {
+                Runtime = "cloudfront-js-2.0",
+                Code = responseFnCode,
+                Comment = $"CORS response headers for {domain}",
+                Publish = true,
+            }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
         // S3 BUCKET + OAC
@@ -110,21 +160,121 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             IgnorePublicAcls = true, RestrictPublicBuckets = true,
         }, new CustomResourceOptions { Parent = this });
 
+        // S3-level CORS configuration. The CFResponse CloudFront Function
+        // adds Access-Control-Allow-Origin to *successful* origin responses
+        // routed through the default '/*' behavior — but CloudFront's
+        // CustomErrorResponses flow can short-circuit viewer-response on
+        // origin 4xx errors (the SPA-fallback /index.html recursion fails
+        // when CFRequest's dynamic origin rewrite picks a bucket without
+        // /index.html, falling back to the raw S3 error which never gets
+        // CORS injected). Configuring CORS at the S3 level means S3 itself
+        // emits Access-Control-Allow-Origin on its responses including
+        // 403/404 — CloudFront passes those headers through. Net effect:
+        // browsers see clean 4xx responses with CORS, the WASM client's
+        // fetch sees the 4xx instead of a CORS-blocked failure, and JS-
+        // side fall-through (e.g. subtenancy overlay missing → fall back
+        // to system default) works as designed.
+        var s3CorsOrigins = new List<string>();
+        if (corsCfg.AllowLocalhostDev)
+        {
+            s3CorsOrigins.Add("http://localhost:*");
+            s3CorsOrigins.Add("https://localhost:*");
+        }
+        if (corsCfg.AllowedOrigins != null)
+            s3CorsOrigins.AddRange(corsCfg.AllowedOrigins);
+        if (s3CorsOrigins.Count > 0)
+        {
+            new Pulumi.Aws.S3.BucketCorsConfigurationV2($"{prefix}-assets-cors",
+                new Pulumi.Aws.S3.BucketCorsConfigurationV2Args
+                {
+                    Bucket = assetsBucket.Id,
+                    CorsRules =
+                    {
+                        new Pulumi.Aws.S3.Inputs.BucketCorsConfigurationV2CorsRuleArgs
+                        {
+                            AllowedHeaders = { "*" },
+                            AllowedMethods = { "GET", "HEAD" },
+                            AllowedOrigins = s3CorsOrigins.ToArray(),
+                            ExposeHeaders = { "ETag" },
+                            MaxAgeSeconds = 3000,
+                        }
+                    }
+                }, new CustomResourceOptions { Parent = this });
+        }
+
         var oac = new OriginAccessControl($"{prefix}-oac", new OriginAccessControlArgs
         {
             Name = $"{prefix}-oac", Description = $"OAC for {domain}",
             OriginAccessControlOriginType = "s3", SigningBehavior = "always", SigningProtocol = "sigv4",
         }, new CustomResourceOptions { Parent = this });
 
+        // ─────────────────────────────────────────────────────────────────────
+        // CACHE POLICY — host-keyed
+        // ─────────────────────────────────────────────────────────────────────
+        // Mirrors the AWS-managed CachingOptimized policy (gzip+brotli, MaxTtl
+        // 1 year) but adds the x-custom-cache-key header to the cache key.
+        // CFRequest.js and CFExplore.js compute that header as
+        // {bucket}-{originPath}-{request.uri} so the cache key is 1:1 with the
+        // resolved S3 response (host-disambiguated through the bucket name,
+        // which contains the tenant/subtenant keys via the KVS lookup).
+        // CFAuthConfig sets it as 'config-{host}' on its inline response.
+        //
+        // Without a custom policy, CloudFront's default cache key is
+        // (URI, query string) — Host is NOT included — and any function-driven
+        // origin rewrite collapses cross-host onto a single entry. That is
+        // the cross-tenant cache poisoning that bit on test the first time
+        // CachingOptimized went live.
+        //
+        // Wired into the default (/*) behavior plus /explore* and /venues*.
+        // /config stays on CachingDisabled today; the function emits the same
+        // header anyway so the migration to this policy is a one-line config
+        // change when desired.
+        var hostKeyedCachePolicy = new CachePolicy($"{prefix}-cache-host-keyed",
+            new CachePolicyArgs
+            {
+                Name = $"{prefix}-cache-host-keyed-{env}",
+                Comment = "Cache key includes x-custom-cache-key header so " +
+                          "function-driven per-host origin rewrites do not collide.",
+                DefaultTtl = 86400,
+                MinTtl = 1,
+                MaxTtl = 31536000,
+                ParametersInCacheKeyAndForwardedToOrigin =
+                    new CachePolicyParametersInCacheKeyAndForwardedToOriginArgs
+                    {
+                        EnableAcceptEncodingGzip = true,
+                        EnableAcceptEncodingBrotli = true,
+                        HeadersConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginHeadersConfigArgs
+                            {
+                                HeaderBehavior = "whitelist",
+                                Headers =
+                                    new CachePolicyParametersInCacheKeyAndForwardedToOriginHeadersConfigHeadersArgs
+                                    {
+                                        Items = { "x-custom-cache-key" },
+                                    },
+                            },
+                        QueryStringsConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginQueryStringsConfigArgs
+                            {
+                                QueryStringBehavior = "none",
+                            },
+                        CookiesConfig =
+                            new CachePolicyParametersInCacheKeyAndForwardedToOriginCookiesConfigArgs
+                            {
+                                CookieBehavior = "none",
+                            },
+                    },
+            }, new CustomResourceOptions { Parent = this });
+
         // =====================================================================
         // ALIASES
         // =====================================================================
 
+        // Apex + wildcard cover every first-level subtenant domain; subtenants
+        // are not enumerated here. SubDomain is a single DNS label (see
+        // ConfigValidator); the FQDN is {SubDomain}.{RootDomain}, so
+        // first-level is structurally guaranteed by the schema.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
-        if (tenantConfig.Subtenants != null)
-            foreach (var sub in tenantConfig.Subtenants)
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    aliases.Add(sub.Value.SubDomain);
 
         // =====================================================================
         // CLOUDFRONT DISTRIBUTION — ALB origin + S3 origin
@@ -164,14 +314,28 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                 CachedMethods = { "GET", "HEAD" },
                 Compress = true,
+                // Dev: CachingDisabled for fast iteration. Other envs: the
+                // host-keyed policy declared above — does NOT use the AWS-
+                // managed CachingOptimized because that policy keys only on
+                // (URI, query string) and CFRequest's per-host bucket
+                // rewrites would poison the cache cross-tenant. The
+                // function emits x-custom-cache-key for every webapp/asset
+                // response and this policy includes that header in the key.
                 CachePolicyId = env == "dev"
-                    ? "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-                    : "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                    ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                    : hostKeyedCachePolicy.Id,
                 FunctionAssociations =
                 {
                     new DistributionDefaultCacheBehaviorFunctionAssociationArgs
                     {
                         EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                    },
+                    // viewer-response: echoes CORS headers for localhost
+                    // origins so VS-hosted local WASM apps can fetch
+                    // cloud assets (system + tenant + subtenant + framework).
+                    new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
                     },
                 },
             },
@@ -247,6 +411,157 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         {
                             EventType = "viewer-request", FunctionArn = requestFn.Arn,
                         },
+                        // CORS for localhost dev — same rationale as default behavior.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
+                    },
+                },
+                // Explore static-site behavior — /explore*
+                // CFExplore.js short-circuits bare-prefix redirects and does
+                // dynamic S3 origin rewrite to the per-subtenant explore
+                // bucket. Pattern matches /explore, /explore/, /explore/home,
+                // /explore/{slug}/... — caveat: also matches /exploration,
+                // which we don't have today; if such a path is ever added,
+                // either rename or move it to its own behavior ahead of this.
+                // Static content benefits from edge caching in non-dev envs.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/explore*",
+                    TargetOriginId = "s3-assets", // placeholder; CFExplore overrides
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    // Host-keyed in non-dev so per-subtenant explore buckets
+                    // don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Host-keyed in non-dev so per-subtenant explore/venues
+                    // buckets don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Dev stays on CachingDisabled for fast iteration; the
+                    // host-keyed policy was validated against dev under a
+                    // temporary flip — see Platform/test/tests/caching.spec.js.
+                    CachePolicyId = env == "dev"
+                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                        : hostKeyedCachePolicy.Id,
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = exploreFn.Arn,
+                        },
+                    },
+                },
+                // Venues static-site behavior — /venues*
+                // Same CFExplore.js function (it's generic over staticsite
+                // path now — matches the longest-prefix `staticsite` tuple
+                // in KVS). The /venues/ static site is tenant-level (lives
+                // in Tenancies/{tk}/staticsite/public/venues/), so the
+                // `StaticSites: /venues/` entry in tenantconfig cascades
+                // into every per-host KVS entry and CFExplore resolves it
+                // to the same `bcs-bcs--webapp-venues-{ts}` bucket on
+                // every request, regardless of which subtenant subdomain
+                // serves the request. Pattern caveat same as /explore* —
+                // /venues* also matches hypothetical /venuesabc paths.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/venues*",
+                    TargetOriginId = "s3-assets", // placeholder; CFExplore overrides
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    // Host-keyed for parity with /explore* even though
+                    // /venues/ resolves to the same tenant-level bucket on
+                    // every host today. Future-safe: if /venues/ ever
+                    // diverges per host (tenant-specific listings, A/B
+                    // testing), this is the right key shape already.
+                    // Host-keyed in non-dev so per-subtenant explore/venues
+                    // buckets don't poison cross-tenant. CFExplore emits
+                    // x-custom-cache-key with the resolved bucket+path+uri.
+                    // Dev stays on CachingDisabled for fast iteration; the
+                    // host-keyed policy was validated against dev under a
+                    // temporary flip — see Platform/test/tests/caching.spec.js.
+                    CachePolicyId = env == "dev"
+                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
+                        : hostKeyedCachePolicy.Id,
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = exploreFn.Arn,
+                        },
+                    },
+                },
+                // OIDC façade behavior — /auth/{pool}/...
+                // CFAuth.js dispatches by sub-path:
+                //   /.well-known/openid-configuration → 200 with synthetic discovery doc
+                //   /.well-known/jwks.json            → origin rewrite to cognito-idp.{region}.amazonaws.com
+                //   /oauth2/{token,userInfo,revoke}   → origin rewrite to auth-{pool}.{domain}
+                //   /oauth2/authorize, /logout        → 302 to Cognito Hosted UI
+                // CachingDisabled is mandatory — token/userInfo responses MUST NOT
+                // be cached at the edge. AllViewerExceptHostHeader rewrites Host to
+                // the dynamically-selected origin (Cognito validates Host strictly).
+                // TargetOriginId is a placeholder; cf.updateRequestOrigin overrides
+                // it for proxied sub-paths and the inline-200/302 sub-paths never
+                // reach an origin.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/auth/*",
+                    TargetOriginId = "alb-origin",
+                    ViewerProtocolPolicy = "https-only",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = false,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = authFn.Arn,
+                        },
+                        // CORS for localhost dev — same rationale as default + /*Api/*.
+                        // CFAuth proxies /auth/{pool}/oauth2/{token,userInfo,revoke}
+                        // upstream to Cognito; the WASM OIDC client at localhost
+                        // exchanges auth codes for tokens here, and needs
+                        // Access-Control-Allow-Origin on the response from
+                        // upstream. Function-generated 200/302 sub-paths
+                        // (.well-known/openid-configuration, authorize, logout)
+                        // bypass viewer-response and add CORS inline in CFAuth.js.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
+                    },
+                },
+                // Authentication-flow behavior — /authentication/...
+                // CFAuth.js handles login/logout intercepts and passes through
+                // the rest to the root webapp's S3 bucket via dynamic origin
+                // rewrite. Same policies as /auth/* for consistency.
+                new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = "/authentication/*",
+                    TargetOriginId = "s3-assets",
+                    ViewerProtocolPolicy = "redirect-to-https",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = true,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = authFn.Arn,
+                        },
+                        // CORS for localhost dev — same rationale as /auth/*.
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
                     },
                 },
             },
@@ -278,14 +593,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 $@"{{ ""Version"": ""2012-10-17"", ""Statement"": [{{ ""Sid"": ""AllowCloudFrontRead"", ""Effect"": ""Allow"", ""Principal"": {{ ""Service"": ""cloudfront.amazonaws.com"" }}, ""Action"": ""s3:GetObject"", ""Resource"": ""{t.Item1}/*"", ""Condition"": {{ ""StringEquals"": {{ ""AWS:SourceAccount"": ""{t.Item2}"" }} }} }}] }}"),
         }, new CustomResourceOptions { Parent = this });
 
-        // Route 53 aliases
+        // Route 53 aliases — apex + wildcard only. The wildcard covers every
+        // first-level subtenant domain, so subtenants are not enumerated here.
         var zoneId = publicZone.Apply(z => z.ZoneId);
         CreateAliasRecord($"{prefix}-cf-alias", zoneId, domain, distribution);
         CreateAliasRecord($"{prefix}-cf-alias-wildcard", zoneId, $"*.{domain}", distribution);
-        if (tenantConfig.Subtenants != null)
-            foreach (var sub in tenantConfig.Subtenants)
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    CreateAliasRecord($"{prefix}-cf-alias-{sub.Key}", zoneId, sub.Value.SubDomain, distribution);
 
         return new AwsCloudFrontOutputs(distribution.Id, distribution.DomainName, assetsBucket.Id, assetsBucket.Id);
     }

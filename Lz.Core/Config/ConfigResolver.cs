@@ -1,38 +1,25 @@
-using Lz.Core.Config;
-
-namespace Lz.Cli;
+namespace Lz.Core.Config;
 
 /// <summary>
 /// Resolves environment, system configs, and tenant configs using smart defaults.
-/// Priority: explicit CLI option → folder hierarchy heuristic → file discovery.
+/// Priority: explicit override → folder hierarchy heuristic → file discovery.
+///
+/// Sibling to <see cref="ConfigLoader"/>: Loader parses a single known path,
+/// Resolver picks which path(s) to load by walking the working directory and
+/// applying the filename conventions in <see cref="ConfigLoader"/>'s docs.
+///
+/// Lives in Lz.Core (not Lz.Cli) so plugins can call the same discovery logic
+/// the CLI uses without taking a tool-package dependency.
 /// </summary>
 public static class ConfigResolver
 {
     /// <summary>
     /// Resolve the target environment.
-    /// Priority: --env override → folder hierarchy (_Dev* → dev, _Test* → test, _Prod* → prod).
+    /// Priority: override → folder hierarchy (_Dev* → dev, _Test* → test, _Prod* → prod).
+    /// Delegates to <see cref="ConfigLoader.ResolveEnvironment"/>.
     /// </summary>
     public static string ResolveEnvironment(string? envOverride = null)
-    {
-        if (!string.IsNullOrEmpty(envOverride))
-            return envOverride;
-
-        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (dir != null)
-        {
-            var name = dir.Name;
-            if (name.StartsWith("_Dev", StringComparison.OrdinalIgnoreCase))
-                return "dev";
-            if (name.StartsWith("_Test", StringComparison.OrdinalIgnoreCase))
-                return "test";
-            if (name.StartsWith("_Prod", StringComparison.OrdinalIgnoreCase))
-                return "prod";
-            dir = dir.Parent;
-        }
-
-        throw new InvalidOperationException(
-            "Cannot determine environment. Use --env or run from a directory under _Dev, _Test, or _Prod.");
-    }
+        => ConfigLoader.ResolveEnvironment(envOverride);
 
     /// <summary>
     /// Resolve system configs for the given environment.
@@ -50,7 +37,6 @@ public static class ConfigResolver
             return [ConfigLoader.LoadSystemConfig(path)];
         }
 
-        // Discover all systemconfig.*.{env}.yaml files
         var configs = DiscoverAllConfigFiles($"systemconfig.*.{env}.yaml");
         if (configs.Count == 0)
             throw new FileNotFoundException(
@@ -73,7 +59,6 @@ public static class ConfigResolver
             return [(tenantKeyOverride, config)];
         }
 
-        // Discover all tenantconfig.{sk}.*.{env}.yaml files
         var pattern = $"tenantconfig.{systemKey}.*.{env}.yaml";
         var paths = DiscoverAllConfigFiles(pattern);
         if (paths.Count == 0)

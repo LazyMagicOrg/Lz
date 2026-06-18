@@ -164,11 +164,11 @@ The tenant configuration file defines per-tenant settings, often inheriting or o
 ### FR-10: CLI Interface
 
 - **FR-10.1:** Ship as a dotnet global tool (`lz`), with system-specific behavior loaded at runtime via an `ILzPlugin` plugin discovered by convention from the `Deploy/` folder (or optionally via `lz.json` marker files).
-- **FR-10.2:** Support commands: `deployshared`, `deployfoundation`, `deploytenant`, `destroy`, `status`. Plugin-specific commands (e.g., `seed`) are registered by the plugin.
+- **FR-10.2:** Support commands: `deployshared`, `deploysystem`, `deploytenant`, `destroy`, `status`. Plugin-specific commands (e.g., `seed`) are registered by the plugin.
 - **FR-10.3:** Support smart defaults via ConfigResolver: environment auto-detected from folder hierarchy (`_Dev*` → dev, `_Test*` → test, `_Prod*` → prod), systemkey auto-detected when only one systemconfig exists.
-- **FR-10.4:** Support platform and topology override: `lz deployfoundation --platform aws --topology ecs`.
+- **FR-10.4:** Support platform and topology override: `lz deploysystem --platform aws --topology ecs-fargate-keycloak`.
 - **FR-10.5:** Support tenant-specific operations: `lz deploytenant --tenantkey meadows`. Without `--tenantkey`, deploy all discovered tenants.
-- **FR-10.6:** Zero-flag operation when possible: `lz deployfoundation` and `lz deploytenant` must work with no flags when run from a properly structured repo with a single systemconfig.
+- **FR-10.6:** Zero-flag operation when possible: `lz deploysystem` and `lz deploytenant` must work with no flags when run from a properly structured repo with a single systemconfig.
 - **FR-10.7:** Provide clear, actionable output including next steps after each phase (transition gates).
 
 ## Non-Functional Requirements

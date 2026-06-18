@@ -1,4 +1,4 @@
-namespace Lz.Core.Interfaces;
+namespace Lz.Aws.Interfaces;
 
 /// <summary>
 /// Manages Tailscale auth key and SSH key lifecycle — ensures valid keys

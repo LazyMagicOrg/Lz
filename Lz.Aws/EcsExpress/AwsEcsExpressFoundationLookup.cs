@@ -5,7 +5,6 @@ using Lz.Aws.AppRunner; // Reuse DynamoDB/FileStorage outputs
 using Pulumi;
 using Pulumi.Aws.Ec2;
 using Pulumi.Aws.Ec2.Inputs;
-using Pulumi.Aws.Ecr;
 using Pulumi.Aws.LB;
 using Pulumi.Aws.LB.Inputs;
 
@@ -13,7 +12,9 @@ namespace Lz.Aws.EcsExpress;
 
 /// <summary>
 /// Looks up foundation resources for ECSExpress tenant phase.
-/// VPC, ALB, ECS cluster, ECR repo — all created by deployfoundation.
+/// VPC, ALB, ECS cluster — all created by deploysystem. ECR repos are
+/// per-tenant and imperatively created by <c>lz deploycontainer</c>, so they
+/// aren't looked up here.
 /// </summary>
 public static class AwsEcsExpressFoundationLookup
 {
@@ -67,9 +68,6 @@ public static class AwsEcsExpressFoundationLookup
         var publicZone = Pulumi.Aws.Route53.GetZone.Invoke(
             new Pulumi.Aws.Route53.GetZoneInvokeArgs { Name = config.SystemDomain });
 
-        // ECR
-        var ecrRepo = GetRepository.Invoke(new GetRepositoryInvokeArgs { Name = $"{sk}-{suffix}-{env}-apphost" });
-
         // ECS cluster
         var cluster = Pulumi.Aws.Ecs.GetCluster.Invoke(new Pulumi.Aws.Ecs.GetClusterInvokeArgs
         {
@@ -106,8 +104,6 @@ public static class AwsEcsExpressFoundationLookup
             InternalIngressEndpoint = Output.Create(""),
             ClusterArn = cluster.Apply(c => c.Arn),
             CloudMapNamespaceId = Output.Create(""),
-            EcrRepositoryUrl = ecrRepo.Apply(r => r.RepositoryUrl),
-            EcrRepositoryArn = ecrRepo.Apply(r => r.Arn),
         };
 
         var tableArnPrefix = Pulumi.Aws.GetCallerIdentity.Invoke(new Pulumi.Aws.GetCallerIdentityInvokeArgs())

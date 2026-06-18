@@ -32,7 +32,7 @@ The Lz tool follows a layered architecture with clear separation between reusabl
          │  ├── systemconfig.med.dev.yaml
          │  ├── tenantconfig.med.meadows.dev.yaml
          │
-         │  lz deployfoundation  (zero flags needed)
+         │  lz deploysystem  (zero flags needed)
          v
 ┌──────────────────────────────────────┐
 │  Cloud Account (dev/test/prod)       │
@@ -81,113 +81,166 @@ Deployments are split into phases that correspond to manual intervention points.
 
 ## Package Structure
 
-### Lz.Core — Interfaces, Config, Orchestration, Plugin
+### Lz.Core — Platform-neutral interfaces, config, orchestration scaffolding, plugin contract
+
+`Lz.Core` speaks in shapes only — it knows nothing about AWS, Azure, or any
+specific cloud target. Platform-specific types (AWS ECS/AppRunner sizing,
+cross-account secret ARNs, Tailscale, Keycloak seeding) live in platform
+libraries and are materialised via `IConfigExtensions` (see
+`Design/TargetIsolation.md`).
 
 ```
 Lz.Core/
 ├── Config/
-│   ├── SystemConfig.cs              # Full model from systemconfig.{systemkey}.{env}.yaml
-│   ├── TenantConfig.cs              # Full model from tenantconfig.{systemkey}.{tenantkey}.{env}.yaml
+│   ├── SystemConfig.cs              # Platform-neutral base; AWS fields live on AwsSystemConfig
+│   ├── TenantConfig.cs              # Platform-neutral base; AWS fields live on AwsTenantConfig
+│   ├── SharedConfig.cs              # Platform-neutral base; AWS fields live on AwsSharedConfig
 │   ├── SubtenantEntry.cs            # Subtenant entry with SubDomain and Behaviors
 │   ├── BehaviorsConfig.cs           # Behaviors hierarchy (APIs, Assets, WebApps)
-│   ├── EcsConfig.cs                 # ECS deployment section (shared between system/tenant)
 │   ├── CdnConfig.cs                 # CDN section (shared between system/tenant)
 │   ├── StateConfig.cs               # Pulumi backend, secrets provider
+│   ├── SeedDataConfig.cs            # Seed-data bucket (generic object-storage shape)
 │   ├── RuntimeConfig.cs             # Runtime sections (Integrations, AuthConfigs, RequestRewriter, etc.)
-│   ├── ConfigLoader.cs              # YAML discovery, parsing, and system/tenant merging
-│   ├── ConfigMerger.cs              # Merges system defaults with tenant overrides for runtime config
-│   └── ConfigValidator.cs           # Post-deserialization validation of required config fields
+│   ├── ConfigLoader.cs              # YAML discovery + platform-gated deserialization
+│   ├── ConfigResolver.cs            # Smart env/systemkey/tenant resolution (used by CLI + plugins)
+│   ├── ConfigMerger.cs              # Generic merges (Profile/Region/CDN/SecretsManager/...)
+│   ├── ConfigValidator.cs           # Post-deserialization validation of required config fields
+│   └── IConfigExtensions.cs         # Platform hook for contributing YAML type mappings
 ├── Definitions/
-│   ├── SystemDefinition.cs          # Base class for system definitions
+│   ├── SystemDefinition.cs          # Base class for system definitions (UseAuth / UseVpn)
 │   ├── ServiceDefinition.cs         # Describes a deployable service
 │   ├── ContainerOptions.cs          # Container-specific options
 │   ├── LambdaOptions.cs             # Lambda-specific options
 │   ├── VolumeMount.cs               # File storage mount
 │   ├── SecretRef.cs                 # Secret reference
 │   ├── ApiRoute.cs                  # API path routing
-│   ├── DockerBuildOptions.cs         # Docker build and push configuration
-│   ├── AuthDefinition.cs            # Auth provider config
+│   ├── DockerBuildOptions.cs        # Docker build and push configuration
+│   ├── AuthDefinition.cs            # Auth realm list (vendor-neutral)
 │   └── CdnBehaviors.cs              # CDN behavior config
 ├── Interfaces/
-│   ├── IPlatformFactory.cs          # Creates all components for a platform+topology
+│   ├── IPlatformFactory.cs          # Creates shape-named components only (no vendor capabilities)
 │   ├── ISystemNetworkComponent.cs   # Network infrastructure
 │   ├── IComputeEnvironmentComponent.cs  # Compute cluster / API gateway
 │   ├── IServiceComponent.cs         # Deploy a service (container or function)
 │   ├── IDatabaseComponent.cs        # Managed database
 │   ├── IFileStorageComponent.cs     # File system / volumes
-│   ├── IAuthServiceComponent.cs     # Auth provider (Keycloak)
+│   ├── IAuthServiceComponent.cs     # Auth service
 │   ├── ITenantCdnComponent.cs       # CDN distribution
 │   ├── ITenantDataComponent.cs      # Per-tenant data resources
-│   ├── ITenantServiceComponent.cs   # Per-tenant dedicated service (SmartStore, AppHost)
-│   ├── IEmailComponent.cs           # Email service (SES, Communication Services)
-│   ├── ITailscaleComponent.cs       # Tailscale subnet router (EC2 ASG)
-│   ├── IGateCheckerComponent.cs     # Lambda for VPC-internal gate checks
-│   ├── ISeedTaskComponent.cs        # ECS task for data seeding
+│   ├── ITenantServiceComponent.cs   # Per-tenant dedicated service
+│   ├── IEmailComponent.cs           # Email service
+│   ├── ISeedTaskComponent.cs        # Container task for data seeding
 │   ├── ITransitionChecker.cs        # Gate-check implementations
+│   ├── IConfigInitRunner.cs        # Tenant DB + config-file initialization
+│   ├── IPostSeedRunner.cs          # Re-writes config after seed restore
+│   ├── IAdminSetupRunner.cs        # Creates internal admin account
+│   ├── IPostDeployAction.cs        # Generic post-deploy hook
 │   └── Outputs/
-│       ├── INetworkOutputs.cs       # VPC/VNet ID, subnet IDs, DNS zone IDs
+│       ├── INetworkOutputs.cs       # Network ID, subnet IDs, DNS zone IDs
 │       ├── IComputeEnvironmentOutputs.cs  # Cluster ID, ingress endpoints
 │       ├── IServiceOutputs.cs       # Service ID, endpoint URL
 │       ├── IDatabaseOutputs.cs      # Endpoint, port, secret ID
 │       ├── IFileStorageOutputs.cs   # File system ID
 │       ├── ICdnOutputs.cs           # Distribution ID, domain, asset bucket
 │       ├── IEmailOutputs.cs         # SMTP host, port, credential ID
-│       ├── ITailscaleOutputs.cs     # ASG ID
-│       ├── ITenantDataOutputs.cs    # Tenant secret, EFS access points, DB name
-│       ├── IGateCheckerOutputs.cs   # Lambda function name
-│       ├── ISeedTaskOutputs.cs      # Task family, ECR URL
-│       └── IAuthOutputs.cs         # Auth service endpoint
+│       ├── ITenantDataOutputs.cs    # Tenant secret, access points, DB name
+│       ├── ISeedTaskOutputs.cs      # Task family, container-image repository URL
+│       └── IAuthPoolOutputs.cs      # Per-pool auth details
 ├── Orchestration/
-│   ├── SystemDeployment.cs          # Single-operation deployment orchestrator
-│   ├── SharedDeployment.cs          # Shared-services deployment (Keycloak, Tailscale)
-│   └── TransitionGate.cs            # Gate-check logic for manual steps
+│   ├── PulumiPathResolver.cs        # Ensures Pulumi CLI is discoverable
+│   ├── StackOutputReader.cs         # Reads Pulumi stack outputs
+│   ├── TransitionGate.cs            # Gate-check logic for manual steps
+│   └── TransitionRequirement.cs     # Declarative gate descriptor
 ├── Plugin/
 │   └── ILzPlugin.cs                 # Plugin contract for system-specific DLLs
 └── Validation/
     └── TopologyValidator.cs         # Validates system definition against topology
 ```
 
+Deployment orchestrators (`SharedDeployment`, `SystemDeployment`) live in
+`Lz.Aws/Orchestration/` because their phasing is AWS-ECS-shaped. When a
+second platform lands, we'll factor out generic orchestration at that
+point (see `Design/TargetIsolation.md` §"Forward-looking policy").
+
 ### Lz.Cli — dotnet Global Tool
 
 ```
 Lz.Cli/
 ├── Lz.Cli.csproj                    # <PackAsTool>, <ToolCommandName>lz</ToolCommandName>
-├── Program.cs                       # CLI entry point: deployshared, deployfoundation,
+├── Program.cs                       # CLI entry point: deployshared, deploysystem,
 │                                    #   deploytenant, destroy, status + plugin commands
-├── ConfigResolver.cs                # Smart env/systemkey/tenant resolution
 └── PluginLoader.cs                  # Discovers plugin DLL (convention or lz.json)
 ```
 
-### Lz.Aws — AWS Pulumi Components
+`ConfigResolver` (env/systemkey/tenant resolution) lives in
+`Lz.Core/Config/ConfigResolver.cs` so plugins — which reference Lz.Core but
+not Lz.Cli — share the same discovery logic the CLI uses.
+
+### Lz.Aws — AWS Pulumi components + AWS-shaped config, interfaces, orchestration
+
+AWS-named vocabulary (Cognito, ECS, AppRunner, Keycloak, Tailscale, ACM,
+Route 53, S3 seed bucket, gate-checker Lambda) lives here — not in
+`Lz.Core`. `AwsConfigExtensions` registers YAML type mappings so
+systemconfig/tenantconfig materialise as `AwsSystemConfig` /
+`AwsTenantConfig` / `AwsSharedConfig` under the AWS platform.
 
 ```
 Lz.Aws/
-├── Ecs/                             # ECS + ALB topology (all components live here currently)
-│   ├── AwsEcsPlatformFactory.cs     # Factory wiring all ECS components
+├── Config/
+│   ├── AwsSystemConfig.cs           # Adds ECS/AppRunner/SharedSecretArn/TrustedAccountIds/...
+│   ├── AwsTenantConfig.cs           # Adds ECS/AppRunner/AcmCertificateArn/HostedZoneId/...
+│   ├── AwsSharedConfig.cs           # Adds Keycloak/Tailscale sizing/TrustedAccountIds
+│   ├── AwsAuthConfigEntry.cs        # Cognito MFA/password/groups/advanced-security
+│   ├── EcsConfig.cs                 # ECS deployment section
+│   ├── AppRunnerConfig.cs           # AppRunner deployment section
+│   ├── KeycloakSeedConfig.cs        # Keycloak realm/client/role/group seed model
+│   ├── BootstrapCredsConfig.cs      # SMTP/Keycloak bootstrap credentials
+│   ├── AwsConfigExtensions.cs       # IConfigExtensions: registers WithTypeMapping<...>
+│   ├── AwsConfigMerger.cs           # AWS-specific merges (GetEffectiveEcsConfig)
+│   ├── AwsKeycloakConfigLoader.cs   # camelCase Keycloak/creds YAML loaders
+│   └── AwsConfigCast.cs             # .Aws() extension helpers for plugin authors
+├── Interfaces/
+│   ├── IAwsPlatformFactory.cs       # Extends IPlatformFactory with AWS-named capabilities
+│   ├── ITailscaleComponent.cs       # Tailscale subnet router
+│   ├── ITailscaleKeyManager.cs      # Tailscale auth-key lifecycle
+│   ├── ITenantKeycloakSeeder.cs     # Per-tenant Keycloak realm seeder
+│   ├── IGateCheckerComponent.cs     # VPC-internal Lambda gate checker
+│   ├── IThemeDeployRunner.cs        # Keycloak theme EFS deploy
+│   └── Outputs/
+│       ├── ITailscaleOutputs.cs     # ASG ID
+│       └── IGateCheckerOutputs.cs   # Lambda function name
+├── Orchestration/
+│   ├── SystemDeployment.cs          # Foundation + tenant orchestrator (AWS-ECS-shaped phases)
+│   └── SharedDeployment.cs          # Shared-services (Keycloak + Tailscale) orchestrator
+├── Ecs/                             # ECS + ALB topology
+│   ├── AwsEcsPlatformFactory.cs     # Implements IAwsPlatformFactory
 │   ├── AwsEcsNetworkComponent.cs    # VPC, subnets, NAT, ALBs, security groups, DNS, certs
 │   ├── AwsEcsClusterComponent.cs    # ECS cluster, Cloud Map namespace
 │   ├── AwsRdsComponent.cs           # RDS PostgreSQL + system secret
 │   ├── AwsEfsComponent.cs           # EFS + mount targets
-│   ├── AwsEcsServiceComponent.cs    # System-level ECS service (task def, TG, listener rule)
+│   ├── AwsEcsServiceComponent.cs    # System-level ECS service
 │   ├── AwsEcsTenantServiceComponent.cs  # Per-tenant dedicated ECS service
 │   ├── AwsKeycloakEcsComponent.cs   # Keycloak ECS task + service + listener rules
 │   ├── AwsCloudFrontComponent.cs    # CloudFront + S3 + OAC + DNS records
 │   ├── AwsSesComponent.cs           # SES domain identity, DKIM, SMTP user, credentials
 │   ├── AwsTenantDataComponent.cs    # Per-tenant EFS access points + tenant secret
 │   ├── AwsTailscaleAsgComponent.cs  # Tailscale EC2 ASG subnet router
-│   ├── AwsGateCheckerLambdaComponent.cs  # Lambda for VPC-internal gate checks
 │   ├── AwsSeedTaskComponent.cs      # ECS task definition for data seeding
 │   ├── AwsTransitionChecker.cs      # Gate-check via Secrets Manager / Lambda
 │   ├── AwsFoundationPostDeployAction.cs  # DB init, Keycloak seed, OIDC secret storage
 │   ├── AwsServicesPostDeployAction.cs    # Docker build/push/scale per-service
-│   ├── AwsEcsPostDeployHelper.cs    # Shared ECS task runner + service scaler
-│   └── AwsStateBootstrapper.cs      # S3 bucket + KMS key bootstrap (idempotent)
+│   ├── AwsTenantKeycloakSeeder.cs   # Per-tenant realm seeder (ITenantKeycloakSeeder)
+│   └── ...
+├── AppRunner/                       # AppRunner topology (serverless containers)
+├── EcsExpress/                      # ECS in public subnets (no NAT)
+├── Lambda/                          # Gate-checker + theme-deploy Lambdas
 ├── Keycloak/                        # Keycloak admin client + seeder
-│   ├── KeycloakAdminClient.cs       # REST client for Keycloak admin API
-│   └── KeycloakSeeder.cs            # Realm/client/role/group seeder
-├── Lambda/                          # Lambda + API Gateway topology (Phase 4 — planned)
-└── Auth/
-    └── AwsSsoValidator.cs           # Pre-flight SSO token check
+├── Tailscale/                       # Tailscale API client + post-deploy
+├── Docker/                          # Shared docker build/push helpers
+├── DynamoDB/                        # Per-tenant table provisioning
+├── Webapp/                          # Blazor WASM S3 bucket provisioning
+├── Shared/                          # Cross-topology shared components
+└── AwsStateBootstrapper.cs          # S3 bucket + KMS key bootstrap (idempotent)
 ```
 
 ### Lz.Azure — Azure Pulumi Components
@@ -368,68 +421,197 @@ public interface ITenantDataOutputs : IFileStorageOutputs
     Output<string> DatabaseName { get; }           // per-tenant database name
 }
 
-// Tailscale subnet router — EC2 ASG advertising VPC CIDR
-public interface ITailscaleComponent
-{
-    ITailscaleOutputs Deploy(
-        SystemConfig config,
-        INetworkOutputs network,
-        IFileStorageOutputs fileStorage);
-}
-
-public interface ITailscaleOutputs
-{
-    Output<string> AutoScalingGroupId { get; }
-}
 ```
 
 ### Platform Factory
 
+The platform-neutral core factory carries only shape-named capabilities:
+
 ```csharp
+// Lz.Core/Interfaces/IPlatformFactory.cs
 public interface IPlatformFactory
 {
-    // System-level components
+    // Shape-named components
     ISystemNetworkComponent CreateNetwork();
     IDatabaseComponent CreateDatabase();
     IFileStorageComponent CreateFileStorage();
     IComputeEnvironmentComponent CreateComputeEnvironment();
-    IServiceComponent CreateService();              // system-level default services
+    IServiceComponent CreateService();
     IAuthServiceComponent CreateAuthService();
     IEmailComponent CreateEmail();
-
-    // Per-tenant components
     ITenantCdnComponent CreateTenantCdn();
     ITenantDataComponent CreateTenantData();
-    ITenantServiceComponent CreateTenantService();   // per-tenant dedicated services
+    ITenantServiceComponent CreateTenantService();
 
-    // Optional components (return null if not supported/configured)
-    ITailscaleComponent? CreateTailscale();          // Tailscale subnet router ASG
-    IGateCheckerComponent? CreateGateChecker();      // Lambda for VPC-internal gate checks
-    ISeedTaskComponent? CreateSeedTask();            // ECS task for data seeding
+    // Shape-named optional components
+    ISeedTaskComponent? CreateSeedTask();
+
+    // Shape-named runners
+    IConfigInitRunner? GetConfigInitRunner();
+    IPostSeedRunner? GetPostSeedRunner();
+    IAdminSetupRunner? GetAdminSetupRunner();
 
     // Post-deploy actions
     IPostDeployAction? GetFoundationPostDeployAction();
+    IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system);
     IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system,
-        IReadOnlyList<ServiceDefinition> services);
+        IReadOnlyList<ServiceDefinition> services,
+        string? tenantKey = null,
+        TenantConfig? tenantConfig = null);
 
-    // Transition checking
+    // Misc
     ITransitionChecker CreateTransitionChecker();
+    void DeployTenantDnsAndCert(TenantConfig tenant, INetworkOutputs network, ICdnOutputs? cdn = null);
+    Task CleanupBeforeFoundationAsync() => Task.CompletedTask;
+
+    (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
+     IDatabaseOutputs Database, IFileStorageOutputs FileStorage)
+        LookupFoundation(SystemConfig config);
 }
 ```
 
-Factory selection is driven by platform + topology configuration:
+AWS-named capabilities live on a platform-extended factory in `Lz.Aws`:
 
 ```csharp
-IPlatformFactory factory = (config.Platform, config.Topology) switch
+// Lz.Aws/Interfaces/IAwsPlatformFactory.cs
+public interface IAwsPlatformFactory : IPlatformFactory
 {
-    ("aws", "ecs")          => new AwsEcsPlatformFactory(),
-    ("aws", "lambda")       => new AwsLambdaPlatformFactory(),
-    ("azure", "containers") => new AzureContainerAppsPlatformFactory(),
-    ("azure", "functions")  => new AzureFunctionsPlatformFactory(),
-    _ => throw new ArgumentException($"Unsupported: {config.Platform}/{config.Topology}")
+    ITailscaleComponent? CreateTailscale();
+    Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig);
+    IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null);
+    ITailscaleKeyManager? GetTailscaleKeyManager();
+    ITenantKeycloakSeeder? GetTenantKeycloakSeeder();
+    IGateCheckerComponent? CreateGateChecker();
+    string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey);
+}
+```
+
+AWS orchestration code (`Lz.Aws/Orchestration/`) holds a
+platform-neutral `IPlatformFactory` reference and casts to
+`IAwsPlatformFactory` only when it needs the AWS-named capabilities:
+
+```csharp
+private IAwsPlatformFactory? AwsFactory => _factory as IAwsPlatformFactory;
+// ...
+var keyManager = AwsFactory?.GetTailscaleKeyManager();
+```
+
+Factory selection dispatches by platform, then delegates to the platform
+library's topology registry:
+
+```csharp
+IPlatformFactory factory = config.Platform switch
+{
+    "aws"   => Lz.Aws.Topologies.AwsTopologies.Get(config.Topology).CreateFactory(config),
+    "azure" => /* Lz.Azure.Topologies.AzureTopologies.Get(...)  — when Azure lands */,
+    _ => throw new ArgumentException($"Unsupported platform: {config.Platform}")
 };
 ```
+
+## Topology Descriptors
+
+A **topology** is a named, fixed bundle of cloud-component choices —
+compute primitive, database, file storage, auth service, network shape,
+VPN presence, etc. — that deploy as a coherent unit. Topology registries
+live in platform libraries; each entry fully specifies what the topology
+bundles, so readers don't have to archaeologize a factory body to
+understand what `Topology: ecs-fargate-keycloak` means.
+
+### AWS topologies
+
+Defined in [`Lz.Aws/Topologies/AwsTopologies.cs`](Lz.Aws/Topologies/AwsTopologies.cs):
+
+| Name | Compute | Data | File Storage | Auth | VPC | VPN | Central auth |
+|---|---|---|---|---|---|---|---|
+| `ecs-fargate-keycloak` | Fargate (private) | RDS | EFS | Keycloak | private | Tailscale | yes |
+| `ecs-fargate-cognito-dynamodb` | Fargate (public) | DynamoDB | S3 | Cognito | public | — | — |
+| `apprunner` | AppRunner | DynamoDB | S3 | Cognito | — | — | — |
+
+Each descriptor carries:
+- **Axis flags** (`Compute`, `Data`, `FileStorage`, `Auth`, `HasPrivateNetwork`,
+  `UsesVpn`, `UsesCentralAuth`, `UsesInVpcGateChecker`, `UsesSeedTask`) so
+  callers can ask "does this topology use VPN?" without pattern-matching
+  the topology name.
+- **`CreateFactory`** — the factory builder, invoked once per deployment
+  after config load.
+- **`ValidateConfig`** — optional topology-specific config validation (e.g.
+  `ecs-fargate-keycloak` requires `VpcCidr` and `CentralAuthDomain`).
+  Invoked by the CLI after systemconfig parsing, before factory construction.
+
+Topologies are **not** composed from orthogonal axes. `AppRunner + EFS` is
+not a real AWS topology (AppRunner can't mount EFS), so we don't pretend
+axes are independent. Each descriptor pins every axis, and callers select
+by name.
+
+### Extending and overriding topologies in a plugin
+
+Systems can contribute their own topologies from the `Deploy/` plugin via
+the `ILzPlugin.RegisterTopologies()` hook. The CLI calls this once at
+startup, before any factory is resolved.
+
+Three patterns:
+
+**Add a new topology** — plugin registers a descriptor under a name the
+built-ins don't use.
+
+```csharp
+// in BCProjNew/Deploy/BCPlugin.cs
+public void RegisterTopologies()
+{
+    AwsTopologies.Register(new AwsTopology
+    {
+        Name = "bc-custom",
+        Summary = "BC-specific topology",
+        // ... axis flags, CreateFactory, ValidateConfig ...
+    });
+}
+```
+
+**Derive from a built-in** — plugin reuses the axis flags of an existing
+topology but wires different component implementations. Works well when
+you subclass an existing `IAwsPlatformFactory` and override a few methods.
+
+```csharp
+// in BCProjNew/Deploy/BcCustomPlatformFactory.cs
+public class BcCustomPlatformFactory : AwsEcsExpressPlatformFactory
+{
+    public BcCustomPlatformFactory(SystemConfig config) : base(config) { }
+
+    public override ITenantCdnComponent CreateTenantCdn()
+        => new BcCustomCloudFrontComponent();
+}
+
+// in BCProjNew/Deploy/BCPlugin.cs
+public void RegisterTopologies()
+{
+    AwsTopologies.Register(AwsTopologies.DeriveFrom(
+        AwsTopologies.EcsFargateCognitoDynamodb,
+        name: "bc-fargate-cognito",
+        summary: "BC variant with custom CloudFront KVS layout",
+        createFactory: cfg => new BcCustomPlatformFactory(cfg)));
+}
+```
+
+The `DeriveFrom` helper copies axis flags, description, and
+`ValidateConfig` from the base; override any of them by passing the
+optional parameter.
+
+**Override a built-in by name** — intentionally replace what an existing
+topology name means for this system. Requires `allowOverride: true` to
+prevent accidental shadowing. Prefer `DeriveFrom` with a new name where
+possible — an override means the YAML no longer tells the reader what
+will actually deploy.
+
+```csharp
+AwsTopologies.Register(myReplacement, allowOverride: true);
+```
+
+To support subclassing, all `Create*` / `Get*` methods on the built-in
+AWS platform factories (`AwsEcsPlatformFactory`,
+`AwsAppRunnerPlatformFactory`, `AwsEcsExpressPlatformFactory`) are
+`virtual`. Plugins override only the components they care to replace;
+everything else inherits from the base factory.
 
 ## System Definition Model
 
@@ -470,8 +652,8 @@ public abstract class SystemDefinition
     protected ServiceDefinition? GetService(string name)
         => Services.FirstOrDefault(s => s.Name == name);
 
-    protected void UseKeycloak(string[] realms) { ... }
-    protected void UseTailscale() { ... }
+    protected void UseAuth(string[] realms) { ... }
+    protected void UseVpn() { ... }
 }
 ```
 
@@ -574,9 +756,9 @@ public class MonroSystem : SystemDefinition
             },
         });
 
-        // Auth and VPN
-        UseKeycloak(new[] { "adminsauth", "usersauth" });
-        UseTailscale();
+        // Auth and VPN (vendor-neutral — platform library decides what a realm is)
+        UseAuth(new[] { "adminsauth", "usersauth" });
+        UseVpn();
 
         // Foundation gates defined via FoundationInfraGates and FoundationGates
         // (e.g., systemconfig exists, keycloakconfig exists, SES credentials,
@@ -637,9 +819,9 @@ SystemDomain: "myprojectdev.click"
 # DefaultTenant — default tenancy for local development
 DefaultTenant: "myprojectdev.click"
 
-# Platform and topology (NEW — not in current config)
-Platform: aws                            # aws | azure
-Topology: ecs                            # ecs | lambda | containers | functions
+# Platform and topology — topology names are registered in Lz.Aws.Topologies.AwsTopologies
+Platform: aws                            # aws (azure planned)
+Topology: ecs-fargate-keycloak           # ecs-fargate-keycloak | ecs-fargate-cognito-dynamodb | apprunner
 
 # Pulumi state — auto-generated from SystemSuffix at load time. Not in YAML.
 # Generated:  s3://myproject-dev-pulumi-state-496a-ffff?region=us-west-2
@@ -875,7 +1057,7 @@ RequestRewriter:
 ### How Deployment Uses Both Files
 
 ```
-lz deployfoundation
+lz deploysystem
   → resolves env from folder hierarchy (_Dev → dev) or --env flag
   → discovers systemconfig.*.{env}.yaml (auto-selects if only one)
   → extracts: SystemSuffix, Profile, Region, SystemDomain, ECS section
@@ -883,7 +1065,7 @@ lz deployfoundation
   → deploys runtime config to EFS (Integrations, AuthConfigs, etc.)
 
 lz deploytenant
-  → resolves env and systemkey (same as deployfoundation)
+  → resolves env and systemkey (same as deploysystem)
   → discovers tenantconfig.{sk}.*.{env}.yaml files (deploys each)
   → reads tenantconfig for: RootDomain, TenantSuffix, ECS overrides, etc.
   → deploys: CloudFront, S3, DNS, per-tenant EFS access points, per-tenant ECS services
@@ -915,7 +1097,7 @@ The `lz` command is a .NET global tool (`Lz.Cli`) that provides zero-flag deploy
 
 ```
 lz deployshared                          # Deploy shared-services (Keycloak + Tailscale)
-lz deployfoundation [--systemkey] [--env] [--platform] [--topology]
+lz deploysystem [--systemkey] [--env] [--platform] [--topology]
 lz deploytenant [--systemkey] [--env] [--tenantkey]
 lz destroy --phase shared|foundation|tenant [--systemkey] [--env] [--tenantkey]
 lz status [--systemkey] [--env]
@@ -942,7 +1124,7 @@ The folder hierarchy walk starts at the current working directory and traverses 
 | 1 | `--systemkey <value>` | `--systemkey med` |
 | 2 | File discovery: `systemconfig.*.{env}.yaml` | One match → auto-select; multiple → deploy all |
 
-File discovery searches upward from the current directory for `systemconfig.*.{env}.yaml`. If a single file matches, its system key is used automatically. If multiple match, the command deploys all of them (e.g., `deployfoundation` deploys each system). If none match, the command errors.
+File discovery searches upward from the current directory for `systemconfig.*.{env}.yaml`. If a single file matches, its system key is used automatically. If multiple match, the command deploys all of them (e.g., `deploysystem` deploys each system). If none match, the command errors.
 
 #### TenantKey Resolution (deploytenant only)
 
@@ -967,7 +1149,7 @@ _Dev/
 From `_Dev/Monro-New/`:
 
 ```bash
-lz deployfoundation                # env=dev (from _Dev), sk=med (only match), deploys foundation
+lz deploysystem                # env=dev (from _Dev), sk=med (only match), deploys foundation
 lz deploytenant                    # env=dev, sk=med, deploys meadows + acme
 lz deploytenant --tenantkey meadows  # env=dev, sk=med, deploys only meadows
 lz status                          # env=dev, sk=med, shows foundation + all tenant status
@@ -996,7 +1178,7 @@ public interface ILzPlugin
 }
 ```
 
-Core commands (`deployshared`, `deployfoundation`, `deploytenant`, `destroy`, `status`) are built into `Lz.Cli` and require a plugin only for the `PrepareSystem` step (creating the `SystemDefinition`). The `deployshared` command does not require a plugin.
+Core commands (`deployshared`, `deploysystem`, `deploytenant`, `destroy`, `status`) are built into `Lz.Cli` and require a plugin only for the `PrepareSystem` step (creating the `SystemDefinition`). The `deployshared` command does not require a plugin.
 
 ## Deployment Orchestration
 
@@ -1062,7 +1244,7 @@ public class SystemDeployment
 The CLI drives iteration:
 
 ```csharp
-// deployfoundation handler — iterates all discovered system configs
+// deploysystem handler — iterates all discovered system configs
 var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
 var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
 

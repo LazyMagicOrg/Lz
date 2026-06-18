@@ -32,17 +32,8 @@ public class AzureContainerAppsPlatformFactory : IPlatformFactory
     public ITenantServiceComponent CreateTenantService()
         => throw new NotImplementedException("Azure tenant service not yet implemented.");
     public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
-    public Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
-
-    public ITailscaleComponent? CreateTailscale() => null;
 
     public IPostDeployAction? GetFoundationPostDeployAction() => null;
-
-    public IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
-
-    public ITailscaleKeyManager? GetTailscaleKeyManager() => null;
-
-    public ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
 
     public IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system) => null;
 
@@ -61,11 +52,7 @@ public class AzureContainerAppsPlatformFactory : IPlatformFactory
 
     public IAdminSetupRunner? GetAdminSetupRunner() => null;
 
-    public IGateCheckerComponent? CreateGateChecker() => null;
-
     public ISeedTaskComponent? CreateSeedTask() => null;
-
-    public string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey) => null;
 
     public (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
         IDatabaseOutputs Database, IFileStorageOutputs FileStorage)

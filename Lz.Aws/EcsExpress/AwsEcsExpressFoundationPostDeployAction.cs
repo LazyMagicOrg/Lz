@@ -8,6 +8,14 @@ namespace Lz.Aws.EcsExpress;
 /// Foundation post-deploy: creates the system-level DynamoDB table.
 /// Table name = {SystemKey} (e.g., "bcs").
 /// Idempotent — skips if table already exists.
+/// <para>
+/// Per-client Cognito Managed Login branding (required by
+/// ManagedLoginVersion=2) is now created declaratively as a
+/// ManagedLoginBranding resource in AwsAppRunnerCognitoComponent —
+/// available since Pulumi.Aws 7.x. Earlier 6.x revisions of this
+/// post-deploy action created the branding imperatively via the AWS
+/// SDK; that fallback is no longer needed.
+/// </para>
 /// </summary>
 public class AwsEcsExpressFoundationPostDeployAction : IPostDeployAction
 {

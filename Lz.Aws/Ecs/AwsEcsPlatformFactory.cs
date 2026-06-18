@@ -1,7 +1,9 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using Lz.Aws.Lambda;
 using Lz.Aws.Tailscale;
 
@@ -13,7 +15,7 @@ namespace Lz.Aws.Ecs;
 /// Platform factory for AWS ECS + ALB topology.
 /// Creates AWS-specific component implementations.
 /// </summary>
-public class AwsEcsPlatformFactory : IPlatformFactory
+public class AwsEcsPlatformFactory : IAwsPlatformFactory
 {
     private readonly SystemConfig _config;
 
@@ -22,34 +24,34 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         _config = config;
     }
 
-    public ISystemNetworkComponent CreateNetwork()
+    public virtual ISystemNetworkComponent CreateNetwork()
         => new AwsEcsNetworkComponent();
-    public IDatabaseComponent CreateDatabase()
+    public virtual IDatabaseComponent CreateDatabase()
         => new AwsRdsComponent();
-    public IFileStorageComponent CreateFileStorage()
+    public virtual IFileStorageComponent CreateFileStorage()
         => new AwsEfsComponent();
-    public IComputeEnvironmentComponent CreateComputeEnvironment()
+    public virtual IComputeEnvironmentComponent CreateComputeEnvironment()
         => new AwsEcsClusterComponent();
-    public IServiceComponent CreateService()
+    public virtual IServiceComponent CreateService()
         => new AwsEcsServiceComponent(_config);
-    public IAuthServiceComponent CreateAuthService()
+    public virtual IAuthServiceComponent CreateAuthService()
         => new AwsKeycloakEcsComponent();
-    public IEmailComponent CreateEmail()
+    public virtual IEmailComponent CreateEmail()
         => new AwsSesComponent();
-    public ITenantCdnComponent CreateTenantCdn()
+    public virtual ITenantCdnComponent CreateTenantCdn()
         => new AwsCloudFrontComponent();
-    public ITenantDataComponent CreateTenantData()
+    public virtual ITenantDataComponent CreateTenantData()
         => new AwsTenantDataComponent();
-    public ITenantServiceComponent CreateTenantService()
+    public virtual ITenantServiceComponent CreateTenantService()
         => new AwsEcsTenantServiceComponent();
 
-    public void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null)
+    public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null)
         => new AwsTenantDnsAndCertComponent().Deploy(tenantConfig, network, cdn);
 
-    public ITailscaleComponent? CreateTailscale()
+    public virtual ITailscaleComponent? CreateTailscale()
         => new AwsTailscaleAsgComponent();
 
-    public async Task CleanupBeforeFoundationAsync()
+    public virtual async Task CleanupBeforeFoundationAsync()
     {
         // Clean up stale records from the old private zone if its name changed.
         // Pulumi can't delete a Route53 zone that has non-NS/SOA records created
@@ -59,17 +61,17 @@ public class AwsEcsPlatformFactory : IPlatformFactory
             _config.SystemKey, expectedZoneName, _config.Profile, _config.Region);
     }
 
-    public IPostDeployAction? GetFoundationPostDeployAction()
+    public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new AwsFoundationPostDeployAction(_config);
 
-    public async Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig)
+    public virtual async Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig)
     {
         // Retrieve Tailscale API key from shared/system secret
         string? apiKey = null;
         try
         {
-            var profile = _config.SharedProfile ?? _config.Profile;
-            var region = _config.SharedRegion ?? _config.Region;
+            var profile = _config.Aws().SharedProfile ?? _config.Profile;
+            var region = _config.Aws().SharedRegion ?? _config.Region;
             var entries = await AwsAccountResolver.ReadSecretEntriesAsync(
                 profile, region, "shared/system", "tailscale-api-key");
             entries.TryGetValue("tailscale-api-key", out apiKey);
@@ -100,7 +102,7 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         foreach (var (domain, resolvers) in splitDnsEntries)
             Console.WriteLine($"  {domain} → {resolvers[0]}");
 
-        using var client = new Tailscale.TailscaleApiClient(apiKey);
+        using var client = new Lz.Core.Tailscale.TailscaleApiClient(apiKey);
         await client.SetSplitDnsAsync(splitDnsEntries);
 
         Console.ForegroundColor = ConsoleColor.Green;
@@ -108,16 +110,16 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         Console.ResetColor();
     }
 
-    public IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null)
+    public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null)
         => new AwsTailscalePostDeployAction(_config, system);
 
-    public ITailscaleKeyManager? GetTailscaleKeyManager()
+    public virtual ITailscaleKeyManager? GetTailscaleKeyManager()
         => new AwsTailscalePostDeployAction(_config);
 
-    public ITenantKeycloakSeeder? GetTenantKeycloakSeeder()
+    public virtual ITenantKeycloakSeeder? GetTenantKeycloakSeeder()
         => new AwsTenantKeycloakSeeder(_config);
 
-    public IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system)
+    public virtual IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system)
     {
         var foundationServices = system.FoundationLayerServices;
         if (foundationServices.Count == 0 || !foundationServices.Any(s => s.Docker != null))
@@ -125,32 +127,32 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         return new AwsServicesPostDeployAction(_config, system, foundationServices);
     }
 
-    public IPostDeployAction? GetServiceDeployAction(
+    public virtual IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system,
         IReadOnlyList<ServiceDefinition> services,
         string? tenantKey = null,
         TenantConfig? tenantConfig = null)
         => new AwsServicesPostDeployAction(_config, system, services, tenantKey, tenantConfig);
 
-    public IConfigInitRunner? GetConfigInitRunner()
+    public virtual IConfigInitRunner? GetConfigInitRunner()
         => new AwsLambdaConfigInitRunner(_config);
 
-    public IPostSeedRunner? GetPostSeedRunner()
+    public virtual IPostSeedRunner? GetPostSeedRunner()
         => new AwsLambdaPostSeedRunner(_config);
 
-    public IAdminSetupRunner? GetAdminSetupRunner()
+    public virtual IAdminSetupRunner? GetAdminSetupRunner()
         => new AwsLambdaAdminSetupRunner(_config);
 
-    public ITransitionChecker CreateTransitionChecker()
+    public virtual ITransitionChecker CreateTransitionChecker()
         => new AwsTransitionChecker(_config);
 
-    public IGateCheckerComponent? CreateGateChecker()
+    public virtual IGateCheckerComponent? CreateGateChecker()
         => new AwsGateCheckerLambdaComponent();
 
-    public ISeedTaskComponent? CreateSeedTask()
+    public virtual ISeedTaskComponent? CreateSeedTask()
         => _config.SeedData != null ? new AwsSeedTaskComponent() : null;
 
-    public string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey)
+    public virtual string? CreateSeedBucket(SharedConfig sharedConfig, string systemKey)
     {
         var bucketName = sharedConfig.SeedData?.Bucket
             ?? $"{systemKey}--seeddata-{sharedConfig.SharedSuffix}";
@@ -207,10 +209,10 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         });
 
         // Cross-account bucket policy — grant trusted accounts access
-        if (sharedConfig.TrustedAccountIds.Count > 0)
+        if (sharedConfig.Aws().TrustedAccountIds.Count > 0)
         {
             var principals = string.Join(",",
-                sharedConfig.TrustedAccountIds.Select(id => $"\"arn:aws:iam::{id}:root\""));
+                sharedConfig.Aws().TrustedAccountIds.Select(id => $"\"arn:aws:iam::{id}:root\""));
 
             new Pulumi.Aws.S3.BucketPolicy($"{systemKey}-seeddata-policy", new Pulumi.Aws.S3.BucketPolicyArgs
             {
@@ -242,7 +244,7 @@ public class AwsEcsPlatformFactory : IPlatformFactory
         return bucketName;
     }
 
-    public (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
+    public virtual (INetworkOutputs Network, IComputeEnvironmentOutputs Compute,
         IDatabaseOutputs Database, IFileStorageOutputs FileStorage)
         LookupFoundation(SystemConfig config)
         => AwsFoundationLookup.Lookup(config);

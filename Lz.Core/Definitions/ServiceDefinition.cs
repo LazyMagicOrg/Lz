@@ -17,7 +17,7 @@ public enum ServiceLayer
 {
     /// <summary>
     /// Foundation-level services shared across all tenants.
-    /// Deployed during deployfoundation, not per-tenant.
+    /// Deployed during deploysystem, not per-tenant.
     /// Examples: LiveKit SFU, shared message broker.
     /// </summary>
     Foundation,

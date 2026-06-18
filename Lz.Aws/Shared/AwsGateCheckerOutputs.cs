@@ -1,3 +1,5 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
 

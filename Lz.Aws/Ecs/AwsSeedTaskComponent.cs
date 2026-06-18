@@ -379,7 +379,7 @@ public class AwsSeedTaskComponent : ComponentResource, ISeedTaskComponent
         return new AwsSeedTaskOutputs
         {
             TaskFamily = taskDef.Family,
-            EcrRepositoryUrl = ecr.RepositoryUrl,
+            ContainerImageRepositoryUrl = ecr.RepositoryUrl,
             TaskDefinitionArn = taskDef.Arn,
             TaskRoleArn = taskRole.Arn,
             ExecutionRoleArn = executionRole.Arn,

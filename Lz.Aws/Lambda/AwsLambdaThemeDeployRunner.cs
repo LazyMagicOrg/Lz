@@ -1,3 +1,5 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Interfaces;
 using System.IO.Compression;
 using System.Text.Json;
 using Amazon.Lambda;
@@ -6,6 +8,7 @@ using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 
 namespace Lz.Aws.Lambda;
@@ -225,8 +228,8 @@ public class AwsLambdaThemeDeployRunner : IThemeDeployRunner
     /// </summary>
     private (string region, string? profile) GetSharedCredentials()
     {
-        var region = _config.SharedRegion ?? _config.Region;
-        var profile = _config.SharedProfile ?? _config.Profile;
+        var region = _config.Aws().SharedRegion ?? _config.Region;
+        var profile = _config.Aws().SharedProfile ?? _config.Profile;
         return (region, profile);
     }
 

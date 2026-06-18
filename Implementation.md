@@ -9,23 +9,26 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   ├── Lz.slnx
   ├── Lz.Core/
   │   ├── Lz.Core.csproj                  # net10.0
+  ├── LzVersion.props                       # Single shared version for all Lz.* packages
+  ├── Lz.Core/                              # Platform-neutral: speaks in shapes, never AWS/Azure
+  │   ├── Lz.Core.csproj                    # net10.0
   │   ├── Config/
-  │   │   ├── SystemConfig.cs             # Full model for systemconfig.{systemkey}.{env}.yaml
-  │   │   ├── TenantConfig.cs             # Full model for tenantconfig.{systemkey}.{tenantkey}.{env}.yaml
-  │   │   │                               #   Includes RootDomain, HostedZoneId, AcmCertificateArn,
-  │   │   │                               #   Behaviors, Subtenants (merged from former TenantRegistryEntry)
-  │   │   ├── SubtenantEntry.cs           # Subtenant entry with SubDomain and Behaviors
-  │   │   ├── SharedConfig.cs             # Shared-services config (sharedconfig.yaml)
-  │   │   ├── BehaviorsConfig.cs          # Behaviors hierarchy (APIs, Assets, WebApps)
-  │   │   ├── EcsConfig.cs               # ECS deployment section (shared system/tenant)
-  │   │   ├── CdnConfig.cs               # CDN section (shared system/tenant)
-  │   │   ├── StateConfig.cs             # Pulumi backend + secrets provider
-  │   │   ├── RuntimeConfig.cs           # Runtime sections (Integrations, AuthConfigs, etc.)
-  │   │   ├── ConfigLoader.cs            # YAML discovery, parsing, filename convention
-  │   │   └── ConfigMerger.cs            # Merges system defaults with tenant overrides
-  │   ├── Definitions/                     # SystemDefinition, ServiceDefinition, etc.
-  │   ├── Interfaces/                      # IPlatformFactory, component interfaces, outputs
-  │   ├── Orchestration/                   # SystemDeployment, SharedDeployment, TransitionGate
+  │   │   ├── SystemConfig.cs               # Base; AWS fields live on AwsSystemConfig
+  │   │   ├── TenantConfig.cs               # Base; AWS fields live on AwsTenantConfig
+  │   │   ├── SharedConfig.cs               # Base; AWS fields live on AwsSharedConfig
+  │   │   ├── SubtenantEntry.cs             # Subtenant entry with SubDomain and Behaviors
+  │   │   ├── BehaviorsConfig.cs            # Behaviors hierarchy (APIs, Assets, WebApps)
+  │   │   ├── CdnConfig.cs                  # CDN section (generic)
+  │   │   ├── StateConfig.cs                # Pulumi backend + secrets provider
+  │   │   ├── SeedDataConfig.cs             # Seed-bucket shape
+  │   │   ├── RuntimeConfig.cs              # Runtime sections (AuthConfigs, Integrations, etc.)
+  │   │   ├── ConfigLoader.cs               # Platform-gated YAML discovery + parsing
+  │   │   ├── ConfigMerger.cs               # Generic merges only (AWS merges live in AwsConfigMerger)
+  │   │   ├── ConfigValidator.cs            # Required-field validation
+  │   │   └── IConfigExtensions.cs          # Platform hook for contributing type mappings
+  │   ├── Definitions/                      # SystemDefinition (UseAuth/UseVpn), ServiceDefinition, etc.
+  │   ├── Interfaces/                       # IPlatformFactory (shape-named only) + component contracts
+  │   ├── Orchestration/                    # PulumiPathResolver, StackOutputReader, TransitionGate
   │   ├── Plugin/
   │   │   └── ILzPlugin.cs               # Plugin contract for system-specific DLLs
   │   └── Validation/                      # TopologyValidator
@@ -59,18 +62,48 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   ├── ContainerApps/                   # AzureContainerAppsPlatformFactory + components
   │   ├── Functions/                       # AzureFunctionsPlatformFactory + components
   │   └── Shared/                          # AzurePostgresComponent, AzureFrontDoorComponent, etc.
+  │   │   └── ILzPlugin.cs                  # Plugin contract for system-specific DLLs
+  │   └── Validation/                       # TopologyValidator
+  ├── Lz.Aws/                               # AWS-specific: ECS/AppRunner, Cognito, Tailscale, Keycloak
+  │   ├── Lz.Aws.csproj                     # net10.0, depends on Lz.Core + Pulumi.Aws
+  │   ├── Config/
+  │   │   ├── AwsSystemConfig.cs            # ECS/AppRunner/SharedSecretArn/TrustedAccountIds/...
+  │   │   ├── AwsTenantConfig.cs            # ECS/AppRunner/AcmCertificateArn/HostedZoneId/...
+  │   │   ├── AwsSharedConfig.cs            # Keycloak/Tailscale sizing/TrustedAccountIds
+  │   │   ├── AwsAuthConfigEntry.cs         # Cognito MFA/password/groups/advanced-security
+  │   │   ├── EcsConfig.cs                  # ECS deployment section
+  │   │   ├── AppRunnerConfig.cs            # AppRunner deployment section
+  │   │   ├── KeycloakSeedConfig.cs         # Keycloak seed model
+  │   │   ├── BootstrapCredsConfig.cs       # SMTP/Keycloak bootstrap creds
+  │   │   ├── AwsConfigExtensions.cs        # IConfigExtensions: registers all AWS type mappings
+  │   │   ├── AwsConfigMerger.cs            # GetEffectiveEcsConfig and other AWS merges
+  │   │   ├── AwsKeycloakConfigLoader.cs    # camelCase Keycloak/creds YAML loaders
+  │   │   └── AwsConfigCast.cs              # .Aws() extension helpers
+  │   ├── Interfaces/                       # IAwsPlatformFactory + AWS-named capabilities
+  │   ├── Orchestration/                    # SystemDeployment, SharedDeployment (AWS-ECS-shaped)
+  │   ├── Ecs/                              # ECS + ALB topology components
+  │   ├── AppRunner/                        # AppRunner topology components
+  │   ├── EcsExpress/                       # ECS in public subnets (no NAT)
+  │   ├── Lambda/                           # Gate-checker + theme-deploy Lambdas
+  │   ├── Keycloak/                         # Keycloak admin client + seeder
+  │   ├── Tailscale/                        # Tailscale API client + post-deploy
+  │   ├── Docker/                           # Shared docker build/push helpers
+  │   ├── DynamoDB/                         # Per-tenant table provisioning
+  │   ├── Webapp/                           # Blazor WASM S3 bucket provisioning
+  │   └── Shared/                           # Cross-topology shared components
+  ├── Lz.Azure/
+  │   └── Stubs/AzureStubPlatformFactory.cs # IPlatformFactory stub — throws NotImplementedException
   ├── Lz.Cli/
-  │   ├── Lz.Cli.csproj                   # dotnet global tool: <PackAsTool>, <ToolCommandName>lz
-  │   ├── Program.cs                       # CLI: deployshared, deployfoundation, deploytenant,
-  │   │                                    #   destroy, status + plugin commands
-  │   ├── ConfigResolver.cs               # Smart env/systemkey/tenant resolution
-  │   └── PluginLoader.cs                 # Discovers plugin DLL (convention or lz.json)
+  │   ├── Lz.Cli.csproj                     # dotnet global tool: <PackAsTool>, <ToolCommandName>lz
+  │   ├── Program.cs                        # CLI: deployshared, deploysystem, deploytenant, ...
+  │   └── PluginLoader.cs                   # Discovers plugin DLL (convention or lz.json)
+  ├── Lz.Runner/                            # Thin dispatcher — resolves newest Lz.Cli.*.nupkg from NuGet feeds
+  ├── Lz.Gen/                               # Model-driven code generation (ported from LazyMagicMDD)
   └── Lz.Tests/
       ├── Lz.Tests.csproj
-      ├── Orchestration.Tests/             # Unit tests with mocked components
-      ├── Config.Tests/                    # YAML parsing tests
-      ├── Validation.Tests/                # Topology validation tests
-      └── Integration/                     # Optional: real cloud integration tests
+      ├── Config.Tests/                     # YAML parsing + derived-type round-trip tests
+      ├── Orchestration.Tests/              # Unit tests with mocked components
+      └── Validation.Tests/                 # Topology validation tests
 
 
 System repo (system-specific plugin — loaded at runtime by Lz.Cli):
@@ -590,7 +623,7 @@ Convention-based discovery makes `lz.json` optional — just name your plugin pr
 
 The DLL is loaded via `Assembly.LoadFrom` with an `AssemblyDependencyResolver` for plugin-specific deps. The first `ILzPlugin` implementation is instantiated.
 
-Core commands (`deployshared`, `deployfoundation`, etc.) are built into `Lz.Cli`. Plugin commands (e.g., `seed`) are registered via `ILzPlugin.RegisterCommands(RootCommand)`.
+Core commands (`deployshared`, `deploysystem`, etc.) are built into `Lz.Cli`. Plugin commands (e.g., `seed`) are registered via `ILzPlugin.RegisterCommands(RootCommand)`.
 
 ### Lz.Cli/Program.cs
 
@@ -616,10 +649,10 @@ plugin?.RegisterCommands(rootCommand);
 Each command handler follows the same pattern:
 
 ```csharp
-// deployfoundation handler
+// deploysystem handler
 cmd.SetHandler(async (systemKey, env, platform, topology) =>
 {
-    RequirePlugin(plugin, "deployfoundation");
+    RequirePlugin(plugin, "deploysystem");
     var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
     var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
 
@@ -636,7 +669,7 @@ cmd.SetHandler(async (systemKey, env, platform, topology) =>
 
 Each account needs a state bucket and encryption key before the first deployment. This is a one-time setup, deliberately kept outside Pulumi (bootstrap problem).
 
-**Current implementation:** `AwsStateBootstrapper.BootstrapAsync()` in `Lz.Aws` handles this automatically. It is called at the start of `deployshared` and `deployfoundation` (in `Program.cs`) before the Pulumi orchestrator runs. The bootstrapper is idempotent — it creates the S3 bucket and KMS key only if they don't already exist. No separate `lz bootstrap` command is needed.
+**Current implementation:** `AwsStateBootstrapper.BootstrapAsync()` in `Lz.Aws` handles this automatically. It is called at the start of `deployshared` and `deploysystem` (in `Program.cs`) before the Pulumi orchestrator runs. The bootstrapper is idempotent — it creates the S3 bucket and KMS key only if they don't already exist. No separate `lz bootstrap` command is needed.
 
 The bootstrapper reads `StateConfig.Backend` and `StateConfig.SecretsProvider` which are auto-generated by `ConfigLoader` from `SystemSuffix`/`SharedSuffix`. The `State:` section is no longer specified in YAML — it's computed at load time with the suffix at the end of the resource name (e.g., `s3://med-dev-pulumi-state-4498-a704?region=us-west-2`).
 
@@ -823,7 +856,7 @@ public async Task Deploy_Foundation_Creates_Network_Database_FileStorage_Compute
     mockFactory.Setup(f => f.CreateDatabase()).Returns(mockDb.Object);
     // ...
 
-    var config = TestConfig.Create(platform: "aws", topology: "ecs");
+    var config = TestConfig.Create(platform: "aws", topology: "ecs-fargate-keycloak");
     var system = new TestSystem();
     var deployment = new SystemDeployment(mockFactory.Object, system, config);
 

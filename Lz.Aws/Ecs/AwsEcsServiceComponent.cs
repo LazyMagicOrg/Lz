@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
@@ -49,7 +50,7 @@ public class AwsEcsServiceComponent : IServiceComponent
         var awsCompute = (AwsComputeOutputs)compute;
         var awsDatabase = (Shared.AwsDatabaseOutputs)database;
         var awsFileStorage = fileStorage != null ? (Shared.AwsFileStorageOutputs)fileStorage : null;
-        var ecs = _config.ECS ?? new EcsConfig();
+        var ecs = _config.Aws().ECS ?? new EcsConfig();
         var (cpu, memory) = GetServiceResources(serviceName, ecs);
         // Start at 0 — services post-deploy action builds/pushes images
         // then scales to the configured count.

@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -28,7 +29,7 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
         var prefix = config.SystemKey;
         var opts = new CustomResourceOptions { Parent = this };
         var awsNetwork = (AwsNetworkOutputs)network;
-        var ecs = config.ECS ?? new EcsConfig();
+        var ecs = config.Aws().ECS ?? new EcsConfig();
 
         // DB Subnet Group
         var subnetGroup = new SubnetGroup($"{prefix}-db-subnet-group", new SubnetGroupArgs
@@ -84,11 +85,11 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
         // KMS key for system secret — required for cross-account Secrets Manager access.
         // Default aws/secretsmanager key cannot be used cross-account.
         Output<string>? kmsKeyArn = null;
-        if (config.TrustedAccountIds.Count > 0)
+        if (config.Aws().TrustedAccountIds.Count > 0)
         {
             var localAccountId = Pulumi.Aws.GetCallerIdentity.Invoke().Apply(id => id.AccountId);
 
-            var accountPrincipals = config.TrustedAccountIds
+            var accountPrincipals = config.Aws().TrustedAccountIds
                 .Select(id => $@"""arn:aws:iam::{id}:root""")
                 .ToList();
 
@@ -158,7 +159,7 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
         });
 
         // Initial secret value — tailscale keys only in shared deployment (not cross-account consumers)
-        var secretJson = string.IsNullOrEmpty(config.SharedSecretArn)
+        var secretJson = string.IsNullOrEmpty(config.Aws().SharedSecretArn)
             ? @$"{{
                 ""keycloak-admin-username"": ""admin"",
                 ""keycloak-admin-password"": ""{prefix}-admin-changeme"",
@@ -182,9 +183,9 @@ public class AwsRdsComponent : ComponentResource, IDatabaseComponent
         });
 
         // Resource policy for cross-account access (shared deployment only)
-        if (config.TrustedAccountIds.Count > 0)
+        if (config.Aws().TrustedAccountIds.Count > 0)
         {
-            var statements = config.TrustedAccountIds.Select(accountId =>
+            var statements = config.Aws().TrustedAccountIds.Select(accountId =>
                 $@"{{
                     ""Effect"": ""Allow"",
                     ""Principal"": {{ ""AWS"": ""arn:aws:iam::{accountId}:root"" }},

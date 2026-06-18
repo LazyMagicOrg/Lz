@@ -8,7 +8,7 @@ DefaultTenant: "testdev.click"
 VpcCidr: "10.20.0.0/16"
 CentralAuthDomain: "auth.meadowsservices.com"
 Platform: aws
-Topology: ecs
+Topology: ecs-fargate-keycloak
 
 SecretsManager:
   SecretPrefix: "testapp"
@@ -36,15 +36,13 @@ Integrations:
 
 AuthConfigs:
   usersauth:
-    HostedUIDomain: "https://testdev.click/realms/usersauth"
+    Authority: "https://testdev.click/realms/usersauth"
     MetadataUrl: "https://testdev.click/realms/usersauth/.well-known/openid-configuration"
-    ClientId: "test-client"
     ValidateAudience: false
   adminsauth:
-    HostedUIDomain: "https://auth.testdev.click/realms/adminsauth"
+    Authority: "https://auth.testdev.click/realms/adminsauth"
     MetadataUrl: "https://auth.testdev.click/realms/adminsauth/.well-known/openid-configuration"
     ValidateAudience: false
-    ClientId: "test-client"
 
 RequestRewriter:
   LogRewrites: false

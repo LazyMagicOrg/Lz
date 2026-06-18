@@ -9,7 +9,7 @@ namespace Lz.Aws.Shared;
 public class AwsSeedTaskOutputs : ISeedTaskOutputs
 {
     public required Output<string> TaskFamily { get; init; }
-    public required Output<string> EcrRepositoryUrl { get; init; }
+    public required Output<string> ContainerImageRepositoryUrl { get; init; }
 
     // AWS-specific
     public required Output<string> TaskDefinitionArn { get; init; }

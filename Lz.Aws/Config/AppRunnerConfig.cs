@@ -1,4 +1,4 @@
-namespace Lz.Core.Config;
+namespace Lz.Aws.Config;
 
 /// <summary>
 /// AppRunner deployment configuration section — shared between systemconfig and tenantconfig.

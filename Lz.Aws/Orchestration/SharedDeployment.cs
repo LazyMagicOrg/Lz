@@ -1,10 +1,13 @@
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
+using Lz.Core.Orchestration;
 using Pulumi.Automation;
 using Pulumi.Automation.Events;
 
-namespace Lz.Core.Orchestration;
+namespace Lz.Aws.Orchestration;
 
 /// <summary>
 /// Deployment orchestrator for the shared-services account.
@@ -34,6 +37,12 @@ public class SharedDeployment
         _config = config;
         _ct = cancellationToken;
     }
+
+    /// <summary>
+    /// AWS-extended factory view for capabilities not on the core interface.
+    /// Null when the active factory isn't an AWS factory.
+    /// </summary>
+    private IAwsPlatformFactory? AwsFactory => _factory as IAwsPlatformFactory;
 
     /// <summary>
     /// Deploy the shared-services account infrastructure.
@@ -68,7 +77,7 @@ public class SharedDeployment
         // This creates an auth key via the API if missing or expired.
         if (_adminBlockingEnabled)
         {
-            var keyManager = _factory.GetTailscaleKeyManager();
+            var keyManager = AwsFactory?.GetTailscaleKeyManager();
             if (keyManager != null)
             {
                 await keyManager.EnsureAuthKeyAsync();
@@ -154,7 +163,7 @@ public class SharedDeployment
         result = await PulumiUpAsync(stackName, includeTailscale: true);
 
         // --- Step 4: Configure Tailscale devices ---
-        var tailscalePostDeploy = _factory.GetTailscalePostDeployAction();
+        var tailscalePostDeploy = AwsFactory?.GetTailscalePostDeployAction();
         if (tailscalePostDeploy != null)
         {
             Console.WriteLine();
@@ -209,7 +218,7 @@ public class SharedDeployment
 
             if (includeTailscale)
             {
-                var tailscale = _factory.CreateTailscale();
+                var tailscale = AwsFactory?.CreateTailscale();
                 if (tailscale != null)
                 {
                     var systemConfig = ToSystemConfig();
@@ -247,12 +256,13 @@ public class SharedDeployment
     }
 
     /// <summary>
-    /// Build a SystemConfig from SharedConfig so we can reuse existing components
-    /// (network, compute, database, auth) which expect SystemConfig.
+    /// Build an AwsSystemConfig from AwsSharedConfig so we can reuse existing
+    /// AWS components (network, compute, database, auth) which expect SystemConfig.
     /// </summary>
-    private SystemConfig ToSystemConfig()
+    private AwsSystemConfig ToSystemConfig()
     {
-        return new SystemConfig
+        var aws = _config.Aws();
+        return new AwsSystemConfig
         {
             SystemKey = "shared",
             Environment = "shared",
@@ -262,18 +272,18 @@ public class SharedDeployment
             VpcCidr = _config.VpcCidr,
             State = _config.State,
             AdminAuth = "adminsauth",
-            TrustedAccountIds = _config.TrustedAccountIds,
+            TrustedAccountIds = aws.TrustedAccountIds,
             SystemSuffix = _config.SharedSuffix,
             ECS = new EcsConfig
             {
-                KeycloakImageTag = _config.Keycloak.ImageTag,
-                KeycloakCpu = _config.Keycloak.Cpu,
-                KeycloakMemory = _config.Keycloak.Memory,
-                KeycloakThemePath = _config.Keycloak.ThemePath ?? new EcsConfig().KeycloakThemePath,
+                KeycloakImageTag = aws.Keycloak.ImageTag,
+                KeycloakCpu = aws.Keycloak.Cpu,
+                KeycloakMemory = aws.Keycloak.Memory,
+                KeycloakThemePath = aws.Keycloak.ThemePath ?? new EcsConfig().KeycloakThemePath,
                 DbInstanceClass = _config.DbInstanceClass,
                 DbAllocatedStorage = _config.DbAllocatedStorage,
-                TailscaleInstanceType = _config.TailscaleInstanceType,
-                TailscaleDesiredCapacity = _config.TailscaleDesiredCapacity,
+                TailscaleInstanceType = aws.TailscaleInstanceType,
+                TailscaleDesiredCapacity = aws.TailscaleDesiredCapacity,
                 LogRetentionDays = _config.LogRetentionDays,
             },
         };
@@ -305,14 +315,14 @@ public class SharedDeployment
         var fileStorageOutputs = fileStorage.Deploy(systemConfig, networkOutputs);
 
         // Gate Checker: Lambda for EFS writes (theme deploy, future shared-level operations)
-        var gateCheckerComponent = _factory.CreateGateChecker();
+        var gateCheckerComponent = AwsFactory?.CreateGateChecker();
         if (gateCheckerComponent != null)
         {
             gateCheckerComponent.Deploy(systemConfig, networkOutputs, databaseOutputs, fileStorageOutputs);
         }
 
         // Seed Data: S3 bucket for cross-account data transfer
-        var seedBucketName = _factory.CreateSeedBucket(_config, systemConfig.SystemKey);
+        var seedBucketName = AwsFactory?.CreateSeedBucket(_config, systemConfig.SystemKey);
 
         // Auth: Keycloak ECS task + service + listener rules
         var auth = _factory.CreateAuthService();
