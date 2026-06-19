@@ -27,11 +27,29 @@ public class IntegrationServiceConfig
     public List<string> Modules { get; set; } = new();
 }
 
+/// <summary>
+/// Per-pool auth configuration.
+/// <para>
+/// <see cref="ValidateAudience"/> is a user-set YAML input. <see cref="Authority"/>
+/// and <see cref="MetadataUrl"/> are deployment outputs — populated at runtime
+/// in the KVS JSON that the client app reads from <c>/config</c>. Users don't
+/// hand-edit them.
+/// </para>
+/// <para>
+/// <c>ClientId</c> is intentionally NOT in this type: client apps know their
+/// own client ID (built in at webapp compile time), so it doesn't belong in
+/// the <c>/config</c> runtime output.
+/// </para>
+/// </summary>
 public class AuthConfigEntry
 {
-    public string? HostedUIDomain { get; set; }
+    /// <summary>OIDC issuer/authority URL (e.g. a Cognito user-pool issuer).</summary>
+    public string? Authority { get; set; }
+
+    /// <summary>OpenID metadata discovery URL.</summary>
     public string? MetadataUrl { get; set; }
-    public string? ClientId { get; set; }
+
+    /// <summary>Whether the client should validate the JWT <c>aud</c> claim.</summary>
     public bool ValidateAudience { get; set; }
 }
 

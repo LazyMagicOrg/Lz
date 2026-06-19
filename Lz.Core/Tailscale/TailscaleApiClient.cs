@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Lz.Aws.Tailscale;
+namespace Lz.Core.Tailscale;
 
 /// <summary>
 /// HTTP client for the Tailscale API v2.

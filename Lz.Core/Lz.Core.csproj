@@ -12,8 +12,22 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pulumi" Version="3.*" />
-    <PackageReference Include="Pulumi.Automation" Version="3.*" />
+    <InternalsVisibleTo Include="Lz.Aws" />
+    <InternalsVisibleTo Include="Lz.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pulumi.Automation crosses the host/plugin assembly boundary: the Lz.Cli
+         host process loads it, and Deploy/* plugins reference it transitively
+         through Lz.Core. A floating "3.*" lets the plugin restore a newer
+         minor than the one baked into the published Lz.Cli host nupkg, which
+         then fails CLR strong-name version binding ("Could not load file or
+         assembly 'Pulumi.Automation, Version=3.105.0.0' ... manifest
+         definition does not match the assembly reference"). Pin both packages
+         so the host and any plugin restored against this Lz.Core nupkg always
+         agree. Bump deliberately when you intend to. -->
+    <PackageReference Include="Pulumi" Version="[3.105.0]" />
+    <PackageReference Include="Pulumi.Automation" Version="[3.105.0]" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
     <PackageReference Include="YamlDotNet" Version="16.*" />
   </ItemGroup>

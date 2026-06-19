@@ -79,8 +79,15 @@
     <PackageReference Include="AWSSDK.SecurityToken" Version="4.*" />
     <PackageReference Include="AWSSDK.SSO" Version="4.0.2.14" />
     <PackageReference Include="AWSSDK.SSOOIDC" Version="4.0.3.15" />
-    <PackageReference Include="Pulumi.Aws" Version="6.*" />
-    <PackageReference Include="Pulumi.Random" Version="4.*" />
+    <!-- Pulumi.Aws 7.30+ transitively requires Pulumi >= 3.106.2, which
+         conflicts with Lz.Core's hard pin of Pulumi == [3.105.0] (the pin
+         is intentional — see Lz.Core.csproj for the host/plugin
+         identity-mismatch comment). Cap Pulumi.Aws below 7.30 until
+         Lz.Core's Pulumi pin is bumped in lockstep. Pulumi.Random sits on
+         a matched range for the same reason — both are floats that can
+         drift independently. -->
+    <PackageReference Include="Pulumi.Aws" Version="[7.29.0, 7.30.0)" />
+    <PackageReference Include="Pulumi.Random" Version="[4.19.2, 4.20.0)" />
     <PackageReference Include="NUglify" Version="1.*" />
   </ItemGroup>
 

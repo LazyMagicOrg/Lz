@@ -178,7 +178,12 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
         // CLOUDFRONT DISTRIBUTION
         // =====================================================================
 
-        // Collect aliases: root domain + wildcard + legacy domains + subtenant domains
+        // Collect aliases: root domain + wildcard (covers every first-level
+        // subtenant) + legacy domains. Subtenants are NOT enumerated — the
+        // wildcard alias + wildcard Route 53 record handle first-level
+        // subdomains. SubDomain is a single DNS label (validated by
+        // ConfigValidator); the FQDN is built as {SubDomain}.{RootDomain}
+        // at consumption time, so first-level is guaranteed by the schema.
         var aliases = new InputList<string> { domain, $"*.{domain}" };
         if (tenantConfig.LegacyDomains != null)
         {
@@ -186,14 +191,6 @@ public class AwsCloudFrontComponent : ComponentResource, ITenantCdnComponent
             {
                 aliases.Add(legacy);
                 aliases.Add($"*.{legacy}");
-            }
-        }
-        if (tenantConfig.Subtenants != null)
-        {
-            foreach (var sub in tenantConfig.Subtenants)
-            {
-                if (!string.IsNullOrEmpty(sub.Value.SubDomain))
-                    aliases.Add(sub.Value.SubDomain);
             }
         }
 

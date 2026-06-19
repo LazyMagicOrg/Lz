@@ -3,22 +3,28 @@ using Pulumi;
 namespace Lz.Core.Interfaces.Outputs;
 
 /// <summary>
-/// Per-pool auth details (e.g., Cognito user pool ID, client ID, metadata URL).
-/// Implemented by auth components that create per-pool resources
-/// so the orchestrator can export them as stack outputs for downstream use.
+/// Per-pool auth details: pool ID, client ID, OIDC metadata URL, and
+/// optional authority URL. Implemented by auth components that create
+/// per-pool resources so the orchestrator can export them as stack outputs
+/// for downstream use.
+/// <para>
+/// <see cref="ClientId"/> is still a deployment output — downstream tooling
+/// like <c>lz deploywebapp</c> injects it into the webapp bundle at build
+/// time. It is not, however, written to the <c>/config</c> runtime JSON.
+/// </para>
 /// </summary>
 public class AuthPoolDetail
 {
     public required Output<string> UserPoolId { get; init; }
     public required Output<string> ClientId { get; init; }
     public required Output<string> MetadataUrl { get; init; }
-    public Output<string>? HostedUIDomain { get; init; }
+    public Output<string>? Authority { get; init; }
 }
 
 /// <summary>
 /// Optional interface for auth service outputs that provide per-pool details.
-/// The orchestrator checks for this interface to export pool IDs as stack outputs,
-/// enabling downstream components (e.g., CloudFront KVS) to auto-wire auth config.
+/// The orchestrator checks for this interface to export pool IDs as stack
+/// outputs, enabling downstream components to auto-wire auth config.
 /// </summary>
 public interface IAuthPoolOutputs : IServiceOutputs
 {

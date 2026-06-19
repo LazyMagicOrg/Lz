@@ -173,7 +173,7 @@ public class AwsTransitionChecker : ITransitionChecker
         catch (Amazon.Lambda.Model.ResourceNotFoundException)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"  Warning: Gate-checker Lambda '{functionName}' not found. Deploy foundation first.");
+            Console.WriteLine($"  Warning: Gate-checker Lambda '{functionName}' not found. Run `lz deploysystem` first.");
             Console.ResetColor();
             return false;
         }

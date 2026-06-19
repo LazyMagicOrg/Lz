@@ -5,6 +5,9 @@ namespace Lz.Core.Config;
 /// SystemKey, TenantKey, and Environment are derived from the filename, NOT from fields in the file.
 /// This file serves dual purpose: per-tenant deployment settings (consumed by Lz tool)
 /// and per-tenant runtime settings (consumed by running containers, overriding system defaults).
+/// Platform-specific fields (certificate ARNs, DNS zone IDs, cross-account
+/// secret ARNs, compute sizing) live on platform-derived types like
+/// <c>Lz.Aws.Config.AwsTenantConfig</c>.
 /// </summary>
 public class TenantConfig
 {
@@ -15,22 +18,30 @@ public class TenantConfig
 
     /// <summary>
     /// Directory containing the tenantconfig YAML file (i.e., repo root).
-    /// Set by ConfigLoader, used to resolve relative paths (e.g., CloudFront function JS files).
+    /// Set by ConfigLoader, used to resolve relative paths referenced by the config.
     /// </summary>
     [YamlDotNet.Serialization.YamlIgnore]
     public string ConfigDirectory { get; set; } = ".";
 
     // --- Deployment Settings ---
     public string RootDomain { get; set; } = string.Empty;
+
+    /// <summary>
+    /// When true, lz does NOT create or manage the apex (RootDomain) DNS
+    /// record and excludes the apex from the CDN TLS certificate — the apex
+    /// is served by an external host (e.g. a Wix marketing site). lz still
+    /// owns and manages the wildcard *.RootDomain for every subtenant.
+    /// Default false: lz claims both the apex and the wildcard.
+    /// </summary>
+    public bool ApexHostedExternally { get; set; } = false;
+
     public string? DisplayName { get; set; }
-    public string? HostedZoneId { get; set; }
-    public string? AcmCertificateArn { get; set; }
     public BehaviorsConfig? Behaviors { get; set; }
     public Dictionary<string, SubtenantEntry>? Subtenants { get; set; }
 
     /// <summary>
     /// Previous domains that 301 redirect to RootDomain during domain transitions.
-    /// Each legacy domain must have a Route53 hosted zone in the same account.
+    /// Each legacy domain must have a DNS zone managed in the same account.
     /// </summary>
     public List<string>? LegacyDomains { get; set; }
     public string TenantSuffix { get; set; } = string.Empty;
@@ -55,18 +66,24 @@ public class TenantConfig
     // Cross-account shared services — propagated from SystemConfig at runtime
     public string? SharedSecretArn { get; set; }
     public string? SharedKmsKeyArn { get; set; }
+
+    /// <summary>
+    /// Optional DNS hostname of a centralized auth service, propagated from
+    /// SystemConfig at runtime. Empty/null means auth is per-environment.
+    /// </summary>
     public string? CentralAuthDomain { get; set; }
 
-    // Per-tenant infrastructure overrides
-    public EcsConfig? ECS { get; set; }
-    public AppRunnerConfig? AppRunner { get; set; }
+    // Per-tenant CDN overrides
     public CdnConfig? CDN { get; set; }
 
     // --- Runtime Application Settings (override system defaults) ---
     public SecretsManagerConfig? SecretsManager { get; set; }
     public string? DefaultTenant { get; set; }
     public IntegrationsConfig? Integrations { get; set; }
-    public Dictionary<string, AuthConfigEntry>? AuthConfigs { get; set; }
+    // AuthConfigs deliberately omitted: Cognito pools are system-scoped (one set
+    // of pools per environment, shared by all tenants). Pool declarations live
+    // on SystemConfig.AuthConfigs; per-tenant overrides don't exist because the
+    // pools themselves aren't per-tenant.
     public RequestRewriterConfig? RequestRewriter { get; set; }
     public RequestLoggingConfig? RequestLogging { get; set; }
     public VerboseLoggingConfig? Authentication { get; set; }
@@ -75,9 +92,8 @@ public class TenantConfig
     public VerboseLoggingConfig? Keycloak { get; set; }
 
     // --- SmartStore usersettings.json content ---
-    // Loaded from smartstore.usersettings.json (same directory as tenantconfig YAML).
-    // Written to EFS smartstore-config/usersettings.json by the gate-checker Lambda.
-    // Contains the full usersettings.json structure (Smartstore, Serilog, etc.).
-    // Stored separately to avoid SSM Parameter Store 4096-char limit.
+    // Loaded from smartstore.usersettings.json (same directory as tenantconfig YAML)
+    // and written to shared file storage by the init runner. Stored separately to
+    // avoid secret-store parameter-size limits.
     public Dictionary<string, object>? Smartstore { get; set; }
 }

@@ -6,7 +6,8 @@ namespace Lz.Aws.AppRunner;
 /// <summary>
 /// AWS AppRunner-specific compute environment outputs.
 /// AppRunner doesn't have a cluster — compute is per-service.
-/// We track the ECR repository and auto-scaling config here.
+/// ECR repos are per-tenant and imperatively created by
+/// <c>lz deploycontainer</c>; they aren't surfaced here.
 /// </summary>
 public class AwsAppRunnerComputeOutputs : IComputeEnvironmentOutputs
 {
@@ -16,6 +17,4 @@ public class AwsAppRunnerComputeOutputs : IComputeEnvironmentOutputs
 
     // AWS AppRunner-specific
     public required Output<string> AutoScalingConfigArn { get; init; }
-    public required Output<string> EcrRepositoryUrl { get; init; }
-    public required Output<string> EcrRepositoryArn { get; init; }
 }

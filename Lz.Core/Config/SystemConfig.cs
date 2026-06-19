@@ -5,6 +5,9 @@ namespace Lz.Core.Config;
 /// SystemKey and Environment are derived from the filename, NOT from fields in the file.
 /// This file serves dual purpose: deployment settings (consumed by Lz tool)
 /// and runtime settings (consumed by running containers).
+/// Platform-specific fields (compute shape, shared-account identifiers,
+/// cross-account trust) live on platform-derived types like
+/// <c>Lz.Aws.Config.AwsSystemConfig</c>.
 /// </summary>
 public class SystemConfig
 {
@@ -19,34 +22,37 @@ public class SystemConfig
     public string Profile { get; set; } = string.Empty;
     public string Region { get; set; } = string.Empty;
     public string? SystemDomain { get; set; }
+
+    /// <summary>
+    /// When true, lz does NOT plant the apex (SystemDomain) placeholder A
+    /// record — the apex is served by an external host that already
+    /// provides a resolvable A record. The apex MUST already resolve before
+    /// `lz deploysystem` runs, because Cognito's CreateUserPoolDomain
+    /// requires a resolvable parent domain. Default false: lz plants a
+    /// 127.0.0.1 placeholder at the apex.
+    /// </summary>
+    public bool ApexHostedExternally { get; set; } = false;
     public string? DefaultTenant { get; set; }
 
     // Network
     public string VpcCidr { get; set; } = string.Empty;
 
-    // Central auth — Keycloak is deployed in the shared-services account, not per-environment.
-    // The domain of the shared-services Keycloak (e.g., "auth.meadowsservices.com").
+    /// <summary>
+    /// Optional DNS hostname of a centralized auth service. When set, per-environment
+    /// auth deployment is skipped in favour of the shared central auth. Empty/null
+    /// means auth is deployed per-environment. Interpreted by platform libraries.
+    /// </summary>
     public string CentralAuthDomain { get; set; } = string.Empty;
 
-    // Cross-account shared services — references the shared-services account.
-    // SharedProfile is from YAML (e.g., "monro-shared"). The rest are resolved by CLI at startup.
-    public string? SharedProfile { get; set; }
-    public string? SharedSecretArn { get; set; }
-    public string? SharedKmsKeyArn { get; set; }
-    public string? SharedRegion { get; set; }
-    public List<string> TrustedAccountIds { get; set; } = new();
-
-    // NEW fields (not in current config, will be added)
+    // Platform/topology selectors
     public string Platform { get; set; } = "aws";
-    public string Topology { get; set; } = "ecs";
+    public string Topology { get; set; } = "ecs-fargate-keycloak";
     public StateConfig? State { get; set; }
 
-    // Infrastructure sizing
-    public EcsConfig? ECS { get; set; }
-    public AppRunnerConfig? AppRunner { get; set; }
+    // CDN sizing/defaults
     public CdnConfig? CDN { get; set; }
 
-    // Seed data — shared S3 bucket for EFS + database seeding/refresh
+    // Seed data — shared object-storage bucket used for tenant seeding and refresh
     public SeedDataConfig? SeedData { get; set; }
 
     // Backup — AWS Backup configuration for foundation EFS (see BackupConfig).

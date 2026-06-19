@@ -1,9 +1,19 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 
 namespace Lz.Tests.Config.Tests;
 
-public class ConfigLoaderTests
+[Collection("ConfigLoaderStaticState")]
+public class ConfigLoaderTests : IDisposable
 {
+    public ConfigLoaderTests()
+    {
+        ConfigLoader.ResetForTests();
+        ConfigLoader.RegisterExtensions(new AwsConfigExtensions());
+    }
+
+    public void Dispose() => ConfigLoader.ResetForTests();
+
     private static string TestDataPath(string filename)
         => Path.Combine("Config.Tests", "testdata", filename);
 
@@ -64,7 +74,7 @@ public class ConfigLoaderTests
         Assert.Equal("testdev.click", config.SystemDomain);
         Assert.Equal("testdev.click", config.DefaultTenant);
         Assert.Equal("aws", config.Platform);
-        Assert.Equal("ecs", config.Topology);
+        Assert.Equal("ecs-fargate-keycloak", config.Topology);
         Assert.Equal("10.20.0.0/16", config.VpcCidr);
         Assert.Equal("auth.meadowsservices.com", config.CentralAuthDomain);
 
@@ -74,14 +84,14 @@ public class ConfigLoaderTests
         Assert.Equal("awskms://alias/testapp-dev-pulumi-key-496a-ffff", config.State.SecretsProvider);
 
         // ECS
-        Assert.NotNull(config.ECS);
-        Assert.Equal(512, config.ECS!.SmartStoreCpu);
-        Assert.Equal(1024, config.ECS.SmartStoreMemory);
-        Assert.Equal(256, config.ECS.AppHostCpu);
-        Assert.Equal(512, config.ECS.AppHostMemory);
-        Assert.Equal("db.t4g.micro", config.ECS.DbInstanceClass);
-        Assert.Equal("26.5.0", config.ECS.KeycloakImageTag);
-        Assert.Equal(2, config.ECS.TailscaleDesiredCapacity);
+        Assert.NotNull(config.Aws().ECS);
+        Assert.Equal(512, config.Aws().ECS!.SmartStoreCpu);
+        Assert.Equal(1024, config.Aws().ECS.SmartStoreMemory);
+        Assert.Equal(256, config.Aws().ECS.AppHostCpu);
+        Assert.Equal(512, config.Aws().ECS.AppHostMemory);
+        Assert.Equal("db.t4g.micro", config.Aws().ECS.DbInstanceClass);
+        Assert.Equal("26.5.0", config.Aws().ECS.KeycloakImageTag);
+        Assert.Equal(2, config.Aws().ECS.TailscaleDesiredCapacity);
 
         // CDN
         Assert.NotNull(config.CDN);
@@ -132,9 +142,9 @@ public class ConfigLoaderTests
         Assert.Equal("testapp/meadows", config.SecretsManager!.SecretPrefix);
 
         // ECS overrides
-        Assert.NotNull(config.ECS);
-        Assert.Equal(512, config.ECS!.SmartStoreCpu);
-        Assert.Equal(256, config.ECS.AppHostCpu);
+        Assert.NotNull(config.Aws().ECS);
+        Assert.Equal(512, config.Aws().ECS!.SmartStoreCpu);
+        Assert.Equal(256, config.Aws().ECS.AppHostCpu);
 
         // CDN
         Assert.NotNull(config.CDN);
@@ -142,7 +152,6 @@ public class ConfigLoaderTests
 
         // Runtime settings present
         Assert.NotNull(config.Integrations);
-        Assert.NotNull(config.AuthConfigs);
     }
 
     [Fact]
@@ -163,16 +172,16 @@ public class ConfigLoaderTests
         Assert.Equal("awskms://alias/shared-pulumi-key-49d2-8357", config.State.SecretsProvider);
 
         // Keycloak
-        Assert.Equal("26.5.0", config.Keycloak.ImageTag);
-        Assert.Equal(512, config.Keycloak.Cpu);
-        Assert.Equal(1024, config.Keycloak.Memory);
-        Assert.Equal(2, config.Keycloak.DesiredCount);
+        Assert.Equal("26.5.0", config.Aws().Keycloak.ImageTag);
+        Assert.Equal(512, config.Aws().Keycloak.Cpu);
+        Assert.Equal(1024, config.Aws().Keycloak.Memory);
+        Assert.Equal(2, config.Aws().Keycloak.DesiredCount);
 
         // Infrastructure
         Assert.Equal("db.t4g.micro", config.DbInstanceClass);
         Assert.Equal(20, config.DbAllocatedStorage);
-        Assert.Equal("t4g.nano", config.TailscaleInstanceType);
-        Assert.Equal(2, config.TailscaleDesiredCapacity);
+        Assert.Equal("t4g.nano", config.Aws().TailscaleInstanceType);
+        Assert.Equal(2, config.Aws().TailscaleDesiredCapacity);
         Assert.Equal(3, config.LogRetentionDays);
     }
 

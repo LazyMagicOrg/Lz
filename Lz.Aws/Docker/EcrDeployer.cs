@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Lz.Core.Config;
+using Lz.Core.Docker;
 
 namespace Lz.Aws.Docker;
 

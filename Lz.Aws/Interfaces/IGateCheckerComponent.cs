@@ -1,7 +1,8 @@
+using Lz.Aws.Interfaces.Outputs;
 using Lz.Core.Config;
 using Lz.Core.Interfaces.Outputs;
 
-namespace Lz.Core.Interfaces;
+namespace Lz.Aws.Interfaces;
 
 /// <summary>
 /// Deploys a gate-checker function (e.g., Lambda) that can verify

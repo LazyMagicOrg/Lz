@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
@@ -51,7 +52,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
         var awsNetwork = (AwsNetworkOutputs)network;
         var awsCompute = (AwsComputeOutputs)compute;
         var awsDatabase = (Shared.AwsDatabaseOutputs)database;
-        var ecs = tenantConfig.ECS ?? new EcsConfig();
+        var ecs = tenantConfig.Aws().ECS ?? new EcsConfig();
         var (cpu, memory) = GetServiceResources(serviceName, ecs);
         // Start at 0 — post-deploy builds/pushes images, then scales up.
         var desiredCount = 0;
@@ -114,17 +115,17 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     ).Apply(t =>
                     {
                         var secretResources = $@"""{t.Item1}"", ""{t.Item2}"", ""arn:aws:secretsmanager:*:*:secret:{sk}/{tk}*"", ""arn:aws:secretsmanager:*:*:secret:rds!*""";
-                        if (!string.IsNullOrEmpty(tenantConfig.SharedSecretArn))
-                            secretResources += $@", ""{tenantConfig.SharedSecretArn}*""";
+                        if (!string.IsNullOrEmpty(tenantConfig.Aws().SharedSecretArn))
+                            secretResources += $@", ""{tenantConfig.Aws().SharedSecretArn}*""";
 
                         var kmsStatement = "";
-                        if (!string.IsNullOrEmpty(tenantConfig.SharedKmsKeyArn))
+                        if (!string.IsNullOrEmpty(tenantConfig.Aws().SharedKmsKeyArn))
                         {
                             kmsStatement = $@",
                                 {{
                                     ""Effect"": ""Allow"",
                                     ""Action"": [""kms:Decrypt"", ""kms:DescribeKey""],
-                                    ""Resource"": ""{tenantConfig.SharedKmsKeyArn}""
+                                    ""Resource"": ""{tenantConfig.Aws().SharedKmsKeyArn}""
                                 }}";
                         }
 
@@ -223,17 +224,17 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             ).Apply(t =>
             {
                 var secretResources = $@"""{t.Item1}"", ""{t.Item2}"", ""arn:aws:secretsmanager:*:*:secret:{sk}/{tk}*"", ""arn:aws:secretsmanager:*:*:secret:rds!*""";
-                if (!string.IsNullOrEmpty(tenantConfig.SharedSecretArn))
-                    secretResources += $@", ""{tenantConfig.SharedSecretArn}*""";
+                if (!string.IsNullOrEmpty(tenantConfig.Aws().SharedSecretArn))
+                    secretResources += $@", ""{tenantConfig.Aws().SharedSecretArn}*""";
 
                 var kmsStatement = "";
-                if (!string.IsNullOrEmpty(tenantConfig.SharedKmsKeyArn))
+                if (!string.IsNullOrEmpty(tenantConfig.Aws().SharedKmsKeyArn))
                 {
                     kmsStatement = $@",
                         {{
                             ""Effect"": ""Allow"",
                             ""Action"": [""kms:Decrypt"", ""kms:DescribeKey""],
-                            ""Resource"": ""{tenantConfig.SharedKmsKeyArn}""
+                            ""Resource"": ""{tenantConfig.Aws().SharedKmsKeyArn}""
                         }}";
                 }
 
@@ -628,10 +629,10 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                 secrets.Add(new { name = "LZ_GITHUB_APP_PRIVATE_KEY", valueFrom = $"{tenantSecretId}:github-app-private-key::" });
 
                 // Cross-account Keycloak admin credentials from shared secret
-                if (!string.IsNullOrEmpty(tenantConfig.SharedSecretArn))
+                if (!string.IsNullOrEmpty(tenantConfig.Aws().SharedSecretArn))
                 {
-                    secrets.Add(new { name = "KC_ADMIN_USERNAME", valueFrom = $"{tenantConfig.SharedSecretArn}:keycloak-admin-username::" });
-                    secrets.Add(new { name = "KC_ADMIN_PASSWORD", valueFrom = $"{tenantConfig.SharedSecretArn}:keycloak-admin-password::" });
+                    secrets.Add(new { name = "KC_ADMIN_USERNAME", valueFrom = $"{tenantConfig.Aws().SharedSecretArn}:keycloak-admin-username::" });
+                    secrets.Add(new { name = "KC_ADMIN_PASSWORD", valueFrom = $"{tenantConfig.Aws().SharedSecretArn}:keycloak-admin-password::" });
                 }
 
                 return System.Text.Json.JsonSerializer.Serialize(new[]
@@ -761,7 +762,7 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
         }
 
         // Register with NLB target groups for services with UDP ports
-        // Guard: only register if NLB target groups are available (created by deployfoundation)
+        // Guard: only register if NLB target groups are available (created by deploysystem)
         var additionalPorts = definition.Container?.AdditionalPorts ?? new();
         var nlbTcpArn = awsNetwork.NlbTcpTargetGroupArn;
         var nlbUdpArn = awsNetwork.NlbUdpTargetGroupArn;

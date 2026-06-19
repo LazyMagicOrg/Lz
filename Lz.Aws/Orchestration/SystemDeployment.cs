@@ -1,12 +1,16 @@
+using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
 using Lz.Core.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
+using Lz.Core.Orchestration;
 using Pulumi;
 using Pulumi.Automation;
 using Pulumi.Automation.Events;
 
-namespace Lz.Core.Orchestration;
+namespace Lz.Aws.Orchestration;
 
 /// <summary>
 /// Deployment orchestrator for a single system (systemconfig).
@@ -32,6 +36,14 @@ public class SystemDeployment
         _ct = cancellationToken;
     }
 
+    /// <summary>
+    /// AWS-extended factory view for the capabilities not on the core
+    /// interface (Tailscale, Keycloak seeder, S3 seed bucket, etc.). Null
+    /// if the active factory isn't an AWS factory — all call sites guard
+    /// with null-conditional access.
+    /// </summary>
+    private IAwsPlatformFactory? AwsFactory => _factory as IAwsPlatformFactory;
+
     // ---------------------------------------------------------------
     // Foundation phase
     // ---------------------------------------------------------------
@@ -48,7 +60,7 @@ public class SystemDeployment
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
         var checker = _factory.CreateTransitionChecker();
 
-        Console.WriteLine($"=== Foundation Phase ===");
+        Console.WriteLine($"=== System Phase ===");
         Console.WriteLine($"Stack: {stackName}");
         Console.WriteLine($"Central auth: {_config.CentralAuthDomain}");
         Console.WriteLine();
@@ -57,7 +69,7 @@ public class SystemDeployment
 
         if (_system.FoundationInfraGates.Count > 0)
         {
-            Console.WriteLine("Checking foundation infrastructure gates...");
+            Console.WriteLine("Checking system infrastructure gates...");
             var infraGatePassed = await TransitionGate.CheckAndReportAsync(
                 checker, _system.FoundationInfraGates, _config.SystemKey);
 
@@ -67,7 +79,7 @@ public class SystemDeployment
 
         if (_system.FoundationGates.Count > 0)
         {
-            Console.WriteLine("Checking foundation transition gates...");
+            Console.WriteLine("Checking system transition gates...");
             var gatePassed = await TransitionGate.CheckAndReportAsync(
                 checker, _system.FoundationGates, _config.SystemKey);
 
@@ -85,14 +97,14 @@ public class SystemDeployment
                     Name = "tailscale-api-key",
                     CheckType = TransitionCheckType.SecretEntry,
                     SecretName = "shared/system",
-                    Profile = _config.SharedProfile,
-                    Region = _config.SharedRegion,
+                    Profile = _config.Aws().SharedProfile,
+                    Region = _config.Aws().SharedRegion,
                     CheckTarget = "tailscale-api-key",
                     Description =
                         "Tailscale API key is required for managing subnet routers.\n" +
                         "  1. Create an API key at https://login.tailscale.com/admin/settings/keys\n" +
                         "  2. Add 'tailscale-api-key' to the 'shared/system' secret in Secrets Manager.\n" +
-                        "  3. Re-run: lz deployfoundation",
+                        "  3. Re-run: lz deploysystem",
                 },
             };
 
@@ -105,7 +117,7 @@ public class SystemDeployment
         }
 
         // --- Auto-ensure: create/refresh auth key + SSH key if missing or expired ---
-        var keyManager = _factory.GetTailscaleKeyManager();
+        var keyManager = AwsFactory?.GetTailscaleKeyManager();
         if (keyManager != null)
         {
             await keyManager.EnsureAuthKeyAsync();
@@ -117,11 +129,11 @@ public class SystemDeployment
 
         // --- Pulumi up: deploy everything including Tailscale in one pass ---
         Console.WriteLine();
-        Console.WriteLine("Deploying foundation infrastructure...");
+        Console.WriteLine("Deploying system infrastructure...");
         var result = await PulumiUpAsync(stackName, includeTailscale: true);
 
         // --- Post-deploy: Configure Tailscale devices ---
-        var tailscalePostDeploy = _factory.GetTailscalePostDeployAction(_system);
+        var tailscalePostDeploy = AwsFactory?.GetTailscalePostDeployAction(_system);
         if (tailscalePostDeploy != null)
         {
             Console.WriteLine();
@@ -137,7 +149,7 @@ public class SystemDeployment
         if (foundationServiceDeploy != null)
         {
             Console.WriteLine();
-            Console.WriteLine("Building and deploying foundation services...");
+            Console.WriteLine("Building and deploying system services...");
             var foundationOutputs = result.Outputs.ToDictionary(
                 kv => kv.Key,
                 kv => kv.Value.Value);
@@ -146,7 +158,7 @@ public class SystemDeployment
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("Foundation deployment complete.");
+        Console.WriteLine("System deployment complete.");
         Console.ResetColor();
     }
 
@@ -162,7 +174,7 @@ public class SystemDeployment
 
             if (includeTailscale)
             {
-                var tailscale = _factory.CreateTailscale();
+                var tailscale = AwsFactory?.CreateTailscale();
                 if (tailscale != null)
                 {
                     var tailscaleOutputs = tailscale.Deploy(_config, foundation.Network, foundation.FileStorage);
@@ -272,13 +284,14 @@ public class SystemDeployment
         // --- Update Tailscale split DNS for tenant domains ---
         // Adds tenant RootDomain (and LegacyDomains) so VPN users can resolve
         // shop.{RootDomain} → internal ALB via the per-tenant private zone.
-        await _factory.UpdateTenantSplitDnsAsync(tenantConfig);
+        var splitDnsTask = AwsFactory?.UpdateTenantSplitDnsAsync(tenantConfig);
+        if (splitDnsTask != null) await splitDnsTask;
 
         // --- Init config: create tenant DB + write Settings.txt/usersettings.json ---
         var configInit = _factory.GetConfigInitRunner();
         if (configInit != null)
         {
-            var ecs = tenantConfig.ECS ?? new Config.EcsConfig();
+            var ecs = tenantConfig.Aws().ECS ?? new EcsConfig();
             var dbName = ecs.DatabaseName
                 ?? $"{_config.SystemKey}_{tenantKey}_{_config.Environment}_smartstore";
             var appUser = $"{_config.SystemKey}_{tenantKey}_app";
@@ -348,7 +361,7 @@ public class SystemDeployment
         var postSeed = _factory.GetPostSeedRunner();
         if (postSeed != null)
         {
-            var ecs2 = tenantConfig.ECS ?? new Config.EcsConfig();
+            var ecs2 = tenantConfig.Aws().ECS ?? new EcsConfig();
             var dbName2 = ecs2.DatabaseName
                 ?? $"{_config.SystemKey}_{tenantKey}_{_config.Environment}_smartstore";
             var appUser2 = $"{_config.SystemKey}_{tenantKey}_app";
@@ -370,7 +383,7 @@ public class SystemDeployment
         var adminSetup = _factory.GetAdminSetupRunner();
         if (adminSetup != null)
         {
-            var ecsAdmin = tenantConfig.ECS ?? new Config.EcsConfig();
+            var ecsAdmin = tenantConfig.Aws().ECS ?? new EcsConfig();
             var adminDbName = ecsAdmin.DatabaseName
                 ?? $"{_config.SystemKey}_{tenantKey}_{_config.Environment}_smartstore";
 
@@ -403,10 +416,10 @@ public class SystemDeployment
         }
 
         // --- Post-deploy: seed per-tenant Keycloak realms ---
-        var keycloakSeeder = _factory.GetTenantKeycloakSeeder();
+        var keycloakSeeder = (_factory as IAwsPlatformFactory)?.GetTenantKeycloakSeeder();
         if (keycloakSeeder != null)
         {
-            var seedConfig = ConfigLoader.DiscoverTenantKeycloakSeedConfig(
+            var seedConfig = AwsKeycloakConfigLoader.DiscoverTenantKeycloakSeedConfig(
                 _config.SystemKey, tenantKey, _config.Environment,
                 tenantConfig, smtpSecrets ?? new Dictionary<string, string?>());
 
@@ -441,7 +454,7 @@ public class SystemDeployment
     {
         var stack = await CreateOrSelectStack(stackName, () =>
         {
-            // Look up existing foundation resources (created by deployfoundation).
+            // Look up existing foundation resources (created by deploysystem).
             // This uses data-source queries — no resources are created here.
             var (network, compute, database, fileStorage) = _factory.LookupFoundation(_config);
             var foundation = new FoundationOutputs(network, compute, database, fileStorage, null, null, new());
@@ -543,7 +556,7 @@ public class SystemDeployment
     public async Task DestroyFoundationAsync()
     {
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
-        Console.WriteLine($"Destroying foundation stack '{stackName}'...");
+        Console.WriteLine($"Destroying system stack '{stackName}'...");
         await DestroyStackAsync(stackName);
     }
 
@@ -715,7 +728,7 @@ public class SystemDeployment
 
         // Gate Checker: Lambda for verifying EFS/DB data at gate-check time
         IGateCheckerOutputs? gateCheckerOutputs = null;
-        var gateCheckerComponent = _factory.CreateGateChecker();
+        var gateCheckerComponent = AwsFactory?.CreateGateChecker();
         if (gateCheckerComponent != null)
         {
             gateCheckerOutputs = gateCheckerComponent.Deploy(_config, networkOutputs, databaseOutputs, fileStorageOutputs);
@@ -771,8 +784,8 @@ public class SystemDeployment
                     exports[$"auth_{poolName}_userPoolId"] = pool.UserPoolId;
                     exports[$"auth_{poolName}_clientId"] = pool.ClientId;
                     exports[$"auth_{poolName}_metadataUrl"] = pool.MetadataUrl;
-                    if (pool.HostedUIDomain != null)
-                        exports[$"auth_{poolName}_hostedUIDomain"] = pool.HostedUIDomain;
+                    if (pool.Authority != null)
+                        exports[$"auth_{poolName}_authority"] = pool.Authority;
                 }
             }
         }
@@ -783,7 +796,7 @@ public class SystemDeployment
         if (seedTaskOutputs != null)
         {
             exports["seederTaskFamily"] = seedTaskOutputs.TaskFamily;
-            exports["seederEcrUrl"] = seedTaskOutputs.EcrRepositoryUrl;
+            exports["seederImageRepoUrl"] = seedTaskOutputs.ContainerImageRepositoryUrl;
         }
 
         return new FoundationOutputs(networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs, gateCheckerOutputs, seedTaskOutputs, exports);

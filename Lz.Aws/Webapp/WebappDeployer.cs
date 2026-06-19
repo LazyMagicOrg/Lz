@@ -113,7 +113,7 @@ public class WebappDeployer
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Syncing to S3...");
         Console.ResetColor();
-        await SyncWithCacheControlAsync(publishPath, bucketName, region, profileArg);
+        await SyncWithCacheControlAsync(publishPath, bucketName, region, profileArg, environment: environment);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
@@ -206,7 +206,7 @@ public class WebappDeployer
             ? "Syncing to S3..."
             : $"Syncing to S3 under prefix '{normalizedPrefix}/'...");
         Console.ResetColor();
-        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg, normalizedPrefix);
+        await SyncWithCacheControlAsync(sourceFolder, bucketName, region, profileArg, normalizedPrefix, environment: environment);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(string.IsNullOrEmpty(normalizedPrefix)
@@ -286,27 +286,50 @@ public class WebappDeployer
     // ---------------------------------------------------------------
 
     /// <summary>
-    /// Syncs the source folder to s3://{bucketName}/wwwroot with three passes
-    /// that apply appropriate Cache-Control headers per file category:
+    /// Syncs the source folder to s3://{bucketName}/wwwroot with metadata
+    /// passes that apply appropriate Cache-Control / Content-Type headers
+    /// per file category:
     ///
-    ///   1) Full sync (--delete) with "public, max-age=3600" — baseline for
-    ///      all files; handles additions and removals.
+    ///   1) Full sync (--delete) with "public, max-age=3600" — baseline
+    ///      for all files; handles additions and removals. Excludes
+    ///      .br/.gz precompressed siblings (see "Compression" below).
     ///   2) Override metadata on /_framework/* (except manifests) with
     ///      "public, max-age=31536000, immutable" — these files are
     ///      content-hashed, so they can be cached forever.
-    ///   3) Override metadata on manifest files (index.html, blazor.boot.json,
-    ///      blazor.webassembly.js, service-worker.js, etc.) with
-    ///      "no-cache, no-store, must-revalidate" — these files change every
-    ///      deploy and reference all other fingerprinted files. They must
-    ///      always be fetched fresh, otherwise returning users get stale
-    ///      manifests that reference old asset hashes (or vice versa),
-    ///      causing errors like "Could not find 'checkIfLoaded'".
+    ///   3) Override metadata on manifest files (index.html,
+    ///      blazor.boot.json, blazor.webassembly.js, service-worker.js,
+    ///      etc.) with "no-cache, no-store, must-revalidate" — these
+    ///      change every deploy and reference all other fingerprinted
+    ///      files. They must always be fetched fresh, otherwise
+    ///      returning users get stale manifests that reference old
+    ///      asset hashes (or vice versa).
+    ///   3b) Override metadata on /_content/*.{js,css} with no-cache
+    ///       — Razor Class Library static assets used by the SW and
+    ///       app shell.
     ///
-    /// Passes 2 and 3 use `aws s3 cp --metadata-directive REPLACE` with
-    /// source == destination, which performs a server-side metadata update
-    /// without re-uploading file content. This ensures correct metadata even
-    /// on files that weren't re-uploaded (e.g. unchanged static assets on a
-    /// bucket that was previously deployed without cache-control).
+    /// Passes 2-3b use `aws s3 cp --metadata-directive REPLACE` with
+    /// source == destination, which performs a server-side metadata
+    /// update without re-uploading file content. This ensures correct
+    /// metadata even on files that weren't re-uploaded.
+    ///
+    /// ── Compression strategy ────────────────────────────────────────
+    /// Earlier this method had two more passes (4 + 5) that set
+    /// Content-Encoding metadata on Blazor's pre-compressed
+    /// .{wasm,js,dat}.{br,gz} siblings, paired with CFRequest.js
+    /// rewriting the request URI to the .br/.gz sibling based on
+    /// Accept-Encoding. The combination interacted badly with the SW
+    /// + Subresource Integrity pipeline in Chromium: SRI was computed
+    /// against the encoded body instead of the decoded one, blocking
+    /// every _framework/*.wasm whose request had an integrity hash.
+    /// See Platform/AssetDeliveryReview.md for the full diagnosis.
+    ///
+    /// Replaced with CloudFront's edge auto-compression (Compress=true
+    /// on the relevant cache behaviors). The Pass 1 sync now excludes
+    /// .br/.gz files entirely — Blazor publish still emits them, but
+    /// they're never uploaded. CloudFront compresses dynamically at
+    /// the edge based on Accept-Encoding, sets Content-Encoding, and
+    /// the browser decompresses through its native fetch pipeline
+    /// where SRI works correctly.
     /// </summary>
     /// <summary>
     /// Normalizes a target-prefix argument: trims leading/trailing slashes and
@@ -321,7 +344,8 @@ public class WebappDeployer
         string bucketName,
         string region,
         string profileArg,
-        string targetPrefix = "")
+        string targetPrefix = "",
+        string environment = "prod")
     {
         var s3Root = string.IsNullOrEmpty(targetPrefix)
             ? $"s3://{bucketName}/wwwroot"
@@ -339,11 +363,46 @@ public class WebappDeployer
             ? " --exclude \"products/*\""
             : "";
 
-        // Pass 1: Full sync with --delete. Sets a 1-hour baseline cache-control
-        // on all files. Subsequent passes override specific categories.
+        // Pass 1 baseline max-age is env-tunable.
+        //
+        // prod: max-age=3600 (1 hour). CDN-friendly default — browsers re-
+        //       request at most once per hour after initial fetch. Hashed
+        //       _framework/* assets are overridden to `immutable` by Pass 2
+        //       so the 1-hour value only applies to images/fonts/etc. that
+        //       legitimately rarely change.
+        //
+        // dev/test: max-age=60 (1 minute). Recovering from cache-poisoning
+        //       failure modes (response cached without ACAO before a CORS
+        //       deploy, response cached with a stale config before a code
+        //       deploy, etc.) should not require operators to wait an hour
+        //       or hand-run "Empty Cache and Hard Reload" through DevTools.
+        //       60s is short enough that any cache desync self-heals
+        //       between coffee sips. The cost is one extra round trip per
+        //       client per minute per asset — irrelevant for dev/test
+        //       traffic volume, meaningful for prod CDN economics.
+        //
+        // Anything other than dev/test falls through to the prod default.
+        var baselineMaxAge = environment.Equals("dev", StringComparison.OrdinalIgnoreCase)
+                          || environment.Equals("test", StringComparison.OrdinalIgnoreCase)
+            ? "60" : "3600";
+
+        // Pass 1: Full sync with --delete. Sets the env-tunable baseline
+        // cache-control on all files. Subsequent passes override specific
+        // categories.
+        //
+        // .br and .gz files are EXCLUDED. Blazor publish emits them as
+        // precompressed siblings of every framework asset; we used to
+        // upload + serve them via CFRequest URI-rewriting, but that
+        // interacted badly with SW + SRI (see method-level docs). Now
+        // CloudFront's edge auto-compression handles compression
+        // dynamically — the precompressed siblings on disk are unused.
+        // Excluding from the sync keeps S3 lean and prevents the
+        // .br/.gz files from being served by accident if any future
+        // routing rule accidentally points at them.
         await RunAsync("aws",
             $"s3 sync \"{sourcePath}\" \"{s3Root}\" --delete --quiet --region {region} {profileArg} " +
-            $"--cache-control \"public, max-age=3600\"{deleteExcludes}");
+            $"--cache-control \"public, max-age={baselineMaxAge}\" " +
+            $"--exclude \"*.br\" --exclude \"*.gz\"{deleteExcludes}");
 
         // Pass 2: Override /_framework/* (except manifest files) with immutable
         // long-lived cache. Content-hashed names make indefinite caching safe.
@@ -382,13 +441,25 @@ public class WebappDeployer
             $"--content-type \"application/wasm\" " +
             $"--exclude \"*\" --include \"*.wasm\"");
 
-        // 2c — *.js override, excluding the two JS manifests (handled by Pass 3).
+        // 2c — *.js override, excluding non-hashed loaders/manifests
+        // (handled by Pass 3 with no-cache). Three loaders here are
+        // non-fingerprinted but rewritten on every Blazor publish — must
+        // NOT be marked immutable, or browsers freeze on the previously-
+        // cached copy for a year and never see new builds:
+        //   blazor.webassembly.js
+        //   dotnet.js                  ← MS rewrites this per build; the
+        //                                hashed dotnet.runtime.{h}.js and
+        //                                dotnet.native.{h}.js it loads ARE
+        //                                immutable, but the loader itself
+        //                                isn't.
+        //   service-worker-assets.js
         await RunAsync("aws",
             $"s3 cp {frameworkRoot} --recursive --quiet --region {region} {profileArg} " +
             $"--metadata-directive REPLACE {immutableCache} " +
             $"--content-type \"application/javascript\" " +
             $"--exclude \"*\" --include \"*.js\" " +
             $"--exclude \"blazor.webassembly.js\" " +
+            $"--exclude \"dotnet.js\" " +
             $"--exclude \"service-worker-assets.js\"");
 
         // Pass 3: Override manifest files with no-cache. These change every
@@ -476,6 +547,60 @@ public class WebappDeployer
                     encodingArg);
             }
         }
+
+        // ── Pass 3b: /_content/* RCL static assets ─────────────────────
+        // Razor Class Library static assets ship under /_content/. Most
+        // are unfingerprinted (appConfig.js, staticContentSettings.js,
+        // lzserviceworker.js, staticContentModule.js, indexhead/body.js,
+        // localized resources, etc.). Some Blazor scoped-CSS bundles get
+        // a hashed filename (BaseApp.BlazorUI.h2eqakxwyu.bundle.scp.css),
+        // but treating all as no-cache is correct — fingerprinted
+        // bundles re-fetch via 304 If-None-Match when unchanged.
+        //
+        // The Pass 1 baseline (max-age=3600) was the wrong default for
+        // this tree: a fix to any RCL JS file (the SW source itself, the
+        // app's bundled config, static content settings) could sit in a
+        // browser's HTTP cache for an hour after the post-deploy
+        // CloudFront invalidation. service-worker.published.js statically
+        // imports four of these files at parse time, so SW byte-content
+        // depends on them being fresh when the SW script revalidates.
+        //
+        // Per-extension passes mirror Pass 2's pattern. Image and font
+        // assets under /_content/* (rare, e.g. icon SVG) are LEFT at the
+        // Pass 1 default — they're rarely changing and not security-
+        // critical to invalidate quickly.
+        string contentRoot = $"\"{s3Root}/_content/\" \"{s3Root}/_content/\"";
+        string noCacheControl = "--cache-control \"no-cache, must-revalidate\"";
+
+        // 3b.1 — *.js
+        await RunAsync("aws",
+            $"s3 cp {contentRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {noCacheControl} " +
+            $"--content-type \"application/javascript\" " +
+            $"--exclude \"*\" --include \"*.js\"");
+
+        // 3b.2 — *.css
+        await RunAsync("aws",
+            $"s3 cp {contentRoot} --recursive --quiet --region {region} {profileArg} " +
+            $"--metadata-directive REPLACE {noCacheControl} " +
+            $"--content-type \"text/css\" " +
+            $"--exclude \"*\" --include \"*.css\"");
+
+        // ── One-time orphan cleanup ───────────────────────────────────
+        // Pre-compressed .br/.gz siblings from earlier deploys (when
+        // CFRequest.js rewrote URIs to point at them) are now orphans.
+        // S3 sync's --exclude on Pass 1 keeps them from being deleted
+        // by the --delete sweep, so left alone they'd persist forever.
+        // A single bulk `aws s3 rm` per deploy cleans them up.
+        // Idempotent: after the first deploy that runs this, subsequent
+        // deploys find nothing to remove.
+        //
+        // RunSilentAsync because the rm reports success even when no
+        // matches exist; we don't want the empty-result line cluttering
+        // output once orphans are gone.
+        await RunSilentAsync("aws",
+            $"s3 rm \"{s3Root}/\" --recursive --quiet --region {region} {profileArg} " +
+            $"--exclude \"*\" --include \"*.br\" --include \"*.gz\"");
     }
 
     /// <summary>

@@ -16,10 +16,20 @@ namespace Lz.Core.Config;
 public static class ConfigLoader
 {
     // Platform-contributed extensions (e.g. AWS type mappings). See IConfigExtensions.
-    // The PascalCase deserializer is rebuilt lazily whenever the list changes so
-    // registrations made at process startup are honoured by the first load.
+    // Only extensions whose Platform matches ActivePlatform contribute to the
+    // deserializer — prevents silent last-write-wins collisions when more than
+    // one platform's extensions are registered in the same process.
     private static readonly List<IConfigExtensions> _extensions = new();
     private static IDeserializer? _deserializer;
+    private static string _activePlatform = "aws";
+
+    /// <summary>
+    /// The platform whose <see cref="IConfigExtensions"/> contribute type
+    /// mappings to the deserializer. Defaults to <c>"aws"</c> and is updated
+    /// when a loaded YAML file carries a top-level <c>platform:</c> key that
+    /// names a different platform.
+    /// </summary>
+    public static string ActivePlatform => _activePlatform;
 
     private static IDeserializer Deserializer => _deserializer ??= BuildDeserializer();
 
@@ -29,14 +39,19 @@ public static class ConfigLoader
             .WithNamingConvention(PascalCaseNamingConvention.Instance)
             .IgnoreUnmatchedProperties();
         foreach (var ext in _extensions)
-            ext.Configure(builder);
+        {
+            if (string.Equals(ext.Platform, _activePlatform, StringComparison.OrdinalIgnoreCase))
+                ext.Configure(builder);
+        }
         return builder.Build();
     }
 
     /// <summary>
     /// Register a platform-specific config extension. Platform libraries (Lz.Aws,
     /// Lz.Azure) call this once during host startup, before any config is loaded,
-    /// to contribute YAML type mappings for their derived config types.
+    /// to contribute YAML type mappings for their derived config types. Multiple
+    /// platforms' extensions can be safely registered — only the one matching
+    /// <see cref="ActivePlatform"/> contributes mappings.
     /// </summary>
     public static void RegisterExtensions(IConfigExtensions extensions)
     {
@@ -45,11 +60,89 @@ public static class ConfigLoader
         _deserializer = null; // invalidate so the next load rebuilds with the new mapping
     }
 
-    // Keycloak config YAML uses camelCase naming
-    private static readonly IDeserializer CamelCaseDeserializer = new DeserializerBuilder()
-        .WithNamingConvention(CamelCaseNamingConvention.Instance)
-        .IgnoreUnmatchedProperties()
-        .Build();
+    /// <summary>
+    /// Resolve the target environment.
+    /// Priority: explicit override → folder hierarchy (_Dev* → dev, _Test* → test, _Prod* → prod).
+    /// Lives in Lz.Core so plugins (which only reference Lz.Core / Lz.Aws) can
+    /// reuse the same resolution logic the CLI uses.
+    /// </summary>
+    public static string ResolveEnvironment(string? envOverride = null)
+    {
+        if (!string.IsNullOrEmpty(envOverride))
+            return envOverride;
+
+        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (dir != null)
+        {
+            var name = dir.Name;
+            if (name.StartsWith("_Dev", StringComparison.OrdinalIgnoreCase))
+                return "dev";
+            if (name.StartsWith("_Test", StringComparison.OrdinalIgnoreCase))
+                return "test";
+            if (name.StartsWith("_Prod", StringComparison.OrdinalIgnoreCase))
+                return "prod";
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException(
+            "Cannot determine environment. Use --env or run from a directory under _Dev, _Test, or _Prod.");
+    }
+
+    /// <summary>
+    /// Reset registrations and active platform. Intended for tests that need
+    /// a clean slate; not part of the normal runtime contract.
+    /// </summary>
+    internal static void ResetForTests()
+    {
+        _extensions.Clear();
+        _deserializer = null;
+        _activePlatform = "aws";
+    }
+
+    /// <summary>
+    /// Explicitly set the active platform. Normally inferred from the YAML
+    /// being loaded; this hook is for tests and for callers that know the
+    /// target before any file is touched.
+    /// </summary>
+    public static void SetActivePlatform(string platform)
+    {
+        if (string.IsNullOrWhiteSpace(platform))
+            throw new ArgumentException("Platform must not be empty.", nameof(platform));
+        var normalized = platform.Trim().ToLowerInvariant();
+        if (_activePlatform == normalized) return;
+        _activePlatform = normalized;
+        _deserializer = null;
+    }
+
+    /// <summary>
+    /// Scan the YAML for a top-level <c>platform:</c> (or <c>Platform:</c>) key
+    /// and update <see cref="ActivePlatform"/> if present and different. Called
+    /// before each deserialize so the correct platform's type mappings are
+    /// active. Lines inside nested blocks are ignored by requiring the key to
+    /// appear at column zero.
+    /// </summary>
+    private static void DetectPlatformFromYaml(string yaml)
+    {
+        using var reader = new StringReader(yaml);
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            if (line.Length == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#')
+                continue;
+            var colon = line.IndexOf(':');
+            if (colon <= 0) continue;
+            var key = line.Substring(0, colon).Trim();
+            if (!key.Equals("platform", StringComparison.OrdinalIgnoreCase)) continue;
+            var value = line.Substring(colon + 1).Trim();
+            // strip inline comment + surrounding quotes
+            var hash = value.IndexOf('#');
+            if (hash >= 0) value = value.Substring(0, hash).Trim();
+            value = value.Trim('"', '\'');
+            if (!string.IsNullOrEmpty(value))
+                SetActivePlatform(value);
+            return;
+        }
+    }
 
     /// <summary>
     /// Load a SharedConfig from a specific file path.
@@ -58,6 +151,7 @@ public static class ConfigLoader
     public static SharedConfig LoadSharedConfig(string filePath)
     {
         var yaml = File.ReadAllText(filePath);
+        DetectPlatformFromYaml(yaml);
         var config = Deserializer.Deserialize<SharedConfig>(yaml) ?? new SharedConfig();
         config.State = GenerateAwsStateConfig("shared", config.SharedSuffix, config.Region);
         ConfigValidator.Validate(config, filePath);
@@ -84,6 +178,7 @@ public static class ConfigLoader
     {
         var (systemKey, environment) = ParseSystemConfigFilename(filePath);
         var yaml = File.ReadAllText(filePath);
+        DetectPlatformFromYaml(yaml);
         var config = Deserializer.Deserialize<SystemConfig>(yaml) ?? new SystemConfig();
         config.SystemKey = systemKey;
         config.Environment = environment;
@@ -113,11 +208,34 @@ public static class ConfigLoader
     {
         var (systemKey, tenantKey, environment) = ParseTenantConfigFilename(filePath);
         var yaml = File.ReadAllText(filePath);
+        DetectPlatformFromYaml(yaml);
         var config = Deserializer.Deserialize<TenantConfig>(yaml) ?? new TenantConfig();
         config.SystemKey = systemKey;
         config.TenantKey = tenantKey;
         config.Environment = environment;
         config.ConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? ".";
+
+        // If a sibling subtenantconfig file is present, hydrate Subtenants
+        // from it. Having both inline Subtenants: in tenantconfig AND a
+        // sibling subtenantconfig is ambiguous — reject.
+        var configDirForSiblings = Path.GetDirectoryName(filePath);
+        if (configDirForSiblings != null)
+        {
+            var subtenantFilename = $"subtenantconfig.{systemKey}.{tenantKey}.{environment}.yaml";
+            var subtenantPath = Path.Combine(configDirForSiblings, subtenantFilename);
+            if (File.Exists(subtenantPath))
+            {
+                if (config.Subtenants != null && config.Subtenants.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Tenant '{tenantKey}' ({environment}) has both an inline Subtenants: " +
+                        $"block in tenantconfig and a sibling {subtenantFilename} file. " +
+                        "Move all subtenants into the subtenantconfig file or delete the file — " +
+                        "pick one.");
+                var subtenantConfig = LoadSubtenantConfig(subtenantPath);
+                config.Subtenants = subtenantConfig.Subtenants;
+            }
+        }
+
         ConfigValidator.Validate(config, filePath);
 
         // Load smartstore.usersettings.json from the same directory if present.
@@ -153,107 +271,33 @@ public static class ConfigLoader
     }
 
     /// <summary>
-    /// Load a KeycloakSeedConfig from a specific file path.
-    /// Uses camelCase YAML naming convention (different from systemconfig).
+    /// Load a SubtenantConfig from a specific file path.
+    /// SystemKey, TenantKey, and Environment are derived from the filename.
     /// </summary>
-    public static KeycloakSeedConfig LoadKeycloakSeedConfig(string filePath)
+    public static SubtenantConfig LoadSubtenantConfig(string filePath)
     {
+        var (systemKey, tenantKey, environment) = ParseSubtenantConfigFilename(filePath);
         var yaml = File.ReadAllText(filePath);
-        return CamelCaseDeserializer.Deserialize<KeycloakSeedConfig>(yaml) ?? new KeycloakSeedConfig();
+        DetectPlatformFromYaml(yaml);
+        var config = Deserializer.Deserialize<SubtenantConfig>(yaml) ?? new SubtenantConfig();
+        config.SystemKey = systemKey;
+        config.TenantKey = tenantKey;
+        config.Environment = environment;
+        return config;
     }
 
     /// <summary>
-    /// Discover a keycloakconfig file by convention: keycloakconfig.{systemKey}.{env}.yaml.
-    /// Returns null if no matching file is found (seeding is optional).
+    /// Discover a subtenantconfig file for the given tenant; returns null if
+    /// no sibling file exists (inline Subtenants: in tenantconfig remains
+    /// supported for back-compat).
     /// </summary>
-    public static KeycloakSeedConfig? DiscoverKeycloakSeedConfig(
-        string systemKey, string environment, string? startDirectory = null)
+    public static SubtenantConfig? DiscoverSubtenantConfig(
+        string systemKey, string tenantKey, string environment, string? startDirectory = null)
     {
         var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var expectedFilename = $"keycloakconfig.{systemKey}.{environment}.yaml";
+        var expectedFilename = $"subtenantconfig.{systemKey}.{tenantKey}.{environment}.yaml";
         var filePath = DiscoverConfigFile(dir, expectedFilename);
-        if (filePath == null) return null;
-        return LoadKeycloakSeedConfig(filePath);
-    }
-
-    /// <summary>
-    /// Discover a per-tenant keycloakconfig file with template fallback.
-    /// Resolution order:
-    ///   1. keycloakconfig.{systemKey}.{tenantKey}.{env}.yaml (tenant-specific override)
-    ///   2. keycloakconfig.system.tenant.{env}.yaml (template with &lt;&lt;placeholder&gt;&gt; replacements)
-    /// Returns null if neither file is found (seeding is optional).
-    /// </summary>
-    public static KeycloakSeedConfig? DiscoverTenantKeycloakSeedConfig(
-        string systemKey, string tenantKey, string environment,
-        TenantConfig tenantConfig,
-        Dictionary<string, string?> smtpSecrets,
-        string? startDirectory = null)
-    {
-        var dir = startDirectory ?? Directory.GetCurrentDirectory();
-
-        // 1. Look for tenant-specific override
-        var specificFilename = $"keycloakconfig.{systemKey}.{tenantKey}.{environment}.yaml";
-        var specificPath = DiscoverConfigFile(dir, specificFilename);
-        if (specificPath != null)
-            return LoadKeycloakSeedConfig(specificPath);
-
-        // 2. Fall back to template
-        var templateFilename = $"keycloakconfig.system.tenant.{environment}.yaml";
-        var templatePath = DiscoverConfigFile(dir, templateFilename);
-        if (templatePath == null)
-            return null;
-
-        // Read raw YAML and perform placeholder replacements
-        var yaml = File.ReadAllText(templatePath);
-        yaml = yaml.Replace("<<system>>", systemKey);
-        yaml = yaml.Replace("<<tenant>>", tenantKey);
-        yaml = yaml.Replace("<<env>>", environment);
-        yaml = yaml.Replace("<<rootdomain>>", tenantConfig.RootDomain);
-
-        // Legacy domain: substitute if present, remove lines if not
-        var legacyDomain = tenantConfig.LegacyDomains?.FirstOrDefault();
-        if (!string.IsNullOrEmpty(legacyDomain))
-        {
-            yaml = yaml.Replace("<<legacydomain>>", legacyDomain);
-        }
-        else
-        {
-            // Remove entire lines containing the placeholder
-            yaml = string.Join("\n",
-                yaml.Split('\n').Where(line => !line.Contains("<<legacydomain>>")));
-        }
-
-        yaml = yaml.Replace("<<displayname>>", tenantConfig.DisplayName ?? tenantKey);
-
-        // SMTP secrets from shared/system
-        foreach (var (key, value) in smtpSecrets)
-            yaml = yaml.Replace($"<<{key}>>", value ?? "");
-
-        return CamelCaseDeserializer.Deserialize<KeycloakSeedConfig>(yaml) ?? new KeycloakSeedConfig();
-    }
-
-    /// <summary>
-    /// Load a BootstrapCredsConfig from a specific file path.
-    /// Uses camelCase YAML naming convention.
-    /// </summary>
-    public static BootstrapCredsConfig LoadBootstrapCredsConfig(string filePath)
-    {
-        var yaml = File.ReadAllText(filePath);
-        return CamelCaseDeserializer.Deserialize<BootstrapCredsConfig>(yaml) ?? new BootstrapCredsConfig();
-    }
-
-    /// <summary>
-    /// Discover a credsconfig file by convention: credsconfig.{systemKey}.{env}.yaml.
-    /// Returns null if no matching file is found (bootstrap creds are optional).
-    /// </summary>
-    public static BootstrapCredsConfig? DiscoverBootstrapCredsConfig(
-        string systemKey, string environment, string? startDirectory = null)
-    {
-        var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var expectedFilename = $"credsconfig.{systemKey}.{environment}.yaml";
-        var filePath = DiscoverConfigFile(dir, expectedFilename);
-        if (filePath == null) return null;
-        return LoadBootstrapCredsConfig(filePath);
+        return filePath == null ? null : LoadSubtenantConfig(filePath);
     }
 
     /// <summary>
@@ -262,19 +306,20 @@ public static class ConfigLoader
     public static ContainerServiceConfig LoadContainerServiceConfig(string filePath)
     {
         var yaml = File.ReadAllText(filePath);
+        DetectPlatformFromYaml(yaml);
         var config = Deserializer.Deserialize<ContainerServiceConfig>(yaml) ?? new ContainerServiceConfig();
         config.ConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? "";
         return config;
     }
 
     /// <summary>
-    /// Discover and load ContainerServiceConfig by convention: servicesconfig.{systemKey}.{env}.yaml.
+    /// Discover and load ContainerServiceConfig by convention: containersbuild.{systemKey}.{env}.yaml.
     /// </summary>
     public static ContainerServiceConfig DiscoverAndLoadContainerServiceConfig(
         string systemKey, string environment, string? startDirectory = null)
     {
         var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var pattern = $"servicesconfig.{systemKey}.{environment}.yaml";
+        var pattern = $"containersbuild.{systemKey}.{environment}.yaml";
         var filePath = DiscoverConfigFile(dir, pattern)
             ?? throw new FileNotFoundException(
                 $"Container service config not found: {pattern}. " +
@@ -283,14 +328,14 @@ public static class ConfigLoader
     }
 
     /// <summary>
-    /// Discover and load foundation ContainerServiceConfig by convention: servicesconfig.foundation.{env}.yaml.
+    /// Discover and load foundation ContainerServiceConfig by convention: containersbuild.foundation.{env}.yaml.
     /// Foundation containers are system-scoped (shared across all tenants).
     /// </summary>
     public static ContainerServiceConfig DiscoverAndLoadFoundationContainerConfig(
         string systemKey, string environment, string? startDirectory = null)
     {
         var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var pattern = $"servicesconfig.foundation.{environment}.yaml";
+        var pattern = $"containersbuild.foundation.{environment}.yaml";
         var filePath = DiscoverConfigFile(dir, pattern);
         if (filePath == null)
         {
@@ -356,6 +401,20 @@ public static class ConfigLoader
             throw new ArgumentException(
                 $"Invalid tenantconfig filename format: '{Path.GetFileName(filePath)}'. " +
                 $"Expected: tenantconfig.{{systemkey}}.{{tenantkey}}.{{env}}.yaml");
+        return (parts[1], parts[2], parts[3]);
+    }
+
+    /// <summary>
+    /// Parse subtenantconfig.{systemkey}.{tenantkey}.{env}.yaml → (systemKey, tenantKey, environment)
+    /// </summary>
+    public static (string SystemKey, string TenantKey, string Environment) ParseSubtenantConfigFilename(string filePath)
+    {
+        var filename = Path.GetFileNameWithoutExtension(filePath);
+        var parts = filename.Split('.');
+        if (parts.Length != 4 || !parts[0].Equals("subtenantconfig", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                $"Invalid subtenantconfig filename format: '{Path.GetFileName(filePath)}'. " +
+                $"Expected: subtenantconfig.{{systemkey}}.{{tenantkey}}.{{env}}.yaml");
         return (parts[1], parts[2], parts[3]);
     }
 

@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Pulumi;
@@ -41,7 +42,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
         var awsCompute = (AwsComputeOutputs)compute;
         var awsDatabase = (Lz.Aws.Shared.AwsDatabaseOutputs)database;
         var awsFileStorage = (Lz.Aws.Shared.AwsFileStorageOutputs)fileStorage;
-        var ecs = config.ECS ?? new EcsConfig();
+        var ecs = config.Aws().ECS ?? new EcsConfig();
         var logRetention = ecs.LogRetentionDays;
         var themeName = Path.GetFileName(ecs.KeycloakThemePath.TrimEnd('/'));
 
@@ -70,7 +71,7 @@ public class AwsKeycloakEcsComponent : ComponentResource, IAuthServiceComponent
         // cross-account access; the execution role needs kms:Decrypt to pull
         // secret values at task startup.
         Input<string> secretsPolicy;
-        if (config.TrustedAccountIds.Count > 0)
+        if (config.Aws().TrustedAccountIds.Count > 0)
         {
             secretsPolicy = Output.Tuple(
                 awsDatabase.MasterSecretArn,

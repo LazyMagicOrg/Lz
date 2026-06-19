@@ -16,7 +16,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Pulumi.AzureNative" Version="2.*" />
+    <!-- Pulumi.AzureNative 2.92+ transitively requires Pulumi >= 3.106.2,
+         which conflicts with Lz.Core's hard pin of Pulumi == [3.105.0]
+         (assembly identity must match across the host/plugin boundary —
+         see Lz.Core.csproj). Cap Pulumi.AzureNative below 2.92 until
+         Lz.Core's Pulumi pin is bumped in lockstep. Mirrors the
+         Pulumi.Aws cap pattern in Lz.Aws.csproj. -->
+    <PackageReference Include="Pulumi.AzureNative" Version="[2.0.0, 2.92.0)" />
   </ItemGroup>
 
 </Project>

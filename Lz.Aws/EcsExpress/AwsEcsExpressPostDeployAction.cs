@@ -1,6 +1,7 @@
 using Lz.Core.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
+using Lz.Aws;
 using Lz.Aws.DynamoDB;
 
 namespace Lz.Aws.EcsExpress;
@@ -51,6 +52,21 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
             Console.WriteLine($"  Triggering ECS force-new-deployment for {prefix}...");
             await ForceNewDeploymentAsync(clusterName, prefix);
         }
+
+        // --- Step 3: Verify apex DNS resolved to the CloudFront alias ---
+        // AwsAppRunnerCognitoComponent creates a placeholder `A 127.0.0.1`
+        // at the apex during deploysystem (Cognito's CreateUserPoolDomain
+        // requires a resolvable apex A). AwsEcsExpressCloudFrontComponent
+        // is supposed to overwrite it with an A-alias to the tenant
+        // CloudFront distribution (AllowOverwrite=true). If that overwrite
+        // didn't happen, the placeholder is still in place and any flow
+        // that depends on the apex (the apex OAuth callback in particular)
+        // will silently break — Pulumi reports success and there's no
+        // visible signal until a real login attempt fails.
+        if (_tenantKey != null && _tenantConfig != null)
+        {
+            await VerifyApexAliasAsync();
+        }
     }
 
     private async Task EnsureTenantTablesAsync()
@@ -77,23 +93,137 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
             ? $"    {tenantTable} — created"
             : $"    {tenantTable} — exists");
 
-        // Subtenant tables: {SystemKey}_{TenantKey}_{SubtenantKey}
-        if (_tenantConfig?.Subtenants != null)
+        // Per-subtenant infrastructure (S3 bucket + DynamoDB table) is
+        // handled by the shared provisioner so the same logic runs here and
+        // from `lz deploysubtenants`.
+        if (_tenantConfig != null)
         {
-            foreach (var sub in _tenantConfig.Subtenants)
+            var accountId = await AwsAccountResolver.ResolveAccountIdAsync(profile, region);
+            await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
+                _config, _tenantConfig, profile, region, accountId);
+        }
+    }
+
+    /// <summary>
+    /// Asserts the tenant root domain's apex A record is the CloudFront
+    /// alias the tenant stack should have created. Warns loudly if the
+    /// placeholder (or any non-CloudFront record) is still present after
+    /// a tenant deploy. Intentionally non-fatal — Pulumi already reported
+    /// success, so erroring out here would be confusing; the warning
+    /// surfaces the issue without unwinding everything else.
+    /// </summary>
+    private async Task VerifyApexAliasAsync()
+    {
+        var rootDomain = _tenantConfig!.RootDomain;
+        if (string.IsNullOrEmpty(rootDomain))
+        {
+            Console.WriteLine("  Skipping apex DNS check — no RootDomain in tenant config.");
+            return;
+        }
+
+        if (_tenantConfig!.ApexHostedExternally)
+        {
+            Console.WriteLine($"  Apex DNS check skipped — {rootDomain} apex is hosted " +
+                              "externally (ApexHostedExternally=true); lz does not manage it.");
+            return;
+        }
+
+        Console.WriteLine($"  Verifying apex DNS for {rootDomain}...");
+
+        try
+        {
+            var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
+            if (!chain.TryGetAWSCredentials(_config.Profile, out var credentials))
             {
-                var subTable = $"{sk}_{tk}_{sub.Key}";
-                var subCreated = await DynamoDbTableCreator.EnsureTableAsync(
-                    profile, region, subTable,
-                    new Dictionary<string, string>(baseTags)
-                    {
-                        { "Subtenant", sub.Key },
-                        { "Level", "subtenant" },
-                    });
-                Console.WriteLine(subCreated
-                    ? $"    {subTable} — created"
-                    : $"    {subTable} — exists");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  Apex DNS check skipped — could not resolve credentials for profile '{_config.Profile}'.");
+                Console.ResetColor();
+                return;
             }
+
+            // Route 53 is a global service routed through us-east-1. Pin
+            // explicitly so the check works on machines whose AWS profile
+            // doesn't set a DefaultRegion.
+            using var r53 = new Amazon.Route53.AmazonRoute53Client(
+                credentials, Amazon.RegionEndpoint.USEast1);
+
+            // Find the hosted zone. ListHostedZonesByName matches as a prefix
+            // search; verify the returned zone's name matches our root.
+            var zoneName = rootDomain.EndsWith('.') ? rootDomain : rootDomain + ".";
+            var zonesResp = await r53.ListHostedZonesByNameAsync(
+                new Amazon.Route53.Model.ListHostedZonesByNameRequest { DNSName = zoneName });
+            var zone = zonesResp.HostedZones?.FirstOrDefault(z => z.Name == zoneName);
+            if (zone == null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  Apex DNS check skipped — no Route 53 hosted zone for {rootDomain}.");
+                Console.ResetColor();
+                return;
+            }
+
+            var rrsResp = await r53.ListResourceRecordSetsAsync(
+                new Amazon.Route53.Model.ListResourceRecordSetsRequest
+                {
+                    HostedZoneId = zone.Id,
+                    StartRecordName = zoneName,
+                    StartRecordType = Amazon.Route53.RRType.A,
+                    MaxItems = "10",
+                });
+            var apexA = rrsResp.ResourceRecordSets?
+                .FirstOrDefault(r => r.Name == zoneName && r.Type == Amazon.Route53.RRType.A);
+
+            if (apexA == null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine($"  WARNING: No apex A record found for {rootDomain}.");
+                Console.Error.WriteLine($"  Expected: A-alias to the tenant CloudFront distribution.");
+                Console.ResetColor();
+                return;
+            }
+
+            // The healthy state is an Alias record whose target ends with
+            // .cloudfront.net (the tenant distribution). Anything else —
+            // a literal IP (the placeholder) or a non-CloudFront alias —
+            // means the tenant stack didn't reconcile the placeholder.
+            var aliasTarget = apexA.AliasTarget?.DNSName;
+            if (!string.IsNullOrEmpty(aliasTarget) &&
+                aliasTarget.Contains(".cloudfront.net", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  Apex DNS OK: {rootDomain} → {aliasTarget.TrimEnd('.')}");
+                Console.ResetColor();
+                return;
+            }
+
+            string actual;
+            if (!string.IsNullOrEmpty(aliasTarget))
+                actual = $"alias to {aliasTarget.TrimEnd('.')}";
+            else
+            {
+                var literals = apexA.ResourceRecords != null
+                    ? string.Join(", ", apexA.ResourceRecords.Select(r => r.Value))
+                    : "(empty)";
+                actual = $"literal record [{literals}]";
+            }
+
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"  WARNING: Apex DNS for {rootDomain} is {actual}.");
+            Console.Error.WriteLine($"  Expected: A-alias to a *.cloudfront.net distribution.");
+            Console.Error.WriteLine($"  Cause: AwsAppRunnerCognitoComponent creates a placeholder A 127.0.0.1 at");
+            Console.Error.WriteLine($"  the apex during `lz deploysystem` so Cognito's CreateUserPoolDomain has a");
+            Console.Error.WriteLine($"  resolvable parent. AwsEcsExpressCloudFrontComponent is supposed to overwrite");
+            Console.Error.WriteLine($"  it during `lz deploytenant` (AllowOverwrite=true on the alias resource).");
+            Console.Error.WriteLine($"  If this warning persists after a successful deploytenant, the alias-creation");
+            Console.Error.WriteLine($"  step didn't run — check the Pulumi tenant-stack output for `cf-alias` errors");
+            Console.Error.WriteLine($"  and re-run. Login flows via the apex callback (https://{rootDomain.TrimEnd('.')}/oauth2/callback)");
+            Console.Error.WriteLine($"  will fail until this is resolved.");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Apex DNS check failed (non-fatal): {ex.Message}");
+            Console.ResetColor();
         }
     }
 

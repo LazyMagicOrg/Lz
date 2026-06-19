@@ -1,4 +1,5 @@
 using Lz.Core.Config;
+using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
@@ -37,16 +38,34 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         var sk = tenantConfig.SystemKey;
         var tk = tenantConfig.TenantKey;
         var env = tenantConfig.Environment;
+        var suffix = tenantConfig.TenantSuffix;
         var prefix = $"{sk}-{tk}-{serviceName}";
         var networkOutputs = (AwsEcsExpressNetworkOutputs)network;
         var computeOutputs = (AwsEcsExpressComputeOutputs)compute;
         var dbOutputs = (AwsAppRunnerDatabaseOutputs)database;
         var container = definition.Container ?? new ContainerOptions();
-        var appRunner = tenantConfig.AppRunner ?? new AppRunnerConfig();
 
-        var cpu = container.Cpu > 0 ? container.Cpu : appRunner.Cpu;
-        var memory = container.Memory > 0 ? container.Memory : appRunner.Memory;
-        var port = container.Port > 0 ? container.Port : appRunner.Port;
+        // Per-tenant ECR image — repo is created on first `lz deploycontainer`,
+        // not by Pulumi. Naming mirrors the ecs-fargate-keycloak topology so
+        // tooling can assume a single convention:
+        //   {sk}-{suffix}-{env}-{tk}-{serviceName}
+        var ecrName = $"{sk}-{suffix}-{env}-{tk}-{serviceName}";
+        var ecsRegion = tenantConfig.Region ?? "us-west-2";
+        var ecsIdentity = Pulumi.Aws.GetCallerIdentity.Invoke();
+        var imageUri = ecsIdentity.Apply(id =>
+            $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{ecrName}:latest");
+
+        // Resolve effective Fargate sizing — prefers Fargate: block on tenant,
+        // then system; falls back to the legacy AppRunner: block for configs
+        // that predate the Fargate alias.
+        // SystemConfig isn't available here, so construct a merger call with
+        // an empty system and let the tenant-side override-or-fallback run.
+        var fargate = AwsConfigMerger.GetEffectiveFargateConfig(
+            new AwsSystemConfig(), tenantConfig);
+
+        var cpu = container.Cpu > 0 ? container.Cpu : fargate.Cpu;
+        var memory = container.Memory > 0 ? container.Memory : fargate.Memory;
+        var port = container.Port > 0 ? container.Port : fargate.Port;
 
         // =====================================================================
         // LOG GROUP
@@ -55,7 +74,7 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         var logGroup = new LogGroup($"{prefix}-logs", new LogGroupArgs
         {
             Name = $"/ecs/{prefix}",
-            RetentionInDays = appRunner.LogRetentionDays,
+            RetentionInDays = fargate.LogRetentionDays,
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
         }, new CustomResourceOptions { Parent = this });
 
@@ -137,17 +156,34 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
             }}",
         }, new CustomResourceOptions { Parent = this });
 
+        // Bedrock is kept at Resource: "*" because cross-region foundation-model
+        // ARNs aren't known at policy-construction time. Cognito, CloudFront,
+        // and Secrets Manager are scoped to the caller's account/region and
+        // to the tenant's prefix for secrets.
+        var callerId = Pulumi.Aws.GetCallerIdentity.Invoke();
+        var awsRegion = Pulumi.Aws.GetRegion.Invoke();
         new RolePolicy($"{prefix}-extra", new RolePolicyArgs
         {
             Role = taskRole.Id,
-            Policy = @"{
-                ""Version"": ""2012-10-17"",
-                ""Statement"": [
-                    { ""Effect"": ""Allow"", ""Action"": [""bedrock:InvokeModel"", ""bedrock:InvokeModelWithResponseStream""], ""Resource"": ""*"" },
-                    { ""Effect"": ""Allow"", ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers"", ""cognito-identity:*""], ""Resource"": ""*"" },
-                    { ""Effect"": ""Allow"", ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""], ""Resource"": ""*"" }
-                ]
-            }",
+            Policy = Output.Tuple(callerId.Apply(c => c.AccountId), awsRegion.Apply(r => r.Name))
+                .Apply(ids => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [
+                        {{ ""Effect"": ""Allow"", ""Action"": [""bedrock:InvokeModel"", ""bedrock:InvokeModelWithResponseStream""], ""Resource"": ""*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers""],
+                           ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cognito-identity:GetId"", ""cognito-identity:GetCredentialsForIdentity"", ""cognito-identity:GetOpenIdTokenForDeveloperIdentity""],
+                           ""Resource"": ""arn:aws:cognito-identity:{ids.Item2}:{ids.Item1}:identitypool/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""],
+                           ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:distribution/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""secretsmanager:GetSecretValue"", ""secretsmanager:DescribeSecret""],
+                           ""Resource"": ""arn:aws:secretsmanager:{ids.Item2}:{ids.Item1}:secret:{sk}/{tk}*"" }}
+                    ]
+                }}"),
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
@@ -163,20 +199,24 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
             RequiresCompatibilities = { "FARGATE" },
             ExecutionRoleArn = executionRole.Arn,
             TaskRoleArn = taskRole.Arn,
-            ContainerDefinitions = computeOutputs.EcrRepositoryUrl.Apply(ecrUrl =>
+            ContainerDefinitions = imageUri.Apply(image =>
                 System.Text.Json.JsonSerializer.Serialize(new[]
                 {
                     new
                     {
                         name = serviceName,
-                        image = $"{ecrUrl}:latest",
+                        image = image,
                         portMappings = new[] { new { containerPort = port, protocol = "tcp" } },
                         environment = new[]
                         {
                             new { name = "ASPNETCORE_ENVIRONMENT", value = env == "prod" ? "Production" : "Development" },
-                            new { name = "SYSTEM_KEY", value = sk },
-                            new { name = "TENANT_KEY", value = tk },
-                            new { name = "ENVIRONMENT", value = env },
+                            new { name = "ASPNETCORE_URLS", value = $"http://+:{port}" },
+                            new { name = "LZ_SYSTEM_KEY", value = sk },
+                            new { name = "LZ_TENANT_KEY", value = tk },
+                            new { name = "LZ_ENVIRONMENT", value = env },
+                            new { name = "LZ_SERVICE_NAME", value = serviceName },
+                            new { name = "AWS_REGION", value = tenantConfig.Region ?? "us-west-2" },
+                            new { name = "LZ_TENANT_SECRET", value = $"{sk}/{tk}" },
                         },
                         logConfiguration = new
                         {

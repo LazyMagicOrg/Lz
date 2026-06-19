@@ -11,20 +11,19 @@ namespace Lz.Aws.Config;
 /// learning AWS vocabulary.
 /// </summary>
 /// <remarks>
-/// This class is intentionally empty today — the plumbing lands first.
-/// When AWS-derived config types are introduced (for example an
-/// <c>AwsAuthConfigEntry : AuthConfigEntry</c> that carries Cognito
-/// MFA/password policy / groups per
-/// <c>Platform/CognitoHardeningPlan.md</c>), add the mapping here:
-/// <code>
-/// builder.WithTypeMapping&lt;AuthConfigEntry, AwsAuthConfigEntry&gt;();
-/// </code>
+/// Add more <c>WithTypeMapping&lt;TBase, TDerived&gt;()</c> calls here as
+/// further AWS-derived config types are introduced under
+/// <c>Lz.Aws/Config/</c>.
 /// </remarks>
 public sealed class AwsConfigExtensions : IConfigExtensions
 {
+    public string Platform => "aws";
+
     public void Configure(DeserializerBuilder builder)
     {
-        // No AWS-derived config types yet. Add WithTypeMapping<...> calls
-        // here as AWS extensions are added under Lz.Aws/Config/.
+        builder.WithTypeMapping<AuthConfigEntry, AwsAuthConfigEntry>();
+        builder.WithTypeMapping<SystemConfig, AwsSystemConfig>();
+        builder.WithTypeMapping<TenantConfig, AwsTenantConfig>();
+        builder.WithTypeMapping<SharedConfig, AwsSharedConfig>();
     }
 }

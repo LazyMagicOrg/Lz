@@ -1,7 +1,8 @@
+using Lz.Aws.Interfaces.Outputs;
 using Lz.Core.Config;
 using Lz.Core.Interfaces.Outputs;
 
-namespace Lz.Core.Interfaces;
+namespace Lz.Aws.Interfaces;
 
 /// <summary>
 /// Component that deploys Tailscale subnet router instances.

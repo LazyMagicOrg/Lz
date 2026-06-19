@@ -1,6 +1,6 @@
-using Lz.Core.Config;
+using Lz.Core.Keycloak;
 
-namespace Lz.Core.Interfaces;
+namespace Lz.Aws.Interfaces;
 
 /// <summary>
 /// Seeds per-tenant Keycloak realms (adminsauth + usersauth) via the

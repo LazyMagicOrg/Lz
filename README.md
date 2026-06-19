@@ -2,26 +2,33 @@
 
 A .NET global tool for deploying multi-tenant SaaS platforms to AWS using Pulumi. Systems define their topology via a plugin (`Deploy/`), and `lz` handles infrastructure provisioning, database initialization, and service deployment.
 
-See `Design.md`, `Requirements.md`, and `Implementation.md` for architecture details.
+See `Design.md`, `Requirements.md`, and `Implementation.md` for architecture
+details, and `FutureIssues.md` for known deferred improvements.
 
 ## Project Structure
 
 | Project | Purpose |
 |---------|---------|
-| `Lz.Core` | Config, interfaces, orchestration — cloud-agnostic |
-| `Lz.Aws` | AWS Pulumi components, Lambda handlers, ECS/RDS/EFS |
-| `Lz.Azure` | Azure Pulumi components (placeholder) |
-| `Lz.Cli` | `dotnet tool` entry point, plugin discovery, command routing |
+| `Lz.Core` | Platform-neutral config, interfaces, orchestration scaffolding. Speaks in shapes only — no AWS/Azure vocabulary. |
+| `Lz.Aws` | AWS-specific config types (AwsSystemConfig/AwsTenantConfig/AwsSharedConfig), derived via `IConfigExtensions` YAML type mappings. Pulumi components, ECS/AppRunner/EcsExpress topologies, Cognito/Keycloak/Tailscale/ACM implementations, AWS-shaped orchestration. |
+| `Lz.Azure` | Stub `IPlatformFactory` placeholder. |
+| `Lz.Cli` | `dotnet tool` entry point, plugin discovery, command routing. |
+| `Lz.Runner` | Thin dispatcher that resolves the correct `Lz.Cli` nupkg from NuGet feeds walked up from the current directory. |
+| `Lz.Gen` | Model-driven code generation (ported from LazyMagicMDD). |
+
+Systems extend the tool via a **plugin** (`Deploy/` project) that implements
+`ILzPlugin`. Plugins are allowed to be platform-aware — see
+`BCProjNew/Deploy/` for a worked AWS example. Plugin authors cast the
+base config types via `config.Aws()` to read AWS-derived fields.
+
+For design details see [`Design.md`](Design.md), and the target-isolation
+architecture doc at [`Design/TargetIsolation.md`](Design/TargetIsolation.md).
 
 ## Version Management
 
-All packages share a single version defined in `LzVersion.props`:
-
-```xml
-<LzVersion>0.9.109</LzVersion>
-```
-
-**All three packages (Lz.Core, Lz.Aws, Lz.Cli) must be at the same version.** A mismatch causes `TypeLoadException` at runtime.
+All packages share a single version defined in `LzVersion.props`.
+**All packages must be at the same version** — a mismatch causes
+`TypeLoadException` at runtime.
 
 ## Building, Packing, and Installing
 
@@ -82,7 +89,7 @@ cd ..\..\..
 
 Then proceed with the normal build/pack/install sequence above.
 
-**After installing the tool**, run `lz deployfoundation` to push the updated Lambda to AWS. The Lambda is a foundation-level resource — `lz deploytenant` does not update it.
+**After installing the tool**, run `lz deploysystem` to push the updated Lambda to AWS. The Lambda is a foundation-level resource — `lz deploytenant` does not update it.
 
 > **Warning:** Never use `aws lambda update-function-code` or any direct AWS CLI/Console commands to modify resources managed by Pulumi. This causes Pulumi state drift — Pulumi thinks the resource matches its state and skips updates on subsequent deployments, leaving broken resources in AWS. Always use `lz deploy*` commands.
 
@@ -90,7 +97,7 @@ Then proceed with the normal build/pack/install sequence above.
 
 ```bash
 # Deploy foundation (VPC, ECS cluster, RDS, EFS, Lambda)
-lz deployfoundation
+lz deploysystem
 
 # Deploy a tenant (infra + DB init + services)
 lz deploytenant

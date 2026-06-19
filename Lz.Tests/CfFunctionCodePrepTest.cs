@@ -18,7 +18,7 @@ public class CfFunctionCodePrepTest
     [Fact]
     public void Minifies_BCProjNew_CFRequest_under_10KB()
     {
-        var jsPath = @"C:\Users\TimothyMay\repos\_Dev\BCProjNew\CloudFront\CFRequest.js";
+        var jsPath = @"C:\Users\TimothyMay\repos\_Dev2\BCProjNew\CloudFront\CFRequest.js";
         if (!File.Exists(jsPath)) return; // skip on CI / other machines
 
         var rawBytes = Encoding.UTF8.GetByteCount(File.ReadAllText(jsPath));
@@ -36,7 +36,7 @@ public class CfFunctionCodePrepTest
         Assert.True(minBytes < rawBytes, "minification should reduce size");
 
         // Dump to a fixed path for inspection.
-        File.WriteAllText(@"C:\Users\TimothyMay\repos\_lz\Lz.Tests\bin\CFRequest.min.js", minified);
+        File.WriteAllText(@"C:\Users\TimothyMay\repos\_Dev2\_lzdev\Lz.Tests\bin\CFRequest.min.js", minified);
 
         // Print slices around positions of interest.
         void Slice(int col, int radius = 80)
@@ -47,5 +47,25 @@ public class CfFunctionCodePrepTest
         }
         Slice(500);
         Slice(5232);
+    }
+
+    [Theory]
+    [InlineData("CFAuthConfig.js")]
+    [InlineData("CFAuthCallback.js")]
+    [InlineData("CFExplore.js")]
+    [InlineData("CFAuth.js")]
+    public void Minifies_BCProjNew_CFFunction_under_10KB(string fileName)
+    {
+        var jsPath = Path.Combine(@"C:\Users\TimothyMay\repos\_Dev2\BCProjNew\CloudFront", fileName);
+        if (!File.Exists(jsPath)) return;
+
+        var raw = Encoding.UTF8.GetByteCount(File.ReadAllText(jsPath));
+        var minified = CfFunctionCodePrep.PrepareAndValidate(jsPath, fileName);
+        var min = Encoding.UTF8.GetByteCount(minified);
+
+        _output.WriteLine($"{fileName}: raw={raw:N0}, min={min:N0}");
+        Assert.True(min <= CfFunctionCodePrep.MaxBytes,
+            $"{fileName} minified size {min} should be <= {CfFunctionCodePrep.MaxBytes}");
+        Assert.True(min < raw, $"{fileName} minification should reduce size");
     }
 }

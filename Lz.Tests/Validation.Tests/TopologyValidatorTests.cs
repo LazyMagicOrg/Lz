@@ -18,10 +18,17 @@ public class TestSystem : SystemDefinition
         => AddService(name, def);
 }
 
+/// <summary>
+/// The platform-neutral TopologyValidator in Lz.Core carries no topology-
+/// specific rules — those live on the platform library's topology descriptor
+/// (e.g. Lz.Aws.Topologies.AwsTopology.ValidateConfig). These tests cover the
+/// cross-topology contract: the validator always returns a result and never
+/// throws on unknown topology strings.
+/// </summary>
 public class TopologyValidatorTests
 {
     [Fact]
-    public void Validate_EcsTopology_PassesForContainerServices()
+    public void Validate_ReturnsValid_ForServicesUnderKnownTopologies()
     {
         var system = new TestSystem();
         system.AddTestService("svc", new ServiceDefinition
@@ -30,65 +37,22 @@ public class TopologyValidatorTests
             Volumes = { new VolumeMount("data", "/data", "/data") }
         });
 
-        var result = TopologyValidator.Validate(system, "ecs");
+        var result = TopologyValidator.Validate(system, "ecs-fargate-keycloak");
         Assert.True(result.IsValid);
     }
 
     [Fact]
-    public void Validate_LambdaTopology_RejectsVolumes()
+    public void Validate_ReturnsValid_ForUnknownTopologyString()
     {
-        var system = new TestSystem();
-        system.AddTestService("svc", new ServiceDefinition
-        {
-            Lambda = new LambdaOptions(),
-            Volumes = { new VolumeMount("data", "/data", "/data") }
-        });
-
-        var result = TopologyValidator.Validate(system, "lambda");
-        Assert.False(result.IsValid);
-        Assert.Contains("volumes", result.Errors[0], StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void Validate_LambdaTopology_RejectsContainerOnlyService()
-    {
+        // Platform libraries own topology-specific validation; the core
+        // validator does not reject unknown topology names.
         var system = new TestSystem();
         system.AddTestService("svc", new ServiceDefinition
         {
             Container = new ContainerOptions { Port = 80 }
         });
 
-        var result = TopologyValidator.Validate(system, "lambda");
-        Assert.False(result.IsValid);
-        Assert.Contains("LambdaOptions", result.Errors[0]);
-    }
-
-    [Fact]
-    public void Validate_LambdaTopology_RejectsInternalIngress()
-    {
-        var system = new TestSystem();
-        system.AddTestService("svc", new ServiceDefinition
-        {
-            IngressType = IngressType.Internal,
-            Lambda = new LambdaOptions()
-        });
-
-        var result = TopologyValidator.Validate(system, "lambda");
-        Assert.False(result.IsValid);
-        Assert.Contains("Internal", result.Errors[0]);
-    }
-
-    [Fact]
-    public void Validate_LambdaTopology_PassesForValidLambdaService()
-    {
-        var system = new TestSystem();
-        system.AddTestService("svc", new ServiceDefinition
-        {
-            IngressType = IngressType.Public,
-            Lambda = new LambdaOptions { MemorySize = 512 }
-        });
-
-        var result = TopologyValidator.Validate(system, "lambda");
+        var result = TopologyValidator.Validate(system, "some-future-topology");
         Assert.True(result.IsValid);
     }
 }
