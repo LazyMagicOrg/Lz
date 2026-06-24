@@ -57,6 +57,29 @@ public class SystemConfig
     public string? IntegrationSecretsPath { get; set; }
     public IntegrationsConfig? Integrations { get; set; }
     public Dictionary<string, AuthConfigEntry>? AuthConfigs { get; set; }
+
+    /// <summary>
+    /// System-wide master switch for the Backend-For-Frontend (BFF) auth
+    /// feature. Default <c>false</c>. When false, NO BFF runtime env vars are
+    /// injected into container task/function definitions, so the deployed
+    /// task definition is byte-for-byte identical to a pre-BFF deploy. A
+    /// tenant can override this via <c>TenantConfig.BffEnabled</c>. Turning
+    /// this on is independent of (but normally paired with) per-pool
+    /// <c>ProvisionBffClient</c> on the AWS auth-config entry, which controls
+    /// the confidential Cognito client. See <c>Platform/MultiTenantAuth.md
+    /// §8.7, §8.14</c>.
+    /// </summary>
+    public bool BffEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Names the Cognito pool (an <see cref="AuthConfigs"/> key, e.g.
+    /// <c>tenantauth</c>) whose confidential BFF client the running container
+    /// uses. Only consulted when <see cref="BffEnabled"/> is true; selects
+    /// which <c>auth_{pool}_bff*</c> foundation outputs feed the
+    /// <c>LZ_BFF_*</c> env vars. Default <c>tenantauth</c> — the employee pool
+    /// that the BFF MVP targets (MultiTenantAuth.md §8.9).
+    /// </summary>
+    public string BffAuthPool { get; set; } = "tenantauth";
     public RequestRewriterConfig? RequestRewriter { get; set; }
     public RequestLoggingConfig? RequestLogging { get; set; }
     public VerboseLoggingConfig? Authentication { get; set; }

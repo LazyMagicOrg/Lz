@@ -212,23 +212,7 @@ public class SharedDeployment
 
     private async Task<UpResult> PulumiUpAsync(string stackName, bool includeTailscale)
     {
-        var stack = await CreateOrSelectStack(stackName, () =>
-        {
-            var result = DeploySharedInfra();
-
-            if (includeTailscale)
-            {
-                var tailscale = AwsFactory?.CreateTailscale();
-                if (tailscale != null)
-                {
-                    var systemConfig = ToSystemConfig();
-                    var tailscaleOutputs = tailscale.Deploy(systemConfig, result.Network, result.FileStorage);
-                    result.Exports["tailscaleAsgId"] = tailscaleOutputs.AutoScalingGroupId;
-                }
-            }
-
-            return result.Exports;
-        });
+        var stack = await CreateOrSelectStack(stackName, BuildSharedProgram(includeTailscale));
 
         Console.WriteLine("Running Pulumi up...");
         Console.WriteLine();
@@ -341,6 +325,81 @@ public class SharedDeployment
         };
 
         return new SharedInfraResult(networkOutputs, fileStorageOutputs, exports);
+    }
+
+    /// <summary>The shared-services resource graph (shared by up and preview).</summary>
+    private Func<IDictionary<string, object?>> BuildSharedProgram(bool includeTailscale)
+        => () =>
+        {
+            var result = DeploySharedInfra();
+
+            if (includeTailscale)
+            {
+                var tailscale = AwsFactory?.CreateTailscale();
+                if (tailscale != null)
+                {
+                    var systemConfig = ToSystemConfig();
+                    var tailscaleOutputs = tailscale.Deploy(systemConfig, result.Network, result.FileStorage);
+                    result.Exports["tailscaleAsgId"] = tailscaleOutputs.AutoScalingGroupId;
+                }
+            }
+
+            return result.Exports;
+        };
+
+    /// <summary>
+    /// Preview (read-only dry run) the shared-services stack. Returns true if the
+    /// plan is destructive (any replace/delete). No changes are applied; no
+    /// post-deploy actions run.
+    /// </summary>
+    public async Task<bool> PreviewAsync(bool refresh = false)
+    {
+        var stackName = "shared";
+        Console.WriteLine($"=== Shared-services preview: {stackName} (no changes will be applied) ===");
+        Console.WriteLine();
+
+        var stack = await CreateOrSelectStack(stackName, BuildSharedProgram(includeTailscale: true));
+
+        if (refresh)
+        {
+            Console.WriteLine("Running Pulumi refresh (syncing state with AWS — writes refreshed state)...");
+            Console.WriteLine();
+            await stack.RefreshAsync(new RefreshOptions
+            {
+                OnEvent = SystemDeployment.HandleEngineEvent,
+                OnStandardError = SystemDeployment.PrintStdErr,
+            }, _ct);
+            Console.WriteLine();
+        }
+
+        Console.WriteLine("Running Pulumi preview...");
+        Console.WriteLine();
+
+        var result = await stack.PreviewAsync(new PreviewOptions
+        {
+            OnEvent = SystemDeployment.HandleEngineEvent,
+            OnStandardError = SystemDeployment.PrintStdErr,
+        }, _ct);
+
+        Console.WriteLine();
+        return SystemDeployment.PrintPreviewSummary(result.ChangeSummary);
+    }
+
+    /// <summary>
+    /// Show the shared-services stack's last-deploy status (read-only).
+    /// </summary>
+    public async Task StatusAsync()
+    {
+        var stackName = "shared";
+        try
+        {
+            var stack = await CreateOrSelectStack(stackName, () => new Dictionary<string, object?>());
+            await SystemDeployment.PrintStackInfoAsync(stackName, stack);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Stack '{stackName}': {ex.Message}");
+        }
     }
 
     private async Task<WorkspaceStack> CreateOrSelectStack(

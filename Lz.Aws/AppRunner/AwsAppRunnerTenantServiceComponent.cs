@@ -187,6 +187,38 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
+        // BFF IAM (additive, flag-gated) — §8.4, §8.5 — parity with EcsExpress/Lambda
+        // =====================================================================
+        // AppRunner is not the active MagicPets topology, but for parity the
+        // instance role gets the same BFF grants (secrets + SSM/KMS Data
+        // Protection) when the BFF is enabled for the tenant. Gated, so a
+        // non-BFF tenant gets no new policy.
+        if (BffWiring.IsEnabled(tenantConfig))
+        {
+            var dpParam = BffWiring.DataProtectionParamPath(sk, env);
+            new RolePolicy($"{prefix}-bff", new RolePolicyArgs
+            {
+                Role = instanceRole.Id,
+                Policy = Output.Tuple(callerIdAr.Apply(c => c.AccountId), awsRegionAr.Apply(r => r.Name))
+                    .Apply(ids => $@"{{
+                        ""Version"": ""2012-10-17"",
+                        ""Statement"": [
+                            {{ ""Effect"": ""Allow"",
+                               ""Action"": [""secretsmanager:GetSecretValue"",""secretsmanager:DescribeSecret""],
+                               ""Resource"": ""arn:aws:secretsmanager:{ids.Item2}:{ids.Item1}:secret:{sk}/{tk}*"" }},
+                            {{ ""Effect"": ""Allow"",
+                               ""Action"": [""ssm:GetParameter"",""ssm:GetParameters"",""ssm:GetParametersByPath"",""ssm:PutParameter""],
+                               ""Resource"": ""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter{dpParam}*"" }},
+                            {{ ""Effect"": ""Allow"",
+                               ""Action"": [""kms:Encrypt"",""kms:Decrypt"",""kms:GenerateDataKey""],
+                               ""Resource"": ""*"",
+                               ""Condition"": {{ ""StringEquals"": {{ ""kms:ViaService"": ""ssm.{ids.Item2}.amazonaws.com"" }} }} }}
+                        ]
+                    }}"),
+            }, new CustomResourceOptions { Parent = this });
+        }
+
+        // =====================================================================
         // APPRUNNER SERVICE
         // =====================================================================
 

@@ -13,6 +13,9 @@ public enum AwsComputeKind
 
     /// <summary>AppRunner managed services — fully serverless, no VPC required.</summary>
     AppRunner,
+
+    /// <summary>AWS Lambda from a container image, fronted by a CloudFront-private Function URL — serverless, scales to zero, no VPC.</summary>
+    Lambda,
 }
 
 /// <summary>

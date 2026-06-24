@@ -19,6 +19,22 @@ public class AuthPoolDetail
     public required Output<string> ClientId { get; init; }
     public required Output<string> MetadataUrl { get; init; }
     public Output<string>? Authority { get; init; }
+
+    /// <summary>
+    /// Confidential BFF app-client id, when the pool provisioned one
+    /// (<c>AwsAuthConfigEntry.ProvisionBffClient</c>). <c>null</c> for pools
+    /// without a BFF client — the default. Exported as a foundation stack
+    /// output for downstream BFF wiring.
+    /// </summary>
+    public Output<string>? BffClientId { get; init; }
+
+    /// <summary>
+    /// Confidential BFF app-client secret, when the pool provisioned one.
+    /// <c>null</c> otherwise. The authoritative runtime copy is written into
+    /// the per-tenant Secrets Manager secret; this output exists for
+    /// completeness/auditing of the foundation stack.
+    /// </summary>
+    public Output<string>? BffClientSecret { get; init; }
 }
 
 /// <summary>

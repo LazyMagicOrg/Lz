@@ -64,6 +64,31 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
+    /// Resolve the ACTIVE ECS cluster name from a list of candidates. The cluster
+    /// naming convention differs by topology — the legacy <c>Ecs</c> platform uses
+    /// <c>{sk}-cluster</c> while the <c>EcsExpress</c> family (ecs-fargate-*,
+    /// lambda-*) uses <c>{sk}-{env}-cluster</c> — so the caller passes both and we
+    /// pick whichever actually exists. A single <c>DescribeClusters</c> call:
+    /// non-existent names come back under Failures (no exception), so the existing
+    /// ACTIVE cluster is the one to use. Returns null if none of the candidates exist.
+    /// </summary>
+    public async Task<string?> ResolveClusterAsync(IReadOnlyList<string> candidates, CancellationToken ct)
+    {
+        if (candidates.Count == 0) return null;
+        var resp = await _ecs.DescribeClustersAsync(
+            new DescribeClustersRequest { Clusters = candidates.ToList() }, ct);
+        // Preserve candidate order (caller lists the preferred convention first).
+        foreach (var name in candidates)
+        {
+            var match = resp.Clusters.FirstOrDefault(
+                c => string.Equals(c.ClusterName, name, StringComparison.Ordinal)
+                     && c.Status == "ACTIVE");
+            if (match != null) return match.ClusterName;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Compare-and-(maybe)-deploy a single tenant service.
     /// </summary>
     public async Task<ContainerUpdateResult> UpdateIfNewerAsync(

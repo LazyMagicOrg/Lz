@@ -167,23 +167,7 @@ public class SystemDeployment
     /// </summary>
     private async Task<UpResult> PulumiUpAsync(string stackName, bool includeTailscale)
     {
-        var stack = await CreateOrSelectStack(stackName, () =>
-        {
-            var foundation = DeployFoundation();
-            var exports = new Dictionary<string, object?>(foundation.Exports);
-
-            if (includeTailscale)
-            {
-                var tailscale = AwsFactory?.CreateTailscale();
-                if (tailscale != null)
-                {
-                    var tailscaleOutputs = tailscale.Deploy(_config, foundation.Network, foundation.FileStorage);
-                    exports["tailscaleAsgId"] = tailscaleOutputs.AutoScalingGroupId;
-                }
-            }
-
-            return exports;
-        });
+        var stack = await CreateOrSelectStack(stackName, BuildFoundationProgram(includeTailscale));
 
         // Always refresh before up — catch state drift from cross-stack
         // operations, manual changes, or prior failed deploys.
@@ -452,58 +436,7 @@ public class SystemDeployment
         TenantConfig tenantConfig,
         bool refresh = false)
     {
-        var stack = await CreateOrSelectStack(stackName, () =>
-        {
-            // Look up existing foundation resources (created by deploysystem).
-            // This uses data-source queries — no resources are created here.
-            var (network, compute, database, fileStorage) = _factory.LookupFoundation(_config);
-            var foundation = new FoundationOutputs(network, compute, database, fileStorage, null, null, new());
-            var exports = new Dictionary<string, object?>();
-
-            // Tenant data: EFS access points, tenant secret
-            var tenantDataComponent = _factory.CreateTenantData();
-            var tenantDataOutputs = tenantDataComponent.Deploy(
-                tenantConfig, foundation.FileStorage, foundation.Database);
-            exports[$"{tenantKey}_tenantSecretId"] = tenantDataOutputs.TenantSecretId;
-
-            // Service-layer services (e.g., SmartStore at desiredCount:0)
-            var tenantServiceComponent = _factory.CreateTenantService();
-            foreach (var svc in _system.ServiceLayerServices)
-            {
-                var svcOutputs = tenantServiceComponent.Deploy(
-                    svc.Name, svc, tenantConfig,
-                    foundation.Network, foundation.Compute,
-                    foundation.Database, tenantDataOutputs);
-                exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;
-                exports[$"{tenantKey}_{svc.Name}_endpoint"] = svcOutputs.Endpoint;
-            }
-
-            // Host-layer services (e.g., AppHost at desiredCount:0)
-            foreach (var svc in _system.HostLayerServices)
-            {
-                var svcOutputs = tenantServiceComponent.Deploy(
-                    svc.Name, svc, tenantConfig,
-                    foundation.Network, foundation.Compute,
-                    foundation.Database, tenantDataOutputs);
-                exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;
-                exports[$"{tenantKey}_{svc.Name}_endpoint"] = svcOutputs.Endpoint;
-            }
-
-            // CDN: CloudFront + S3 (creates ACM cert in us-east-1 automatically)
-            var cdn = _factory.CreateTenantCdn();
-            var cdnOutputs = cdn.Deploy(tenantConfig, foundation.Compute);
-            exports[$"{tenantKey}_distributionId"] = cdnOutputs.DistributionId;
-            exports[$"{tenantKey}_webappBucketId"] = cdnOutputs.WebappBucketId;
-            exports[$"{tenantKey}_exploreBucketId"] = cdnOutputs.ExploreBucketId;
-
-            // Tenant DNS + ALB certificates (SNI) + all public DNS records.
-            // Runs AFTER CDN so it can create CloudFront alias records.
-            // All DNS for all domains (root + legacy) managed here with stable
-            // resource names keyed by domain — no identity conflicts on transitions.
-            _factory.DeployTenantDnsAndCert(tenantConfig, foundation.Network, cdnOutputs);
-
-            return exports;
-        });
+        var stack = await CreateOrSelectStack(stackName, BuildTenantProgram(tenantKey, tenantConfig));
 
         // Refresh: sync Pulumi state with actual AWS resource state.
         // Used after `lz park` or manual AWS changes to detect drift.
@@ -616,26 +549,35 @@ public class SystemDeployment
         try
         {
             var stack = await CreateOrSelectStack(stackName, () => new Dictionary<string, object?>());
-            var info = await stack.GetInfoAsync();
-
-            if (info == null)
-            {
-                Console.WriteLine($"Stack '{stackName}': No deployments yet.");
-                return;
-            }
-
-            Console.WriteLine($"Stack: {stackName}");
-            Console.WriteLine($"  Last updated: {info.EndTime}");
-            Console.WriteLine($"  Result: {info.Result}");
-            if (info.ResourceChanges != null)
-            {
-                foreach (var kv in info.ResourceChanges)
-                    Console.WriteLine($"  {kv.Key}: {kv.Value}");
-            }
+            await PrintStackInfoAsync(stackName, stack);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Stack '{stackName}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Print the last-deploy summary (end time, result, resource-change counts)
+    /// for a stack. Shared by the system, tenant, and shared-services status.
+    /// </summary>
+    internal static async Task PrintStackInfoAsync(string stackName, WorkspaceStack stack)
+    {
+        var info = await stack.GetInfoAsync();
+
+        if (info == null)
+        {
+            Console.WriteLine($"Stack '{stackName}': No deployments yet.");
+            return;
+        }
+
+        Console.WriteLine($"Stack: {stackName}");
+        Console.WriteLine($"  Last updated: {info.EndTime}");
+        Console.WriteLine($"  Result: {info.Result}");
+        if (info.ResourceChanges != null)
+        {
+            foreach (var kv in info.ResourceChanges)
+                Console.WriteLine($"  {kv.Key}: {kv.Value}");
         }
     }
 
@@ -786,7 +728,28 @@ public class SystemDeployment
                     exports[$"auth_{poolName}_metadataUrl"] = pool.MetadataUrl;
                     if (pool.Authority != null)
                         exports[$"auth_{poolName}_authority"] = pool.Authority;
+                    // BFF confidential-client outputs — only present when the
+                    // pool set ProvisionBffClient. Null otherwise, so unconfigured
+                    // pools export exactly the same keys as before.
+                    if (pool.BffClientId != null)
+                        exports[$"auth_{poolName}_bffClientId"] = pool.BffClientId;
+                    if (pool.BffClientSecret != null)
+                        exports[$"auth_{poolName}_bffClientSecret"] = pool.BffClientSecret;
                 }
+
+                // Combined poolName -> userPoolId map (JSON) so a tenant stack can
+                // emit the LZ_AUTH_{POOL}_USERPOOLID env vars the AppHost's
+                // DiscoverAuthenticators REQUIRES, without enumerating dynamic
+                // per-pool stack-output keys. (The EcsExpress topology previously
+                // never injected these, so its AppHost container crash-looped with
+                // "No authenticators configured.")
+                var poolIdEntries = poolOutputs.Pools
+                    .Select(kv => kv.Value.UserPoolId.Apply(id =>
+                        new System.Collections.Generic.KeyValuePair<string, string>(kv.Key, id)))
+                    .ToArray();
+                exports["auth_userPoolIdsJson"] = Output.All(poolIdEntries)
+                    .Apply(entries => System.Text.Json.JsonSerializer.Serialize(
+                        entries.ToDictionary(e => e.Key, e => e.Value)));
             }
         }
 
@@ -800,6 +763,187 @@ public class SystemDeployment
         }
 
         return new FoundationOutputs(networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs, gateCheckerOutputs, seedTaskOutputs, exports);
+    }
+
+    // ---------------------------------------------------------------
+    // Pulumi programs (shared by up and preview so a preview faithfully
+    // predicts what an up would do)
+    // ---------------------------------------------------------------
+
+    /// <summary>The foundation resource graph (VPC/compute/data/auth + optional Tailscale).</summary>
+    private Func<IDictionary<string, object?>> BuildFoundationProgram(bool includeTailscale)
+        => () =>
+        {
+            var foundation = DeployFoundation();
+            var exports = new Dictionary<string, object?>(foundation.Exports);
+
+            if (includeTailscale)
+            {
+                var tailscale = AwsFactory?.CreateTailscale();
+                if (tailscale != null)
+                {
+                    var tailscaleOutputs = tailscale.Deploy(_config, foundation.Network, foundation.FileStorage);
+                    exports["tailscaleAsgId"] = tailscaleOutputs.AutoScalingGroupId;
+                }
+            }
+
+            return exports;
+        };
+
+    /// <summary>The tenant resource graph (tenant data + services + CDN + DNS).</summary>
+    private Func<IDictionary<string, object?>> BuildTenantProgram(string tenantKey, TenantConfig tenantConfig)
+        => () =>
+        {
+            // Look up existing foundation resources (created by deploysystem).
+            // This uses data-source queries — no resources are created here.
+            var (network, compute, database, fileStorage) = _factory.LookupFoundation(_config);
+            var foundation = new FoundationOutputs(network, compute, database, fileStorage, null, null, new());
+            var exports = new Dictionary<string, object?>();
+
+            // Tenant data: EFS access points, tenant secret
+            var tenantDataComponent = _factory.CreateTenantData();
+            var tenantDataOutputs = tenantDataComponent.Deploy(
+                tenantConfig, foundation.FileStorage, foundation.Database);
+            exports[$"{tenantKey}_tenantSecretId"] = tenantDataOutputs.TenantSecretId;
+
+            // Service-layer services (e.g., SmartStore at desiredCount:0)
+            var tenantServiceComponent = _factory.CreateTenantService();
+            foreach (var svc in _system.ServiceLayerServices)
+            {
+                var svcOutputs = tenantServiceComponent.Deploy(
+                    svc.Name, svc, tenantConfig,
+                    foundation.Network, foundation.Compute,
+                    foundation.Database, tenantDataOutputs);
+                exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;
+                exports[$"{tenantKey}_{svc.Name}_endpoint"] = svcOutputs.Endpoint;
+            }
+
+            // Host-layer services (e.g., AppHost at desiredCount:0)
+            foreach (var svc in _system.HostLayerServices)
+            {
+                var svcOutputs = tenantServiceComponent.Deploy(
+                    svc.Name, svc, tenantConfig,
+                    foundation.Network, foundation.Compute,
+                    foundation.Database, tenantDataOutputs);
+                exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;
+                exports[$"{tenantKey}_{svc.Name}_endpoint"] = svcOutputs.Endpoint;
+            }
+
+            // CDN: CloudFront + S3 (creates ACM cert in us-east-1 automatically)
+            var cdn = _factory.CreateTenantCdn();
+            var cdnOutputs = cdn.Deploy(tenantConfig, foundation.Compute);
+            exports[$"{tenantKey}_distributionId"] = cdnOutputs.DistributionId;
+            exports[$"{tenantKey}_webappBucketId"] = cdnOutputs.WebappBucketId;
+            exports[$"{tenantKey}_exploreBucketId"] = cdnOutputs.ExploreBucketId;
+
+            // Tenant DNS + ALB certificates (SNI) + all public DNS records.
+            // Runs AFTER CDN so it can create CloudFront alias records.
+            // All DNS for all domains (root + legacy) managed here with stable
+            // resource names keyed by domain — no identity conflicts on transitions.
+            _factory.DeployTenantDnsAndCert(tenantConfig, foundation.Network, cdnOutputs);
+
+            return exports;
+        };
+
+    // ---------------------------------------------------------------
+    // Preview (read-only dry run) — no post-deploy actions ever run
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Preview the foundation stack. Returns true if the plan is destructive
+    /// (contains any replace/delete). No changes are applied.
+    /// </summary>
+    public Task<bool> PreviewFoundationAsync(bool refresh = false)
+    {
+        var stackName = $"{_config.SystemKey}-{_config.Environment}";
+        Console.WriteLine($"=== Foundation preview: {stackName} (no changes will be applied) ===");
+        Console.WriteLine();
+        return PulumiPreviewAsync(stackName, BuildFoundationProgram(includeTailscale: true), refresh);
+    }
+
+    /// <summary>
+    /// Preview a tenant stack. Returns true if the plan is destructive
+    /// (contains any replace/delete). No changes are applied.
+    /// </summary>
+    public Task<bool> PreviewTenantAsync(string tenantKey, TenantConfig tenantConfig, bool refresh = false)
+    {
+        var stackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
+        Console.WriteLine($"=== Tenant preview: {tenantKey} ({stackName}) (no changes will be applied) ===");
+        Console.WriteLine();
+        return PulumiPreviewAsync(stackName, BuildTenantProgram(tenantKey, tenantConfig), refresh);
+    }
+
+    /// <summary>
+    /// Run Pulumi preview for a stack. Preview never mutates the world; if
+    /// <paramref name="refresh"/> is set it first runs a refresh (which writes the
+    /// refreshed state) so the diff reflects live AWS state. Returns true if the
+    /// plan contains any replace/delete operation — used by <c>--fail-on-replace</c>.
+    /// </summary>
+    private async Task<bool> PulumiPreviewAsync(
+        string stackName, Func<IDictionary<string, object?>> program, bool refresh)
+    {
+        var stack = await CreateOrSelectStack(stackName, program);
+
+        if (refresh)
+        {
+            Console.WriteLine("Running Pulumi refresh (syncing state with AWS — writes refreshed state)...");
+            Console.WriteLine();
+            await stack.RefreshAsync(new RefreshOptions
+            {
+                OnEvent = HandleEngineEvent,
+                OnStandardError = PrintStdErr,
+            }, _ct);
+            Console.WriteLine();
+        }
+
+        Console.WriteLine("Running Pulumi preview...");
+        Console.WriteLine();
+
+        var result = await stack.PreviewAsync(new PreviewOptions
+        {
+            OnEvent = HandleEngineEvent,
+            OnStandardError = PrintStdErr,
+        }, _ct);
+
+        Console.WriteLine();
+        return PrintPreviewSummary(result.ChangeSummary);
+    }
+
+    /// <summary>
+    /// Print the preview change summary and return whether it is destructive
+    /// (contains any replace or delete operation).
+    /// </summary>
+    internal static bool PrintPreviewSummary(IReadOnlyDictionary<OperationType, int> changeSummary)
+    {
+        var meaningful = changeSummary?.Where(kv => kv.Key != OperationType.Same).ToList()
+                         ?? new List<KeyValuePair<OperationType, int>>();
+        if (meaningful.Count == 0)
+        {
+            Console.WriteLine("Preview: no changes.");
+            return false;
+        }
+
+        Console.WriteLine("Preview — planned changes:");
+        foreach (var kv in meaningful)
+            Console.WriteLine($"  {kv.Key.ToString().ToLowerInvariant()}: {kv.Value}");
+
+        changeSummary!.TryGetValue(OperationType.Replace, out var replaces);
+        changeSummary.TryGetValue(OperationType.Delete, out var deletes);
+        var destructive = replaces + deletes > 0;
+        if (destructive)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  ⚠ destructive: {replaces} replace, {deletes} delete — stateful resources may be recreated.");
+            Console.ResetColor();
+        }
+        return destructive;
+    }
+
+    internal static void PrintStdErr(string msg)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine(msg);
+        Console.ResetColor();
     }
 
     private async Task<WorkspaceStack> CreateOrSelectStack(

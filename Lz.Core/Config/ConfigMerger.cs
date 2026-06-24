@@ -57,6 +57,17 @@ public static class ConfigMerger
         => tenant.RequestRewriter ?? system.RequestRewriter;
 
     /// <summary>
+    /// Resolve the effective Backend-For-Frontend (BFF) enablement for a
+    /// tenant deployment. The tenant's nullable <see cref="TenantConfig.BffEnabled"/>
+    /// overrides when set (<c>true</c>/<c>false</c>); when <c>null</c> it
+    /// inherits <see cref="SystemConfig.BffEnabled"/>. Both default off, so
+    /// an unconfigured system/tenant resolves to <c>false</c> and no BFF
+    /// runtime wiring is emitted.
+    /// </summary>
+    public static bool GetEffectiveBffEnabled(SystemConfig system, TenantConfig tenant)
+        => tenant.BffEnabled ?? system.BffEnabled;
+
+    /// <summary>
     /// Resolve the <c>Behaviors.WebApps</c> cascade for a single host, applying
     /// system → tenant → subtenant override semantics keyed by <c>Path</c>.
     /// </summary>

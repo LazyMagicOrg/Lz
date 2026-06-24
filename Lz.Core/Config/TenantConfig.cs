@@ -81,6 +81,24 @@ public class TenantConfig
     public VerboseLoggingConfig? UsersModuleAuth { get; set; }
     public VerboseLoggingConfig? Keycloak { get; set; }
 
+    /// <summary>
+    /// Per-tenant override of <see cref="SystemConfig.BffEnabled"/>. Nullable
+    /// three-state: <c>null</c> (unset) inherits the system value; <c>true</c>
+    /// / <c>false</c> force the tenant on/off. Default <c>null</c> — a tenant
+    /// that says nothing about the BFF gets exactly today's behaviour. Gates
+    /// the <c>LZ_BFF_*</c> container env injection for this tenant. See
+    /// <c>Platform/MultiTenantAuth.md §8.7</c>.
+    /// </summary>
+    public bool? BffEnabled { get; set; }
+
+    /// <summary>
+    /// Per-tenant override of <see cref="SystemConfig.BffAuthPool"/> — names
+    /// the Cognito pool whose confidential BFF client this tenant's container
+    /// uses. <c>null</c> (default) inherits the system value. Only consulted
+    /// when the BFF is enabled for the tenant.
+    /// </summary>
+    public string? BffAuthPool { get; set; }
+
     // --- SmartStore usersettings.json content ---
     // Loaded from smartstore.usersettings.json (same directory as tenantconfig YAML)
     // and written to shared file storage by the init runner. Stored separately to

@@ -131,7 +131,10 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
                         ""dynamodb:DeleteItem"", ""dynamodb:Query"", ""dynamodb:Scan"",
                         ""dynamodb:BatchGetItem"", ""dynamodb:BatchWriteItem""
                     ],
-                    ""Resource"": [""{arnPrefix}"", ""{arnPrefix}/index/*""]
+                    ""Resource"": [
+                        ""{arnPrefix}"", ""{arnPrefix}/index/*"",
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}/index/*""
+                    ]
                 }}]
             }}"),
         }, new CustomResourceOptions { Parent = this });
@@ -187,8 +190,127 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
+        // BFF DATA PROTECTION IAM (additive, flag-gated) — §8.4
+        // =====================================================================
+        // The BFF persists its ASP.NET Data Protection key ring to an SSM
+        // Parameter (LZ_BFF_DP_PARAM = /{sk}/{env}/bff/dataprotection) as a
+        // SecureString, which uses the AWS-managed alias/aws/ssm KMS key.
+        // Grant the task role SSM read/write on that path prefix plus KMS
+        // encrypt/decrypt. Created ONLY when the BFF is enabled for this
+        // tenant — a non-BFF tenant gets no new policy, so its plan is
+        // unchanged.
+        if (BffWiring.IsEnabled(tenantConfig))
+        {
+            var dpParam = BffWiring.DataProtectionParamPath(sk, env);
+            new RolePolicy($"{prefix}-bff-dataprotection", new RolePolicyArgs
+            {
+                Role = taskRole.Id,
+                Policy = Output.Tuple(callerId.Apply(c => c.AccountId), awsRegion.Apply(r => r.Name))
+                    .Apply(ids => $@"{{
+                        ""Version"": ""2012-10-17"",
+                        ""Statement"": [
+                            {{ ""Effect"": ""Allow"",
+                               ""Action"": [""ssm:GetParameter"", ""ssm:GetParameters"", ""ssm:GetParametersByPath"", ""ssm:PutParameter""],
+                               ""Resource"": ""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter{dpParam}*"" }},
+                            {{ ""Effect"": ""Allow"",
+                               ""Action"": [""kms:Encrypt"", ""kms:Decrypt"", ""kms:GenerateDataKey""],
+                               ""Resource"": ""*"",
+                               ""Condition"": {{ ""StringEquals"": {{ ""kms:ViaService"": ""ssm.{ids.Item2}.amazonaws.com"" }} }} }}
+                        ]
+                    }}"),
+            }, new CustomResourceOptions { Parent = this });
+        }
+
+        // =====================================================================
         // TASK DEFINITION
         // =====================================================================
+
+        // Base (always-present) container env. BFF env vars are appended ONLY
+        // when the BFF is enabled for this tenant; when off, the serialized
+        // environment array is identical to a pre-BFF deploy.
+        var baseEnv = new List<KeyValuePair<string, string>>
+        {
+            new("ASPNETCORE_ENVIRONMENT", env == "prod" ? "Production" : "Development"),
+            new("ASPNETCORE_URLS", $"http://+:{port}"),
+            new("LZ_SYSTEM_KEY", sk),
+            new("LZ_TENANT_KEY", tk),
+            new("LZ_ENVIRONMENT", env),
+            new("LZ_SERVICE_NAME", serviceName),
+            new("AWS_REGION", tenantConfig.Region ?? "us-west-2"),
+            new("LZ_TENANT_SECRET", $"{sk}/{tk}"),
+        };
+
+        // Resolve any BFF env outputs (StackReference-backed) alongside the
+        // image URI so the whole container definition serializes in one Apply.
+        var bffEnv = BffWiring.IsEnabled(tenantConfig)
+            ? BffWiring.BuildEnv(tenantConfig, this)
+            : new List<(string Name, Output<string> Value)>();
+        var bffNames = bffEnv.Select(e => e.Name).ToArray();
+        var bffValueOutputs = Output.All(bffEnv.Select(e => e.Value).ToArray());
+
+        // Auth pool env: LZ_AUTH_{POOL}_USERPOOLID for every Cognito pool. The
+        // AppHost's DiscoverAuthenticators REQUIRES at least one of these or it
+        // throws "No authenticators configured" and the container crash-loops.
+        // Read the combined poolName->userPoolId map the foundation stack exports.
+        // Always emitted — the backend needs auth regardless of the BFF. (The
+        // EcsExpress topology previously omitted this entirely.)
+        var foundationAuthRef = new StackReference(
+            $"{prefix}-auth-foundation-ref",
+            new StackReferenceArgs { Name = $"organization/lz-{sk}/{sk}-{env}" },
+            new CustomResourceOptions { Parent = this });
+        var authUserPoolIdsJson = foundationAuthRef.GetOutput("auth_userPoolIdsJson")
+            .Apply(v => v as string ?? "{}");
+
+        var containerDefs = Output.Tuple(imageUri, bffValueOutputs, authUserPoolIdsJson).Apply(t =>
+        {
+            var image = t.Item1;
+            var bffValues = t.Item2;
+            var authJson = t.Item3;
+
+            var envList = baseEnv.Select(kv => new { name = kv.Key, value = kv.Value }).ToList();
+
+            // LZ_AUTH_{POOL}_USERPOOLID from the foundation pool map.
+            try
+            {
+                var poolIds = System.Text.Json.JsonSerializer
+                    .Deserialize<System.Collections.Generic.Dictionary<string, string>>(authJson)
+                    ?? new System.Collections.Generic.Dictionary<string, string>();
+                foreach (var kv in poolIds)
+                    if (!string.IsNullOrEmpty(kv.Value))
+                        envList.Add(new { name = $"LZ_AUTH_{kv.Key.ToUpperInvariant()}_USERPOOLID", value = kv.Value });
+            }
+            catch { /* malformed map -> AppHost will surface the misconfig */ }
+
+            for (int i = 0; i < bffNames.Length; i++)
+                envList.Add(new { name = bffNames[i], value = bffValues[i] });
+
+            return System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    name = serviceName,
+                    image = image,
+                    portMappings = new[] { new { containerPort = port, protocol = "tcp" } },
+                    environment = envList.ToArray(),
+                    logConfiguration = new
+                    {
+                        logDriver = "awslogs",
+                        options = new Dictionary<string, string>
+                        {
+                            ["awslogs-group"] = $"/ecs/{prefix}",
+                            ["awslogs-region"] = tenantConfig.Region ?? "us-west-2",
+                            ["awslogs-stream-prefix"] = "ecs",
+                        },
+                    },
+                    // No container-level healthCheck: the base `mcr.microsoft.com/dotnet/aspnet`
+                    // image ships no curl/wget, so a curl-based command fails on every probe and
+                    // ECS kills the task ~90s in (after startPeriod) even though the app is fine.
+                    // The ALB target-group health check (HTTP HealthCheckPath, below) is the
+                    // authoritative health source for traffic routing AND ECS task health when a
+                    // load balancer is attached; HealthCheckGracePeriodSeconds covers cold start.
+                },
+            });
+        });
 
         var taskDef = new TaskDefinition($"{prefix}-task-def", new TaskDefinitionArgs
         {
@@ -199,45 +321,7 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
             RequiresCompatibilities = { "FARGATE" },
             ExecutionRoleArn = executionRole.Arn,
             TaskRoleArn = taskRole.Arn,
-            ContainerDefinitions = imageUri.Apply(image =>
-                System.Text.Json.JsonSerializer.Serialize(new[]
-                {
-                    new
-                    {
-                        name = serviceName,
-                        image = image,
-                        portMappings = new[] { new { containerPort = port, protocol = "tcp" } },
-                        environment = new[]
-                        {
-                            new { name = "ASPNETCORE_ENVIRONMENT", value = env == "prod" ? "Production" : "Development" },
-                            new { name = "ASPNETCORE_URLS", value = $"http://+:{port}" },
-                            new { name = "LZ_SYSTEM_KEY", value = sk },
-                            new { name = "LZ_TENANT_KEY", value = tk },
-                            new { name = "LZ_ENVIRONMENT", value = env },
-                            new { name = "LZ_SERVICE_NAME", value = serviceName },
-                            new { name = "AWS_REGION", value = tenantConfig.Region ?? "us-west-2" },
-                            new { name = "LZ_TENANT_SECRET", value = $"{sk}/{tk}" },
-                        },
-                        logConfiguration = new
-                        {
-                            logDriver = "awslogs",
-                            options = new Dictionary<string, string>
-                            {
-                                ["awslogs-group"] = $"/ecs/{prefix}",
-                                ["awslogs-region"] = tenantConfig.Region ?? "us-west-2",
-                                ["awslogs-stream-prefix"] = "ecs",
-                            },
-                        },
-                        healthCheck = new
-                        {
-                            command = new[] { "CMD-SHELL", $"curl -f http://localhost:{port}{container.HealthCheckPath} || exit 1" },
-                            interval = 30,
-                            timeout = 5,
-                            retries = 3,
-                            startPeriod = 60,
-                        },
-                    },
-                })),
+            ContainerDefinitions = containerDefs,
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
         }, new CustomResourceOptions { Parent = this });
 
@@ -308,6 +392,10 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
                     ContainerPort = port,
                 },
             },
+            // With the load balancer attached and no container-level healthCheck, ECS uses the
+            // ALB target-group health check for task health. Give cold starts room before it
+            // governs, so a slow first boot isn't killed by the deployment circuit breaker.
+            HealthCheckGracePeriodSeconds = 120,
             DeploymentCircuitBreaker = new ServiceDeploymentCircuitBreakerArgs
             {
                 Enable = true,

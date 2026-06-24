@@ -56,10 +56,30 @@ public class AwsAppRunnerTenantDataComponent : ComponentResource, ITenantDataCom
             },
         }, new CustomResourceOptions { Parent = this });
 
+        // Seed the secret body. Default is the historical empty document "{}".
+        // When the BFF is enabled for this tenant (additive, opt-in), seed the
+        // confidential client id/secret as JSON keys so the BFF server can read
+        // them via its secret-based path. The id/secret are pulled from the
+        // FOUNDATION stack outputs (the Cognito pools are system-scoped) via a
+        // StackReference — created ONLY on the BFF path, so a non-BFF tenant
+        // still seeds "{}" exactly as before.
+        Input<string> secretBody = "{}";
+        if (BffWiring.IsEnabled(tenantConfig))
+        {
+            var pool = BffWiring.ResolvePool(tenantConfig);
+            var foundation = new BffStackOutputs(tenantConfig, this);
+            secretBody = Output.Tuple(foundation.ClientId(pool), foundation.ClientSecret(pool))
+                .Apply(t => System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["BffClientId"] = t.Item1,
+                    ["BffClientSecret"] = t.Item2,
+                }));
+        }
+
         new SecretVersion($"{prefix}-secret-init", new SecretVersionArgs
         {
             SecretId = tenantSecret.Id,
-            SecretString = "{}",
+            SecretString = secretBody,
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================

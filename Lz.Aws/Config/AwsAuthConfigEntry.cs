@@ -105,6 +105,28 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// trusted across every subtenant that uses plannerauth.
     /// </summary>
     public string DeviceTracking { get; set; } = "USER_OPT_IN";
+
+    /// <summary>
+    /// When true, provision a SECOND, confidential Cognito app client
+    /// (<c>{poolPrefix}-bff-client</c>, <c>GenerateSecret=true</c>) alongside
+    /// the existing public client, for the Backend-For-Frontend (BFF) auth
+    /// flow. The public client is NOT modified — the BFF client is purely
+    /// additive. Default <c>false</c>: when unset, no extra client, secret,
+    /// or outputs are created, so the deploy plan is byte-for-byte identical
+    /// to a pre-BFF deploy. See <c>Platform/MultiTenantAuth.md §8.5</c>.
+    /// </summary>
+    public bool ProvisionBffClient { get; set; } = false;
+
+    /// <summary>
+    /// Per-pool BFF session lifetime, in hours. Drives the confidential
+    /// client's explicit <c>RefreshTokenValidity</c> (and the DynamoDB
+    /// session-record TTL the BFF server enforces). Per
+    /// <c>MultiTenantAuth.md §8.14</c>: employee pools (tenantauth/admin)
+    /// ≈ 12 h absolute; consumer pools run much longer (e.g. 720 h ≈ 30 d).
+    /// Only consulted when <see cref="ProvisionBffClient"/> is true; default
+    /// <c>12</c> matches the employee-pool recommendation.
+    /// </summary>
+    public int BffSessionTtlHours { get; set; } = 12;
 }
 
 /// <summary>

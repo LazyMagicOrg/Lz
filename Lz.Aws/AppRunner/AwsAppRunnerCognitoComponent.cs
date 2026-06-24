@@ -242,6 +242,74 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 new CustomResourceOptions { Parent = this });
 
             // =================================================================
+            // BFF CONFIDENTIAL CLIENT (additive, flag-gated) — §8.5
+            // =================================================================
+            // A SECOND app client for the Backend-For-Frontend auth flow. The
+            // public client above is left untouched (flipping GenerateSecret is
+            // immutable → replacement → breaks consumers). This client is
+            // confidential (GenerateSecret=true) and used only by the BFF
+            // server: authorization-code+PKCE exchange happens server-side, so
+            // the secret never reaches the browser.
+            //
+            // Created ONLY when ProvisionBffClient==true. When the flag is off
+            // (the default), neither this client nor its secret/outputs exist,
+            // so the deploy plan is identical to a pre-BFF deploy.
+            Output<string>? bffClientId = null;
+            Output<string>? bffClientSecret = null;
+            if (poolConfig.ProvisionBffClient)
+            {
+                // Token validity derived from the per-pool BFF session TTL.
+                // RefreshTokenValidity == session lifetime (hours); access/id
+                // tokens stay short (revocation-latency bound, §8.4/§8.14).
+                var ttlHours = poolConfig.BffSessionTtlHours > 0
+                    ? poolConfig.BffSessionTtlHours
+                    : 12;
+
+                // BFF callback lives at /bff/callback (NOT /oauth2/callback,
+                // which is the façade's apex callback for the public client).
+                // Mirror the public client's URL-building: primary on the
+                // system apex; dev entries (localhost) when IncludeDevCallbackUrls.
+                var bffCallbackUrls = new List<string> { $"https://{systemDomain}/bff/callback" };
+                var bffLogoutUrls = new List<string> { $"https://{systemDomain}/bff/logout-callback" };
+                if (poolConfig.IncludeDevCallbackUrls)
+                {
+                    bffCallbackUrls.Add("https://localhost:5001/bff/callback");
+                    bffLogoutUrls.Add("https://localhost:5001/bff/logout-callback");
+                }
+
+                var bffClient = new UserPoolClient($"{poolPrefix}-bff-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-bff-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = true,
+                    // Refresh-token flow only — the BFF does code+PKCE at the
+                    // /token endpoint and refreshes server-side. No browser SRP.
+                    ExplicitAuthFlows = { "ALLOW_REFRESH_TOKEN_AUTH" },
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AllowedOauthFlows = { "code" },
+                    AllowedOauthScopes = { "openid", "profile", "email" },
+                    AllowedOauthFlowsUserPoolClient = true,
+                    CallbackUrls = { bffCallbackUrls.ToArray() },
+                    LogoutUrls = { bffLogoutUrls.ToArray() },
+                    // Explicit token validity. Refresh == session TTL; access
+                    // and id tokens kept short (60 min, Cognito min/typical).
+                    RefreshTokenValidity = ttlHours,
+                    AccessTokenValidity = 60,
+                    IdTokenValidity = 60,
+                    TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                    {
+                        RefreshToken = "hours",
+                        AccessToken = "minutes",
+                        IdToken = "minutes",
+                    },
+                }, new CustomResourceOptions { Parent = this });
+
+                bffClientId = bffClient.Id;
+                bffClientSecret = bffClient.ClientSecret;
+            }
+
+            // =================================================================
             // USER POOL GROUPS — role distinctions within the pool (roles
             // surface to the app in the cognito:groups JWT claim)
             // =================================================================
@@ -362,6 +430,24 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                     DeleteBeforeReplace = true,
                 });
 
+            // ManagedLoginVersion=2 also requires a per-client branding for the
+            // confidential BFF client. Without it the hosted UI returns
+            // "Login pages unavailable" for /bff/login sign-ins (the public
+            // client's branding does NOT cover a second client). Reuse the same
+            // convention-folder branding source as the public client.
+            if (poolConfig.ProvisionBffClient && bffClientId is not null)
+            {
+                var bffBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, bffClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-bff-branding", bffBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
             // Route 53 alias: auth.{domain} → Cognito's managed CloudFront distribution
             new Pulumi.Aws.Route53.Record($"{poolPrefix}-dns", new Pulumi.Aws.Route53.RecordArgs
             {
@@ -425,6 +511,11 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 MetadataUrl = userPool.Id.Apply(id =>
                     $"https://cognito-idp.{region}.amazonaws.com/{id}/.well-known/openid-configuration"),
                 Authority = Output.Create($"https://{customDomain}"),
+                // BFF confidential-client outputs. Null unless ProvisionBffClient
+                // was set for this pool — downstream secret plumbing skips pools
+                // without a BFF client.
+                BffClientId = bffClientId,
+                BffClientSecret = bffClientSecret,
             };
         }
 
@@ -625,6 +716,21 @@ public class CognitoPoolOutputs
     public required Output<string> IdentityPoolId { get; init; }
     public required Output<string> MetadataUrl { get; init; }
     public required Output<string> Authority { get; init; }
+
+    /// <summary>
+    /// Confidential BFF client id. Non-null only when the pool's
+    /// <c>ProvisionBffClient</c> flag was set; <c>null</c> otherwise (no BFF
+    /// client was created). See <c>MultiTenantAuth.md §8.5</c>.
+    /// </summary>
+    public Output<string>? BffClientId { get; init; }
+
+    /// <summary>
+    /// Confidential BFF client secret. Non-null only when the pool's
+    /// <c>ProvisionBffClient</c> flag was set. Persisted into the tenant
+    /// Secrets Manager secret by the tenant-data flow, never exported in clear
+    /// to the SPA.
+    /// </summary>
+    public Output<string>? BffClientSecret { get; init; }
 }
 
 /// <summary>
@@ -647,5 +753,7 @@ public class AwsAppRunnerCognitoOutputs : IAuthPoolOutputs
                 ClientId = kv.Value.UserPoolClientId,
                 MetadataUrl = kv.Value.MetadataUrl,
                 Authority = kv.Value.Authority,
+                BffClientId = kv.Value.BffClientId,
+                BffClientSecret = kv.Value.BffClientSecret,
             });
 }

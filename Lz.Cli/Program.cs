@@ -106,6 +106,7 @@ class Program
         RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
         RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeploySubtenantsCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterPreviewCommands(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySubtenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -120,6 +121,17 @@ class Program
 
         // Plugin-specific commands (e.g., seed)
         plugin?.RegisterCommands(rootCommand);
+
+        // Top-level help: render the command list grouped into sections for
+        // readability (Shared / System / Tenant / Subtenant / Misc). Subcommand
+        // help (e.g. `lz deploytenant -h`) is unaffected. Placed after plugin
+        // command registration so plugin-contributed commands are included.
+        if (args.Length == 0 ||
+            (args.Length == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "-?")))
+        {
+            PrintGroupedHelp(rootCommand);
+            return 0;
+        }
 
         return await rootCommand.InvokeAsync(args);
     }
@@ -138,6 +150,96 @@ class Program
     /// (see LzRunner/Lz.Runner/Program.cs). If those env vars are absent the
     /// process wasn't launched via the runner; falls back to "(unknown)".
     /// </summary>
+    /// <summary>
+    /// Render <c>lz --help</c> with the top-level commands grouped into sections
+    /// for readability. Command descriptions are read from the registered
+    /// commands (the source of truth, including plugin-contributed ones); any
+    /// command not assigned to a section below still appears under "Other".
+    /// </summary>
+    private static void PrintGroupedHelp(RootCommand root)
+    {
+        var sections = new[]
+        {
+            ("Shared",    "shared-services account (Keycloak + Tailscale)",
+                new[] { "previewshared", "deployshared", "destroyshared" }),
+            ("System",    "foundation stack: VPC, Cognito, DynamoDB, ECS cluster",
+                new[] { "previewsystem", "deploysystem", "destroysystem" }),
+            ("Tenant",    "per-tenant stack + per-tenant operations",
+                new[] { "previewtenant", "deploytenant", "deploycontainer", "updatecontainer",
+                        "updateconfig", "updateedge", "updatekvs", "deploywebapp", "deployassets",
+                        "park", "unpark", "destroytenant" }),
+            ("Subtenant", "per-subtenant resources",
+                new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
+            ("Misc",      "discovery, codegen, utilities",
+                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers" }),
+        };
+
+        var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
+        var categorized = new HashSet<string>(sections.SelectMany(s => s.Item3), StringComparer.Ordinal);
+
+        var pad = byName.Keys.Select(n => n.Length).DefaultIfEmpty(12).Max() + 2;
+        var descWidth = 72;
+        try { if (!Console.IsOutputRedirected) descWidth = Math.Max(36, Console.WindowWidth - pad - 6); }
+        catch { /* no console (output redirected) — keep the default width */ }
+
+        Console.WriteLine("Lz infrastructure deployment tool");
+        Console.WriteLine();
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  lz [command] [options]");
+        Console.WriteLine();
+        Console.WriteLine("Options:");
+        Console.WriteLine("  --version       Show version information");
+        Console.WriteLine("  -?, -h, --help  Show help and usage information");
+        Console.WriteLine();
+        Console.WriteLine("Commands:");
+
+        void Row(string name)
+        {
+            if (!byName.TryGetValue(name, out var c)) return;
+            Console.WriteLine($"    {name.PadRight(pad)}{Summarize(c.Description, descWidth)}");
+        }
+
+        void Header(string title, string blurb)
+        {
+            Console.WriteLine();
+            var color = !Console.IsOutputRedirected;
+            if (color) Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write($"  {title}");
+            if (color) Console.ResetColor();
+            Console.WriteLine($" — {blurb}");
+        }
+
+        foreach (var (title, blurb, cmds) in sections)
+        {
+            Header(title, blurb);
+            foreach (var name in cmds) Row(name);
+        }
+
+        // Safety net: any registered command not assigned above still shows up,
+        // so newly-added (or plugin) commands are never silently dropped.
+        var leftovers = byName.Keys.Where(n => !categorized.Contains(n))
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+        if (leftovers.Count > 0)
+        {
+            Header("Other", "uncategorized — assign a section in PrintGroupedHelp");
+            foreach (var name in leftovers) Row(name);
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Run 'lz <command> -h' for command-specific help.");
+    }
+
+    /// <summary>Collapse whitespace and truncate a command description to one line.</summary>
+    private static string Summarize(string? description, int max)
+    {
+        if (string.IsNullOrWhiteSpace(description)) return "";
+        var text = System.Text.RegularExpressions.Regex.Replace(description.Trim(), @"\s+", " ");
+        if (text.Length <= max) return text;
+        var cut = text.LastIndexOf(' ', Math.Min(max - 1, text.Length - 1));
+        if (cut < max / 2) cut = max - 1;
+        return text.Substring(0, cut).TrimEnd() + "…";
+    }
+
     private static void PrintVersionInfo(ILzPlugin? plugin)
     {
         // -- Line 1: the dispatcher
@@ -283,6 +385,145 @@ class Program
         }, themeOption);
 
         root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // preview (read-only dry run of a Pulumi stack — no changes applied,
+    // no post-deploy actions; --fail-on-replace gates topology switches)
+    // ---------------------------------------------------------------
+
+    private static void RegisterPreviewCommands(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var platformOption = new Option<string?>("--platform", "Override platform from config");
+        var topologyOption = new Option<string?>("--topology",
+            "Override topology from config — e.g. preview a switch to lambda-cognito-dynamodb");
+        var refreshOption = new Option<bool>("--refresh",
+            "Refresh state from AWS before previewing for an accurate diff (writes the refreshed state)");
+        var failOnReplaceOption = new Option<bool>("--fail-on-replace",
+            "Exit non-zero (2) if the plan contains any replace/delete — the topology-switch guardrail");
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Tenant key (previews all tenants if not specified)");
+
+        // ---- previewsystem ----
+        var systemCmd = new Command("previewsystem",
+            "Preview (dry-run) the system/foundation stack. No changes are applied.");
+        systemCmd.AddOption(systemKeyOption);
+        systemCmd.AddOption(envOption);
+        systemCmd.AddOption(platformOption);
+        systemCmd.AddOption(topologyOption);
+        systemCmd.AddOption(refreshOption);
+        systemCmd.AddOption(failOnReplaceOption);
+        systemCmd.SetHandler(async (systemKey, env, platform, topology, refresh, failOnReplace) =>
+        {
+            RequirePlugin(plugin, "previewsystem");
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+            var anyDestructive = false;
+            foreach (var config in configs)
+            {
+                if (platform != null) config.Platform = platform;
+                if (topology != null) config.Topology = topology;
+                TryResolveSharedContext(config);
+                var (system, factory) = PrepareSystem(plugin!, config);
+                Console.WriteLine($"System: {config.SystemKey}  Env: {config.Environment}  Topology: {config.Topology}");
+                Console.WriteLine();
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+                anyDestructive |= await deployment.PreviewFoundationAsync(refresh);
+            }
+            if (failOnReplace && anyDestructive)
+            {
+                Console.Error.WriteLine("previewsystem: replace/delete operations detected and --fail-on-replace was set.");
+                Environment.ExitCode = 2;
+            }
+        }, systemKeyOption, envOption, platformOption, topologyOption, refreshOption, failOnReplaceOption);
+        root.AddCommand(systemCmd);
+
+        // ---- previewtenant ----
+        var tenantCmd = new Command("previewtenant",
+            "Preview (dry-run) a tenant stack — including the CloudFront edge. No changes are applied. " +
+            "Works before 'lz deploycontainer' (the image need not exist yet).");
+        tenantCmd.AddOption(systemKeyOption);
+        tenantCmd.AddOption(envOption);
+        tenantCmd.AddOption(tenantKeyOption);
+        tenantCmd.AddOption(topologyOption);
+        tenantCmd.AddOption(refreshOption);
+        tenantCmd.AddOption(failOnReplaceOption);
+        tenantCmd.SetHandler(async (systemKey, env, tenantKey, topology, refresh, failOnReplace) =>
+        {
+            RequirePlugin(plugin, "previewtenant");
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+            var anyDestructive = false;
+            foreach (var config in configs)
+            {
+                if (topology != null) config.Topology = topology;
+                TryResolveSharedContext(config);
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+                var tenants = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment, tenantKey);
+                foreach (var (tk, tenantConfig) in tenants)
+                {
+                    ValidateTenantConfig(config, tk, tenantConfig);
+                    tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+                    anyDestructive |= await deployment.PreviewTenantAsync(tk, tenantConfig, refresh);
+                }
+            }
+            if (failOnReplace && anyDestructive)
+            {
+                Console.Error.WriteLine("previewtenant: replace/delete operations detected and --fail-on-replace was set.");
+                Environment.ExitCode = 2;
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, topologyOption, refreshOption, failOnReplaceOption);
+        root.AddCommand(tenantCmd);
+
+        // ---- previewshared ----
+        var sharedCmd = new Command("previewshared",
+            "Preview (dry-run) the shared-services (Keycloak + Tailscale) stack. No changes are applied.");
+        sharedCmd.AddOption(refreshOption);
+        sharedCmd.AddOption(failOnReplaceOption);
+        sharedCmd.SetHandler(async (refresh, failOnReplace) =>
+        {
+            var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+            var factory = CreateFactory(new AwsSystemConfig
+            {
+                SystemKey = "shared",
+                Environment = "shared",
+                Platform = "aws",
+                Topology = Lz.Aws.Topologies.AwsTopologies.EcsFargateKeycloak.Name,
+                Profile = sharedConfig.Profile,
+                Region = sharedConfig.Region,
+                CentralAuthDomain = sharedConfig.Domain,
+                VpcCidr = sharedConfig.VpcCidr,
+                AdminAuth = "adminsauth",
+                TrustedAccountIds = sharedConfig.Aws().TrustedAccountIds,
+            });
+            var deployment = new SharedDeployment(factory, sharedConfig, Cts.Token);
+            var destructive = await deployment.PreviewAsync(refresh);
+            if (failOnReplace && destructive)
+            {
+                Console.Error.WriteLine("previewshared: replace/delete operations detected and --fail-on-replace was set.");
+                Environment.ExitCode = 2;
+            }
+        }, refreshOption, failOnReplaceOption);
+        root.AddCommand(sharedCmd);
+    }
+
+    /// <summary>
+    /// Best-effort shared-services seed-data propagation for preview. Preview is
+    /// read-only: it does NOT bootstrap state or resolve cross-account secret ARNs
+    /// (so a keycloak-topology preview that depends on those may differ slightly
+    /// from a real deploy). Topologies without shared services no-op here.
+    /// </summary>
+    private static void TryResolveSharedContext(SystemConfig config)
+    {
+        try
+        {
+            var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+            ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
+        }
+        catch { /* no sharedconfig.yaml — fine for cognito/dynamodb/lambda topologies */ }
     }
 
     // ---------------------------------------------------------------
@@ -997,8 +1238,26 @@ class Program
                 {
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
-                    var cluster = $"{config.SystemKey}-cluster";
                     var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
+
+                    // Cluster naming differs by topology: the EcsExpress family (the current
+                    // ecs-fargate-* / lambda-* topologies) names it {sk}-{env}-cluster; the
+                    // legacy Ecs platform uses {sk}-cluster. Resolve whichever actually exists
+                    // instead of hardcoding one convention — the hardcoded {sk}-cluster
+                    // predated the EcsExpress topology and caused "Cluster not found".
+                    var cluster = await updater.ResolveClusterAsync(
+                        new[] { $"{config.SystemKey}-{config.Environment}-cluster", $"{config.SystemKey}-cluster" },
+                        Cts.Token);
+                    if (cluster == null)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine(
+                            $"  [error] no ECS cluster found for system '{config.SystemKey}' (tried " +
+                            $"{config.SystemKey}-{config.Environment}-cluster and {config.SystemKey}-cluster). " +
+                            "Run 'lz deploysystem' first.");
+                        Console.ResetColor();
+                        continue;
+                    }
 
                     Console.ForegroundColor = ConsoleColor.Cyan;
                     Console.WriteLine(
@@ -1126,7 +1385,8 @@ class Program
                             tenantConfig.LegacyDomains,
                             function,
                             dryRun,
-                            Cts.Token);
+                            Cts.Token,
+                            corsConfig: tenantConfig.CDN?.Cors);
 
                         foreach (var r in results)
                             PrintEdgeResult(r);
@@ -1558,13 +1818,66 @@ class Program
         RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
-        var cmd = new Command("status", "Show deployment status");
+        var cmd = new Command("status",
+            "Show deployment status across all layers (shared + system + tenants). " +
+            "Scope with --layer or --tenantkey.");
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Show only this tenant (implies --layer tenant)");
+        tenantKeyOption.AddAlias("--tenant");
+        var layerOption = new Option<string?>("--layer",
+            "Scope to one layer: shared | system | tenant (default: all)");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(layerOption);
 
-        cmd.SetHandler(async (systemKey, env) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, layer) =>
         {
             RequirePlugin(plugin, "status");
+
+            layer = layer?.ToLowerInvariant();
+            if (layer != null && layer != "shared" && layer != "system" && layer != "tenant" && layer != "all")
+            {
+                Console.Error.WriteLine($"--layer must be one of: shared, system, tenant. Got '{layer}'.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            // --tenantkey implies the tenant layer.
+            if (tenantKey != null && layer == null) layer = "tenant";
+            var all = layer == null || layer == "all";
+            var doShared = all || layer == "shared";
+            var doSystem = all || layer == "system";
+            var doTenants = all || layer == "tenant";
+
+            // Shared services are account-wide (not per-system) — report once.
+            if (doShared)
+            {
+                try
+                {
+                    var sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+                    var sharedFactory = CreateFactory(new AwsSystemConfig
+                    {
+                        SystemKey = "shared",
+                        Environment = "shared",
+                        Platform = "aws",
+                        Topology = Lz.Aws.Topologies.AwsTopologies.EcsFargateKeycloak.Name,
+                        Profile = sharedConfig.Profile,
+                        Region = sharedConfig.Region,
+                        CentralAuthDomain = sharedConfig.Domain,
+                        VpcCidr = sharedConfig.VpcCidr,
+                        AdminAuth = "adminsauth",
+                        TrustedAccountIds = sharedConfig.Aws().TrustedAccountIds,
+                    });
+                    await new SharedDeployment(sharedFactory, sharedConfig, Cts.Token).StatusAsync();
+                }
+                catch (Exception ex)
+                {
+                    // No sharedconfig.yaml — cognito/dynamodb/lambda topologies don't use
+                    // shared services. Note it only when shared was explicitly requested.
+                    if (layer == "shared")
+                        Console.WriteLine($"Shared-services: not configured ({ex.Message}).");
+                }
+            }
 
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -1574,14 +1887,18 @@ class Program
                 var (system, factory) = PrepareSystem(plugin!, config);
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
 
-                await deployment.StatusFoundationAsync();
+                if (doSystem)
+                    await deployment.StatusFoundationAsync();
 
-                var tenants = ConfigResolver.ResolveTenantConfigs(
-                    config.SystemKey, config.Environment);
-                foreach (var (tk, _) in tenants)
-                    await deployment.StatusTenantAsync(tk);
+                if (doTenants)
+                {
+                    var tenants = ConfigResolver.ResolveTenantConfigs(
+                        config.SystemKey, config.Environment, tenantKey);
+                    foreach (var (tk, _) in tenants)
+                        await deployment.StatusTenantAsync(tk);
+                }
             }
-        }, systemKeyOption, envOption);
+        }, systemKeyOption, envOption, tenantKeyOption, layerOption);
 
         root.AddCommand(cmd);
     }

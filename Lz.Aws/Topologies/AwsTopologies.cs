@@ -2,6 +2,7 @@ using Lz.Aws.AppRunner;
 using Lz.Aws.Config;
 using Lz.Aws.Ecs;
 using Lz.Aws.EcsExpress;
+using Lz.Aws.Lambda;
 using Lz.Aws.Interfaces;
 using Lz.Core.Config;
 
@@ -128,6 +129,48 @@ public static class AwsTopologies
     };
 
     /// <summary>
+    /// True-serverless variant of <see cref="EcsFargateCognitoDynamodb"/>: the
+    /// per-tenant container Lambda (same image as Fargate) replaces the ECS task,
+    /// and a CloudFront-private Function URL (OAC + AWS_IAM) replaces the ALB.
+    /// Shares Cognito/DynamoDB/S3 and the CloudFront edge component identities with
+    /// the Fargate topology, so a deployed stack can be switched in place.
+    /// </summary>
+    public static readonly AwsTopology LambdaCognitoDynamodb = new()
+    {
+        Name = "lambda-cognito-dynamodb",
+        Summary = "AWS Lambda (container) + CloudFront Function URL + Cognito + DynamoDB + S3",
+        Description = """
+            True-serverless variant of ecs-fargate-cognito-dynamodb. The per-tenant
+            container Lambda — the SAME ECR image as the Fargate topology, with the
+            tenant injected via the TENANT_KEY env var — replaces the ECS task. A
+            CloudFront-fronted Lambda Function URL (Origin Access Control + AWS_IAM
+            SigV4) replaces the ALB, so the Function URL is private to CloudFront.
+            Cognito for auth, DynamoDB for data, S3 for tenant assets. No VPC, no NAT;
+            scales to zero. The CloudFront edge, Cognito pools, and DynamoDB tables
+            reuse the same component identities as ecs-fargate-cognito-dynamodb, so a
+            deployed stack can be switched in place between the two
+            (deploysystem + deploytenant). Run `lz deploycontainer` before
+            `lz deploytenant` — the function references the {ecr}:latest image.
+            See Platform/LambdaTopology.md.
+            """,
+        Compute = AwsComputeKind.Lambda,
+        Data = AwsDataKind.DynamoDb,
+        FileStorage = AwsFileStorageKind.S3,
+        Auth = AwsAuthKind.Cognito,
+        HasPrivateNetwork = false,
+        UsesVpn = false,
+        UsesCentralAuth = false,
+        UsesInVpcGateChecker = false,
+        UsesSeedTask = false,
+        CreateFactory = config => new AwsLambdaPlatformFactory(config),
+        ValidateConfig = (cfg, errs) =>
+        {
+            AwsNamingValidator.ValidateSystemKeys(cfg, errs);
+            RequireAuthConfigs(cfg, errs, "lambda-cognito-dynamodb");
+        },
+    };
+
+    /// <summary>
     /// Topology-validation helper: require at least one Cognito pool declared
     /// in <c>SystemConfig.AuthConfigs</c>. Used by all topologies where
     /// <c>Auth == <see cref="AwsAuthKind.Cognito"/></c>.
@@ -153,6 +196,7 @@ public static class AwsTopologies
             [EcsFargateKeycloak.Name] = EcsFargateKeycloak,
             [EcsFargateCognitoDynamodb.Name] = EcsFargateCognitoDynamodb,
             [AppRunner.Name] = AppRunner,
+            [LambdaCognitoDynamodb.Name] = LambdaCognitoDynamodb,
         };
 
     /// <summary>

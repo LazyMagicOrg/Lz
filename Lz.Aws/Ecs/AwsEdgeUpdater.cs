@@ -4,6 +4,7 @@ using Amazon.CloudFront.Model;
 using Amazon.Runtime.CredentialManagement;
 using Lz.Aws.Shared;
 using Lz.Aws.Webapp;
+using Lz.Core.Config;
 
 namespace Lz.Aws.Ecs;
 
@@ -37,22 +38,22 @@ public record EdgeFunctionResult(
 /// source), so there is no drift.
 ///
 /// Why this exists: <c>deploytenant</c> picks up CloudFront-function edits, but
-/// only by running a full Pulumi up that scales ECS services to 0 first
-/// (see AwsEcsTenantServiceComponent.desiredCount) — a service-interruption
-/// window. A CloudFront Function code change is natively in-place
-/// (UpdateFunction → PublishFunction), so <c>lz updateedge</c> applies it with
-/// zero downtime and no container restart.
+/// only by running a full Pulumi up that scales ECS services to 0 first — a
+/// service-interruption window. A CloudFront Function code change is natively
+/// in-place (UpdateFunction → PublishFunction), so <c>lz updateedge</c> applies
+/// it with zero downtime and no container restart.
 ///
-/// The three functions and how their code is prepared — kept byte-identical to
-/// AwsCloudFrontComponent so the published result matches a full deploy:
-///   • CFViewerRequest.js  → viewer-request on the default behavior.
-///       Minified + validated via CfFunctionCodePrep, with the same five
-///       template substitutions (${RootDomainParameter}, ${LegacyDomainsJson},
-///       ${KvsId}, ${ExploreBucketDomain}, ${ParkBucketDomain}).
-///   • CFViewerResponse.js → viewer-response (optional). Minified + validated,
-///       no substitutions.
-///   • CFExploreRewrite.js → viewer-request on /explore/* (optional). Read raw
-///       (File.ReadAllText) — matches the component, which does not minify it.
+/// The three functions and how their code is prepared — byte-identical to
+/// AwsEcsExpressCloudFrontComponent so the published result matches a full deploy:
+///   • CFRequest.js  → viewer-request on the default behavior.
+///       Minified + validated via CfFunctionCodePrep. Substitution: ${KvsArn}.
+///       CloudFront function name prefix: {sk}-{tk}-request-fn.
+///   • CFResponse.js → viewer-response (CORS). Minified + validated.
+///       Substitutions: __ALLOW_LOCALHOST_DEV__ / __ALLOWED_ORIGINS_JSON__
+///       from the tenant's CDN.Cors config. Name prefix: {sk}-{tk}-response-fn.
+///   • CFExplore.js  → viewer-request on /explore* ordered behavior (optional).
+///       Minified + validated; no template substitutions (uses cf.kvs() directly).
+///       Name prefix: {sk}-{tk}-explore-fn.
 /// </summary>
 public class AwsEdgeUpdater
 {
@@ -62,7 +63,7 @@ public class AwsEdgeUpdater
 
     /// <summary>Logical function types this updater knows how to publish.</summary>
     public static readonly string[] FunctionTypes =
-        { "viewer-request", "viewer-response", "explore-rewrite" };
+        { "viewer-request", "viewer-response", "explore-rewrite", "auth", "authconfig", "auth-callback" };
 
     public AwsEdgeUpdater(string systemKey, string profile, string region)
     {
@@ -71,13 +72,19 @@ public class AwsEdgeUpdater
         _region = region;
     }
 
-    private sealed record FnDef(string Type, string JsFileName, string NameSuffix, bool UsePrep);
+    private sealed record FnDef(string Type, string JsFileName, string NameSuffix);
 
     private static readonly FnDef[] _defs =
     {
-        new("viewer-request",  "CFViewerRequest.js",  "-viewer-request",  true),
-        new("viewer-response", "CFViewerResponse.js", "-viewer-response", true),
-        new("explore-rewrite", "CFExploreRewrite.js", "-explore-rewrite", false),
+        new("viewer-request",  "CFRequest.js",  "-request-fn"),
+        new("viewer-response", "CFResponse.js", "-response-fn"),
+        new("explore-rewrite", "CFExplore.js",  "-explore-fn"),
+        // OIDC-facade functions (attached to /auth/* and /authentication/*).
+        // CFAuth + CFAuthConfig take the ${KvsArn} substitution like CFRequest;
+        // CFAuthCallback is a simple function with no substitution.
+        new("auth",            "CFAuth.js",         "-auth-fn"),
+        new("authconfig",      "CFAuthConfig.js",   "-authconfig-fn"),
+        new("auth-callback",   "CFAuthCallback.js", "-auth-callback-fn"),
     };
 
     /// <summary>
@@ -86,6 +93,12 @@ public class AwsEdgeUpdater
     /// <param name="functionFilter">
     /// Optional single function type ("viewer-request" | "viewer-response" |
     /// "explore-rewrite"); null updates all present functions.
+    /// </param>
+    /// <param name="corsConfig">
+    /// CORS settings from the tenant config — used to reproduce the
+    /// CFResponse.js substitutions exactly as the Pulumi component does.
+    /// If null, viewer-response is prepared with AllowLocalhostDev=false
+    /// and no AllowedOrigins (production-safe defaults).
     /// </param>
     public async Task<List<EdgeFunctionResult>> UpdateAsync(
         string tenantKey,
@@ -96,7 +109,8 @@ public class AwsEdgeUpdater
         List<string>? legacyDomains,
         string? functionFilter,
         bool dryRun,
-        CancellationToken ct)
+        CancellationToken ct,
+        CorsConfig? corsConfig = null)
     {
         var prefix = $"{_systemKey}-{tenantKey}";
         var cfDir = Path.Combine(configDirectory, "CloudFront");
@@ -132,25 +146,20 @@ public class AwsEdgeUpdater
         using var cf = CreateCloudFrontClient();
 
         // Enumerate LIVE functions once (paginated) for name-prefix matching.
-        // CloudFront Functions are Pulumi-auto-named ("{sk}-{tk}-viewer-request-<hex>"),
+        // CloudFront Functions are Pulumi-auto-named ("{sk}-{tk}-request-fn-<hex>"),
         // so we match on the logical-name prefix rather than an exact name.
         var liveFns = await ListAllFunctionsAsync(cf, ct);
 
-        // Resolve viewer-request substitution params lazily — only if needed,
-        // since they require extra API calls (distribution + KVS lookups).
-        string? exploreBucketDomain = null;
-        string? parkBucketDomain = null;
-        string? kvsUuid = null;
-        var needSubs = present.Any(d => d.Type == "viewer-request");
-        if (needSubs)
-        {
-            (exploreBucketDomain, parkBucketDomain) = await ResolveBucketDomainsAsync(cf, domain, ct);
-            kvsUuid = await ResolveKvsUuidAsync(cf, prefix, ct);
-        }
+        // Resolve KVS ARN lazily — needed for CFRequest/CFExplore/CFAuth/CFAuthConfig.
+        var needKvsArn = present.Any(d => d.Type is "viewer-request" or "explore-rewrite" or "auth" or "authconfig");
+        string? kvsArn = null;
+        if (needKvsArn)
+            kvsArn = await ResolveKvsArnAsync(cf, prefix, ct);
 
-        var legacyDomainsJson = legacyDomains is { Count: > 0 }
-            ? "[" + string.Join(",", legacyDomains.Select(d => $"\"{d}\"")) + "]"
-            : "[]";
+        // CORS substitution values for CFResponse.js.
+        var allowLocalhostJs = (corsConfig?.AllowLocalhostDev ?? false) ? "true" : "false";
+        var allowedOriginsJson = System.Text.Json.JsonSerializer.Serialize(
+            corsConfig?.AllowedOrigins ?? new List<string>());
 
         foreach (var d in present)
         {
@@ -158,26 +167,30 @@ public class AwsEdgeUpdater
             {
                 var jsPath = Path.Combine(cfDir, d.JsFileName);
 
-                // Prepare code exactly as AwsCloudFrontComponent does.
+                // Prepare code exactly as AwsEcsExpressCloudFrontComponent does.
                 string code;
-                if (d.Type == "viewer-request")
+                if (d.Type is "viewer-request" or "explore-rewrite" or "auth" or "authconfig")
+                {
+                    // CFRequest/CFAuth/CFAuthConfig substitute ${KvsArn}; CFExplore
+                    // has no ${KvsArn} placeholder so the substitution is a no-op.
+                    // All are created via CreateFunctionFromFile (minified), so
+                    // PrepareAndValidate matches the component byte-for-byte.
+                    code = CfFunctionCodePrep.PrepareAndValidate(
+                        jsPath, d.JsFileName,
+                        ("${KvsArn}", kvsArn ?? ""));
+                }
+                else if (d.Type == "viewer-response")
                 {
                     code = CfFunctionCodePrep.PrepareAndValidate(
                         jsPath, d.JsFileName,
-                        ("${RootDomainParameter}", domain),
-                        ("${LegacyDomainsJson}", legacyDomainsJson),
-                        ("${KvsId}", kvsUuid ?? ""),
-                        ("${ExploreBucketDomain}", exploreBucketDomain ?? ""),
-                        ("${ParkBucketDomain}", parkBucketDomain ?? ""));
-                }
-                else if (d.UsePrep)
-                {
-                    code = CfFunctionCodePrep.PrepareAndValidate(jsPath, d.JsFileName);
+                        ("__ALLOW_LOCALHOST_DEV__", allowLocalhostJs),
+                        ("__ALLOWED_ORIGINS_JSON__", allowedOriginsJson));
                 }
                 else
                 {
-                    // explore-rewrite: raw read, matching the component (no minify).
-                    code = File.ReadAllText(jsPath);
+                    // auth-callback: simple function, minified, no substitutions
+                    // (matches CreateSimpleFunctionFromFile in the component).
+                    code = CfFunctionCodePrep.PrepareAndValidate(jsPath, d.JsFileName);
                 }
 
                 var fnName = liveFns
@@ -286,37 +299,9 @@ public class AwsEdgeUpdater
     // ---------------------------------------------------------------
 
     /// <summary>
-    /// Read the explore/park bucket regional domain names from the live
-    /// distribution's origins (ids "s3-explore"/"s3-park"). Reading them off the
-    /// distribution guarantees the substituted values match exactly what
-    /// AwsCloudFrontComponent injected (BucketRegionalDomainName).
+    /// Find the tenant's KeyValueStore ARN. KVS name convention: "{sk}-{tk}-kvs".
     /// </summary>
-    private async Task<(string explore, string park)> ResolveBucketDomainsAsync(
-        AmazonCloudFrontClient cf, string domain, CancellationToken ct)
-    {
-        var distId = await WebappDeployer.FindDistributionIdAsync(domain, _profile, _region);
-        if (string.IsNullOrEmpty(distId))
-            throw new InvalidOperationException(
-                $"No CloudFront distribution found for '{domain}'. Has deploytenant run?");
-
-        var cfg = await cf.GetDistributionConfigAsync(
-            new GetDistributionConfigRequest { Id = distId }, ct);
-        var origins = cfg.DistributionConfig.Origins.Items;
-
-        var explore = origins.FirstOrDefault(o => o.Id == "s3-explore")?.DomainName;
-        var park = origins.FirstOrDefault(o => o.Id == "s3-park")?.DomainName;
-        if (explore == null || park == null)
-            throw new InvalidOperationException(
-                $"Distribution {distId} is missing s3-explore/s3-park origins.");
-
-        return (explore, park);
-    }
-
-    /// <summary>
-    /// Find the tenant's KeyValueStore UUID (cf.kvs() needs the UUID, not the
-    /// full ARN). KVS name convention: "{sk}-{tk}-kvs".
-    /// </summary>
-    private async Task<string> ResolveKvsUuidAsync(
+    private async Task<string> ResolveKvsArnAsync(
         AmazonCloudFrontClient cf, string prefix, CancellationToken ct)
     {
         var kvsName = $"{prefix}-kvs";
@@ -326,7 +311,7 @@ public class AwsEdgeUpdater
         if (string.IsNullOrEmpty(arn))
             throw new InvalidOperationException(
                 $"CloudFront KeyValueStore '{kvsName}' not found. Has deploytenant run?");
-        return arn.Contains('/') ? arn.Split('/').Last() : arn;
+        return arn;
     }
 
     // ---------------------------------------------------------------

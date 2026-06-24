@@ -24,6 +24,56 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
     {
     }
 
+    /// <summary>
+    /// Identifies the dynamic application origin (the API host) that the
+    /// distribution proxies <c>/*Api/*</c> and <c>/auth/*</c> to.
+    /// </summary>
+    protected sealed class ApiOriginSpec
+    {
+        /// <summary>The <c>OriginId</c> that the API/auth ordered behaviors target.</summary>
+        public required string OriginId { get; init; }
+        /// <summary>The distribution origin definition for the API host.</summary>
+        public required DistributionOriginArgs Origin { get; init; }
+    }
+
+    /// <summary>
+    /// Builds the application/API origin. Base implementation = the ECSExpress
+    /// ALB, reached via the stable <c>origin.{domain}</c> Route 53 alias. The
+    /// Lambda topology overrides this to target the Function URL through a
+    /// Lambda-type OAC. The base output is kept byte-identical to the previous
+    /// inline definition so the live distribution's config — and therefore its
+    /// in-place updatability — is unchanged.
+    /// </summary>
+    protected virtual ApiOriginSpec BuildApiOrigin(
+        string prefix, string domain, IComputeEnvironmentOutputs compute)
+        => new()
+        {
+            OriginId = "alb-origin",
+            Origin = new DistributionOriginArgs
+            {
+                OriginId = "alb-origin",
+                DomainName = $"origin.{domain}",
+                CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
+                {
+                    HttpPort = 80, HttpsPort = 443,
+                    OriginProtocolPolicy = "https-only",
+                    OriginSslProtocols = { "TLSv1.2" },
+                },
+            },
+        };
+
+    /// <summary>
+    /// Hook invoked after the distribution is created so a topology can grant
+    /// CloudFront access to its API origin — e.g. the Lambda topology adds the
+    /// <c>aws:lambda:Permission</c> that lets this distribution invoke the
+    /// Function URL via OAC, scoped to the distribution ARN. Base = no-op
+    /// (the ECSExpress ALB origin is publicly reachable).
+    /// </summary>
+    protected virtual void ConfigureApiOriginAccess(
+        string prefix, Distribution distribution, IComputeEnvironmentOutputs compute)
+    {
+    }
+
     public ICdnOutputs Deploy(TenantConfig tenantConfig, IComputeEnvironmentOutputs compute)
     {
         var sk = tenantConfig.SystemKey;
@@ -33,6 +83,9 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var suffix = tenantConfig.TenantSuffix;
         var domain = tenantConfig.RootDomain;
         var cdn = tenantConfig.CDN ?? new CdnConfig();
+
+        // Topology-overridable API origin (base = ALB via origin.{domain}).
+        var apiOrigin = BuildApiOrigin(prefix, domain, compute);
 
         // =====================================================================
         // ACM CERTIFICATE (us-east-1)
@@ -280,7 +333,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // CLOUDFRONT DISTRIBUTION — ALB origin + S3 origin
         // =====================================================================
 
-        var distribution = new Distribution($"{prefix}-cf-dist", new DistributionArgs
+        var distributionArgs = new DistributionArgs
         {
             Enabled = true, IsIpv6Enabled = true,
             Comment = $"{sk}/{tk} CDN ({env})",
@@ -295,17 +348,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     DomainName = assetsBucket.BucketRegionalDomainName,
                     OriginAccessControlId = oac.Id,
                 },
-                new DistributionOriginArgs
-                {
-                    OriginId = "alb-origin",
-                    DomainName = $"origin.{domain}",
-                    CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
-                    {
-                        HttpPort = 80, HttpsPort = 443,
-                        OriginProtocolPolicy = "https-only",
-                        OriginSslProtocols = { "TLSv1.2" },
-                    },
-                },
+                apiOrigin.Origin,
             },
             DefaultCacheBehavior = new DistributionDefaultCacheBehaviorArgs
             {
@@ -398,7 +441,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/*Api/*",
-                    TargetOriginId = "alb-origin",
+                    TargetOriginId = apiOrigin.OriginId,
                     ViewerProtocolPolicy = "https-only",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
@@ -510,7 +553,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/auth/*",
-                    TargetOriginId = "alb-origin",
+                    TargetOriginId = apiOrigin.OriginId,
                     ViewerProtocolPolicy = "https-only",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
@@ -580,7 +623,56 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 GeoRestriction = new DistributionRestrictionsGeoRestrictionArgs { RestrictionType = "none" },
             },
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
-        }, new CustomResourceOptions { Parent = this });
+        };
+
+        // BFF behavior — routes /bff/* to the API origin (the container).
+        // ADDED ONLY when the BFF is enabled for this tenant, so a non-BFF
+        // distribution's ordered-behaviors list (and therefore its config) is
+        // byte-for-byte identical to today. The Backend-For-Frontend auth
+        // endpoints (/bff/login, /callback, /user, /logout, /ws-token —
+        // MultiTenantAuth.md §8.3) live in AppHost, so this mirrors the /*Api/*
+        // behavior: same API origin, CachingDisabled (auth responses MUST NOT be
+        // edge-cached), AllViewerExceptHostHeader origin-request policy, and the
+        // same CFRequest viewer-request function that injects the lz-config /
+        // lz-tenantid tenancy headers (its "api" branch).
+        //
+        // NOTE: deliberately NOT /auth/* — that path is the CFAuth.js OIDC façade
+        // (a different function) and never reaches the container. /bff/* is a
+        // distinct pattern, so there is no collision with CFAuth.
+        if (tenantConfig.BffEnabled == true)
+        {
+            distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
+            {
+                PathPattern = "/bff/*",
+                TargetOriginId = apiOrigin.OriginId,
+                ViewerProtocolPolicy = "https-only",
+                AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                CachedMethods = { "GET", "HEAD" },
+                Compress = false,
+                CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                FunctionAssociations =
+                {
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                    },
+                    // CORS for localhost dev — same rationale as /*Api/*.
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                    },
+                },
+            });
+        }
+
+        var distribution = new Distribution($"{prefix}-cf-dist", distributionArgs,
+            new CustomResourceOptions { Parent = this });
+
+        // Topology hook: grant CloudFront access to the API origin (Lambda adds
+        // the Function-URL invoke permission scoped to this distribution; the
+        // ECSExpress ALB origin is public so the base implementation is a no-op).
+        ConfigureApiOriginAccess(prefix, distribution, compute);
 
         // S3 bucket policy for OAC
         // Use SourceAccount (not SourceArn) so dynamic origin rewriting works —
