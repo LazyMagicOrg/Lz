@@ -61,8 +61,11 @@ internal static class BffWiring
 
         // SSM Parameter path holding the Data Protection key ring (§8.4).
         var dpParam = $"/{sk}/{env}/bff/dataprotection";
-        // Session DynamoDB table — reuses the per-tenant table {sk}_{tk} (§8.4).
-        var sessionTable = $"{sk}_{tk}";
+        // Session DynamoDB table — DEDICATED table {sk}_{tk}_bff (id/sk schema),
+        // provisioned by AwsEcsExpressPostDeployAction.EnsureTenantTablesAsync. Kept
+        // separate from the app's data table {sk}_{tk} (PK/SK envelope) so the BFF
+        // session store never collides with the app repo. (§8.4)
+        var sessionTable = $"{sk}_{tk}_bff";
         // Cookie domain spans subtenants: .{RootDomain} (§8.12).
         var cookieDomain = string.IsNullOrWhiteSpace(rootDomain) ? string.Empty : $".{rootDomain}";
         // Per-pool session TTL (hours). The infra default mirrors the

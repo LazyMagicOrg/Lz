@@ -133,7 +133,8 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
                     ],
                     ""Resource"": [
                         ""{arnPrefix}"", ""{arnPrefix}/index/*"",
-                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}/index/*""
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}/index/*"",
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_bff""
                     ]
                 }}]
             }}"),

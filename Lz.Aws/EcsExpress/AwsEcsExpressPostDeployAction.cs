@@ -84,7 +84,7 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
             { "Tenant", tk },
         };
 
-        // Tenant table: {SystemKey}_{TenantKey}
+        // Tenant table: {SystemKey}_{TenantKey} (PK/SK envelope schema)
         var tenantTable = $"{sk}_{tk}";
         var created = await DynamoDbTableCreator.EnsureTableAsync(
             profile, region, tenantTable,
@@ -92,6 +92,17 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
         Console.WriteLine(created
             ? $"    {tenantTable} — created"
             : $"    {tenantTable} — exists");
+
+        // Dedicated BFF session table: {SystemKey}_{TenantKey}_bff (id/sk schema).
+        // Separate from the app data table so the BFF session store (id/sk point-ops)
+        // never collides with the app repo (PK/SK envelope). See BffWiring.sessionTable.
+        var bffSessionTable = $"{sk}_{tk}_bff";
+        var bffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
+            profile, region, bffSessionTable,
+            new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions" } });
+        Console.WriteLine(bffCreated
+            ? $"    {bffSessionTable} — created"
+            : $"    {bffSessionTable} — exists");
 
         // Per-subtenant infrastructure (S3 bucket + DynamoDB table) is
         // handled by the shared provisioner so the same logic runs here and
