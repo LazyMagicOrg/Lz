@@ -13,4 +13,19 @@
   <Project Path="Lz.Gen/Lz.Gen.csproj" />
   <Project Path="Lz.Tests/Lz.Tests.csproj" />
   <Project Path="Lz.Cli/Lz.Cli.csproj" />
+  <!-- Framework code-gen templates. Built (not just shipped as Content) so contamination
+       like dangling ProjectReferences is caught at build time. See ProjectTemplates/README.md. -->
+  <Folder Name="/ProjectTemplates/">
+    <Project Path="ProjectTemplates/ApiLambda/ApiLambda.csproj" />
+    <Project Path="ProjectTemplates/AppSyncEventsSDK/AppSyncEventsSDK.csproj" />
+    <Project Path="ProjectTemplates/AspDotNetHost/AspDotNetHost.csproj" />
+    <Project Path="ProjectTemplates/Authorization/Authorization.csproj" />
+    <Project Path="ProjectTemplates/BasicLib/BasicLib.csproj" />
+    <Project Path="ProjectTemplates/ClientSDK/ClientSDK.csproj" />
+    <Project Path="ProjectTemplates/Controller/Controller.csproj" />
+    <Project Path="ProjectTemplates/ModuleClientInterface/ModuleClientInterface.csproj" />
+    <Project Path="ProjectTemplates/Repo/Repo.csproj" />
+    <Project Path="ProjectTemplates/Schema/Schema.csproj" />
+    <Project Path="ProjectTemplates/WebApi/WebApi.csproj" />
+  </Folder>
 </Solution>

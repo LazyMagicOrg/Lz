@@ -212,8 +212,33 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             var logoutUrls = new List<string> { $"https://{systemDomain}/oauth2/logout-callback" };
             if (poolConfig.IncludeDevCallbackUrls)
             {
+                // 5001 is the LocalWebService (API) port; 7218 is the Blazor WASM
+                // dev-server port (all three MagicPets WASM apps launch on 7218 —
+                // one at a time — per each WASMApp/Properties/launchSettings.json).
+                // SPA-OIDC in local VS debug builds its redirect_uri from the WASM's
+                // own origin+base-path (redirect override in Program.cs →
+                // {BaseAddress}authentication/login-callback), so every localhost
+                // base path a WASM can mount at MUST be registered or Cognito
+                // returns redirect_mismatch. The bare-root entries cover an app
+                // served at "/"; the per-app sub-paths (/store/,/admin/,/app/)
+                // cover apps whose WASMApp.csproj StaticWebAssetBasePath mounts the
+                // dev app under the same path as the cloud. Cognito has no wildcard
+                // support, so each must be enumerated. Dev-only (IncludeDevCallbackUrls).
                 callbackUrls.Add("https://localhost:5001/authentication/login-callback");
                 logoutUrls.Add("https://localhost:5001/authentication/logout-callback");
+                foreach (var basePath in new[] { "", "store/", "admin/", "app/" })
+                {
+                    callbackUrls.Add($"https://localhost:7218/{basePath}authentication/login-callback");
+                    logoutUrls.Add($"https://localhost:7218/{basePath}authentication/logout-callback");
+                }
+                // MAUI native apps: LazyMagic.OIDC.MAUI hardcodes this custom-scheme
+                // redirect (MauiOIDCService.GetRedirectUri → "awsloginmaui://auth-callback").
+                // The callback is intercepted by the app's embedded WebView (no OS deep
+                // link / intent-filter needed), but Cognito must have the scheme
+                // registered on the client or the authorize request fails
+                // redirect_mismatch. Registered on both lists (login + logout/end-session).
+                callbackUrls.Add("awsloginmaui://auth-callback");
+                logoutUrls.Add("awsloginmaui://auth-callback");
             }
 
             var userPoolClientArgs = new UserPoolClientArgs
@@ -269,12 +294,15 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 // which is the façade's apex callback for the public client).
                 // Mirror the public client's URL-building: primary on the
                 // system apex; dev entries (localhost) when IncludeDevCallbackUrls.
-                var bffCallbackUrls = new List<string> { $"https://{systemDomain}/bff/callback" };
-                var bffLogoutUrls = new List<string> { $"https://{systemDomain}/bff/logout-callback" };
+                // Route prefix is per-pool (tenantauth=/bff; a second pool on the same apphost,
+                // e.g. consumerauth, uses /cbff) so the two BFF instances' callbacks never collide.
+                var bffPrefix = "/" + (poolConfig.BffRoutePrefix ?? "/bff").Trim('/');
+                var bffCallbackUrls = new List<string> { $"https://{systemDomain}{bffPrefix}/callback" };
+                var bffLogoutUrls = new List<string> { $"https://{systemDomain}{bffPrefix}/logout-callback" };
                 if (poolConfig.IncludeDevCallbackUrls)
                 {
-                    bffCallbackUrls.Add("https://localhost:5001/bff/callback");
-                    bffLogoutUrls.Add("https://localhost:5001/bff/logout-callback");
+                    bffCallbackUrls.Add($"https://localhost:5001{bffPrefix}/callback");
+                    bffLogoutUrls.Add($"https://localhost:5001{bffPrefix}/logout-callback");
                 }
 
                 var bffClient = new UserPoolClient($"{poolPrefix}-bff-client", new UserPoolClientArgs

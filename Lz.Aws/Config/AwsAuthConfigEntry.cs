@@ -127,6 +127,16 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// <c>12</c> matches the employee-pool recommendation.
     /// </summary>
     public int BffSessionTtlHours { get; set; } = 12;
+
+    /// <summary>
+    /// BFF route prefix this pool's confidential client serves at — drives the
+    /// registered callback/logout URLs (<c>{prefix}/callback</c>,
+    /// <c>{prefix}/logout-callback</c>). Default <c>/bff</c> (tenantauth). A second
+    /// pool sharing the same apphost (e.g. consumerauth) MUST use a distinct prefix
+    /// (e.g. <c>/cbff</c>) so the two BFF instances' endpoints/cookies never collide.
+    /// Only consulted when <see cref="ProvisionBffClient"/> is true.
+    /// </summary>
+    public string BffRoutePrefix { get; set; } = "/bff";
 }
 
 /// <summary>

@@ -96,7 +96,7 @@ internal static class BffWiring
                 ? url[..^DiscoverySuffix.Length]
                 : url);
 
-        return new List<(string, Output<string>)>
+        var list = new List<(string, Output<string>)>
         {
             // Activates the BFF hosting-startup assembly inside AppHost.
             ("ASPNETCORE_HOSTINGSTARTUPASSEMBLIES", lit("LazyMagic.OIDC.Bff")),
@@ -117,6 +117,44 @@ internal static class BffWiring
             ("LZ_BFF_AWS_REGION", lit(region)),
             ("LZ_BFF_ACCESS_TOKEN_SKEW_SECONDS", lit("60")),
         };
+
+        // SECOND pool instance — consumerauth at /cbff (LZ_CBFF_*). Appended ONLY when the tenant
+        // opts in (BffConsumerAuthEnabled). Requires the consumerauth pool to have ProvisionBffClient
+        // + BffRoutePrefix:/cbff so the foundation exports auth_consumerauth_bff* outputs. Default off
+        // ⇒ the list above is the exact single-pool set (byte-for-byte unchanged for existing tenants).
+        // The DP key ring + app name are SHARED with the default instance (the cookie codec is shared
+        // in the apphost), so no LZ_CBFF_DP_* is emitted.
+        if (tenantConfig.BffConsumerAuthEnabled == true)
+        {
+            const string consumerPool = "consumerauth";
+            var consumerMeta = foundation.MetadataUrl(consumerPool);
+            var consumerIssuer = consumerMeta.Apply(url =>
+                url.EndsWith(DiscoverySuffix, StringComparison.OrdinalIgnoreCase)
+                    ? url[..^DiscoverySuffix.Length]
+                    : url);
+            const string consumerTtlHours = "720"; // consumer sessions ≈ 30 days (§8.14)
+
+            list.AddRange(new List<(string, Output<string>)>
+            {
+                ("LZ_CBFF_ENABLED", lit("true")),
+                ("LZ_CBFF_PROVIDER", lit("cognito")),
+                ("LZ_CBFF_AUTHORITY", consumerIssuer),
+                ("LZ_CBFF_METADATA_URL", consumerMeta),
+                ("LZ_CBFF_CLIENT_ID", foundation.ClientId(consumerPool)),
+                ("LZ_CBFF_CLIENT_SECRET", foundation.ClientSecret(consumerPool)),
+                ("LZ_CBFF_SCOPES", lit("openid profile email")),
+                ("LZ_CBFF_ROUTE_PREFIX", lit("/cbff")),
+                ("LZ_CBFF_COOKIE_DOMAIN", lit(cookieDomain)),
+                ("LZ_CBFF_COOKIE_NAME", lit("__cbff")),
+                ("LZ_CBFF_SESSION_TABLE", lit($"{sk}_{tk}_cbff")),
+                ("LZ_CBFF_SESSION_TTL_HOURS", lit(consumerTtlHours)),
+                ("LZ_CBFF_AUTHNAME", lit(consumerPool)),
+                ("LZ_CBFF_AWS_REGION", lit(region)),
+                ("LZ_CBFF_ACCESS_TOKEN_SKEW_SECONDS", lit("60")),
+            });
+        }
+
+        return list;
     }
 
     /// <summary>The SSM Parameter Store path prefix for the Data Protection key ring.</summary>

@@ -357,16 +357,17 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                 CachedMethods = { "GET", "HEAD" },
                 Compress = true,
-                // Dev: CachingDisabled for fast iteration. Other envs: the
-                // host-keyed policy declared above — does NOT use the AWS-
-                // managed CachingOptimized because that policy keys only on
-                // (URI, query string) and CFRequest's per-host bucket
-                // rewrites would poison the cache cross-tenant. The
-                // function emits x-custom-cache-key for every webapp/asset
-                // response and this policy includes that header in the key.
-                CachePolicyId = env == "dev"
-                    ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
-                    : hostKeyedCachePolicy.Id,
+                // ALL envs (incl. dev) use the host-keyed policy declared
+                // above — does NOT use the AWS-managed CachingOptimized
+                // because that policy keys only on (URI, query string) and
+                // CFRequest's per-host bucket rewrites would poison the cache
+                // cross-tenant. The function emits x-custom-cache-key for
+                // every webapp/asset response and this policy includes that
+                // header in the key. Dev was previously CachingDisabled for
+                // fast iteration; flipped ON to exercise edge caching + the
+                // .br/.gz pre-compressed asset path (so dev now needs a
+                // CloudFront invalidation to see redeploys).
+                CachePolicyId = hostKeyedCachePolicy.Id,
                 FunctionAssociations =
                 {
                     new DistributionDefaultCacheBehaviorFunctionAssociationArgs
@@ -480,15 +481,14 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     // Host-keyed in non-dev so per-subtenant explore buckets
                     // don't poison cross-tenant. CFExplore emits
                     // x-custom-cache-key with the resolved bucket+path+uri.
-                    // Host-keyed in non-dev so per-subtenant explore/venues
-                    // buckets don't poison cross-tenant. CFExplore emits
-                    // x-custom-cache-key with the resolved bucket+path+uri.
-                    // Dev stays on CachingDisabled for fast iteration; the
-                    // host-keyed policy was validated against dev under a
-                    // temporary flip — see Platform/test/tests/caching.spec.js.
-                    CachePolicyId = env == "dev"
-                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
-                        : hostKeyedCachePolicy.Id,
+                    // Host-keyed in ALL envs (incl. dev) so per-subtenant
+                    // explore/venues buckets don't poison cross-tenant.
+                    // CFExplore emits x-custom-cache-key with the resolved
+                    // bucket+path+uri. Dev was CachingDisabled for fast
+                    // iteration; flipped ON alongside the default behavior to
+                    // enable edge caching + compression (dev now needs a
+                    // CloudFront invalidation to see redeploys).
+                    CachePolicyId = hostKeyedCachePolicy.Id,
                     FunctionAssociations =
                     {
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
@@ -521,15 +521,14 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     // every host today. Future-safe: if /venues/ ever
                     // diverges per host (tenant-specific listings, A/B
                     // testing), this is the right key shape already.
-                    // Host-keyed in non-dev so per-subtenant explore/venues
-                    // buckets don't poison cross-tenant. CFExplore emits
-                    // x-custom-cache-key with the resolved bucket+path+uri.
-                    // Dev stays on CachingDisabled for fast iteration; the
-                    // host-keyed policy was validated against dev under a
-                    // temporary flip — see Platform/test/tests/caching.spec.js.
-                    CachePolicyId = env == "dev"
-                        ? Output.Create("4135ea2d-6df8-44a3-9df3-4b5a84be39ad") // CachingDisabled
-                        : hostKeyedCachePolicy.Id,
+                    // Host-keyed in ALL envs (incl. dev) so per-subtenant
+                    // explore/venues buckets don't poison cross-tenant.
+                    // CFExplore emits x-custom-cache-key with the resolved
+                    // bucket+path+uri. Dev was CachingDisabled for fast
+                    // iteration; flipped ON alongside the default behavior to
+                    // enable edge caching + compression (dev now needs a
+                    // CloudFront invalidation to see redeploys).
+                    CachePolicyId = hostKeyedCachePolicy.Id,
                     FunctionAssociations =
                     {
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
@@ -658,6 +657,35 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                         EventType = "viewer-request", FunctionArn = requestFn.Arn,
                     },
                     // CORS for localhost dev — same rationale as /*Api/*.
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                    },
+                },
+            });
+        }
+
+        // SECOND BFF pool — routes /cbff/* (consumerauth) to the API origin, mirroring /bff/*.
+        // ADDED ONLY when the tenant wires the consumerauth instance (BffConsumerAuthEnabled), so
+        // tenants without it keep a byte-for-byte identical behaviors list.
+        if (tenantConfig.BffConsumerAuthEnabled == true)
+        {
+            distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
+            {
+                PathPattern = "/cbff/*",
+                TargetOriginId = apiOrigin.OriginId,
+                ViewerProtocolPolicy = "https-only",
+                AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                CachedMethods = { "GET", "HEAD" },
+                Compress = false,
+                CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                FunctionAssociations =
+                {
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                    },
                     new DistributionOrderedCacheBehaviorFunctionAssociationArgs
                     {
                         EventType = "viewer-response", FunctionArn = responseFn.Arn,

@@ -11,10 +11,12 @@
     <Description>Lz model-driven code generator (ported from LazyMagicMDD)</Description>
     <!-- Templates and AWS SAM snippets ship as content and are also packed -->
     <ContentTargetFolders>contentFiles\any\any;content</ContentTargetFolders>
-    <!-- Keep SDK-default globs from sweeping template .cs/.csproj/.yaml etc.
-         into Compile/EmbeddedResource/None. Re-added explicitly as Content below. -->
+    <!-- ProjectTemplates now live at $(SolutionDir)ProjectTemplates as real, buildable
+         projects in lz.slnx (so contamination like dangling ProjectReferences is caught
+         at build time). They are shipped from there via the Content glob below.
+         Keep SDK-default globs from sweeping AWSTemplates .yaml etc. into Compile/None. -->
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
-    <DefaultItemExcludes>$(DefaultItemExcludes);ProjectTemplates\**;AWSTemplates\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);AWSTemplates\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -45,10 +47,19 @@
   <ItemGroup>
     <!-- Ship project templates and AWS SAM snippets alongside the assembly so
          LzGenSolution can resolve them from AppContext.BaseDirectory when a
-         user's solution doesn't supply local overrides. -->
-    <Content Include="ProjectTemplates\**\*">
+         user's solution doesn't supply local overrides.
+         ProjectTemplates moved up to $(SolutionDir)ProjectTemplates (sibling of Lz.Gen)
+         so they are real projects in lz.slnx; we source them from there but preserve the
+         ProjectTemplates\... layout in output + package via per-file Link/PackagePath.
+         bin/obj are excluded because the templates now produce build output of their own. -->
+    <Content Include="..\ProjectTemplates\**\*" Exclude="..\ProjectTemplates\**\bin\**;..\ProjectTemplates\**\obj\**;..\ProjectTemplates\Directory.Build.targets;..\ProjectTemplates\Directory.Packages.props;..\ProjectTemplates\NuGet.Config">
+      <Link>ProjectTemplates\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Pack>true</Pack>
+      <!-- PackagePath is the BASE directory only. NuGet appends %(RecursiveDir)%(Filename)%(Extension)
+           itself, so the per-template subfolders are preserved AND extensionless files (Dockerfile) land
+           as files. Do NOT add %(RecursiveDir) here (double-nests) or %(Filename)%(Extension) (turns
+           Dockerfile into a folder). The <Link> above governs the local build output only. -->
       <PackagePath>contentFiles\any\any\ProjectTemplates\;content\ProjectTemplates\</PackagePath>
     </Content>
     <Content Include="AWSTemplates\**\*">

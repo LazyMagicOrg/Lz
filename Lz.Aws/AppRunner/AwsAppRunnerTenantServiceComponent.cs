@@ -118,7 +118,11 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
             },
         }, new CustomResourceOptions { Parent = this });
 
-        // DynamoDB access
+        // DynamoDB access. Mirrors the EcsExpress task role: besides the hyphenated
+        // {arnPrefix} ({sk}-{suffix}-{env}-*) system tables, tenant-scoped tables use
+        // UNDERSCORE naming — {sk}_{tk}, {sk}_{tk}_{subtenant}, and the BFF session
+        // tables {sk}_{tk}_bff / {sk}_{tk}_cbff. Without the underscore patterns the
+        // BFF login session PutItem and server-initiated repo access are denied.
         var dbOutputs = (AwsAppRunnerDatabaseOutputs)database;
         new RolePolicy($"{prefix}-dynamodb", new RolePolicyArgs
         {
@@ -132,7 +136,11 @@ public class AwsAppRunnerTenantServiceComponent : ComponentResource, ITenantServ
                         ""dynamodb:DeleteItem"", ""dynamodb:Query"", ""dynamodb:Scan"",
                         ""dynamodb:BatchGetItem"", ""dynamodb:BatchWriteItem""
                     ],
-                    ""Resource"": [""{arnPrefix}"", ""{arnPrefix}/index/*""]
+                    ""Resource"": [
+                        ""{arnPrefix}"", ""{arnPrefix}/index/*"",
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}/index/*"",
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_*"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_*/index/*""
+                    ]
                 }}]
             }}"),
         }, new CustomResourceOptions { Parent = this });

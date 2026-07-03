@@ -13,9 +13,13 @@ namespace Lz.Aws.Lambda;
 /// a deployed stack between ecs-fargate-cognito-dynamodb and lambda-cognito-dynamodb
 /// is an in-place update of the SAME distribution (URN-stable), not a replace.
 /// Only the API origin differs: the ALB <c>origin.{domain}</c> alias is replaced
-/// by the Lambda Function URL, reached through a Lambda-type OAC (SigV4), and a
-/// scoped invoke permission is granted to this distribution.
-/// See Platform/LambdaTopology.md.
+/// by the (public) Lambda Function URL carrying the <c>x-origin-verify</c> origin
+/// custom header that the AppHost enforces (OriginVerifyMiddleware).
+///
+/// WHY NOT OAC: a lambda-type OAC (SigV4) was implemented first and proved unable to
+/// carry a REST API — the Function URL rejects PUT/PATCH/DELETE outright under OAC
+/// and requires viewers to send x-amz-content-sha256 on POST (AWS-documented
+/// limitation; confirmed against the live env 2026-07-03). See Platform/LambdaTopology.md.
 /// </summary>
 public class AwsLambdaCloudFrontComponent : AwsEcsExpressCloudFrontComponent
 {
@@ -33,17 +37,8 @@ public class AwsLambdaCloudFrontComponent : AwsEcsExpressCloudFrontComponent
         var host = _originHolder.FunctionUrlHost ?? throw new System.InvalidOperationException(
             "Lambda API origin is not set: a Public Lambda service must be deployed before the CDN. " +
             "Ensure the tenant has a host-layer service with IngressType=Public.");
-
-        // OAC for the Function URL: CloudFront SigV4-signs each origin request,
-        // so the Function URL is private to this distribution.
-        var oac = new OriginAccessControl($"{prefix}-api-oac", new OriginAccessControlArgs
-        {
-            Name = $"{prefix}-api-oac",
-            Description = $"OAC for {domain} Lambda Function URL",
-            OriginAccessControlOriginType = "lambda",
-            SigningBehavior = "always",
-            SigningProtocol = "sigv4",
-        }, new CustomResourceOptions { Parent = this });
+        var secret = _originHolder.OriginVerifySecret ?? throw new System.InvalidOperationException(
+            "Lambda origin-verify secret is not set: the tenant service publishes it with the Function URL.");
 
         return new ApiOriginSpec
         {
@@ -52,7 +47,18 @@ public class AwsLambdaCloudFrontComponent : AwsEcsExpressCloudFrontComponent
             {
                 OriginId = "api-origin",
                 DomainName = host,
-                OriginAccessControlId = oac.Id,
+                // The secret CloudFront stamps on every origin request. Origin custom
+                // headers OVERRIDE any viewer-supplied header of the same name, so a
+                // caller cannot spoof it through the distribution; direct-to-URL calls
+                // lack it and are 403'd by the app.
+                CustomHeaders =
+                {
+                    new DistributionOriginCustomHeaderArgs
+                    {
+                        Name = "x-origin-verify",
+                        Value = secret,
+                    },
+                },
                 CustomOriginConfig = new DistributionOriginCustomOriginConfigArgs
                 {
                     HttpPort = 80, HttpsPort = 443,
@@ -63,19 +69,8 @@ public class AwsLambdaCloudFrontComponent : AwsEcsExpressCloudFrontComponent
         };
     }
 
-    protected override void ConfigureApiOriginAccess(
-        string prefix, Distribution distribution, IComputeEnvironmentOutputs compute)
-    {
-        if (_originHolder.FunctionName is null) return;
-
-        // Allow ONLY this distribution to invoke the Function URL (OAC + SigV4).
-        new Pulumi.Aws.Lambda.Permission($"{prefix}-cf-invoke", new Pulumi.Aws.Lambda.PermissionArgs
-        {
-            Action = "lambda:InvokeFunctionUrl",
-            Function = _originHolder.FunctionName!,
-            Principal = "cloudfront.amazonaws.com",
-            SourceArn = distribution.Arn,
-            FunctionUrlAuthType = "AWS_IAM",
-        }, new CustomResourceOptions { Parent = this });
-    }
+    // No ConfigureApiOriginAccess override: the base is a no-op, and with a public
+    // Function URL there is no CloudFront invoke permission to grant — the public
+    // InvokeFunctionUrl grant lives with the FunctionUrl itself
+    // (AwsLambdaTenantServiceComponent), and access control is the origin-verify gate.
 }

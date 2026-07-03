@@ -104,6 +104,20 @@ public class AwsEcsExpressPostDeployAction : IPostDeployAction
             ? $"    {bffSessionTable} — created"
             : $"    {bffSessionTable} — exists");
 
+        // SECOND BFF pool (consumerauth) session table: {SystemKey}_{TenantKey}_cbff.
+        // Only when the tenant wires the consumerauth /cbff instance. (IAM is already covered by
+        // the {sk}_{tk}_* tenant-service role policy.)
+        if (_tenantConfig?.BffConsumerAuthEnabled == true)
+        {
+            var cbffSessionTable = $"{sk}_{tk}_cbff";
+            var cbffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
+                profile, region, cbffSessionTable,
+                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-consumerauth" } });
+            Console.WriteLine(cbffCreated
+                ? $"    {cbffSessionTable} — created"
+                : $"    {cbffSessionTable} — exists");
+        }
+
         // Per-subtenant infrastructure (S3 bucket + DynamoDB table) is
         // handled by the shared provisioner so the same logic runs here and
         // from `lz deploysubtenants`.

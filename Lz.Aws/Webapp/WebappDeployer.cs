@@ -378,7 +378,25 @@ public class WebappDeployer
         //   2a: baseline → application/octet-stream (covers binary blobs)
         //   2b: *.wasm  → application/wasm
         //   2c: *.js    → application/javascript (excludes the 2 JS manifests)
-        string frameworkRoot = $"\"{s3Root}/_framework/\" \"{s3Root}/_framework/\"";
+        //
+        // BASE-PATH APPS: a WASM app built with <StaticWebAssetBasePath> (e.g.
+        // "app", "store", "admin" — every MagicPets app) publishes its assets
+        // under wwwroot/{base}/ rather than wwwroot/. The metadata passes below
+        // must target that real location. Locate _framework in the local publish
+        // output to learn the base prefix. Without this, every pass targeted
+        // wwwroot/_framework/ (nonexistent for base-path apps) and silently
+        // no-op'd, leaving framework assets on the Pass-1 baseline (max-age=3600,
+        // NO Content-Encoding) — which defeated brotli + immutable caching.
+        var assetBase = "";
+        var fwDirs = Directory.GetDirectories(sourcePath, "_framework", SearchOption.AllDirectories);
+        if (fwDirs.Length > 0)
+        {
+            var rel = Path.GetRelativePath(sourcePath, Path.GetDirectoryName(fwDirs[0])!)
+                .Replace('\\', '/');
+            if (!string.IsNullOrEmpty(rel) && rel != ".") assetBase = rel + "/";
+        }
+
+        string frameworkRoot = $"\"{s3Root}/{assetBase}_framework/\" \"{s3Root}/{assetBase}_framework/\"";
         string immutableCache = "--cache-control \"public, max-age=31536000, immutable\"";
         string manifestExcludes =
             "--exclude \"blazor.boot.json\" " +
@@ -497,7 +515,7 @@ public class WebappDeployer
                     : $"--content-encoding \"{encoding}\" ";
 
                 await RunSilentAsync("aws",
-                    $"s3 cp \"{s3Root}/{path}{suffix}\" \"{s3Root}/{path}{suffix}\" " +
+                    $"s3 cp \"{s3Root}/{assetBase}{path}{suffix}\" \"{s3Root}/{assetBase}{path}{suffix}\" " +
                     $"--quiet --region {region} {profileArg} " +
                     $"--metadata-directive REPLACE " +
                     $"--cache-control \"no-cache, must-revalidate\" " +
@@ -577,7 +595,7 @@ public class WebappDeployer
             // manifest .br/.gz (depends on framework version + flags).
             // Treat absence as a non-issue, same as Pass 3.
             await RunSilentAsync("aws",
-                $"s3 cp \"{s3Root}/{path}\" \"{s3Root}/{path}\" " +
+                $"s3 cp \"{s3Root}/{assetBase}{path}\" \"{s3Root}/{assetBase}{path}\" " +
                 $"--quiet --region {region} {profileArg} " +
                 $"--metadata-directive REPLACE " +
                 $"--cache-control \"no-cache, must-revalidate\" " +

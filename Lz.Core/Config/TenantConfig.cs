@@ -99,6 +99,17 @@ public class TenantConfig
     /// </summary>
     public string? BffAuthPool { get; set; }
 
+    /// <summary>
+    /// When <c>true</c>, ALSO wire a SECOND BFF instance for the <c>consumerauth</c> pool
+    /// (the <c>LZ_CBFF_*</c> env set: route <c>/cbff</c>, cookie <c>__cbff</c>, session table
+    /// <c>{sk}_{tk}_cbff</c>, <c>lz-authname=consumerauth</c>) alongside the default tenantauth
+    /// <c>/bff</c> instance. Requires the <c>consumerauth</c> pool to set
+    /// <c>ProvisionBffClient: true</c> (+ <c>BffRoutePrefix: /cbff</c>) so the confidential client
+    /// and its <c>auth_consumerauth_bff*</c> foundation outputs exist. Default <c>false</c> ⇒ the
+    /// container is byte-for-byte identical to a single-pool BFF deploy. (§ multi-pool BFF)
+    /// </summary>
+    public bool? BffConsumerAuthEnabled { get; set; }
+
     // --- SmartStore usersettings.json content ---
     // Loaded from smartstore.usersettings.json (same directory as tenantconfig YAML)
     // and written to shared file storage by the init runner. Stored separately to

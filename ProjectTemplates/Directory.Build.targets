@@ -1,0 +1,19 @@
+<Project>
+  <!-- lz-build-only. These template projects are members of lz.slnx purely so the framework
+       ProjectTemplates are COMPILED — that is what catches contamination such as dangling
+       ProjectReferences (e.g. the Monro "Services\..." refs that were copied into the host
+       templates). They are NOT NuGet packages.
+
+       Some templates conditionally import $(SolutionDir)CommonPackageHandling.targets, which
+       in the lz solution context ($(SolutionDir) == lz\) sets GeneratePackageOnBuild=true and
+       copies the .nupkg into lz\Packages. Directory.Build.targets is imported AFTER the project
+       body, so the overrides below win and prevent a template from packaging itself and
+       polluting the Lz feed.
+
+       This file is intentionally NOT shipped with the templates (it is excluded from the
+       Lz.Gen Content glob), so it has no effect on generated systems. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+</Project>

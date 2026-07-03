@@ -133,21 +133,19 @@ public class EcrDeployer
                 buildArgStr += $" --build-arg {key}={value}";
         }
 
-        // Use buildx on non-x86_64 platforms (e.g., macOS ARM)
-        var needsBuildx = !RuntimeInformation.OSArchitecture.ToString()
-            .Contains("X64", StringComparison.OrdinalIgnoreCase);
-
-        if (needsBuildx)
-        {
-            Console.WriteLine("  (Cross-platform build via buildx → linux/amd64)");
-            await RunAsync("docker",
-                $"buildx build --no-cache --platform linux/amd64 -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
-        }
-        else
-        {
-            await RunAsync("docker",
-                $"build --no-cache -f \"{dockerfilePath}\"{buildArgStr} -t {imageName} \"{contextPath}\"");
-        }
+        // Always build via buildx with attestations DISABLED and a single target
+        // platform. BuildKit's default provenance/SBOM attestations turn the push
+        // into an OCI image *index* carrying an `attestation-manifest`; AWS Lambda's
+        // CreateFunction rejects that ("image manifest, config or layer media type
+        // ... is not supported"), even though ECS/Fargate accepts it. A plain
+        // `docker build` on modern Docker Desktop produces exactly that index, so we
+        // use `buildx --provenance=false --sbom=false --platform linux/amd64`, which
+        // yields a single-platform image manifest that BOTH Lambda and Fargate accept.
+        // (The same image serves both the lambda-* and ecs-* topologies.)
+        Console.WriteLine("  (buildx → linux/amd64, attestations off for Lambda compatibility)");
+        await RunAsync("docker",
+            $"buildx build --no-cache --provenance=false --sbom=false --platform linux/amd64 " +
+            $"-f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
     }
 
     /// <summary>

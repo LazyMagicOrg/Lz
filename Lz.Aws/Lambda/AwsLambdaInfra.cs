@@ -22,6 +22,16 @@ public sealed class AwsLambdaApiOriginHolder
 
     /// <summary>Name of the API Lambda function (for the CloudFront invoke permission).</summary>
     public Output<string>? FunctionName { get; set; }
+
+    /// <summary>
+    /// Shared origin-verification secret. The Function URL is PUBLIC (AuthType=NONE —
+    /// CloudFront OAC/SigV4 cannot carry REST writes to Function URLs: PUT/PATCH/DELETE
+    /// are rejected and POST demands a viewer-supplied x-amz-content-sha256). Instead,
+    /// CloudFront injects this value as the <c>x-origin-verify</c> origin custom header
+    /// and the AppHost (LazyMagic.OIDC.Bff OriginVerifyMiddleware, via LZ_ORIGIN_VERIFY)
+    /// rejects requests without it — so the public URL is unusable directly.
+    /// </summary>
+    public Output<string>? OriginVerifySecret { get; set; }
 }
 
 /// <summary>

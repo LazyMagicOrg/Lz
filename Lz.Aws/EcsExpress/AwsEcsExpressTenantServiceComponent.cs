@@ -134,7 +134,7 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
                     ""Resource"": [
                         ""{arnPrefix}"", ""{arnPrefix}/index/*"",
                         ""arn:aws:dynamodb:*:*:table/{sk}_{tk}"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}/index/*"",
-                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_bff""
+                        ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_*"", ""arn:aws:dynamodb:*:*:table/{sk}_{tk}_*/index/*""
                     ]
                 }}]
             }}"),
@@ -183,6 +183,12 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
                         {{ ""Effect"": ""Allow"",
                            ""Action"": [""cloudfront:CreateInvalidation"", ""cloudfront:GetDistribution""],
                            ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:distribution/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cloudfront:ListKeyValueStores""],
+                           ""Resource"": ""*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""cloudfront-keyvaluestore:ListKeys"", ""cloudfront-keyvaluestore:GetKey"", ""cloudfront-keyvaluestore:DescribeKeyValueStore""],
+                           ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:key-value-store/*"" }},
                         {{ ""Effect"": ""Allow"",
                            ""Action"": [""secretsmanager:GetSecretValue"", ""secretsmanager:DescribeSecret""],
                            ""Resource"": ""arn:aws:secretsmanager:{ids.Item2}:{ids.Item1}:secret:{sk}/{tk}*"" }}
