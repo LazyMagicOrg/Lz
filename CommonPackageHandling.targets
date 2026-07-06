@@ -3,6 +3,12 @@
 	<!-- Common properties for package handling -->
 	<PropertyGroup>
 		<PackageRepoFolder>$(SolutionDir)Packages</PackageRepoFolder>
+		<Authors>Tim May, Thomas May</Authors>
+		<Company>Insight Sciences Corporation</Company>
+		<Copyright>Copyright (c) 2021 - 2026 Insight Sciences Corporation. All rights reserved.</Copyright>
+		<PackageProjectUrl>https://LazyMagic.org</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/LazyMagicOrg/Lz</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
 		<Version>$(LzVersion)</Version>
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 		<IncludeSymbols>true</IncludeSymbols>
