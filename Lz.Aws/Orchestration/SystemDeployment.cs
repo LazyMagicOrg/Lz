@@ -527,33 +527,113 @@ public class SystemDeployment
     // ---------------------------------------------------------------
 
     /// <summary>
-    /// Show deployment status for the foundation stack.
+    /// Show deployment status for the foundation stack, including the DEPLOYED
+    /// topology vs the CONFIGURED one (drift-flagged). Deployed comes from the
+    /// stack's `topology` output (recorded by deploysystem); older stacks that
+    /// predate the output fall back to inference from the foundation's network
+    /// component type.
     /// </summary>
     public async Task StatusFoundationAsync()
     {
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
-        await PrintStackStatusAsync(stackName);
-    }
-
-    /// <summary>
-    /// Show deployment status for a single tenant stack.
-    /// </summary>
-    public async Task StatusTenantAsync(string tenantKey)
-    {
-        var tenantStackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
-        await PrintStackStatusAsync(tenantStackName);
-    }
-
-    private async Task PrintStackStatusAsync(string stackName)
-    {
         try
         {
             var stack = await CreateOrSelectStack(stackName, () => new Dictionary<string, object?>());
             await PrintStackInfoAsync(stackName, stack);
+
+            string? deployed = null;
+            var outputs = await stack.GetOutputsAsync();
+            if (outputs.TryGetValue("topology", out var t) && t.Value is string s && !string.IsNullOrEmpty(s))
+                deployed = s;
+            deployed ??= await InferTopologyFromStateAsync(stack, foundation: true);
+            PrintTopologyLine(deployed, source: outputs.ContainsKey("topology") ? "stack output" : "inferred");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Stack '{stackName}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Show deployment status for a single tenant stack, including the tenant's
+    /// DEPLOYED compute topology inferred from its resource types (the tenant
+    /// service component type is a definitive per-topology discriminator).
+    /// </summary>
+    public async Task StatusTenantAsync(string tenantKey)
+    {
+        var tenantStackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
+        try
+        {
+            var stack = await CreateOrSelectStack(tenantStackName, () => new Dictionary<string, object?>());
+            await PrintStackInfoAsync(tenantStackName, stack);
+            PrintTopologyLine(await InferTopologyFromStateAsync(stack, foundation: false), source: "inferred from tenant compute");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Stack '{tenantStackName}': {ex.Message}");
+        }
+    }
+
+    private void PrintTopologyLine(string? deployed, string source)
+    {
+        var configured = _config.Topology;
+        if (deployed == null)
+        {
+            Console.WriteLine($"  Topology: {configured} (configured); deployed: unknown — run deploysystem/deploytenant to record it");
+            return;
+        }
+        // Containment (not equality) so the foundation's ambiguous no-VPC inference
+        // ("apprunner or lambda-…") counts as a match for either configured value.
+        if (deployed.Contains(configured, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"  Topology: {deployed} (deployed = configured; {source})");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Topology: {deployed} (deployed, {source}) != {configured} (configured) -- DRIFT: config changed since the last deploy");
+            Console.ResetColor();
+        }
+    }
+
+    /// <summary>
+    /// Infer the deployed topology from the Pulumi state's component-resource types.
+    /// Tenant stacks are definitive (each topology has a distinct tenant-service
+    /// type). Foundation stacks are definitive except that apprunner and
+    /// lambda-cognito-dynamodb share the AppRunner (no-VPC) network — for that
+    /// pair the tenant compute is the tiebreaker, so the foundation reports the
+    /// ambiguity honestly.
+    /// </summary>
+    private static async Task<string?> InferTopologyFromStateAsync(WorkspaceStack stack, bool foundation)
+    {
+        try
+        {
+            var export = await stack.ExportStackAsync();
+            if (!export.Json.TryGetProperty("deployment", out var dep)
+                || !dep.TryGetProperty("resources", out var resources)) return null;
+
+            var types = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var r in resources.EnumerateArray())
+                if (r.TryGetProperty("type", out var ty) && ty.GetString() is { } tyStr)
+                    types.Add(tyStr);
+
+            if (!foundation)
+            {
+                if (types.Contains("lz:aws:LambdaTenantService")) return "lambda-cognito-dynamodb";
+                if (types.Contains("lz:aws:EcsExpressTenantService")) return "ecs-fargate-cognito-dynamodb";
+                if (types.Contains("lz:aws:EcsTenantService")) return "ecs-fargate-keycloak";
+                if (types.Contains("lz:aws:AppRunnerTenantService")) return "apprunner";
+                return null;
+            }
+
+            if (types.Contains("lz:aws:EcsExpressNetwork")) return "ecs-fargate-cognito-dynamodb";
+            if (types.Contains("lz:aws:EcsNetwork")) return "ecs-fargate-keycloak";
+            if (types.Contains("lz:aws:AppRunnerNetwork")) return "apprunner or lambda-cognito-dynamodb (shared no-VPC network — see the tenant compute line)";
+            return null;
+        }
+        catch
+        {
+            return null; // status must never fail over inference
         }
     }
 
@@ -704,6 +784,10 @@ public class SystemDeployment
 
         var exports = new Dictionary<string, object?>
         {
+            // Record which topology this deploy actually provisioned, so `lz status`
+            // can report the DEPLOYED topology (and flag drift against the config)
+            // without inferring it from resource types.
+            ["topology"] = _config.Topology,
             ["vpcId"] = networkOutputs.NetworkId,
             ["publicSubnetIds"] = networkOutputs.PublicSubnetIds,
             ["privateSubnetIds"] = networkOutputs.PrivateSubnetIds,
