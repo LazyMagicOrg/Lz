@@ -60,10 +60,23 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
 
     // The container image is built/pushed by `lz deploycontainer`; the per-tenant
     // Lambda references {ecr}:latest, so deploycontainer must run before deploytenant.
-    // No ECS-style scale/build post-deploy action applies here.
+    // No ECS-style scale/build post-deploy applies here — but the tenant-phase table
+    // creation ({sk}_{tk} data table + {sk}_{tk}_bff / {sk}_{tk}_cbff session stores)
+    // and the apex-alias verification still must run, same as on EcsExpress. Reuse
+    // AwsEcsExpressPostDeployAction with an EMPTY services list: its ECS
+    // force-new-deployment step iterates zero services and no-ops, while
+    // EnsureTenantTablesAsync / VerifyApexAliasAsync run. Returning null here (as
+    // this method once did) leaves a FRESH lambda-topology system with no tenant/BFF
+    // tables, and every BFF login 500s at the session PutItem
+    // (DynamoBffSessionStore.CreateAsync → ResourceNotFoundException); the flipped
+    // Fargate→Lambda systems never noticed because their tables already existed.
     public virtual IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system, IReadOnlyList<ServiceDefinition> services,
-        string? tenantKey = null, TenantConfig? tenantConfig = null) => null;
+        string? tenantKey = null, TenantConfig? tenantConfig = null)
+        => tenantKey != null
+            ? new AwsEcsExpressPostDeployAction(
+                _config, Array.Empty<ServiceDefinition>(), tenantKey, tenantConfig)
+            : null;
 
     public virtual ITransitionChecker CreateTransitionChecker() => new AwsAppRunnerTransitionChecker(_config);
     public virtual IGateCheckerComponent? CreateGateChecker() => null;
