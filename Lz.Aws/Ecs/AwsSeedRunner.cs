@@ -247,13 +247,46 @@ public class AwsSeedRunner
     {
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
 
+        // Tolerate transient connectivity failures while polling. The seed
+        // task runs on ECS independently of this CLI, so a brief DNS blip,
+        // VPN/Tailscale flap, or socket reset while calling DescribeTasks must
+        // NOT abort the whole watch (previously a single "No such host is
+        // known" from ecs.<region>.amazonaws.com crashed the CLI mid-export).
+        // Retry through short outages; only give up if they persist past the
+        // window below (the task is still running — CloudWatch has the truth).
+        const int maxConsecutiveNetworkErrors = 18; // ~3 min at a 10s interval
+        var consecutiveNetworkErrors = 0;
+
         while (DateTime.UtcNow < deadline)
         {
-            var response = await client.DescribeTasksAsync(new DescribeTasksRequest
+            DescribeTasksResponse response;
+            try
             {
-                Cluster = clusterArn,
-                Tasks = [taskArn],
-            });
+                response = await client.DescribeTasksAsync(new DescribeTasksRequest
+                {
+                    Cluster = clusterArn,
+                    Tasks = [taskArn],
+                });
+                consecutiveNetworkErrors = 0; // reset on any success
+            }
+            catch (Exception ex) when (IsTransientNetworkError(ex))
+            {
+                consecutiveNetworkErrors++;
+                if (consecutiveNetworkErrors >= maxConsecutiveNetworkErrors)
+                {
+                    throw new InvalidOperationException(
+                        $"Lost connectivity to ECS for {consecutiveNetworkErrors} consecutive polls " +
+                        $"(~{consecutiveNetworkErrors * pollIntervalSeconds}s). The seed task is most " +
+                        "likely still running — check CloudWatch (/ecs/<seeder-log-group>) and the ECS " +
+                        $"console for the final status. Last error: {ex.Message}", ex);
+                }
+                Console.WriteLine();
+                Console.WriteLine(
+                    $"  Transient network error polling ECS ({ex.Message}) — retrying " +
+                    $"{consecutiveNetworkErrors}/{maxConsecutiveNetworkErrors}. The task keeps running.");
+                await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds));
+                continue;
+            }
 
             // AWS SDK v4 returns null for empty collection properties (v3 returned an empty list).
             var task = response.Tasks?.FirstOrDefault()
@@ -275,6 +308,37 @@ public class AwsSeedRunner
         }
 
         throw new TimeoutException($"Seed task did not complete within {timeoutSeconds}s");
+    }
+
+    /// <summary>
+    /// True when the exception (or any inner exception) indicates a transient
+    /// transport/connectivity failure — DNS resolution failure, socket error,
+    /// HTTP timeout, or the AWS SDK's own "could not reach the service" wrapper
+    /// (<see cref="Amazon.Runtime.AmazonClientException"/>, but NOT its subclass
+    /// <see cref="Amazon.Runtime.AmazonServiceException"/>, which is a genuine
+    /// service-side error — auth, throttling, validation — that must surface).
+    /// </summary>
+    private static bool IsTransientNetworkError(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is System.Net.Http.HttpRequestException
+                or System.Net.Sockets.SocketException
+                or System.Threading.Tasks.TaskCanceledException // HttpClient timeout
+                or TimeoutException
+                or System.IO.IOException)
+            {
+                return true;
+            }
+
+            if (e is Amazon.Runtime.AmazonClientException
+                && e is not Amazon.Runtime.AmazonServiceException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static AmazonECSClient CreateEcsClient(string region, string? profile)
