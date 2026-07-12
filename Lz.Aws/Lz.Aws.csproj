@@ -62,11 +62,16 @@
   <ItemGroup>
     <PackageReference Include="AWSSDK.AppRunner" Version="4.*" />
     <PackageReference Include="AWSSDK.AutoScaling" Version="4.*" />
+    <PackageReference Include="AWSSDK.CertificateManager" Version="4.*" />
     <PackageReference Include="AWSSDK.CloudFront" Version="4.*" />
     <PackageReference Include="AWSSDK.CloudFrontKeyValueStore" Version="4.*" />
+    <PackageReference Include="AWSSDK.CloudWatchLogs" Version="4.*" />
+    <PackageReference Include="AWSSDK.CognitoIdentity" Version="4.*" />
+    <PackageReference Include="AWSSDK.CognitoIdentityProvider" Version="4.*" />
     <PackageReference Include="AWSSDK.Extensions.CrtIntegration" Version="4.*" />
     <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.*" />
     <PackageReference Include="AWSSDK.ECR" Version="4.*" />
+    <PackageReference Include="AWSSDK.IdentityManagement" Version="4.*" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
     <PackageReference Include="AWSSDK.KeyManagementService" Version="4.*" />
     <PackageReference Include="AWSSDK.Lambda" Version="4.*" />

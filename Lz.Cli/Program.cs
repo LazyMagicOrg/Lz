@@ -112,6 +112,7 @@ class Program
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterVerifyCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
@@ -133,7 +134,13 @@ class Program
             return 0;
         }
 
-        return await rootCommand.InvokeAsync(args);
+        var rc = await rootCommand.InvokeAsync(args);
+        // Handlers signal failure via Environment.ExitCode (the established
+        // pattern throughout this file), but a Main that RETURNS an int makes
+        // the runtime ignore Environment.ExitCode — so honor it explicitly.
+        // InvokeAsync's own non-zero results (parse errors, thrown exceptions)
+        // still win.
+        return rc != 0 ? rc : Environment.ExitCode;
     }
 
     // ---------------------------------------------------------------
@@ -1711,15 +1718,29 @@ class Program
         var cmd = new Command("destroysystem",
             "Destroy system-level infrastructure (VPC, ECS, RDS, EFS, etc.)");
 
+        var yesOption = new Option<bool>("--yes",
+            "Skip the interactive confirmation prompt (for scripted/test runs)");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
+        cmd.AddOption(yesOption);
 
-        cmd.SetHandler(async (systemKey, env) =>
+        cmd.SetHandler(async (systemKey, env, yes) =>
         {
             RequirePlugin(plugin, "destroysystem");
 
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            // --yes must confirm a target the operator actually named; refusing
+            // to blanket-confirm a runtime-discovered multi-system set.
+            if (yes && systemKey == null && configs.Count > 1)
+            {
+                Console.Error.WriteLine(
+                    $"--yes with {configs.Count} systems resolved and no --systemkey: " +
+                    "refusing to blanket-confirm. Pass --systemkey (or drop --yes).");
+                Environment.ExitCode = 1;
+                return;
+            }
 
             foreach (var config in configs)
             {
@@ -1728,12 +1749,19 @@ class Program
                     $"WARNING: This will destroy foundation for system " +
                     $"'{config.SystemKey}' ({config.Environment}).");
                 Console.ResetColor();
-                Console.Write("Type 'yes' to confirm: ");
-                var confirmation = Console.ReadLine();
-                if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                if (yes)
                 {
-                    Console.WriteLine("Aborted.");
-                    continue;
+                    Console.WriteLine("Confirmed via --yes.");
+                }
+                else
+                {
+                    Console.Write("Type 'yes' to confirm: ");
+                    var confirmation = Console.ReadLine();
+                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    {
+                        Console.WriteLine("Aborted.");
+                        continue;
+                    }
                 }
 
                 // Ensure Pulumi state backend exists (needed to find the stack)
@@ -1745,7 +1773,7 @@ class Program
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 await deployment.DestroyFoundationAsync();
             }
-        }, systemKeyOption, envOption);
+        }, systemKeyOption, envOption, yesOption);
 
         root.AddCommand(cmd);
     }
@@ -1763,11 +1791,14 @@ class Program
 
         var tenantKeyOption = new Option<string?>("--tenantkey",
             "Tenant key (destroys all tenants if not specified)");
+        var yesOption = new Option<bool>("--yes",
+            "Skip the interactive confirmation prompt (for scripted/test runs)");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(yesOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, yes) =>
         {
             RequirePlugin(plugin, "destroytenant");
 
@@ -1787,6 +1818,17 @@ class Program
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
 
+                // Same rule as destroysystem: --yes never blanket-confirms a
+                // runtime-discovered multi-tenant set.
+                if (yes && tenantKey == null && tenants.Count > 1)
+                {
+                    Console.Error.WriteLine(
+                        $"--yes with {tenants.Count} tenants resolved and no --tenantkey: " +
+                        "refusing to blanket-confirm. Pass --tenantkey (or drop --yes).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
                 foreach (var (tk, _) in tenants)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
@@ -1794,18 +1836,25 @@ class Program
                         $"WARNING: This will destroy tenant '{tk}' for system " +
                         $"'{config.SystemKey}' ({config.Environment}).");
                     Console.ResetColor();
-                    Console.Write("Type 'yes' to confirm: ");
-                    var confirmation = Console.ReadLine();
-                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    if (yes)
                     {
-                        Console.WriteLine("Aborted.");
-                        continue;
+                        Console.WriteLine("Confirmed via --yes.");
+                    }
+                    else
+                    {
+                        Console.Write("Type 'yes' to confirm: ");
+                        var confirmation = Console.ReadLine();
+                        if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                        {
+                            Console.WriteLine("Aborted.");
+                            continue;
+                        }
                     }
 
                     await deployment.DestroyTenantAsync(tk);
                 }
             }
-        }, systemKeyOption, envOption, tenantKeyOption);
+        }, systemKeyOption, envOption, tenantKeyOption, yesOption);
 
         root.AddCommand(cmd);
     }
@@ -1899,6 +1948,211 @@ class Program
                 }
             }
         }, systemKeyOption, envOption, tenantKeyOption, layerOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // verify — live-AWS interrogation (no Pulumi state involved)
+    // ---------------------------------------------------------------
+
+    private static void RegisterVerifyCommand(
+        RootCommand root, ILzPlugin? plugin,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("verify",
+            "Interrogate LIVE AWS for every resource the topology is expected to have " +
+            "created, classified as stack (Pulumi-managed; gone after destroy) or " +
+            "persistent (survives destroy). Derived from config naming conventions, " +
+            "not Pulumi state — works after a destroy. Read-only.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Verify only this tenant (default: all tenants of the system)");
+        tenantKeyOption.AddAlias("--tenant");
+        var jsonOption = new Option<bool>("--json",
+            "Machine-readable output (one JSON document on stdout)");
+        var scopeOption = new Option<string>("--scope", () => "all",
+            "Which categories to check/report: all | stack | persistent");
+        var expectOption = new Option<string?>("--expect",
+            "Assert an overall state and set the exit code: 'deployed' (every stack " +
+            "resource present) or 'destroyed' (no stack resource present or " +
+            "tombstoned). Persistent resources are always informational. The verdict " +
+            "is computed over ALL stack checks (foundation included, regardless of " +
+            "--scope/--tenantkey filtering of the report).");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(jsonOption);
+        cmd.AddOption(scopeOption);
+        cmd.AddOption(expectOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, json, scope, expect) =>
+        {
+            RequirePlugin(plugin, "verify");
+
+            scope = scope.ToLowerInvariant();
+            if (scope is not ("all" or "stack" or "persistent"))
+            {
+                Console.Error.WriteLine($"--scope must be all, stack, or persistent. Got '{scope}'.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            expect = expect?.ToLowerInvariant();
+            if (expect is not (null or "deployed" or "destroyed"))
+            {
+                Console.Error.WriteLine($"--expect must be deployed or destroyed. Got '{expect}'.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var (system, _) = PrepareSystem(plugin!, config);
+                var tenants = ConfigResolver.ResolveTenantConfigs(
+                    config.SystemKey, config.Environment, tenantKey);
+
+                List<Lz.Aws.Verification.ResourceCheckResult> results;
+                try
+                {
+                    results = await Lz.Aws.Verification.AwsLiveVerifier.VerifyAsync(
+                        config, tenants, system, Cts.Token);
+                }
+                catch (NotSupportedException ex)
+                {
+                    Console.Error.WriteLine(ex.Message);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                // The --expect verdict is ALWAYS computed over the unfiltered
+                // results — otherwise `--scope persistent --expect destroyed`
+                // would be vacuously MET with the whole stack still deployed.
+                // --scope only narrows what is REPORTED.
+                var stack = results.Where(r =>
+                    r.Category == Lz.Aws.Verification.ResourceCategory.Stack).ToList();
+                var persistent = results.Where(r =>
+                    r.Category == Lz.Aws.Verification.ResourceCategory.Persistent).ToList();
+                var errors = results.Where(r =>
+                    r.State == Lz.Aws.Verification.ResourceState.Error).ToList();
+
+                var reported = scope switch
+                {
+                    "stack" => stack,
+                    "persistent" => persistent,
+                    _ => results,
+                };
+
+                // --expect verdict. Tombstones count as "still lingering" for
+                // 'destroyed' and as "not cleanly present" for 'deployed'.
+                bool? expectMet = expect switch
+                {
+                    "deployed" => stack.All(r =>
+                        r.State == Lz.Aws.Verification.ResourceState.Present),
+                    "destroyed" => stack.All(r =>
+                        r.State == Lz.Aws.Verification.ResourceState.Absent),
+                    _ => null,
+                };
+                // Errors make either verdict unreliable — fail the expectation.
+                if (expectMet == true && errors.Count > 0) expectMet = false;
+
+                if (json)
+                {
+                    var doc = new
+                    {
+                        systemKey = config.SystemKey,
+                        environment = config.Environment,
+                        topology = config.Topology,
+                        profile = config.Profile,
+                        region = config.Region,
+                        scope,
+                        expect,
+                        expectMet,
+                        summary = new
+                        {
+                            stackPresent = stack.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Present),
+                            stackAbsent = stack.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Absent),
+                            stackTombstoned = stack.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.ScheduledForDeletion),
+                            persistentPresent = persistent.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Present),
+                            persistentAbsent = persistent.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Absent),
+                            errors = errors.Count,
+                        },
+                        results = reported.Select(r => new
+                        {
+                            category = r.Category.ToString().ToLowerInvariant(),
+                            service = r.Service,
+                            kind = r.Kind,
+                            name = r.Name,
+                            state = r.State.ToString(),
+                            detail = r.Detail,
+                        }),
+                    };
+                    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc,
+                        new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                }
+                else
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}, " +
+                                      $"Topology: {config.Topology}");
+                    void Print(string title, List<Lz.Aws.Verification.ResourceCheckResult> rs)
+                    {
+                        if (rs.Count == 0) return;
+                        Console.WriteLine();
+                        Console.WriteLine($"  {title}");
+                        foreach (var r in rs)
+                        {
+                            var (glyph, color) = r.State switch
+                            {
+                                Lz.Aws.Verification.ResourceState.Present =>
+                                    ("+", ConsoleColor.Green),
+                                Lz.Aws.Verification.ResourceState.Absent =>
+                                    ("-", ConsoleColor.DarkGray),
+                                Lz.Aws.Verification.ResourceState.ScheduledForDeletion =>
+                                    ("!", ConsoleColor.Yellow),
+                                _ => ("x", ConsoleColor.Red),
+                            };
+                            Console.ForegroundColor = color;
+                            Console.Write($"    {glyph} ");
+                            Console.ResetColor();
+                            Console.WriteLine($"{r.Service,-16} {r.Kind,-34} {r.Name}" +
+                                (r.Detail != null ? $"  [{r.Detail}]" : ""));
+                        }
+                    }
+                    if (scope != "persistent")
+                        Print("Stack (Pulumi-managed — gone after destroy):", stack);
+                    if (scope != "stack")
+                        Print("Persistent (survives destroy by design):", persistent);
+
+                    Console.WriteLine();
+                    Console.WriteLine($"  Stack: {stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
+                        $"{stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.Absent)} absent, " +
+                        $"{stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.ScheduledForDeletion)} tombstoned; " +
+                        $"Persistent: {persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
+                        $"{persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Absent)} absent; " +
+                        $"Errors: {errors.Count}");
+                    if (expect != null)
+                    {
+                        Console.ForegroundColor = expectMet == true
+                            ? ConsoleColor.Green : ConsoleColor.Red;
+                        Console.WriteLine($"  Expectation '{expect}': " +
+                            (expectMet == true ? "MET" : "NOT MET"));
+                        Console.ResetColor();
+                    }
+                }
+
+                if (expect != null && expectMet != true)
+                    Environment.ExitCode = 1;
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, jsonOption, scopeOption, expectOption);
 
         root.AddCommand(cmd);
     }

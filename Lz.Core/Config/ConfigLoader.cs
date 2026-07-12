@@ -66,12 +66,23 @@ public static class ConfigLoader
     /// Lives in Lz.Core so plugins (which only reference Lz.Core / Lz.Aws) can
     /// reuse the same resolution logic the CLI uses.
     /// </summary>
+    // Kept as a distinct overload (not an added optional parameter) for BINARY
+    // compatibility: plugin DLLs compiled against older Lz.Core bound to this
+    // exact signature and would throw MissingMethodException otherwise.
     public static string ResolveEnvironment(string? envOverride = null)
+        => ResolveEnvironment(envOverride, null);
+
+    /// <summary>
+    /// Overload with <paramref name="startDirectory"/> anchoring the folder
+    /// walk (default: current directory) — lets tests resolve against a repo
+    /// root without mutating process-wide CurrentDirectory.
+    /// </summary>
+    public static string ResolveEnvironment(string? envOverride, string? startDirectory)
     {
         if (!string.IsNullOrEmpty(envOverride))
             return envOverride;
 
-        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        var dir = new DirectoryInfo(startDirectory ?? Directory.GetCurrentDirectory());
         while (dir != null)
         {
             var name = dir.Name;

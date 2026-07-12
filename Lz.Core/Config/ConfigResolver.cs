@@ -18,8 +18,13 @@ public static class ConfigResolver
     /// Priority: override → folder hierarchy (_Dev* → dev, _Test* → test, _Prod* → prod).
     /// Delegates to <see cref="ConfigLoader.ResolveEnvironment"/>.
     /// </summary>
+    // Two overloads (not one optional parameter) for binary compatibility with
+    // plugin DLLs compiled against older Lz.Core — see ConfigLoader.ResolveEnvironment.
     public static string ResolveEnvironment(string? envOverride = null)
-        => ConfigLoader.ResolveEnvironment(envOverride);
+        => ConfigLoader.ResolveEnvironment(envOverride, null);
+
+    public static string ResolveEnvironment(string? envOverride, string? startDirectory)
+        => ConfigLoader.ResolveEnvironment(envOverride, startDirectory);
 
     /// <summary>
     /// Resolve system configs for the given environment.

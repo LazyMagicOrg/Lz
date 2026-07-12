@@ -505,7 +505,18 @@ public class SystemDeployment
 
     private async Task DestroyStackAsync(string stackName)
     {
-        var stack = await CreateOrSelectStack(stackName, () => new Dictionary<string, object?>());
+        // Select-only: destroying a never-deployed stack must not CREATE an
+        // empty stack in the backend as a side effect.
+        WorkspaceStack stack;
+        try
+        {
+            stack = await SelectStackReadOnly(stackName);
+        }
+        catch (Pulumi.Automation.Commands.Exceptions.StackNotFoundException)
+        {
+            Console.WriteLine($"Stack '{stackName}': not deployed — nothing to destroy.");
+            return;
+        }
 
         var result = await stack.DestroyAsync(new DestroyOptions
         {
@@ -538,7 +549,9 @@ public class SystemDeployment
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
         try
         {
-            var stack = await CreateOrSelectStack(stackName, () => new Dictionary<string, object?>());
+            // Select-only: status is read-only and must not create an empty
+            // stack when probing a never-deployed system.
+            var stack = await SelectStackReadOnly(stackName);
             await PrintStackInfoAsync(stackName, stack);
 
             string? deployed = null;
@@ -547,6 +560,10 @@ public class SystemDeployment
                 deployed = s;
             deployed ??= await InferTopologyFromStateAsync(stack, foundation: true);
             PrintTopologyLine(deployed, source: outputs.ContainsKey("topology") ? "stack output" : "inferred");
+        }
+        catch (Pulumi.Automation.Commands.Exceptions.StackNotFoundException)
+        {
+            Console.WriteLine($"Stack '{stackName}': not deployed (no stack in the backend).");
         }
         catch (Exception ex)
         {
@@ -564,9 +581,14 @@ public class SystemDeployment
         var tenantStackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
         try
         {
-            var stack = await CreateOrSelectStack(tenantStackName, () => new Dictionary<string, object?>());
+            // Select-only — see StatusFoundationAsync.
+            var stack = await SelectStackReadOnly(tenantStackName);
             await PrintStackInfoAsync(tenantStackName, stack);
             PrintTopologyLine(await InferTopologyFromStateAsync(stack, foundation: false), source: "inferred from tenant compute");
+        }
+        catch (Pulumi.Automation.Commands.Exceptions.StackNotFoundException)
+        {
+            Console.WriteLine($"Stack '{tenantStackName}': not deployed (no stack in the backend).");
         }
         catch (Exception ex)
         {
@@ -1033,6 +1055,34 @@ public class SystemDeployment
     private async Task<WorkspaceStack> CreateOrSelectStack(
         string stackName, Func<IDictionary<string, object?>> program)
     {
+        var stackArgs = BuildStackArgs(stackName, program);
+        var stack = await LocalWorkspace.CreateOrSelectStackAsync(stackArgs);
+
+        if (!string.IsNullOrEmpty(_config.Region))
+            await stack.SetConfigAsync("aws:region", new ConfigValue(_config.Region));
+
+        Console.WriteLine($"Stack '{stackName}' ready (project: lz-{_config.SystemKey})");
+
+        return stack;
+    }
+
+    /// <summary>
+    /// Select an EXISTING stack without creating one. Used by the read-only
+    /// paths (status) and by destroy — probing a never-deployed system must
+    /// not leave an empty stack behind in the backend. Throws
+    /// <see cref="Pulumi.Automation.Commands.Exceptions.StackNotFoundException"/>
+    /// when the stack does not exist.
+    /// </summary>
+    private async Task<WorkspaceStack> SelectStackReadOnly(string stackName)
+    {
+        var stackArgs = BuildStackArgs(
+            stackName, () => new Dictionary<string, object?>());
+        return await LocalWorkspace.SelectStackAsync(stackArgs);
+    }
+
+    private InlineProgramArgs BuildStackArgs(
+        string stackName, Func<IDictionary<string, object?>> program)
+    {
         PulumiPathResolver.EnsurePulumiOnPath();
 
         var projectName = $"lz-{_config.SystemKey}";
@@ -1055,14 +1105,6 @@ public class SystemDeployment
             envVars["AWS_PROFILE"] = _config.Profile;
 
         stackArgs.EnvironmentVariables = envVars;
-
-        var stack = await LocalWorkspace.CreateOrSelectStackAsync(stackArgs);
-
-        if (!string.IsNullOrEmpty(_config.Region))
-            await stack.SetConfigAsync("aws:region", new ConfigValue(_config.Region));
-
-        Console.WriteLine($"Stack '{stackName}' ready (project: {projectName})");
-
-        return stack;
+        return stackArgs;
     }
 }
