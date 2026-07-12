@@ -169,6 +169,50 @@ ACM re-issuance, Cognito custom-domain recreate add more). Plan timeouts accordi
 | Pulumi state backend | S3 `lzm-dev-pulumi-state-496a-bd90` + KMS `alias/lzm-dev-pulumi-key-496a-bd90` |
 | Route53 hosted zone | `lazymagicdev.click` |
 
+## Drill run #1 — 2026-07-12 (artifacts `20260712-090019`)
+
+First live enabled run, from DEPLOYED. **The destroy phase was clean and the test
+caught real residue** — it failed exactly as designed:
+
+| Step | Result | Elapsed |
+|---|---|---|
+| interrogate | DEPLOYED (31 stack / 19 persistent) | 2s |
+| `destroytenant --tenantkey mp --yes` | ✅ exit 0 | **4m34s** |
+| `previewsystem --refresh` | ✅ exit 0 | 48s |
+| `destroysystem --yes` | ✅ exit 0 | **1m42s** |
+| post-destroy verify | ❌ 1 stack resource still present | 1m04s |
+
+**Experiment outcomes (B8):**
+- **Route53 cross-stack double-ownership: NO failure.** The full two-stack destroy
+  (first ever) completed cleanly — no `DependencyViolation`, no delete-not-found
+  errors; the refresh-between-destroys mitigation worked. Apex/wildcard/validation
+  records all gone.
+- **Secrets tombstone: PASSED** — 0 tombstoned (the `RecoveryWindowInDays=0` path holds).
+- **Persistent layer: 19/19 intact** (ECR image, all DynamoDB tables, webapp/subtenant
+  buckets, SSM, state backend).
+- **Timing reality check:** full two-stack teardown ≈ **7 minutes**, not the estimated
+  60–120 (the CloudFront distribution delete was fast). Budget accordingly.
+
+**Residue found (the test working as intended):** a **legacy orphan ACM cert** in
+us-east-1 for `lazymagicdev.click` — created **2024-03-18** (pre-lz era), untagged,
+`InUseBy=[]` — a duplicate of the stack-managed CDN cert (which WAS correctly
+deleted). Invisible until the strict post-destroy sweep. **Deleted 2026-07-12 with
+user approval** (`f19bd87a-1f5f-46b3-9acc-5ac2ee82b7df`). Baseline is now clean.
+
+**Second find — a genuine FROM-SCRATCH redeploy blocker (the drill's headline):**
+the restore's `deploytenant` failed creating the CloudFront distribution with
+`InvalidArgument: The parameter Origin S3 Origins can only use the following managed
+request policies: CORS-CustomOrigin, CORS-S3Origin, UserAgentRefererHeaders`. Root
+cause: the `/authentication/*` behavior targeted the **S3** assets origin while
+carrying the **AllViewerExceptHostHeader** origin-request policy ("same as /auth/*
+for consistency") — legal-looking in code, rejected by CreateDistribution. The live
+distribution never exercised this because in-place updates never recreate it; only
+a real destroy→redeploy reaches CreateDistribution. **Fixed in lz 0.10.41**
+(`AwsEcsExpressCloudFrontComponent.cs`: `/authentication/*` → CORS-S3Origin); other
+CDN components audited — no other S3-origin behavior carries an AllViewer policy.
+This one finding justifies the drill: the config was un-deployable from scratch and
+nobody knew.
+
 ## Accepted risks / signoffs
 
 - Destroys the **live dev environment**; downtime for the full cycle.

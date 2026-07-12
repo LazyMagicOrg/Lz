@@ -582,7 +582,18 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 // Authentication-flow behavior — /authentication/...
                 // CFAuth.js handles login/logout intercepts and passes through
                 // the rest to the root webapp's S3 bucket via dynamic origin
-                // rewrite. Same policies as /auth/* for consistency.
+                // rewrite. Cache policy matches /auth/* (CachingDisabled), but
+                // the ORIGIN-REQUEST policy must differ: this behavior's target
+                // is an S3 origin, and CloudFront rejects CreateDistribution
+                // when an S3 origin uses AllViewerExceptHostHeader — only
+                // CORS-CustomOrigin / CORS-S3Origin / UserAgentRefererHeaders
+                // are legal there. The live distribution predated this behavior
+                // config, so the 400 (InvalidArgument: "The parameter Origin S3
+                // Origins can only use the following managed request policies…")
+                // only surfaced on a FROM-SCRATCH deploytenant — found by the
+                // teardown-redeploy drill, 2026-07-12. S3 serves static SPA
+                // files here and needs no viewer headers; CORS-S3Origin is the
+                // appropriate legal policy.
                 new DistributionOrderedCacheBehaviorArgs
                 {
                     PathPattern = "/authentication/*",
@@ -592,7 +603,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     CachedMethods = { "GET", "HEAD" },
                     Compress = true,
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
-                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    OriginRequestPolicyId = "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf", // CORS-S3Origin (S3-origin-legal)
                     FunctionAssociations =
                     {
                         new DistributionOrderedCacheBehaviorFunctionAssociationArgs
