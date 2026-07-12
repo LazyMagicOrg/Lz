@@ -169,41 +169,71 @@ public class SystemDeployment
     {
         var stack = await CreateOrSelectStack(stackName, BuildFoundationProgram(includeTailscale));
 
-        // Always refresh before up — catch state drift from cross-stack
-        // operations, manual changes, or prior failed deploys.
-        Console.WriteLine("Running Pulumi refresh...");
-        Console.WriteLine();
+        // Cognito custom domains are internally CloudFront-backed: after a
+        // destroy, the domain name stays "taken" until AWS releases the
+        // internal distribution (~15 min, not queryable via any API). A rapid
+        // destroy→redeploy therefore fails CreateUserPoolDomain with a 400
+        // until the window clears — found by the teardown-redeploy drill,
+        // 2026-07-12. `pulumi up` is resumable (partial state + the refresh
+        // below re-sync each attempt), so retry on exactly that error.
+        const int maxAttempts = 15;
+        var retryDelay = TimeSpan.FromMinutes(2);
 
-        await stack.RefreshAsync(new RefreshOptions
+        for (var attempt = 1; ; attempt++)
         {
-            OnEvent = HandleEngineEvent,
-            OnStandardError = msg =>
+            // Always refresh before up — catch state drift from cross-stack
+            // operations, manual changes, or prior failed deploys (including
+            // our own previous attempt).
+            Console.WriteLine("Running Pulumi refresh...");
+            Console.WriteLine();
+
+            await stack.RefreshAsync(new RefreshOptions
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.Error.WriteLine(msg);
-                Console.ResetColor();
-            },
-        }, _ct);
+                OnEvent = HandleEngineEvent,
+                OnStandardError = msg =>
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(msg);
+                    Console.ResetColor();
+                },
+            }, _ct);
 
-        Console.WriteLine();
-        Console.WriteLine("Running Pulumi up...");
-        Console.WriteLine();
+            Console.WriteLine();
+            Console.WriteLine("Running Pulumi up...");
+            Console.WriteLine();
 
-        var result = await stack.UpAsync(new UpOptions
-        {
-            OnEvent = HandleEngineEvent,
-            OnStandardError = msg =>
+            try
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.Error.WriteLine(msg);
+                var result = await stack.UpAsync(new UpOptions
+                {
+                    OnEvent = HandleEngineEvent,
+                    OnStandardError = msg =>
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine(msg);
+                        Console.ResetColor();
+                    },
+                }, _ct);
+
+                Console.WriteLine();
+                PrintResourceChanges("Update", result.Summary);
+
+                return result;
+            }
+            catch (Pulumi.Automation.Commands.Exceptions.CommandException ex) when (
+                attempt < maxAttempts
+                && ex.Message.Contains("CreateUserPoolDomain", StringComparison.Ordinal))
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine();
+                Console.WriteLine(
+                    $"Cognito custom domain not yet released by AWS after the previous " +
+                    $"destroy (attempt {attempt}/{maxAttempts}). Waiting " +
+                    $"{retryDelay.TotalMinutes:0} min and retrying the up...");
                 Console.ResetColor();
-            },
-        }, _ct);
-
-        Console.WriteLine();
-        PrintResourceChanges("Update", result.Summary);
-
-        return result;
+                await Task.Delay(retryDelay, _ct);
+            }
+        }
     }
 
     // ---------------------------------------------------------------

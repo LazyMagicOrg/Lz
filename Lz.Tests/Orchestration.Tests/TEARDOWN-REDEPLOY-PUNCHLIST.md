@@ -213,6 +213,45 @@ CDN components audited — no other S3-origin behavior carries an AllViewer poli
 This one finding justifies the drill: the config was un-deployable from scratch and
 nobody knew.
 
+## Drill run #2 — 2026-07-12 (artifacts `20260712-092828`)
+
+From DEPLOYED with the clean baseline + lz 0.10.41. **The destroy-phase objective
+passed end-to-end**: teardown ~8 min (destroytenant 5m00 / refresh 19s /
+destroysystem 1m43), post-destroy sweep **CLEAN** — 31/31 stack gone, 0 tombstones,
+19/19 persistent intact. The drill then advanced into redeploy and found blocker #3:
+
+**Third find — Cognito custom-domain release lag.** `deploysystem` failed
+`CreateUserPoolDomain` (400) for BOTH `auth.` and `auth-consumerauth.` domains ~5 min
+after the destroy: Cognito custom domains are internally CloudFront-backed and the
+name stays "taken" until AWS releases the internal distribution (~15 min, not
+queryable via any API). Run #1's manual restore dodged it only because diagnosis
+added ~40 min of accidental cool-down. **Fixed in lz 0.10.42**: `PulumiUpAsync`
+(foundation) retries the refresh+up on exactly this error, up to ~30 min at 2-min
+spacing — `pulumi up` is resumable, so each retry continues from partial state.
+
+## Drill run #3 — 2026-07-12 (artifacts `20260712-095406`) — ✅ **GREEN, END TO END**
+
+With all three finds fixed (orphan cert deleted, lz 0.10.41 CDN config, lz 0.10.42
+domain retry): **Passed, 25m42s total**, dev ends deployed and healthy.
+
+| Phase | Elapsed |
+|---|---|
+| interrogate (DEPLOYED 31/0) | 1s |
+| destroytenant | 4m48s |
+| previewsystem --refresh | 19s |
+| destroysystem | 1m42s |
+| post-destroy verify → **CLEAN** (0 lingering, 0 tombstoned, persistent 19/19) | 1s |
+| deploysystem (**domain retry fired 3× — window measured ~9–10 min**) | 12m45s |
+| deploytenant (fresh distribution OK) | 4m52s |
+| deployassets | 25s |
+| verify --expect deployed → MET | 22s |
+| previews --fail-on-replace → "no changes" ×2 | 21s |
+| HTTP smoke (apex + /config pools) | pass |
+
+The objective is met and repeatable: destroy leaves nothing that lingers or blocks,
+the persistent layer survives, redeploy restores a verified-healthy system, and the
+test always ends in the beginning state.
+
 ## Accepted risks / signoffs
 
 - Destroys the **live dev environment**; downtime for the full cycle.
