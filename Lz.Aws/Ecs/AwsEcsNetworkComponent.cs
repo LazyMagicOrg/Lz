@@ -208,12 +208,25 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             Tags = Tags(config, "public-rt"),
         }, opts);
 
+        // WORKAROUND (pulumi-aws 7.x, remove when fixed upstream): metadata-only
+        // updates on aws.ec2.Route — e.g. the provider v7 migration stamping its
+        // new per-resource `region` attribute onto v6-written state — fail with
+        // "route target attribute not specified" because no real target attribute
+        // changed (hashicorp/terraform-provider-aws#45228, fix PR #47413 open).
+        // Ignoring `region` on routes (cross-region bookkeeping we don't use)
+        // removes the fail-retry-succeed ritual on the first deploy after a
+        // provider major bump.
+        var routeOpts = CustomResourceOptions.Merge(opts, new CustomResourceOptions
+        {
+            IgnoreChanges = { "region" },
+        });
+
         new Route($"{prefix}-public-route", new RouteArgs
         {
             RouteTableId = publicRt.Id,
             DestinationCidrBlock = "0.0.0.0/0",
             GatewayId = igw.Id,
-        }, opts);
+        }, routeOpts);
 
         new RouteTableAssociation($"{prefix}-public-rta-1", new RouteTableAssociationArgs
         {
@@ -238,7 +251,7 @@ public class AwsEcsNetworkComponent : ComponentResource, ISystemNetworkComponent
             RouteTableId = privateRt.Id,
             DestinationCidrBlock = "0.0.0.0/0",
             NatGatewayId = natGw.Id,
-        }, opts);
+        }, routeOpts);
 
         new RouteTableAssociation($"{prefix}-private-rta-1", new RouteTableAssociationArgs
         {
