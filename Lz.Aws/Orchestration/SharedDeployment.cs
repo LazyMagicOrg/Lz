@@ -61,17 +61,7 @@ public class SharedDeployment
         // public Keycloak admin access (auth.{domain}/admin/ via VPN only).
         // Uses tailscale-api-key as the signal: if the API key exists, Tailscale is
         // configured and auth keys will be auto-created before ASG deployment.
-        _adminBlockingEnabled = await checker.CheckAsync(new TransitionRequirement
-        {
-            Name = "tailscale-admin-check",
-            CheckType = TransitionCheckType.SecretEntry,
-            SecretName = "shared/system",
-            CheckTarget = "tailscale-api-key",
-        }, "shared");
-
-        Console.WriteLine(_adminBlockingEnabled
-            ? "  Admin blocking: ON (tailscale-api-key found — public admin access blocked)"
-            : "  Admin blocking: OFF (tailscale-api-key not found — public admin access open)");
+        _adminBlockingEnabled = await ResolveAdminBlockingAsync();
 
         // If Tailscale is configured, ensure a valid auth key exists before ASG deployment.
         // This creates an auth key via the API if missing or expired.
@@ -348,6 +338,33 @@ public class SharedDeployment
         };
 
     /// <summary>
+    /// Resolve whether Keycloak admin blocking is enabled: tailscale-api-key
+    /// present in the shared/system secret. Read-only. Shared by RunAsync and
+    /// PreviewAsync so a preview models the SAME program a deploy would apply —
+    /// both the admin-block listener rules and Tailscale inclusion key off this
+    /// flag, and a preview that skips the check plans phantom deletes of the
+    /// kc-admin rules while pairing (blocking OFF, tailscale ON), a state
+    /// RunAsync can never produce.
+    /// </summary>
+    private async Task<bool> ResolveAdminBlockingAsync()
+    {
+        var checker = _factory.CreateTransitionChecker();
+        var enabled = await checker.CheckAsync(new TransitionRequirement
+        {
+            Name = "tailscale-admin-check",
+            CheckType = TransitionCheckType.SecretEntry,
+            SecretName = "shared/system",
+            CheckTarget = "tailscale-api-key",
+        }, "shared");
+
+        Console.WriteLine(enabled
+            ? "  Admin blocking: ON (tailscale-api-key found — public admin access blocked)"
+            : "  Admin blocking: OFF (tailscale-api-key not found — public admin access open)");
+
+        return enabled;
+    }
+
+    /// <summary>
     /// Preview (read-only dry run) the shared-services stack. Returns true if the
     /// plan is destructive (any replace/delete). No changes are applied; no
     /// post-deploy actions run.
@@ -358,7 +375,13 @@ public class SharedDeployment
         Console.WriteLine($"=== Shared-services preview: {stackName} (no changes will be applied) ===");
         Console.WriteLine();
 
-        var stack = await CreateOrSelectStack(stackName, BuildSharedProgram(includeTailscale: true));
+        // Mirror RunAsync's admin-blocking resolution so the previewed program
+        // matches what a deploy would apply. Read-only — unlike RunAsync, no
+        // Tailscale auth/SSH keys are created here.
+        _adminBlockingEnabled = await ResolveAdminBlockingAsync();
+        Console.WriteLine();
+
+        var stack = await CreateOrSelectStack(stackName, BuildSharedProgram(includeTailscale: _adminBlockingEnabled));
 
         if (refresh)
         {
