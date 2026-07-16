@@ -13,11 +13,11 @@
 
   <ItemGroup>
     <!-- LazyMagic packages (resolved from the local feed, see NuGet.Config) -->
-    <PackageVersion Include="LazyMagic.Shared" Version="3.0.12" />
-    <PackageVersion Include="LazyMagic.Service.Shared" Version="3.0.12" />
-    <PackageVersion Include="LazyMagic.Service.Authorization" Version="3.0.12" />
-    <PackageVersion Include="LazyMagic.Service.DynamoDBRepo" Version="3.0.12" />
-    <PackageVersion Include="LazyMagic.Service.AwsLocalWebApiRoutingMiddleware" Version="3.0.12" />
+    <PackageVersion Include="LazyMagic.Shared" Version="3.0.17" />
+    <PackageVersion Include="LazyMagic.Service.Shared" Version="3.0.17" />
+    <PackageVersion Include="LazyMagic.Service.Authorization" Version="3.0.17" />
+    <PackageVersion Include="LazyMagic.Service.DynamoDBRepo" Version="3.0.17" />
+    <PackageVersion Include="LazyMagic.Service.AwsLocalWebApiRoutingMiddleware" Version="3.0.17" />
   </ItemGroup>
 
   <ItemGroup>

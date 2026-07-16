@@ -32,7 +32,34 @@ All packages share a single version defined in `LzVersion.props`.
 
 ## Building, Packing, and Installing
 
-There is no `.sln` file. The `SolutionDir` MSBuild property must be passed explicitly so that `LzVersion.props` can be resolved.
+Build through **`Lz.slnx`**, which sets `SolutionDir` for you — the `Lz.*` projects need it to
+resolve `LzVersion.props` / `CommonPackageHandling.targets`, and there is no `Directory.Build.props`
+to supply it, so a per-project build fails with `MSB4019`.
+
+### Prerequisite: a LazyMagic package source
+
+`ProjectTemplates/` is compiled as a member of `Lz.slnx` (that is what catches template
+contamination at build time), and those templates reference `LazyMagic.*` packages that are **not
+published to nuget.org**. NuGet needs somewhere to get them.
+
+Declare that source **above this repo** — in your user-level `%APPDATA%\NuGet\NuGet.Config`, or any
+ancestor directory — pointing at your local LazyMagic package output:
+
+```xml
+<add key="LazyMagic" value="...\LazyMagic\Packages" />
+```
+
+**Do not add a `NuGet.Config` inside this repo for it.** A consuming system already declares that
+same feed in its own root config, and a config *inside* Lz is a **descendant** of that root: it
+escapes the root's `<clear/>`, and because NuGet deduplicates package sources by resolved path, it
+silently renames the system's source out from under its `packageSourceMapping` — which then matches
+nothing and fails `NU1100` for packages sitting on disk. This repo carried exactly such a file
+(`ProjectTemplates/NuGet.Config`, aliasing the feed as `LazyMagicLocal`); it was removed for that
+reason. Machine-specific paths belong in machine-specific config.
+
+Note also that a fresh clone has no `Packages/` folder while `NuGet.Config` declares `Lz` →
+`./Packages`. NuGet raises `NU1301` for a local source that does not exist, so create it once:
+`mkdir Packages`.
 
 ### Full build and install sequence
 
