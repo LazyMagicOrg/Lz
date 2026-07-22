@@ -74,6 +74,20 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
     {
     }
 
+    /// <summary>
+    /// Hook for a topology to append extra ordered cache behaviors just before the
+    /// distribution is created — e.g. a server-rendered commerce path that needs a
+    /// cookie-forwarding / no-cache cache behavior (a policy bound at deploy time that
+    /// the runtime CFRequest function cannot set). Base returns none, so an existing
+    /// distribution's ordered-behaviors list — and therefore its config — is byte-for-byte
+    /// identical. Behaviors are appended after any /bff and /cbff behaviors; CloudFront
+    /// evaluates ordered behaviors first-match, so give an appended pattern a prefix that
+    /// does not overlap an earlier one.
+    /// </summary>
+    protected virtual IEnumerable<DistributionOrderedCacheBehaviorArgs> BuildExtraBehaviors(
+        TenantConfig tenantConfig, ApiOriginSpec apiOrigin, Function requestFn, Function responseFn)
+        => Array.Empty<DistributionOrderedCacheBehaviorArgs>();
+
     public ICdnOutputs Deploy(TenantConfig tenantConfig, IComputeEnvironmentOutputs compute)
     {
         var sk = tenantConfig.SystemKey;
@@ -704,6 +718,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 },
             });
         }
+
+        // Topology hook: append extra ordered behaviors (e.g. a commerce path with a
+        // cookie-forwarding cache policy). Base = none → byte-identical for existing tenants.
+        foreach (var extra in BuildExtraBehaviors(tenantConfig, apiOrigin, requestFn, responseFn))
+            distributionArgs.OrderedCacheBehaviors.Add(extra);
 
         var distribution = new Distribution($"{prefix}-cf-dist", distributionArgs,
             new CustomResourceOptions { Parent = this });
