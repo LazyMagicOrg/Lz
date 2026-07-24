@@ -128,6 +128,16 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         };
 
     /// <summary>
+    /// Topology-overridable DefaultRootObject. Base: config value, falling back to the
+    /// consumer app's index — the KVS-webapp-at-root convention. A topology that serves a
+    /// server app at the apex overrides this to "" (CloudFront: no root object) so a bare
+    /// "/" reaches the origin verbatim. The override exists because config cannot express
+    /// empty: the YAML loader turns an explicit "" into null and the fallback re-applies.
+    /// </summary>
+    protected virtual string BuildDefaultRootObject(TenantConfig tenantConfig, CdnConfig cdn)
+        => cdn.DefaultRootObject ?? "app/index.html";
+
+    /// <summary>
     /// Topology-overridable CustomErrorResponses. Base: the SPA fallback pair
     /// (403/404 → /index.html) that lets deep links into the S3-served WASM apps
     /// resolve. These are DISTRIBUTION-GLOBAL — a topology whose default behavior
@@ -404,7 +414,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         {
             Enabled = true, IsIpv6Enabled = true,
             Comment = $"{sk}/{tk} CDN ({env})",
-            DefaultRootObject = cdn.DefaultRootObject ?? "app/index.html",
+            // Topology-overridable (BuildDefaultRootObject). NOTE: config alone cannot express
+            // "no root object" — the YAML loader nullifies an explicit "" and the fallback
+            // re-applies app/index.html — so a topology whose apex is a server app must
+            // override the hook to return "".
+            DefaultRootObject = BuildDefaultRootObject(tenantConfig, cdn),
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
             Origins =
