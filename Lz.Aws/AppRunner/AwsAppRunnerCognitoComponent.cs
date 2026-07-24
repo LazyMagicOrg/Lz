@@ -338,6 +338,57 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             }
 
             // =================================================================
+            // SMARTSTORE CONFIDENTIAL CLIENT (additive, flag-gated) — §8
+            // =================================================================
+            // A confidential app client for the Smartstore storefront's OpenID
+            // Connect handler (the Smartstore.Cognito.Auth module). Unlike the
+            // BFF client, its callback is the framework-owned sign-in path at the
+            // store apex (/signin-cognito) and its sign-out URL is the apex root
+            // (Cognito has no end_session_endpoint; the module hits {domain}/logout
+            // with logout_uri=apex). Confidential (GenerateSecret=true): the code
+            // exchange runs server-side in the container, so the secret never
+            // reaches the browser.
+            //
+            // Created ONLY when ProvisionSmartstoreClient==true. When off (the
+            // default) neither this client nor its secret/branding/outputs exist,
+            // so the deploy plan is identical to a pre-Smartstore deploy.
+            Output<string>? smartstoreClientId = null;
+            Output<string>? smartstoreClientSecret = null;
+            if (poolConfig.ProvisionSmartstoreClient)
+            {
+                // Callback == the module's fixed CallbackPath (/signin-cognito) on
+                // the store apex; sign-out == the apex root. Dev entries (localhost
+                // on the storefront's container port) only when IncludeDevCallbackUrls.
+                var ssCallbackUrls = new List<string> { $"https://{systemDomain}/signin-cognito" };
+                var ssLogoutUrls = new List<string> { $"https://{systemDomain}/" };
+                if (poolConfig.IncludeDevCallbackUrls)
+                {
+                    ssCallbackUrls.Add("https://localhost:8080/signin-cognito");
+                    ssLogoutUrls.Add("https://localhost:8080/");
+                }
+
+                var smartstoreClient = new UserPoolClient($"{poolPrefix}-smartstore-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-smartstore-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = true,
+                    // Refresh-token flow only — the storefront does code+PKCE at
+                    // the /token endpoint and refreshes server-side.
+                    ExplicitAuthFlows = { "ALLOW_REFRESH_TOKEN_AUTH" },
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AllowedOauthFlows = { "code" },
+                    AllowedOauthScopes = { "openid", "profile", "email" },
+                    AllowedOauthFlowsUserPoolClient = true,
+                    CallbackUrls = { ssCallbackUrls.ToArray() },
+                    LogoutUrls = { ssLogoutUrls.ToArray() },
+                }, new CustomResourceOptions { Parent = this });
+
+                smartstoreClientId = smartstoreClient.Id;
+                smartstoreClientSecret = smartstoreClient.ClientSecret;
+            }
+
+            // =================================================================
             // USER POOL GROUPS — role distinctions within the pool (roles
             // surface to the app in the cognito:groups JWT claim)
             // =================================================================
@@ -476,6 +527,23 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                     });
             }
 
+            // ManagedLoginVersion=2 also requires a per-client branding for the
+            // confidential Smartstore client. Without it the hosted UI returns
+            // "Login pages unavailable" for storefront sign-ins (each client needs
+            // its own branding slot). Reuse the same convention-folder source.
+            if (poolConfig.ProvisionSmartstoreClient && smartstoreClientId is not null)
+            {
+                var ssBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, smartstoreClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-smartstore-branding", ssBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
             // Route 53 alias: auth.{domain} → Cognito's managed CloudFront distribution
             new Pulumi.Aws.Route53.Record($"{poolPrefix}-dns", new Pulumi.Aws.Route53.RecordArgs
             {
@@ -544,6 +612,10 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 // without a BFF client.
                 BffClientId = bffClientId,
                 BffClientSecret = bffClientSecret,
+                // Smartstore confidential-client outputs. Null unless
+                // ProvisionSmartstoreClient was set for this pool.
+                SmartstoreClientId = smartstoreClientId,
+                SmartstoreClientSecret = smartstoreClientSecret,
             };
         }
 
@@ -759,6 +831,19 @@ public class CognitoPoolOutputs
     /// to the SPA.
     /// </summary>
     public Output<string>? BffClientSecret { get; init; }
+
+    /// <summary>
+    /// Confidential Smartstore client id. Non-null only when the pool's
+    /// <c>ProvisionSmartstoreClient</c> flag was set; <c>null</c> otherwise.
+    /// </summary>
+    public Output<string>? SmartstoreClientId { get; init; }
+
+    /// <summary>
+    /// Confidential Smartstore client secret. Non-null only when the pool's
+    /// <c>ProvisionSmartstoreClient</c> flag was set. Consumed by the storefront
+    /// container as <c>SMARTSTORE_COGNITO_CLIENTSECRET</c>.
+    /// </summary>
+    public Output<string>? SmartstoreClientSecret { get; init; }
 }
 
 /// <summary>
@@ -783,5 +868,7 @@ public class AwsAppRunnerCognitoOutputs : IAuthPoolOutputs
                 Authority = kv.Value.Authority,
                 BffClientId = kv.Value.BffClientId,
                 BffClientSecret = kv.Value.BffClientSecret,
+                SmartstoreClientId = kv.Value.SmartstoreClientId,
+                SmartstoreClientSecret = kv.Value.SmartstoreClientSecret,
             });
 }

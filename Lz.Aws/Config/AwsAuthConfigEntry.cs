@@ -137,6 +137,21 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// Only consulted when <see cref="ProvisionBffClient"/> is true.
     /// </summary>
     public string BffRoutePrefix { get; set; } = "/bff";
+
+    /// <summary>
+    /// When true, provision a confidential Cognito app client
+    /// (<c>{poolPrefix}-smartstore-client</c>, <c>GenerateSecret=true</c>) for the
+    /// Smartstore storefront's OpenID Connect handler (the
+    /// <c>Smartstore.Cognito.Auth</c> module). The client's callback is the store
+    /// apex (<c>https://{systemDomain}/signin-cognito</c>) and its sign-out URL is
+    /// the apex root (<c>https://{systemDomain}/</c>). Like <see cref="ProvisionBffClient"/>
+    /// this is purely additive: the public client is untouched, and when the flag is
+    /// off (the default) no extra client, secret, branding, or outputs are created,
+    /// so the deploy plan is byte-for-byte identical. Provision this on the pool the
+    /// storefront authenticates against (typically <c>consumerauth</c>).
+    /// See <c>Platform/SMARTSTORE-COGNITO-AUTH.md §8</c>.
+    /// </summary>
+    public bool ProvisionSmartstoreClient { get; set; } = false;
 }
 
 /// <summary>

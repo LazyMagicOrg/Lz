@@ -35,6 +35,21 @@ public class AuthPoolDetail
     /// completeness/auditing of the foundation stack.
     /// </summary>
     public Output<string>? BffClientSecret { get; init; }
+
+    /// <summary>
+    /// Confidential Smartstore app-client id, when the pool provisioned one
+    /// (<c>AwsAuthConfigEntry.ProvisionSmartstoreClient</c>). <c>null</c> for pools
+    /// without a Smartstore client — the default. Exported as a foundation stack
+    /// output so the storefront container can wire <c>SMARTSTORE_COGNITO_CLIENTID</c>.
+    /// </summary>
+    public Output<string>? SmartstoreClientId { get; init; }
+
+    /// <summary>
+    /// Confidential Smartstore app-client secret, when the pool provisioned one.
+    /// <c>null</c> otherwise. Consumed as <c>SMARTSTORE_COGNITO_CLIENTSECRET</c> by the
+    /// storefront's OpenID Connect handler.
+    /// </summary>
+    public Output<string>? SmartstoreClientSecret { get; init; }
 }
 
 /// <summary>
