@@ -26,6 +26,25 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
     {
     }
 
+    /// <summary>ALB listener-rule priority for this service's rule. Base: 10.</summary>
+    protected virtual int ListenerRulePriority => 10;
+
+    /// <summary>
+    /// ALB listener-rule conditions for this service. Base: catch-all path <c>/*</c> —
+    /// correct when this is the listener's only service (the EcsExpress topology).
+    /// Override when multiple services share the listener; e.g. NTS's apphost matches
+    /// the <c>lz-config</c> header that CFRequest stamps on every API-behavior request,
+    /// leaving everything else to fall through to the storefront's host rule.
+    /// </summary>
+    protected virtual List<ListenerRuleConditionArgs> BuildListenerRuleConditions()
+        => new()
+        {
+            new ListenerRuleConditionArgs
+            {
+                PathPattern = new ListenerRuleConditionPathPatternArgs { Values = { "/*" } },
+            },
+        };
+
     public IServiceOutputs Deploy(
         string serviceName,
         ServiceDefinition definition,
@@ -354,22 +373,19 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
         }, new CustomResourceOptions { Parent = this });
 
-        // Route all traffic to this target group (default for now — single service)
+        // Route traffic to this target group. Conditions are topology-overridable
+        // (BuildListenerRuleConditions): the base catch-all assumes this is the only
+        // ALB-fronted service. A topology whose ALB hosts several services (e.g. NTS:
+        // apphost + smartstore on one listener) overrides to a narrower match.
         new ListenerRule($"{prefix}-rule", new ListenerRuleArgs
         {
             ListenerArn = networkOutputs.HttpsListenerArn,
-            Priority = 10,
+            Priority = ListenerRulePriority,
             Actions =
             {
                 new ListenerRuleActionArgs { Type = "forward", TargetGroupArn = targetGroup.Arn },
             },
-            Conditions =
-            {
-                new ListenerRuleConditionArgs
-                {
-                    PathPattern = new ListenerRuleConditionPathPatternArgs { Values = { "/*" } },
-                },
-            },
+            Conditions = BuildListenerRuleConditions(),
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
         }, new CustomResourceOptions { Parent = this });
 
