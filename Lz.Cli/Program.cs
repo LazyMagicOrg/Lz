@@ -547,12 +547,22 @@ class Program
 
         var platformOption = new Option<string?>("--platform", "Override platform from config");
         var topologyOption = new Option<string?>("--topology", "Override topology from config");
+        var secretOption = new Option<string[]>("--secret",
+            "Supply a required-secret value non-interactively (repeatable): " +
+            "--secret \"<name>:<key>=<value>\", e.g. --secret \"scu/icecat:ApiToken=abc123\". " +
+            "Used to satisfy systemconfig RequiredSecrets from scripts; when omitted and a " +
+            "console is attached, missing values are prompted for (input hidden). NOTE: " +
+            "command-line values can land in shell history — prefer the prompt when running by hand.")
+        {
+            Arity = ArgumentArity.ZeroOrMore,
+        };
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(platformOption);
         cmd.AddOption(topologyOption);
+        cmd.AddOption(secretOption);
 
-        cmd.SetHandler(async (systemKey, env, platform, topology) =>
+        cmd.SetHandler(async (systemKey, env, platform, topology, secretArgs) =>
         {
             RequirePlugin(plugin, "deploysystem");
 
@@ -602,6 +612,16 @@ class Program
                     await AwsStateBootstrapper.BootstrapAsync(
                         config.Profile, config.Region, config.State);
 
+                // Required secrets (systemconfig RequiredSecrets, absent = skip):
+                // verify each exists with all keys BEFORE any deploy step; fill
+                // missing values from --secret args or the hidden interactive
+                // prompt; fail fast with instructions when neither is available.
+                if (config.RequiredSecrets is { Count: > 0 })
+                    await Lz.Aws.Secrets.AwsSecretsEnsurer.EnsureAsync(
+                        config,
+                        Lz.Aws.Secrets.SecretsPlanner.ParseSecretArgs(secretArgs),
+                        PromptSecretValue);
+
                 var (system, factory) = PrepareSystem(plugin!, config);
 
                 Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
@@ -612,9 +632,30 @@ class Program
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 await deployment.DeployFoundationAsync();
             }
-        }, systemKeyOption, envOption, platformOption, topologyOption);
+        }, systemKeyOption, envOption, platformOption, topologyOption, secretOption);
 
         root.AddCommand(cmd);
+    }
+
+    /// <summary>
+    /// Hidden-input console prompt for a required-secret value. Returns null when
+    /// no console is attached (stdin redirected — scripted/CI contexts must use
+    /// --secret instead) or when the user enters nothing.
+    /// </summary>
+    private static string? PromptSecretValue(string secretName, string key)
+    {
+        if (Console.IsInputRedirected)
+            return null;
+        Console.Write($"  Enter value for secret '{secretName}' key '{key}' (input hidden): ");
+        var sb = new System.Text.StringBuilder();
+        while (true)
+        {
+            var k = Console.ReadKey(intercept: true);
+            if (k.Key == ConsoleKey.Enter) { Console.WriteLine(); break; }
+            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
+            if (!char.IsControl(k.KeyChar)) sb.Append(k.KeyChar);
+        }
+        return sb.Length == 0 ? null : sb.ToString();
     }
 
     // ---------------------------------------------------------------

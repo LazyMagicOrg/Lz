@@ -66,6 +66,11 @@ public class SystemConfig
 
     // --- Runtime Application Settings ---
     public SecretsManagerConfig? SecretsManager { get; set; }
+
+    // RequiredSecrets — secrets that must exist (with listed JSON keys) before
+    // deploysystem proceeds; missing values are prompted for or supplied via
+    // --secret (see RequiredSecretConfig). Absent = nothing checked.
+    public List<RequiredSecretConfig>? RequiredSecrets { get; set; }
     public string? IntegrationSecretsPath { get; set; }
     public IntegrationsConfig? Integrations { get; set; }
     public Dictionary<string, AuthConfigEntry>? AuthConfigs { get; set; }
