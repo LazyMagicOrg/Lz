@@ -49,6 +49,12 @@ public class SystemConfig
     // When omitted, defaults apply: enabled in prod/staging, disabled elsewhere.
     public BackupConfig? Backup { get; set; }
 
+    // Durability — deletion-protection + point-in-time recovery for the
+    // per-subtenant vault/PII DynamoDB table (see DurabilityConfig). When
+    // omitted, NOTHING is applied and the emitted table is byte-identical to a
+    // pre-durability deploy (the MagicPets/no-opt-in baseline).
+    public DurabilityConfig? Durability { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 

@@ -111,6 +111,7 @@ class Program
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterUnlockCommand(rootCommand, systemKeyOption, envOption);
         RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterVerifyCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
@@ -178,7 +179,7 @@ class Program
             ("Subtenant", "per-subtenant resources",
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
             ("Misc",      "discovery, codegen, utilities",
-                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers" }),
+                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
@@ -1602,15 +1603,21 @@ class Program
         var forceOption = new Option<bool>("--force",
             "Empty the S3 bucket before deleting (data loss). Without --force, " +
             "deletion fails if the bucket is non-empty.");
+        var forceDeleteProtectedOption = new Option<bool>("--force-delete-protected",
+            "Delete the subtenant DynamoDB table even if it has deletion " +
+            "protection enabled (disables protection first, then deletes — DATA " +
+            "LOSS). Without this flag, a protected table is left intact and the " +
+            "destroy fails. Separate from --force (which only empties the S3 bucket).");
         var yesOption = new Option<bool>("--yes", "Skip the confirmation prompt.");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
         cmd.AddOption(subtenantKeyOption);
         cmd.AddOption(forceOption);
+        cmd.AddOption(forceDeleteProtectedOption);
         cmd.AddOption(yesOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, force, yes) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, force, forceDeleteProtected, yes) =>
         {
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -1630,7 +1637,8 @@ class Program
                         "  - S3 bucket " +
                         $"{Lz.Aws.Shared.SubtenantBucketManager.BucketName(config.SystemKey, tenantKey, subtenantKey, config.SystemSuffix)} " +
                         $"will be deleted{(force ? " (emptied first — DATA LOSS)" : "")}.");
-                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS).");
+                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS)" +
+                        $"{(forceDeleteProtected ? "; deletion protection, if enabled, will be DISABLED first (--force-delete-protected)" : " — if it has deletion protection enabled, the destroy will FAIL unless you also pass --force-delete-protected")}.");
                     Console.Write("Type 'yes' to confirm: ");
                     Console.ResetColor();
                     var response = Console.ReadLine();
@@ -1645,7 +1653,7 @@ class Program
                 var region = tenantConfig.Region ?? config.Region;
 
                 await Lz.Aws.Shared.SubtenantProvisioner.DeleteOneAsync(
-                    config, tenantConfig, subtenantKey, profile, region, force);
+                    config, tenantConfig, subtenantKey, profile, region, force, forceDeleteProtected);
 
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine($"Subtenant '{subtenantKey}' destroyed.");
@@ -1655,7 +1663,102 @@ class Program
                     "run `lz deploysubtenants` to refresh KVS. The KVS entry " +
                     "for the destroyed subtenant's domain will need manual cleanup.");
             }
-        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, forceOption, yesOption);
+        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, forceOption, forceDeleteProtectedOption, yesOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // unlock
+    // ---------------------------------------------------------------
+
+    private static void RegisterUnlockCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("unlock",
+            "Release a stale Pulumi state lock on a stack (like `pulumi cancel`). A lock " +
+            "left behind by a hard-killed deploy/destroy (Ctrl+C, crash) blocks further " +
+            "operations with \"the stack is currently locked\". Defaults to the SYSTEM " +
+            "(foundation) stack; pass --tenantkey to unlock a tenant stack. Use ONLY when " +
+            "no deploy/destroy is actually running.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Unlock the tenant stack {systemkey}-{tenantkey}-{env} instead of the foundation stack.");
+        var yesOption = new Option<bool>("--yes", "Skip the confirmation prompt.");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(yesOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, yes) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var stackName = string.IsNullOrEmpty(tenantKey)
+                    ? $"{config.SystemKey}-{config.Environment}"
+                    : $"{config.SystemKey}-{tenantKey}-{config.Environment}";
+
+                IReadOnlyList<Lz.Aws.Orchestration.PulumiStateLock.LockRecord> locks;
+                try
+                {
+                    locks = await Lz.Aws.Orchestration.PulumiStateLock.ListAsync(config, stackName);
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Could not read locks for stack '{stackName}': {ex.Message}");
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                    continue;
+                }
+
+                if (locks.Count == 0)
+                {
+                    Console.WriteLine($"Stack '{stackName}': no lock present — nothing to release.");
+                    continue;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Stack '{stackName}' is locked by {locks.Count} lock(s):");
+                foreach (var l in locks)
+                    Console.WriteLine(
+                        $"  - pid {(l.Pid?.ToString() ?? "?")} on host {l.Hostname ?? "?"} " +
+                        $"({l.Username ?? "?"}) since {l.Timestamp ?? "?"}");
+                Console.WriteLine(
+                    "Release the lock ONLY if you are certain no deploy/destroy is still running " +
+                    "(verify the host/PID above). Force-unlocking a live update can corrupt the stack state.");
+                Console.ResetColor();
+
+                if (!yes)
+                {
+                    Console.Write("Type 'yes' to release the lock: ");
+                    if (!string.Equals(Console.ReadLine(), "yes", StringComparison.Ordinal))
+                    {
+                        Console.WriteLine("Aborted.");
+                        continue;
+                    }
+                }
+
+                try
+                {
+                    var removed = await Lz.Aws.Orchestration.PulumiStateLock.ReleaseAsync(config, stackName);
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"Released {removed} lock(s) on stack '{stackName}'. Re-run your deploy now.");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Failed to release lock on '{stackName}': {ex.Message}");
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, yesOption);
 
         root.AddCommand(cmd);
     }
