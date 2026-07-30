@@ -215,12 +215,10 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
 
         // S3-level CORS configuration. The CFResponse CloudFront Function
         // adds Access-Control-Allow-Origin to *successful* origin responses
-        // routed through the default '/*' behavior — but CloudFront's
-        // CustomErrorResponses flow can short-circuit viewer-response on
-        // origin 4xx errors (the SPA-fallback /index.html recursion fails
-        // when CFRequest's dynamic origin rewrite picks a bucket without
-        // /index.html, falling back to the raw S3 error which never gets
-        // CORS injected). Configuring CORS at the S3 level means S3 itself
+        // routed through the default '/*' behavior — but origin 4xx errors
+        // (missing objects answer 403 AccessDenied under OAC-without-
+        // ListBucket) are served raw and never get CORS injected at the
+        // edge. Configuring CORS at the S3 level means S3 itself
         // emits Access-Control-Allow-Origin on its responses including
         // 403/404 — CloudFront passes those headers through. Net effect:
         // browsers see clean 4xx responses with CORS, the WASM client's
@@ -618,11 +616,21 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     },
                 },
             },
-            CustomErrorResponses =
-            {
-                new DistributionCustomErrorResponseArgs { ErrorCode = 403, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
-                new DistributionCustomErrorResponseArgs { ErrorCode = 404, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
-            },
+            // NO CustomErrorResponses — deliberately (removed 2026-07-30). The
+            // 403/404→200 /index.html SPA fallback they provided is (a) redundant:
+            // CFRequest.js already rewrites extensionless webapp paths to
+            // {appPath}index.html at REQUEST time, before the origin fetch, so SPA
+            // deep links never produce an origin 404; and (b) harmful: custom error
+            // responses are DISTRIBUTION-wide, so they also intercepted API-origin
+            // 403/404s on /*Api/* — and because the /index.html error fetch resolves
+            // against a bucket location without that object, CloudFront served S3's
+            // own 403 AccessDenied XML instead, destroying the API's real status and
+            // body (a missing route and an ownership refusal became
+            // indistinguishable; probed live on match.aiproxydev.click). Removing
+            // them restores authentic API errors and changes nothing user-visible
+            // for assets: a genuinely missing S3 object surfaced the same S3 403
+            // before (via the broken error fetch) and after (directly). The
+            // Scutara E2E canary CdnErrorRegime_Canary pins the resulting regime.
             ViewerCertificate = new DistributionViewerCertificateArgs
             {
                 AcmCertificateArn = certValidation.CertificateArn,
