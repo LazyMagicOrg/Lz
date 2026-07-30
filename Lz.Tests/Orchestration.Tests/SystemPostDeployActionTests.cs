@@ -58,4 +58,32 @@ public class SystemPostDeployActionTests
         IPlatformFactory factory = new AwsEcsPlatformFactory(Config());
         Assert.Null(factory.GetSystemPostDeployAction());
     }
+
+    // ---- tenant-phase (deploytenant) service action: the Lambda code-roll wiring ----
+
+    private sealed class TestSystem : Lz.Core.Definitions.SystemDefinition
+    {
+        public override void Define(SystemConfig config) { }
+    }
+
+    [Fact]
+    public void LambdaFactory_TenantServiceAction_IsTheLambdaPostDeploy_WithTheCodeRoll()
+    {
+        // deploytenant on ECS re-pulls :latest via the task cycle; the Lambda
+        // topology gets the SAME leave-the-tenant-on-current-code guarantee via
+        // AwsLambdaPostDeployAction's digest-compared UpdateFunctionCode roll.
+        IPlatformFactory factory = new AwsLambdaPlatformFactory(Config());
+        var action = factory.GetServiceDeployAction(
+            new TestSystem(), Array.Empty<Lz.Core.Definitions.ServiceDefinition>(),
+            "mp", new TenantConfig());
+        Assert.IsType<AwsLambdaPostDeployAction>(action);
+    }
+
+    [Fact]
+    public void LambdaFactory_NonTenantServiceAction_StaysNull()
+    {
+        IPlatformFactory factory = new AwsLambdaPlatformFactory(Config());
+        Assert.Null(factory.GetServiceDeployAction(
+            new TestSystem(), Array.Empty<Lz.Core.Definitions.ServiceDefinition>()));
+    }
 }
