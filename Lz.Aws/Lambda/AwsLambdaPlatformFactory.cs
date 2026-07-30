@@ -35,7 +35,7 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
     // Lambda-specific components.
     public virtual IComputeEnvironmentComponent CreateComputeEnvironment() => new AwsLambdaComputeComponent();
     public virtual IServiceComponent CreateService() => new AwsLambdaServiceComponent();
-    public virtual ITenantServiceComponent CreateTenantService() => new AwsLambdaTenantServiceComponent(_originHolder);
+    public virtual ITenantServiceComponent CreateTenantService() => new AwsLambdaTenantServiceComponent(_originHolder, _config);
     public virtual ITenantCdnComponent CreateTenantCdn() => new AwsLambdaCloudFrontComponent(_originHolder);
 
     // Reused from AppRunner (no-VPC network, DynamoDB, S3, Cognito, tenant data).
@@ -52,6 +52,9 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
     // No Tailscale / Keycloak / gate-checker / seed.
     public virtual ITailscaleComponent? CreateTailscale() => null;
     public virtual IPostDeployAction? GetFoundationPostDeployAction()
+        => new AwsEcsExpressFoundationPostDeployAction(_config);
+    // deploysystem-phase hook: ensure the {SystemKey} system table (idempotent).
+    public virtual IPostDeployAction? GetSystemPostDeployAction()
         => new AwsEcsExpressFoundationPostDeployAction(_config);
     public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
     public virtual ITailscaleKeyManager? GetTailscaleKeyManager() => null;

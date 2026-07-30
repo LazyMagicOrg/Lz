@@ -24,11 +24,13 @@ namespace Lz.Aws.Lambda;
 public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantServiceComponent
 {
     private readonly AwsLambdaApiOriginHolder _originHolder;
+    private readonly SystemConfig _systemConfig;
 
-    public AwsLambdaTenantServiceComponent(AwsLambdaApiOriginHolder originHolder)
+    public AwsLambdaTenantServiceComponent(AwsLambdaApiOriginHolder originHolder, SystemConfig systemConfig)
         : base("lz:aws:LambdaTenantService", "tenant-service", ResourceArgs.Empty, null)
     {
         _originHolder = originHolder;
+        _systemConfig = systemConfig;
     }
 
     public IServiceOutputs Deploy(
@@ -201,6 +203,55 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
         var authUserPoolIdsJson = foundationAuthRef.GetOutput("auth_userPoolIdsJson")
             .Apply(v => v as string ?? "{}");
 
+        // =====================================================================
+        // Vector store (aoss) — additive, opt-in via systemconfig VectorStore.
+        // The collection lives in the FOUNDATION stack (AwsVectorStoreComponent);
+        // this side gives the function what it needs to reach it: (1) the
+        // aoss:APIAccessAll IAM statement, (2) membership in a data-access
+        // policy — aoss allows several per collection, so the tenant grants its
+        // OWN role in a per-tenant policy instead of mutating the foundation's —
+        // and (3) the endpoint env var (OpenSearch__Endpoint, added to fnEnv
+        // below). A system without VectorStore gets none of this, so its
+        // function definition stays byte-identical to a pre-feature deploy.
+        // =====================================================================
+        var vectorStoreEndpoint = Output.Create(string.Empty);
+        if (_systemConfig.VectorStore != null)
+        {
+            var collectionName = Lz.Aws.VectorStore.VectorStorePolicy.CollectionName(_systemConfig);
+            vectorStoreEndpoint = foundationAuthRef.GetOutput("vectorStoreEndpoint")
+                .Apply(v => v as string ?? string.Empty);
+            var collectionArn = foundationAuthRef.GetOutput("vectorStoreCollectionArn")
+                .Apply(v => v as string ?? string.Empty);
+
+            // IAM permission — scoped to the foundation collection when its ARN
+            // export is available; falls back to the account's collections on a
+            // foundation stack that predates the export (re-run deploysystem to
+            // tighten). aoss data-plane calls need this AND a data-access policy
+            // grant — the IAM statement alone admits nothing.
+            new RolePolicy($"{prefix}-aoss", new RolePolicyArgs
+            {
+                Role = execRole.Id,
+                Policy = collectionArn.Apply(arn => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [""aoss:APIAccessAll""],
+                        ""Resource"": ""{(string.IsNullOrEmpty(arn) ? "arn:aws:aoss:*:*:collection/*" : arn)}""
+                    }}]
+                }}"),
+            }, new CustomResourceOptions { Parent = this });
+
+            new Pulumi.Aws.OpenSearch.ServerlessAccessPolicy($"{prefix}-aoss-data",
+                new Pulumi.Aws.OpenSearch.ServerlessAccessPolicyArgs
+                {
+                    Name = Lz.Aws.VectorStore.VectorStorePolicy.TenantAccessPolicyName(collectionName, tk),
+                    Type = "data",
+                    Description = $"lz: data access for the {tk} tenant service role",
+                    Policy = execRole.Arn.Apply(arn =>
+                        Lz.Aws.VectorStore.VectorStorePolicy.DataAccessPolicyJson(collectionName, new[] { arn })),
+                }, new CustomResourceOptions { Parent = this });
+        }
+
         // BFF env vars (flag-gated) — Output-valued; appended only when enabled so a
         // non-BFF tenant's Variables map is identical to a pre-BFF deploy.
         var bffEnv = Lz.Aws.AppRunner.BffWiring.IsEnabled(tenantConfig)
@@ -221,7 +272,7 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
 
         var fnEnv = new FunctionEnvironmentArgs
         {
-            Variables = Output.Tuple(authUserPoolIdsJson, bffValueOutputs, originVerify.Result).Apply(t =>
+            Variables = Output.Tuple(authUserPoolIdsJson, bffValueOutputs, originVerify.Result, vectorStoreEndpoint).Apply(t =>
             {
                 var authJson = t.Item1;
                 var bffValues = t.Item2;
@@ -229,6 +280,13 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
                 {
                     ["LZ_ORIGIN_VERIFY"] = t.Item3,
                 };
+
+                // aoss endpoint (config key OpenSearch:Endpoint via the ASP.NET
+                // double-underscore env convention) — present only when the
+                // system opted into VectorStore AND the foundation exported it,
+                // so a non-opted system's Variables map is unchanged.
+                if (!string.IsNullOrEmpty(t.Item4))
+                    vars["OpenSearch__Endpoint"] = t.Item4;
 
                 // LZ_AUTH_{POOL}_USERPOOLID from the foundation pool map.
                 try

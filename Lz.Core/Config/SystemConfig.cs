@@ -55,6 +55,12 @@ public class SystemConfig
     // pre-durability deploy (the MagicPets/no-opt-in baseline).
     public DurabilityConfig? Durability { get; set; }
 
+    // VectorStore — OpenSearch Serverless (aoss) collection for the semantic-
+    // matching backend (see VectorStoreConfig). When omitted, nothing aoss-
+    // related is provisioned and no OpenSearch env/IAM reaches the tenant
+    // service — the no-opt-in baseline.
+    public VectorStoreConfig? VectorStore { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 

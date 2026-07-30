@@ -42,6 +42,9 @@ public class AwsEcsExpressPlatformFactory : IAwsPlatformFactory
     public virtual ITailscaleComponent? CreateTailscale() => null;
     public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new AwsEcsExpressFoundationPostDeployAction(_config);
+    // deploysystem-phase hook: ensure the {SystemKey} system table (idempotent).
+    public virtual IPostDeployAction? GetSystemPostDeployAction()
+        => new AwsEcsExpressFoundationPostDeployAction(_config);
     public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
     public virtual ITailscaleKeyManager? GetTailscaleKeyManager() => null;
     public virtual ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
