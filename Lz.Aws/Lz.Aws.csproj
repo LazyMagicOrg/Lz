@@ -15,6 +15,10 @@
     <ProjectReference Include="..\Lz.Core\Lz.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Lz.Tests" />
+  </ItemGroup>
+
   <!-- Pre-built Lambda package. AwsGateCheckerLambdaComponent looks for
        Lambda/gate-checker.zip relative to Assembly.Location of the loaded
        Lz.Aws.dll. Depending on the host process's assembly load behavior,

@@ -279,6 +279,14 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
                 var vars = new System.Collections.Generic.Dictionary<string, string>(baseVars)
                 {
                     ["LZ_ORIGIN_VERIFY"] = t.Item3,
+                    // The origin-verify gate lives in the LazyMagic.OIDC.Bff hosting-
+                    // startup assembly and must LOAD unconditionally: BffHostingStartup
+                    // registers OriginVerifyMiddleware independent of LZ_BFF_ENABLED
+                    // and is inert otherwise. This must NOT ride on the BFF opt-in
+                    // (BffWiring emits the same var only when BffEnabled) — a tenant
+                    // without the BFF would otherwise deploy a public AuthType=NONE
+                    // Function URL with NO app-side gate.
+                    ["ASPNETCORE_HOSTINGSTARTUPASSEMBLIES"] = "LazyMagic.OIDC.Bff",
                 };
 
                 // aoss endpoint (config key OpenSearch:Endpoint via the ASP.NET

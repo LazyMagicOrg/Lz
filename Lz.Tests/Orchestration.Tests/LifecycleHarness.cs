@@ -149,7 +149,8 @@ public sealed class LifecycleHarness
     public sealed record VerifySnapshot(
         JsonElement Document,
         int StackPresent, int StackAbsent, int StackTombstoned,
-        int PersistentPresent, int PersistentAbsent, int Errors)
+        int PersistentPresent, int PersistentAbsent,
+        int SmokePassed, int SmokeFailed, bool? ExpectMet, int Errors)
     {
         // Errored checks make any classification unreliable — a snapshot with
         // errors is neither cleanly deployed nor cleanly destroyed (callers
@@ -195,6 +196,10 @@ public sealed class LifecycleHarness
                 $"stdout: {raw[..Math.Min(raw.Length, 500)]}");
         var doc = JsonDocument.Parse(raw[first..(last + 1)]).RootElement;
         var s = doc.GetProperty("summary");
+        // expectMet is null when no --expect was passed (JSON null → nullable).
+        bool? expectMet = doc.TryGetProperty("expectMet", out var em)
+            && em.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? em.GetBoolean() : null;
         return new VerifySnapshot(
             doc,
             s.GetProperty("stackPresent").GetInt32(),
@@ -202,6 +207,9 @@ public sealed class LifecycleHarness
             s.GetProperty("stackTombstoned").GetInt32(),
             s.GetProperty("persistentPresent").GetInt32(),
             s.GetProperty("persistentAbsent").GetInt32(),
+            s.GetProperty("smokePassed").GetInt32(),
+            s.GetProperty("smokeFailed").GetInt32(),
+            expectMet,
             s.GetProperty("errors").GetInt32());
     }
 }

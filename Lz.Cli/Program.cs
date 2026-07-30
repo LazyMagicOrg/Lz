@@ -2157,13 +2157,15 @@ class Program
         var jsonOption = new Option<bool>("--json",
             "Machine-readable output (one JSON document on stdout)");
         var scopeOption = new Option<string>("--scope", () => "all",
-            "Which categories to check/report: all | stack | persistent");
+            "Which categories to report: all | stack | persistent | smoke");
         var expectOption = new Option<string?>("--expect",
             "Assert an overall state and set the exit code: 'deployed' (every stack " +
-            "resource present) or 'destroyed' (no stack resource present or " +
-            "tombstoned). Persistent resources are always informational. The verdict " +
-            "is computed over ALL stack checks (foundation included, regardless of " +
-            "--scope/--tenantkey filtering of the report).");
+            "resource present AND every runtime smoke probe passing) or 'destroyed' " +
+            "(no stack resource present or tombstoned). Persistent resources are " +
+            "always informational. --scope only filters the REPORT — the verdict " +
+            "always covers every check that ran. --tenantkey, however, narrows which " +
+            "tenants are checked at all: a verdict with --tenantkey attests ONLY that " +
+            "tenant.");
 
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
@@ -2177,9 +2179,9 @@ class Program
             RequirePlugin(plugin, "verify");
 
             scope = scope.ToLowerInvariant();
-            if (scope is not ("all" or "stack" or "persistent"))
+            if (scope is not ("all" or "stack" or "persistent" or "smoke"))
             {
-                Console.Error.WriteLine($"--scope must be all, stack, or persistent. Got '{scope}'.");
+                Console.Error.WriteLine($"--scope must be all, stack, persistent, or smoke. Got '{scope}'.");
                 Environment.ExitCode = 1;
                 return;
             }
@@ -2221,6 +2223,8 @@ class Program
                     r.Category == Lz.Aws.Verification.ResourceCategory.Stack).ToList();
                 var persistent = results.Where(r =>
                     r.Category == Lz.Aws.Verification.ResourceCategory.Persistent).ToList();
+                var smoke = results.Where(r =>
+                    r.Category == Lz.Aws.Verification.ResourceCategory.Smoke).ToList();
                 var errors = results.Where(r =>
                     r.State == Lz.Aws.Verification.ResourceState.Error).ToList();
 
@@ -2228,21 +2232,13 @@ class Program
                 {
                     "stack" => stack,
                     "persistent" => persistent,
+                    "smoke" => smoke,
                     _ => results,
                 };
 
-                // --expect verdict. Tombstones count as "still lingering" for
-                // 'destroyed' and as "not cleanly present" for 'deployed'.
-                bool? expectMet = expect switch
-                {
-                    "deployed" => stack.All(r =>
-                        r.State == Lz.Aws.Verification.ResourceState.Present),
-                    "destroyed" => stack.All(r =>
-                        r.State == Lz.Aws.Verification.ResourceState.Absent),
-                    _ => null,
-                };
-                // Errors make either verdict unreliable — fail the expectation.
-                if (expectMet == true && errors.Count > 0) expectMet = false;
+                // The rules (deployed = stack AND smoke; destroyed = stack-only;
+                // Error downgrades MET) live in the unit-tested VerifyVerdict.
+                bool? expectMet = Lz.Aws.Verification.VerifyVerdict.Compute(expect, results);
 
                 if (json)
                 {
@@ -2268,6 +2264,10 @@ class Program
                                 r.State == Lz.Aws.Verification.ResourceState.Present),
                             persistentAbsent = persistent.Count(r =>
                                 r.State == Lz.Aws.Verification.ResourceState.Absent),
+                            smokePassed = smoke.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Present),
+                            smokeFailed = smoke.Count(r =>
+                                r.State != Lz.Aws.Verification.ResourceState.Present),
                             errors = errors.Count,
                         },
                         results = reported.Select(r => new
@@ -2312,10 +2312,12 @@ class Program
                                 (r.Detail != null ? $"  [{r.Detail}]" : ""));
                         }
                     }
-                    if (scope != "persistent")
+                    if (scope is "all" or "stack")
                         Print("Stack (Pulumi-managed — gone after destroy):", stack);
-                    if (scope != "stack")
+                    if (scope is "all" or "persistent")
                         Print("Persistent (survives destroy by design):", persistent);
+                    if (scope is "all" or "smoke")
+                        Print("Smoke (runtime probes of the deployed surfaces):", smoke);
 
                     Console.WriteLine();
                     Console.WriteLine($"  Stack: {stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
@@ -2323,6 +2325,7 @@ class Program
                         $"{stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.ScheduledForDeletion)} tombstoned; " +
                         $"Persistent: {persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
                         $"{persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Absent)} absent; " +
+                        $"Smoke: {smoke.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)}/{smoke.Count} passing; " +
                         $"Errors: {errors.Count}");
                     if (expect != null)
                     {

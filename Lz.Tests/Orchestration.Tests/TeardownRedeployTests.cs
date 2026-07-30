@@ -268,12 +268,19 @@ public class TeardownRedeployTests
         var assets = await harness.RunLzAsync("deployassets", TimeSpan.FromMinutes(30), "deployassets");
         Assert.True(assets.Ok, $"deployassets failed (exit {assets.ExitCode}).\n{assets.StdErr}");
 
-        // B7a — every expected stack resource is present again.
+        // B7a — every expected stack resource is present again, AND the runtime
+        // smoke gate passes. Asserting the tool's own expectMet (not just the
+        // stack counts) means a failing smoke probe — e.g. the origin-verify gate
+        // not engaged after redeploy — fails the drill instead of sailing through.
         var after = await harness.VerifyAsync("--expect deployed");
         Assert.True(after.Errors == 0, $"{after.Errors} verify checks errored post-redeploy.");
         Assert.True(after.LooksDeployed,
             $"Redeploy incomplete: {after.StackAbsent} stack resource(s) still absent, " +
             $"{after.StackTombstoned} tombstoned.");
+        Assert.True(after.SmokeFailed == 0,
+            $"{after.SmokeFailed} smoke probe(s) failing post-redeploy — surfaces unhealthy.");
+        Assert.True(after.ExpectMet == true,
+            "lz verify --expect deployed reported NOT MET post-redeploy.");
 
         var missing = persistentBaseline.Except(after.PresentPersistentNames()).ToList();
         Assert.True(missing.Count == 0,
