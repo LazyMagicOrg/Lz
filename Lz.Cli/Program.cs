@@ -1287,6 +1287,47 @@ class Program
                 {
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
+
+                    // Lambda topologies have no ECS service to roll — the per-tenant
+                    // FUNCTION must be rolled with UpdateFunctionCode (Lambda resolves
+                    // the image digest at update time, so a pushed :latest is invisible
+                    // until then; a tenant Pulumi re-deploy no-ops too since the
+                    // ImageUri string never changes). Same compare/force/wait/dry-run
+                    // semantics as the ECS path.
+                    if (Lz.Aws.Lambda.AwsLambdaContainerUpdater.IsLambdaTopology(config.Topology))
+                    {
+                        var lambdaUpdater = new Lz.Aws.Lambda.AwsLambdaContainerUpdater(profile, region);
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine(
+                            $"=== updatecontainer: tenant {tk} ({config.Environment}, lambda){(dryRun ? " [dry-run]" : "")} ===");
+                        Console.ResetColor();
+
+                        foreach (var (svcName, _) in containersToProcess)
+                        {
+                            // Must match AwsLambdaTenantServiceComponent (function name) and
+                            // deploycontainer/deploytenant (ECR repo) naming.
+                            var functionName = $"{config.SystemKey}-{tk}-{svcName}";
+                            var lambdaEcrRepo =
+                                $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                            try
+                            {
+                                var result = await lambdaUpdater.UpdateIfNewerAsync(
+                                    functionName, lambdaEcrRepo, tag, force, wait, dryRun, Cts.Token);
+                                PrintUpdateResult(result);
+                                if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                                    anyFailure = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                anyFailure = true;
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.WriteLine($"  [error] {functionName}: {ex.Message}");
+                                Console.ResetColor();
+                            }
+                        }
+                        continue;
+                    }
+
                     var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
 
                     // Cluster naming differs by topology: the EcsExpress family (the current
