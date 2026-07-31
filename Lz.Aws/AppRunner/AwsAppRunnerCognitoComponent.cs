@@ -9,6 +9,11 @@ using Pulumi.Aws.Acm;
 using Pulumi.Aws.Cognito;
 using Pulumi.Aws.Cognito.Inputs;
 using Pulumi.Aws.CloudWatch;
+using Pulumi.Aws.DynamoDB;
+using Pulumi.Aws.DynamoDB.Inputs;
+using Pulumi.Aws.Iam;
+using Pulumi.Aws.Lambda;
+using Pulumi.Aws.Lambda.Inputs;
 
 namespace Lz.Aws.AppRunner;
 
@@ -194,6 +199,88 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 userPoolArgs.UserPoolAddOns = new UserPoolUserPoolAddOnsArgs
                 {
                     AdvancedSecurityMode = poolConfig.AdvancedSecurityMode,
+                };
+            }
+
+            // =================================================================
+            // M0-7 — SELLER CUSTOM-AUTH INFRA (opt-in). Provisioned ONLY when poolConfig.CustomAuth is set,
+            // so absent = byte-identical baseline for the ~10 sibling pools. The Lambda + its role + the
+            // vendor-credential table are created HERE, BEFORE the pool, because the pool's LambdaConfig — a
+            // POOL-LEVEL setting — must reference the Lambda ARN. The Cognito invoke Permission and the
+            // seller/buyer clients need the pool, so they follow it below under the same guard.
+            // =================================================================
+            const string vendorCredKeyAttr = "username";
+            const string vendorCredHashAttr = "apiKeyHash";
+            Function? customAuthFn = null;
+            if (poolConfig.CustomAuth is { } customAuth)
+            {
+                var vendorCredTable = new Table($"{poolPrefix}-vendor-creds", new TableArgs
+                {
+                    Name = $"{poolPrefix}-vendor-creds",
+                    BillingMode = "PAY_PER_REQUEST",
+                    HashKey = vendorCredKeyAttr,
+                    Attributes = { new TableAttributeArgs { Name = vendorCredKeyAttr, Type = "S" } },
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Least-privilege role for the challenge Lambda: assumed by Lambda, writes its own logs, and
+                // GetItem ONLY on the vendor-credential table (nothing else).
+                var fnRole = new Role($"{poolPrefix}-custom-auth-role", new RoleArgs
+                {
+                    AssumeRolePolicy =
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"," +
+                        "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}",
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                _ = new RolePolicyAttachment($"{poolPrefix}-custom-auth-logs", new RolePolicyAttachmentArgs
+                {
+                    Role = fnRole.Name,
+                    PolicyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                }, new CustomResourceOptions { Parent = this });
+
+                _ = new RolePolicy($"{poolPrefix}-custom-auth-ddb", new RolePolicyArgs
+                {
+                    Role = fnRole.Id,
+                    Policy = vendorCredTable.Arn.Apply(arn =>
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"," +
+                        "\"Action\":\"dynamodb:GetItem\",\"Resource\":\"" + arn + "\"}]}"),
+                }, new CustomResourceOptions { Parent = this });
+
+                // Inline Node.js source dir shipped next to the assembly (see Lz.Aws.csproj). We resolve it via
+                // the assembly's own Location — NOT AppContext.BaseDirectory — because under plugin load the
+                // running process is the lz runner, whose base dir does NOT contain Lz.Aws's content. This is
+                // the exact idiom AwsGateCheckerLambdaComponent uses for gate-checker.zip.
+                var customAuthDir = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(typeof(AwsAppRunnerCognitoComponent).Assembly.Location)!,
+                    "CognitoCustomAuth");
+                customAuthFn = new Function($"{poolPrefix}-custom-auth", new FunctionArgs
+                {
+                    Name = $"{poolPrefix}-custom-auth",
+                    Runtime = "nodejs20.x",
+                    Handler = "custom-auth.handler",
+                    // No build step, no npm deps (only the runtime-bundled AWS SDK v3); Pulumi zips the dir.
+                    Code = new FileArchive(customAuthDir),
+                    Role = fnRole.Arn,
+                    Timeout = 5,   // Cognito's synchronous-trigger budget.
+                    Environment = new FunctionEnvironmentArgs
+                    {
+                        Variables =
+                        {
+                            { "VENDOR_CRED_TABLE", vendorCredTable.Name },
+                            { "VENDOR_CRED_KEY_ATTR", vendorCredKeyAttr },
+                            { "VENDOR_CRED_HASH_ATTR", vendorCredHashAttr },
+                        },
+                    },
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                // The three challenge triggers → the one Lambda. POOL-LEVEL, so strictly inside this guard.
+                userPoolArgs.LambdaConfig = new UserPoolLambdaConfigArgs
+                {
+                    DefineAuthChallenge = customAuthFn.Arn,
+                    CreateAuthChallenge = customAuthFn.Arn,
+                    VerifyAuthChallengeResponse = customAuthFn.Arn,
                 };
             }
 
@@ -391,6 +478,81 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                             AccessToken = "minutes",
                         },
                     }, new CustomResourceOptions { Parent = this, DependsOn = { resourceServer } });
+                }
+            }
+
+            // =================================================================
+            // M0-7 — SELLER/BUYER CLIENTS + the Cognito invoke Permission (opt-in; the pool + Lambda exist
+            // now). Same guard as the pre-pool infra above.
+            // =================================================================
+            if (poolConfig.CustomAuth is { } customAuthClients && customAuthFn is not null)
+            {
+                // Cognito must be allowed to invoke the challenge Lambda; scope the permission to THIS pool so
+                // no other pool (or account principal) can trigger it.
+                _ = new Permission($"{poolPrefix}-custom-auth-invoke", new PermissionArgs
+                {
+                    Action = "lambda:InvokeFunction",
+                    Function = customAuthFn.Name,
+                    Principal = "cognito-idp.amazonaws.com",
+                    SourceArn = userPool.Arn,
+                }, new CustomResourceOptions { Parent = this });
+
+                // The confidential SELLER client: non-interactive Custom-Auth (the vendor presents its API key,
+                // validated by the challenge Lambda) + the ADMIN_USER_PASSWORD_AUTH MVP fallback — both yield a
+                // USER token (sub = the vendor user). GenerateSecret=true (a server-side agent holds it).
+                var sellerSuffix = string.IsNullOrWhiteSpace(customAuthClients.SellerClientName)
+                    ? "seller-agent" : customAuthClients.SellerClientName;
+                _ = new UserPoolClient($"{poolPrefix}-{sellerSuffix}-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-{sellerSuffix}-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = true,
+                    ExplicitAuthFlows =
+                    {
+                        "ALLOW_CUSTOM_AUTH",
+                        "ALLOW_ADMIN_USER_PASSWORD_AUTH",   // MVP fallback — same USER identity as Custom-Auth
+                        "ALLOW_REFRESH_TOKEN_AUTH",
+                    },
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AccessTokenValidity = customAuthClients.AccessTokenMinutes > 0 ? customAuthClients.AccessTokenMinutes : 60,
+                    TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs { AccessToken = "minutes" },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Optional PUBLIC buyer/device client: Auth Code + PKCE (public ⇒ Cognito enforces PKCE) with
+                // refresh-token ROTATION, for on-device buyer agents (§ McpAuth.md).
+                if (!string.IsNullOrWhiteSpace(customAuthClients.BuyerDeviceClientName))
+                {
+                    var buyerDays = customAuthClients.BuyerRefreshTokenDays > 0 ? customAuthClients.BuyerRefreshTokenDays : 90;
+                    _ = new UserPoolClient($"{poolPrefix}-{customAuthClients.BuyerDeviceClientName}-client", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-{customAuthClients.BuyerDeviceClientName}-client",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = false,
+                        ExplicitAuthFlows = { "ALLOW_REFRESH_TOKEN_AUTH" },
+                        SupportedIdentityProviders = { "COGNITO" },
+                        PreventUserExistenceErrors = "ENABLED",
+                        AllowedOauthFlows = { "code" },
+                        AllowedOauthScopes = { "openid", "profile", "email" },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        CallbackUrls = { callbackUrls.ToArray() },
+                        LogoutUrls = { logoutUrls.ToArray() },
+                        RefreshTokenValidity = buyerDays,
+                        AccessTokenValidity = 60,
+                        IdTokenValidity = 60,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            RefreshToken = "days",
+                            AccessToken = "minutes",
+                            IdToken = "minutes",
+                        },
+                        // Rotate the refresh token on every use — a stolen refresh token becomes single-use.
+                        // (Provider 7.39.0 surfaces only Feature; Cognito applies its default rotation grace.)
+                        RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                        {
+                            Feature = "ENABLED",
+                        },
+                    }, new CustomResourceOptions { Parent = this });
                 }
             }
 

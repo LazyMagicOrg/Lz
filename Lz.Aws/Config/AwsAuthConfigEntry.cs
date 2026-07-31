@@ -147,6 +147,18 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// one client, so each machine client is a NEW confidential app client. See McpAgents.md M0-2.
     /// </summary>
     public MachineAuthConfig? MachineAuth { get; set; }
+
+    /// <summary>
+    /// Opt-in USER-principal credential provisioning for this pool (the M0-7 seller Custom-Auth + buyer
+    /// PKCE model). When null (the default) NO Custom-Auth Lambda, vendor-credential table, pool
+    /// <c>LambdaConfig</c>, or seller/buyer client is created — the deploy plan is byte-for-byte identical to
+    /// before, so existing systems/pools are unaffected (same guarantee as <see cref="MachineAuth"/>). This is
+    /// DISTINCT from <see cref="MachineAuth"/>: that is app-only <c>client_credentials</c>; this authenticates
+    /// per-vendor Cognito USERS non-interactively (Custom-Auth challenge over a vendor API key). Because the
+    /// <c>LambdaConfig</c> it wires is POOL-LEVEL, every resource here — the Lambda especially — MUST stay
+    /// inside the opt-in guard. See McpAgents.md M0-7 and Lz.Aws/AppRunner/CognitoCustomAuth/custom-auth.mjs.
+    /// </summary>
+    public CustomAuthConfig? CustomAuth { get; set; }
 }
 
 /// <summary>
@@ -188,6 +200,35 @@ public class MachineClientConfig
 {
     public string Name { get; set; } = string.Empty;
     public List<string> Scopes { get; set; } = new();
+}
+
+/// <summary>
+/// USER-principal credential provisioning for a pool (M0-7). Present ⇒ the component provisions: a DynamoDB
+/// table of per-vendor API-key hashes, the Custom-Auth challenge Lambda (from
+/// <c>CognitoCustomAuth/custom-auth.mjs</c>) with its IAM role + Cognito invoke permission, the pool's
+/// <c>LambdaConfig</c> (Define/Create/Verify → that Lambda), and a confidential SELLER app client
+/// (<c>ALLOW_CUSTOM_AUTH</c> + the <c>ALLOW_ADMIN_USER_PASSWORD_AUTH</c> MVP fallback). Optionally a PUBLIC
+/// buyer/device client (Auth Code + PKCE + refresh-token rotation). Purely additive — see
+/// <see cref="AwsAuthConfigEntry.CustomAuth"/>.
+/// </summary>
+public class CustomAuthConfig
+{
+    /// <summary>Name suffix of the confidential seller client (<c>{poolPrefix}-{SellerClientName}-client</c>).</summary>
+    public string SellerClientName { get; set; } = "seller-agent";
+
+    /// <summary>Access-token lifetime, in minutes, for the seller client. Default <c>60</c>.</summary>
+    public int AccessTokenMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// When set, ALSO provision a PUBLIC buyer/device client (<c>{poolPrefix}-{BuyerDeviceClientName}-client</c>,
+    /// <c>GenerateSecret=false</c>) — Auth Code + PKCE (Cognito enforces PKCE for public clients) with
+    /// refresh-token ROTATION enabled. When null, no buyer client is created.
+    /// </summary>
+    public string? BuyerDeviceClientName { get; set; }
+
+    /// <summary>Buyer refresh-token validity, in days (rotation on). Default <c>90</c>. Only consulted when
+    /// <see cref="BuyerDeviceClientName"/> is set.</summary>
+    public int BuyerRefreshTokenDays { get; set; } = 90;
 }
 
 /// <summary>
