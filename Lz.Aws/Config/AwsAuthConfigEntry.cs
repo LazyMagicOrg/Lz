@@ -137,6 +137,57 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// Only consulted when <see cref="ProvisionBffClient"/> is true.
     /// </summary>
     public string BffRoutePrefix { get; set; } = "/bff";
+
+    /// <summary>
+    /// Opt-in OAuth2 <c>client_credentials</c> (machine-to-machine) provisioning for this pool.
+    /// When null (the default) NO Cognito resource server, custom scopes, or M2M app clients are
+    /// created — the deploy plan is byte-for-byte identical to before, so existing systems/pools are
+    /// unaffected (same guarantee as <see cref="ProvisionBffClient"/>). Cannot be bolted onto the
+    /// public or BFF client: Cognito forbids mixing <c>client_credentials</c> with the code flow on
+    /// one client, so each machine client is a NEW confidential app client. See McpAgents.md M0-2.
+    /// </summary>
+    public MachineAuthConfig? MachineAuth { get; set; }
+}
+
+/// <summary>
+/// Machine-to-machine (<c>client_credentials</c>) provisioning for a pool: one Cognito resource
+/// server declaring custom scopes, plus a roster of confidential app clients that each request a
+/// subset of those scopes. Purely additive — see <see cref="AwsAuthConfigEntry.MachineAuth"/>.
+/// </summary>
+public class MachineAuthConfig
+{
+    /// <summary>
+    /// Resource-server identifier — the audience prefix Cognito prepends to each scope on an issued
+    /// access token (e.g. <c>https://api.aiproxydev.click/scutara</c>). Not a real URL that must
+    /// resolve; it just namespaces the scopes. Required when any <see cref="Clients"/> are declared.
+    /// </summary>
+    public string Identifier { get; set; } = string.Empty;
+
+    /// <summary>Custom scopes to declare on the resource server (surfaced in the <c>scope</c> claim).</summary>
+    public List<MachineScope> Scopes { get; set; } = new();
+
+    /// <summary>The confidential <c>client_credentials</c> app clients to provision.</summary>
+    public List<MachineClientConfig> Clients { get; set; } = new();
+
+    /// <summary>Access-token lifetime, in minutes, for the machine clients. Default <c>60</c>.</summary>
+    public int AccessTokenMinutes { get; set; } = 60;
+}
+
+/// <summary>A custom scope on the resource server, e.g. <c>seller</c> / <c>buyer</c>.</summary>
+public class MachineScope
+{
+    public string Name { get; set; } = string.Empty;
+    public string? Description { get; set; }
+}
+
+/// <summary>
+/// One machine app client. <see cref="Scopes"/> are the bare scope names (e.g. <c>seller</c>); the
+/// component qualifies them as <c>{Identifier}/{scope}</c> for the client's allowed-scope list.
+/// </summary>
+public class MachineClientConfig
+{
+    public string Name { get; set; } = string.Empty;
+    public List<string> Scopes { get; set; } = new();
 }
 
 /// <summary>

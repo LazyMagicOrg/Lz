@@ -338,6 +338,63 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             }
 
             // =================================================================
+            // MACHINE (client_credentials) CLIENTS — opt-in M2M principals.
+            // Created ONLY when MachineAuth declares clients. When absent (the
+            // default), no resource server, scope, or M2M client exists, so the
+            // deploy plan is byte-for-byte identical to before (same guarantee
+            // as the BFF client). A resource server declares the custom scopes;
+            // each machine client is a NEW confidential app client — Cognito
+            // forbids client_credentials on the public/BFF clients. M0-2.
+            // =================================================================
+            if (poolConfig.MachineAuth is { Clients.Count: > 0 } machineAuth)
+            {
+                if (string.IsNullOrWhiteSpace(machineAuth.Identifier))
+                    throw new InvalidOperationException(
+                        $"Pool '{authType}' MachineAuth declares clients but no Identifier. " +
+                        "Set the resource-server identifier (the scope audience prefix).");
+
+                var resourceServer = new ResourceServer($"{poolPrefix}-resource-server", new ResourceServerArgs
+                {
+                    Identifier = machineAuth.Identifier,
+                    Name = $"{poolPrefix}-resource-server",
+                    UserPoolId = userPool.Id,
+                    Scopes = machineAuth.Scopes.Select(s => new ResourceServerScopeArgs
+                    {
+                        ScopeName = s.Name,
+                        ScopeDescription = string.IsNullOrWhiteSpace(s.Description) ? s.Name : s.Description,
+                    }).ToArray(),
+                }, new CustomResourceOptions { Parent = this });
+
+                var accessMinutes = machineAuth.AccessTokenMinutes > 0 ? machineAuth.AccessTokenMinutes : 60;
+                foreach (var mc in machineAuth.Clients)
+                {
+                    if (string.IsNullOrWhiteSpace(mc.Name))
+                        throw new InvalidOperationException(
+                            $"Pool '{authType}' has a MachineAuth client with empty Name. Check systemconfig.");
+
+                    // Cognito requires scopes on a client_credentials client to be
+                    // resource-server-qualified: "{identifier}/{scope}".
+                    var qualifiedScopes = mc.Scopes.Select(sc => $"{machineAuth.Identifier}/{sc}").ToArray();
+
+                    _ = new UserPoolClient($"{poolPrefix}-m2m-{mc.Name}", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-m2m-{mc.Name}",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = true,
+                        // client_credentials ONLY — no user-auth flow, no callback/logout URLs.
+                        AllowedOauthFlows = { "client_credentials" },
+                        AllowedOauthScopes = { qualifiedScopes },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        AccessTokenValidity = accessMinutes,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            AccessToken = "minutes",
+                        },
+                    }, new CustomResourceOptions { Parent = this, DependsOn = { resourceServer } });
+                }
+            }
+
+            // =================================================================
             // USER POOL GROUPS — role distinctions within the pool (roles
             // surface to the app in the cognito:groups JWT claim)
             // =================================================================
