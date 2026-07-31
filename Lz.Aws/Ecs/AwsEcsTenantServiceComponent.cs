@@ -553,6 +553,11 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             }
         }
 
+        // Topology-specific extra env (empty for all base-class tenants). Its
+        // values are cross-stack Outputs, resolved alongside the image URI below.
+        var extraEnv = BuildExtraEnv(tenantConfig, definition);
+        var extraEnvNames = extraEnv.Select(e => e.Name).ToArray();
+
         var taskDef = new TaskDefinition($"{prefix}-{serviceName}-task", new TaskDefinitionArgs
         {
             Family = $"{prefix}-{serviceName}",
@@ -564,10 +569,11 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
             TaskRoleArn = taskRole.Arn,
             Volumes = taskVolumes,
             ContainerDefinitions = Output.Tuple(
-                imageUri, database.Endpoint, awsDatabase.MasterSecretArn, tenantData.TenantSecretId
+                imageUri, database.Endpoint, awsDatabase.MasterSecretArn, tenantData.TenantSecretId,
+                Output.All(extraEnv.Select(e => e.Value).ToArray())
             ).Apply(async t =>
             {
-                var (image, dbHost, masterSecretArn, tenantSecretId) = t;
+                var (image, dbHost, masterSecretArn, tenantSecretId, extraEnvValues) = t;
 
                 var mountPoints = definition.Volumes.Select(v => new
                 {
@@ -599,6 +605,14 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
                     new { name = "LZ_EXPLORE_BUCKET", value = $"{sk}-{tk}--webapp-explore-{suffix}" },
                     new { name = "LZ_MEDIA_BUCKET", value = $"{sk}-{tk}--media--{suffix}" },
                 };
+
+                // Topology-specific extra env (empty unless a subclass overrides
+                // BuildExtraEnv). Appended by matching resolved values to their
+                // names positionally — extraEnvValues preserves Output.All order.
+                for (var i = 0; i < extraEnvNames.Length; i++)
+                {
+                    envVars.Add(new { name = extraEnvNames[i], value = extraEnvValues[i] });
+                }
 
                 if (definition.RequiresDatabase)
                 {
@@ -809,6 +823,19 @@ public class AwsEcsTenantServiceComponent : ComponentResource, ITenantServiceCom
 
         return lbs;
     }
+
+    /// <summary>
+    /// Extra container environment variables to append to the task definition,
+    /// resolved at apply time. Base returns an empty list — so the serialized
+    /// container definition is byte-for-byte identical to before for every
+    /// tenant that doesn't override this. Subclasses (e.g. the NTS Smartstore
+    /// arm) return topology-specific env whose values come from cross-stack
+    /// outputs. The pairs are appended AFTER the base env, so a subclass can
+    /// only add, never rewrite, the standard variables.
+    /// </summary>
+    protected virtual List<(string Name, Output<string> Value)> BuildExtraEnv(
+        TenantConfig tenantConfig, ServiceDefinition definition)
+        => new();
 
     /// <summary>
     /// Build port mappings for the ECS task definition, supporting additional TCP/UDP ports.

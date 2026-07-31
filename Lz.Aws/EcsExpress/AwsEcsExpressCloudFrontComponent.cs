@@ -74,6 +74,83 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
     {
     }
 
+    /// <summary>
+    /// Hook for a topology to append extra ordered cache behaviors just before the
+    /// distribution is created — e.g. a server-rendered commerce path that needs a
+    /// cookie-forwarding / no-cache cache behavior (a policy bound at deploy time that
+    /// the runtime CFRequest function cannot set). Base returns none, so an existing
+    /// distribution's ordered-behaviors list — and therefore its config — is byte-for-byte
+    /// identical. Behaviors are appended after any /bff and /cbff behaviors; CloudFront
+    /// evaluates ordered behaviors first-match, so give an appended pattern a prefix that
+    /// does not overlap an earlier one.
+    /// </summary>
+    protected virtual IEnumerable<DistributionOrderedCacheBehaviorArgs> BuildExtraBehaviors(
+        TenantConfig tenantConfig, ApiOriginSpec apiOrigin, Function requestFn, Function responseFn,
+        Output<string> hostKeyedCachePolicyId)
+        => Array.Empty<DistributionOrderedCacheBehaviorArgs>();
+
+    /// <summary>
+    /// Topology-overridable DEFAULT cache behavior. Base: s3-assets origin behind the
+    /// host-keyed cache policy with the CFRequest/CFResponse viewer functions — the
+    /// KVS-driven multi-tenant webapp/asset router. A topology that serves a server
+    /// application at the site root (e.g. NTS's Smartstore-at-apex) overrides this to
+    /// target the api origin with a no-cache/all-viewer policy and NO functions, then
+    /// re-adds the webapp/asset paths as ordered behaviors via BuildExtraBehaviors.
+    /// Base body is byte-for-byte the previous inline block — existing distributions
+    /// see no diff.
+    /// </summary>
+    protected virtual DistributionDefaultCacheBehaviorArgs BuildDefaultBehavior(
+        TenantConfig tenantConfig, ApiOriginSpec apiOrigin, Function requestFn, Function responseFn,
+        Output<string> hostKeyedCachePolicyId)
+        => new DistributionDefaultCacheBehaviorArgs
+        {
+            TargetOriginId = "s3-assets",
+            ViewerProtocolPolicy = "redirect-to-https",
+            AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+            CachedMethods = { "GET", "HEAD" },
+            Compress = true,
+            // ALL envs (incl. dev) use the host-keyed policy — see the CachePolicy
+            // declaration for the cross-tenant cache-poisoning rationale.
+            CachePolicyId = hostKeyedCachePolicyId,
+            FunctionAssociations =
+            {
+                new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+                {
+                    EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                },
+                // viewer-response: echoes CORS headers for localhost origins so
+                // VS-hosted local WASM apps can fetch cloud assets.
+                new DistributionDefaultCacheBehaviorFunctionAssociationArgs
+                {
+                    EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                },
+            },
+        };
+
+    /// <summary>
+    /// Topology-overridable DefaultRootObject. Base: config value, falling back to the
+    /// consumer app's index — the KVS-webapp-at-root convention. A topology that serves a
+    /// server app at the apex overrides this to "" (CloudFront: no root object) so a bare
+    /// "/" reaches the origin verbatim. The override exists because config cannot express
+    /// empty: the YAML loader turns an explicit "" into null and the fallback re-applies.
+    /// </summary>
+    protected virtual string BuildDefaultRootObject(TenantConfig tenantConfig, CdnConfig cdn)
+        => cdn.DefaultRootObject ?? "app/index.html";
+
+    /// <summary>
+    /// Topology-overridable CustomErrorResponses. Base: the SPA fallback pair
+    /// (403/404 → /index.html) that lets deep links into the S3-served WASM apps
+    /// resolve. These are DISTRIBUTION-GLOBAL — a topology whose default behavior
+    /// is a server app (which must serve its own 4xx pages) overrides this to
+    /// return none.
+    /// </summary>
+    protected virtual IEnumerable<DistributionCustomErrorResponseArgs> BuildCustomErrorResponses()
+        => new[]
+        {
+            new DistributionCustomErrorResponseArgs { ErrorCode = 403, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
+            new DistributionCustomErrorResponseArgs { ErrorCode = 404, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
+        };
+
     public ICdnOutputs Deploy(TenantConfig tenantConfig, IComputeEnvironmentOutputs compute)
     {
         var sk = tenantConfig.SystemKey;
@@ -335,7 +412,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         {
             Enabled = true, IsIpv6Enabled = true,
             Comment = $"{sk}/{tk} CDN ({env})",
-            DefaultRootObject = cdn.DefaultRootObject ?? "app/index.html",
+            // Topology-overridable (BuildDefaultRootObject). NOTE: config alone cannot express
+            // "no root object" — the YAML loader nullifies an explicit "" and the fallback
+            // re-applies app/index.html — so a topology whose apex is a server app must
+            // override the hook to return "".
+            DefaultRootObject = BuildDefaultRootObject(tenantConfig, cdn),
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
             Origins =
@@ -348,39 +429,13 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 },
                 apiOrigin.Origin,
             },
-            DefaultCacheBehavior = new DistributionDefaultCacheBehaviorArgs
-            {
-                TargetOriginId = "s3-assets",
-                ViewerProtocolPolicy = "redirect-to-https",
-                AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
-                CachedMethods = { "GET", "HEAD" },
-                Compress = true,
-                // ALL envs (incl. dev) use the host-keyed policy declared
-                // above — does NOT use the AWS-managed CachingOptimized
-                // because that policy keys only on (URI, query string) and
-                // CFRequest's per-host bucket rewrites would poison the cache
-                // cross-tenant. The function emits x-custom-cache-key for
-                // every webapp/asset response and this policy includes that
-                // header in the key. Dev was previously CachingDisabled for
-                // fast iteration; flipped ON to exercise edge caching + the
-                // .br/.gz pre-compressed asset path (so dev now needs a
-                // CloudFront invalidation to see redeploys).
-                CachePolicyId = hostKeyedCachePolicy.Id,
-                FunctionAssociations =
-                {
-                    new DistributionDefaultCacheBehaviorFunctionAssociationArgs
-                    {
-                        EventType = "viewer-request", FunctionArn = requestFn.Arn,
-                    },
-                    // viewer-response: echoes CORS headers for localhost
-                    // origins so VS-hosted local WASM apps can fetch
-                    // cloud assets (system + tenant + subtenant + framework).
-                    new DistributionDefaultCacheBehaviorFunctionAssociationArgs
-                    {
-                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
-                    },
-                },
-            },
+            // Topology-overridable (BuildDefaultBehavior). Base = s3-assets + host-keyed
+            // cache policy + CFRequest/CFResponse — the KVS-driven multi-tenant router.
+            // (The host-keyed policy exists because CachingOptimized keys only on
+            // URI+query and CFRequest's per-host bucket rewrites would poison the
+            // cache cross-tenant; the function emits x-custom-cache-key.)
+            DefaultCacheBehavior = BuildDefaultBehavior(
+                tenantConfig, apiOrigin, requestFn, responseFn, hostKeyedCachePolicy.Id),
             OrderedCacheBehaviors =
             {
                 // OAuth callback — CFAuthCallback.js redirects to subtenant
@@ -616,21 +671,17 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     },
                 },
             },
-            // NO CustomErrorResponses — deliberately (removed 2026-07-30). The
-            // 403/404→200 /index.html SPA fallback they provided is (a) redundant:
-            // CFRequest.js already rewrites extensionless webapp paths to
-            // {appPath}index.html at REQUEST time, before the origin fetch, so SPA
-            // deep links never produce an origin 404; and (b) harmful: custom error
-            // responses are DISTRIBUTION-wide, so they also intercepted API-origin
-            // 403/404s on /*Api/* — and because the /index.html error fetch resolves
-            // against a bucket location without that object, CloudFront served S3's
-            // own 403 AccessDenied XML instead, destroying the API's real status and
-            // body (a missing route and an ownership refusal became
-            // indistinguishable; probed live on match.aiproxydev.click). Removing
-            // them restores authentic API errors and changes nothing user-visible
-            // for assets: a genuinely missing S3 object surfaced the same S3 403
-            // before (via the broken error fetch) and after (directly). The
-            // Scutara E2E canary CdnErrorRegime_Canary pins the resulting regime.
+            // Topology-overridable (BuildCustomErrorResponses). Base = the SPA fallback pair
+            // (403/404→200 /index.html) for genuine SPA/Fargate tenants. The Lambda topology
+            // (AwsLambdaCloudFrontComponent) OVERRIDES this to return NONE — that distribution-wide
+            // pair is (a) redundant there (CFRequest.js already rewrites extensionless webapp paths
+            // to {appPath}index.html at REQUEST time, so SPA deep links never 404 at the origin) and
+            // (b) harmful: it also intercepted API-origin 403/404s on /*Api/*, and because the
+            // /index.html error fetch resolves against a bucket location without that object,
+            // CloudFront served S3's own 403 AccessDenied XML instead — destroying the API's real
+            // status and body (probed live on match.aiproxydev.click). The Scutara E2E canary
+            // CdnErrorRegime_Canary pins the resulting regime; the override keeps it green.
+            CustomErrorResponses = BuildCustomErrorResponses().ToArray(),
             ViewerCertificate = new DistributionViewerCertificateArgs
             {
                 AcmCertificateArn = certValidation.CertificateArn,
@@ -712,6 +763,11 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 },
             });
         }
+
+        // Topology hook: append extra ordered behaviors (e.g. a commerce path with a
+        // cookie-forwarding cache policy). Base = none → byte-identical for existing tenants.
+        foreach (var extra in BuildExtraBehaviors(tenantConfig, apiOrigin, requestFn, responseFn, hostKeyedCachePolicy.Id))
+            distributionArgs.OrderedCacheBehaviors.Add(extra);
 
         var distribution = new Distribution($"{prefix}-cf-dist", distributionArgs,
             new CustomResourceOptions { Parent = this });

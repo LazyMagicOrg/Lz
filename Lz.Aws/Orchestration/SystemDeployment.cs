@@ -898,6 +898,13 @@ public class SystemDeployment
                         exports[$"auth_{poolName}_bffClientId"] = pool.BffClientId;
                     if (pool.BffClientSecret != null)
                         exports[$"auth_{poolName}_bffClientSecret"] = pool.BffClientSecret;
+                    // Smartstore confidential-client outputs — only present when the
+                    // pool set ProvisionSmartstoreClient. Null otherwise, so
+                    // unconfigured pools export exactly the same keys as before.
+                    if (pool.SmartstoreClientId != null)
+                        exports[$"auth_{poolName}_smartstoreClientId"] = pool.SmartstoreClientId;
+                    if (pool.SmartstoreClientSecret != null)
+                        exports[$"auth_{poolName}_smartstoreClientSecret"] = pool.SmartstoreClientSecret;
                 }
 
                 // Combined poolName -> userPoolId map (JSON) so a tenant stack can

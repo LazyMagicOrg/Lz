@@ -110,6 +110,28 @@ public class TenantConfig
     /// </summary>
     public bool? BffConsumerAuthEnabled { get; set; }
 
+    /// <summary>
+    /// When <c>true</c>, inject the <c>SMARTSTORE_COGNITO_*</c> env set
+    /// (AUTHORITY / CLIENTID / CLIENTSECRET / HOSTEDUIDOMAIN) into this tenant's
+    /// storefront container, sourced from the foundation Cognito outputs for the
+    /// <see cref="SmartstoreCognitoPool"/> pool. Requires that pool to set
+    /// <c>ProvisionSmartstoreClient: true</c> so the confidential client and its
+    /// <c>auth_{pool}_smartstoreClient*</c> foundation outputs exist. Default
+    /// <c>null</c>/<c>false</c> ⇒ no env injection, so the task definition is
+    /// byte-for-byte identical to a pre-Smartstore-Cognito deploy. Consumed by
+    /// the <c>Smartstore.Cognito.Auth</c> module (env wins over DB settings). See
+    /// <c>Platform/SMARTSTORE-COGNITO-AUTH.md §8</c>.
+    /// </summary>
+    public bool? SmartstoreCognitoEnabled { get; set; }
+
+    /// <summary>
+    /// Names the Cognito pool whose confidential Smartstore client this tenant's
+    /// storefront uses. <c>null</c> (default) resolves to <c>consumerauth</c> —
+    /// the pool consumers authenticate against. Only consulted when
+    /// <see cref="SmartstoreCognitoEnabled"/> is true.
+    /// </summary>
+    public string? SmartstoreCognitoPool { get; set; }
+
     // --- SmartStore usersettings.json content ---
     // Loaded from smartstore.usersettings.json (same directory as tenantconfig YAML)
     // and written to shared file storage by the init runner. Stored separately to
