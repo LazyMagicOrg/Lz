@@ -111,6 +111,15 @@ public class TenantConfig
     public bool? BffConsumerAuthEnabled { get; set; }
 
     /// <summary>
+    /// M0-8: when <c>true</c>, add the CloudFront ordered behaviors that route the bare <c>/mcp</c>
+    /// (Streamable HTTP) and the RFC 9728 PRM (<c>/.well-known/oauth-protected-resource</c>) to the API
+    /// origin (AipHost), unstripped (same passthrough model as <c>/bff</c>). Default <c>false</c>/null ⇒
+    /// the behaviors list is byte-for-byte identical to a non-MCP tenant. Pair with the pool's
+    /// <c>McpResource</c> opt-in and AipHost's <c>Mcp:*</c> config. See specs/McpAgents.md M0-8.
+    /// </summary>
+    public bool? McpEnabled { get; set; }
+
+    /// <summary>
     /// When <c>true</c>, inject the <c>SMARTSTORE_COGNITO_*</c> env set
     /// (AUTHORITY / CLIENTID / CLIENTSECRET / HOSTEDUIDOMAIN) into this tenant's
     /// storefront container, sourced from the foundation Cognito outputs for the

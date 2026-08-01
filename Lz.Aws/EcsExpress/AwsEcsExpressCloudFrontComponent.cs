@@ -764,6 +764,43 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             });
         }
 
+        // M0-8 — MCP resource-server paths. Route the bare /mcp (Streamable HTTP) and the RFC 9728 PRM
+        // (/.well-known/oauth-protected-resource) to the API origin (AipHost) — same template as /bff/*
+        // (CachingDisabled + AllViewerExceptHostHeader + the CFRequest viewer-request, which passes these
+        // paths THROUGH unstripped; see CloudFront/CFRequest.js). The API origin carries the x-origin-verify
+        // header, so these reach the container the same gated way /bff does. ADDED ONLY when
+        // tenantConfig.McpEnabled, so tenants without MCP keep a byte-for-byte identical behaviors list.
+        // The bare /mcp URL (not /AipApi/mcp) is load-bearing: it is the token aud + the PRM resource. See
+        // specs/McpAgents.md M0-8 and specs/McpAuth.md §7.4.
+        if (tenantConfig.McpEnabled == true)
+        {
+            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource" })
+            {
+                distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = mcpPath,
+                    TargetOriginId = apiOrigin.OriginId,
+                    ViewerProtocolPolicy = "https-only",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = false,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                        },
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
+                    },
+                });
+            }
+        }
+
         // Topology hook: append extra ordered behaviors (e.g. a commerce path with a
         // cookie-forwarding cache policy). Base = none → byte-identical for existing tenants.
         foreach (var extra in BuildExtraBehaviors(tenantConfig, apiOrigin, requestFn, responseFn, hostKeyedCachePolicy.Id))
