@@ -133,7 +133,10 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
                            ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*"" }},
                         {{ ""Effect"": ""Allow"",
                            ""Action"": [""cloudfront:CreateInvalidation"",""cloudfront:GetDistribution""],
-                           ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:distribution/*"" }}
+                           ""Resource"": ""arn:aws:cloudfront::{ids.Item1}:distribution/*"" }},
+                        {{ ""Effect"": ""Allow"",
+                           ""Action"": [""ssm:GetParameter"",""ssm:GetParameters"",""ssm:GetParametersByPath""],
+                           ""Resource"": [""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter/{sk}/{env}"",""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter/{sk}/{env}/*""] }}
                     ]
                 }}"),
         }, new CustomResourceOptions { Parent = this });
