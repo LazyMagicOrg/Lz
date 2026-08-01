@@ -525,8 +525,8 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                     TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs { AccessToken = "minutes" },
                 }, new CustomResourceOptions { Parent = this });
 
-                // Optional PUBLIC buyer/device client: Auth Code + PKCE (public ⇒ Cognito enforces PKCE) with
-                // refresh-token ROTATION, for on-device buyer agents (§ McpAuth.md).
+                // Optional PUBLIC buyer/device client: Auth Code + PKCE (public ⇒ Cognito enforces PKCE),
+                // for on-device buyer agents (§ McpAuth.md).
                 if (!string.IsNullOrWhiteSpace(customAuthClients.BuyerDeviceClientName))
                 {
                     var buyerDays = customAuthClients.BuyerRefreshTokenDays > 0 ? customAuthClients.BuyerRefreshTokenDays : 90;
@@ -535,7 +535,8 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                         Name = $"{poolPrefix}-{customAuthClients.BuyerDeviceClientName}-client",
                         UserPoolId = userPool.Id,
                         GenerateSecret = false,
-                        ExplicitAuthFlows = { "ALLOW_REFRESH_TOKEN_AUTH" },
+                        // ExplicitAuthFlows OMITTED (see the MCP client): an empty-list drifts against Cognito's
+                        // null; OAuth-only client needs no InitiateAuth flows.
                         SupportedIdentityProviders = { "COGNITO" },
                         PreventUserExistenceErrors = "ENABLED",
                         AllowedOauthFlows = { "code" },
@@ -552,13 +553,14 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                             AccessToken = "minutes",
                             IdToken = "minutes",
                         },
-                        // Rotate the refresh token on every use — a stolen refresh token becomes single-use.
-                        // (Provider 7.39.0 surfaces only Feature; Cognito applies its default rotation grace.)
-                        RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
-                        {
-                            Feature = "ENABLED",
-                        },
-                    }, new CustomResourceOptions { Parent = this });
+                        // NOTE: refresh-token rotation omitted — Essentials/Plus-only; this plan ignores it.
+                        // IgnoreChanges (see the MCP client) suppresses the non-round-tripping rotation +
+                        // explicitAuthFlows drift.
+                    }, new CustomResourceOptions
+                    {
+                        Parent = this,
+                        IgnoreChanges = { "refreshTokenRotation", "explicitAuthFlows" },
+                    });
                 }
             }
 
@@ -611,6 +613,83 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
 
                 smartstoreClientId = smartstoreClient.Id;
                 smartstoreClientSecret = smartstoreClient.ClientSecret;
+            }
+
+            // =================================================================
+            // M0-8 — MCP RESOURCE SERVER + PUBLIC PKCE CLIENT (opt-in). A Cognito resource server whose
+            // identifier IS the MCP URL (so a token can carry aud == that URL under RFC 8707), plus a PUBLIC
+            // auth-code + PKCE client granted the qualified scope. Absent ⇒ byte-identical baseline. Distinct
+            // from MachineAuth: that mints client_credentials clients (no sub, no aud); the hosted MCP path
+            // needs auth-code + PKCE — the only Cognito flow yielding sub + scope + aud together. The aud
+            // itself is set at RUNTIME (client sends &resource=<Identifier> at /authorize), not here. See
+            // specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+            // =================================================================
+            if (poolConfig.McpResource is { } mcp)
+            {
+                if (string.IsNullOrWhiteSpace(mcp.Identifier))
+                    throw new InvalidOperationException(
+                        $"Pool '{authType}' McpResource has no Identifier — set the MCP endpoint URL " +
+                        "(it is BOTH the resource-server id and the token aud).");
+
+                var mcpScope = string.IsNullOrWhiteSpace(mcp.Scope) ? "invoke" : mcp.Scope;
+
+                var mcpResourceServer = new ResourceServer($"{poolPrefix}-mcp-resource-server", new ResourceServerArgs
+                {
+                    Identifier = mcp.Identifier,
+                    Name = $"{poolPrefix}-mcp-resource-server",
+                    UserPoolId = userPool.Id,
+                    Scopes =
+                    {
+                        new ResourceServerScopeArgs
+                        {
+                            ScopeName = mcpScope,
+                            ScopeDescription = string.IsNullOrWhiteSpace(mcp.ScopeDescription) ? mcpScope : mcp.ScopeDescription,
+                        },
+                    },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Token-visible qualified scope "{identifier}/{scope}" — what the client requests, Cognito puts
+                // in the scope claim, and AipHost's McpTokenGuard checks. Depends on the resource server.
+                var qualifiedMcpScope = $"{mcp.Identifier}/{mcpScope}";
+                var mcpClientSuffix = string.IsNullOrWhiteSpace(mcp.ClientName) ? "mcp" : mcp.ClientName;
+                var mcpDays = mcp.RefreshTokenDays > 0 ? mcp.RefreshTokenDays : 90;
+
+                _ = new UserPoolClient($"{poolPrefix}-{mcpClientSuffix}-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-{mcpClientSuffix}-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = false,   // public ⇒ Cognito enforces PKCE (S256); works for device + server
+                    // ExplicitAuthFlows intentionally OMITTED (not empty-list): Cognito stores "no flows" as
+                    // null, and an empty-list in the program drifts perpetually against that null. This is an
+                    // OAuth-only client (refresh via /oauth2/token), so it needs no InitiateAuth flows.
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AllowedOauthFlows = { "code" },
+                    // openid/profile/email for the user identity + the qualified MCP scope for the resource.
+                    AllowedOauthScopes = { "openid", "profile", "email", qualifiedMcpScope },
+                    AllowedOauthFlowsUserPoolClient = true,
+                    CallbackUrls = { callbackUrls.ToArray() },
+                    LogoutUrls = { logoutUrls.ToArray() },
+                    RefreshTokenValidity = mcpDays,
+                    AccessTokenValidity = 60,
+                    IdTokenValidity = 60,
+                    TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                    {
+                        RefreshToken = "days",
+                        AccessToken = "minutes",
+                        IdToken = "minutes",
+                    },
+                    // NOTE: refresh-token rotation omitted — it's a Cognito Essentials/Plus feature this pool's
+                    // plan silently ignores (never persists). Refresh tokens are standard OAuth (reusable until
+                    // expiry). Re-add when the plan supports it. IgnoreChanges on refreshTokenRotation +
+                    // explicitAuthFlows below: the API doesn't round-trip either on this plan (rotation → null;
+                    // "no flows" stored as null vs an empty-list), which would otherwise perpetually drift.
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    DependsOn = { mcpResourceServer },
+                    IgnoreChanges = { "refreshTokenRotation", "explicitAuthFlows" },
+                });
             }
 
             // =================================================================

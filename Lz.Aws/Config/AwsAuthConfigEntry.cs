@@ -174,6 +174,18 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// See <c>Platform/SMARTSTORE-COGNITO-AUTH.md §8</c>.
     /// </summary>
     public bool ProvisionSmartstoreClient { get; set; } = false;
+
+    /// <summary>
+    /// Opt-in MCP resource server (M0-8). Present ⇒ the component provisions a Cognito resource server whose
+    /// IDENTIFIER is the MCP endpoint URL (URL form is mandatory so it can serve as the token <c>aud</c> under
+    /// RFC 8707) declaring one custom scope, plus a PUBLIC auth-code + PKCE app client granted that scope. When
+    /// null (the default) nothing is created — byte-for-byte identical, same as <see cref="MachineAuth"/> /
+    /// <see cref="CustomAuth"/>. DISTINCT from <see cref="MachineAuth"/>: that welds its resource server to
+    /// <c>client_credentials</c> clients (which carry neither a user <c>sub</c> nor an <c>aud</c>); the hosted
+    /// MCP path needs auth-code + PKCE, the only Cognito flow that yields <c>sub</c> + scope + <c>aud</c>
+    /// together. See specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+    /// </summary>
+    public McpResourceConfig? McpResource { get; set; }
 }
 
 /// <summary>
@@ -244,6 +256,36 @@ public class CustomAuthConfig
     /// <summary>Buyer refresh-token validity, in days (rotation on). Default <c>90</c>. Only consulted when
     /// <see cref="BuyerDeviceClientName"/> is set.</summary>
     public int BuyerRefreshTokenDays { get; set; } = 90;
+}
+
+/// <summary>
+/// MCP resource-server provisioning for a pool (M0-8). Creates a Cognito <c>ResourceServer</c> whose identifier
+/// is <see cref="Identifier"/> (the MCP endpoint URL) declaring the single scope <see cref="Scope"/>, plus a
+/// PUBLIC auth-code + PKCE client granted <c>{Identifier}/{Scope}</c>. The token's <c>aud == Identifier</c> is
+/// NOT a provisioning property — it materializes only when the client sends <c>&amp;resource=&lt;Identifier&gt;</c>
+/// at <c>/oauth2/authorize</c> (RFC 8707); provisioning's job is purely (resource server + scope) + (that scope
+/// on a PKCE client). Purely additive — see <see cref="AwsAuthConfigEntry.McpResource"/>.
+/// </summary>
+public class McpResourceConfig
+{
+    /// <summary>
+    /// The MCP endpoint URL, in URL form (e.g. <c>https://match.aiproxydev.click/mcp</c>). Becomes BOTH the
+    /// Cognito resource-server identifier and the token <c>aud</c> AipHost validates. Required. Must match the
+    /// AipHost <c>Mcp:ResourceUrl</c> exactly.
+    /// </summary>
+    public string Identifier { get; set; } = string.Empty;
+
+    /// <summary>The single custom scope name (bare, e.g. <c>invoke</c>). Token-visible as <c>{Identifier}/{Scope}</c>.</summary>
+    public string Scope { get; set; } = "invoke";
+
+    /// <summary>Description surfaced on the resource-server scope. Defaults to the scope name.</summary>
+    public string? ScopeDescription { get; set; }
+
+    /// <summary>Name suffix of the public PKCE MCP client (<c>{poolPrefix}-{ClientName}-client</c>). Default <c>mcp</c>.</summary>
+    public string ClientName { get; set; } = "mcp";
+
+    /// <summary>MCP client refresh-token validity, in days (rotation on). Default <c>90</c>.</summary>
+    public int RefreshTokenDays { get; set; } = 90;
 }
 
 /// <summary>
