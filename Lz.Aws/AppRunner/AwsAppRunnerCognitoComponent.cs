@@ -553,13 +553,17 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                             AccessToken = "minutes",
                             IdToken = "minutes",
                         },
-                        // NOTE: refresh-token rotation omitted — Essentials/Plus-only; this plan ignores it.
-                        // IgnoreChanges (see the MCP client) suppresses the non-round-tripping rotation +
-                        // explicitAuthFlows drift.
+                        // Refresh-token ROTATION enabled (see the MCP client) — Feature + RetryGracePeriodSeconds
+                        // both required for a clean round-trip.
+                        RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                        {
+                            Feature = "ENABLED",
+                            RetryGracePeriodSeconds = 60,
+                        },
                     }, new CustomResourceOptions
                     {
                         Parent = this,
-                        IgnoreChanges = { "refreshTokenRotation", "explicitAuthFlows" },
+                        IgnoreChanges = { "explicitAuthFlows" },
                     });
                 }
             }
@@ -679,16 +683,24 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                         AccessToken = "minutes",
                         IdToken = "minutes",
                     },
-                    // NOTE: refresh-token rotation omitted — it's a Cognito Essentials/Plus feature this pool's
-                    // plan silently ignores (never persists). Refresh tokens are standard OAuth (reusable until
-                    // expiry). Re-add when the plan supports it. IgnoreChanges on refreshTokenRotation +
-                    // explicitAuthFlows below: the API doesn't round-trip either on this plan (rotation → null;
-                    // "no flows" stored as null vs an empty-list), which would otherwise perpetually drift.
+                    // Refresh-token ROTATION enabled — a stolen refresh token is then single-use. BOTH Feature
+                    // AND RetryGracePeriodSeconds must be set: Feature alone leaves the block incomplete and it
+                    // never round-trips (that mis-read as "the plan ignores it" — the pool is actually on the
+                    // PLUS tier, which supports rotation). The 60s grace tolerates one in-flight retry with the
+                    // just-rotated token.
+                    RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                    {
+                        Feature = "ENABLED",
+                        RetryGracePeriodSeconds = 60,
+                    },
                 }, new CustomResourceOptions
                 {
                     Parent = this,
                     DependsOn = { mcpResourceServer },
-                    IgnoreChanges = { "refreshTokenRotation", "explicitAuthFlows" },
+                    // Only explicitAuthFlows is ignored: this OAuth-only client sets no InitiateAuth flows, and
+                    // Cognito stores "no flows" as null while the provider would send an empty-list → drift.
+                    // Rotation is MANAGED (not ignored) so Pulumi enforces it and drift means it's really off.
+                    IgnoreChanges = { "explicitAuthFlows" },
                 });
             }
 
