@@ -257,7 +257,13 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 customAuthFn = new Function($"{poolPrefix}-custom-auth", new FunctionArgs
                 {
                     Name = $"{poolPrefix}-custom-auth",
-                    Runtime = "nodejs20.x",
+                    // Keep on a SUPPORTED Node.js runtime — nodejs20.x is deprecated (2026-04-30). nodejs24.x
+                    // is the newest managed runtime (support to 2028-04-30) and, like all supported Node.js
+                    // runtimes, bundles the AWS SDK for JavaScript v3 — which custom-auth.mjs relies on
+                    // (`import('@aws-sdk/client-dynamodb')`, no node_modules shipped). The file is explicit
+                    // .mjs (ESM), so Node 22/24's module-detection default is irrelevant. Bump before the
+                    // next deprecation; verify the target still bundles the SDK v3.
+                    Runtime = "nodejs24.x",
                     Handler = "custom-auth.handler",
                     // No build step, no npm deps (only the runtime-bundled AWS SDK v3); Pulumi zips the dir.
                     Code = new FileArchive(customAuthDir),
