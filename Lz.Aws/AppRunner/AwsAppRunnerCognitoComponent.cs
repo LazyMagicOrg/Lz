@@ -628,6 +628,10 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             // itself is set at RUNTIME (client sends &resource=<Identifier> at /authorize), not here. See
             // specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
             // =================================================================
+            // Captured for the ManagedLoginBranding block below: ManagedLoginVersion=2 requires a per-client
+            // branding slot or the hosted UI returns "Login pages unavailable" for THIS client's sign-in (the
+            // buyer/device agent's one-time PKCE login). Null unless McpResource was configured for this pool.
+            Output<string>? mcpClientId = null;
             if (poolConfig.McpResource is { } mcp)
             {
                 if (string.IsNullOrWhiteSpace(mcp.Identifier))
@@ -658,7 +662,7 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 var mcpClientSuffix = string.IsNullOrWhiteSpace(mcp.ClientName) ? "mcp" : mcp.ClientName;
                 var mcpDays = mcp.RefreshTokenDays > 0 ? mcp.RefreshTokenDays : 90;
 
-                _ = new UserPoolClient($"{poolPrefix}-{mcpClientSuffix}-client", new UserPoolClientArgs
+                var mcpClient = new UserPoolClient($"{poolPrefix}-{mcpClientSuffix}-client", new UserPoolClientArgs
                 {
                     Name = $"{poolPrefix}-{mcpClientSuffix}-client",
                     UserPoolId = userPool.Id,
@@ -702,6 +706,8 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                     // Rotation is MANAGED (not ignored) so Pulumi enforces it and drift means it's really off.
                     IgnoreChanges = { "explicitAuthFlows" },
                 });
+
+                mcpClientId = mcpClient.Id;
             }
 
             // =================================================================
@@ -852,6 +858,26 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 var ssBrandingArgs = BuildBrandingArgsFromConventionFolder(
                     userPool.Id, smartstoreClientId, authType);
                 new ManagedLoginBranding($"{poolPrefix}-smartstore-branding", ssBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
+            // ManagedLoginVersion=2 also requires a per-client branding for the
+            // public MCP PKCE client. Without it the hosted UI returns "Login
+            // pages unavailable" for the buyer/device agent's one-time PKCE
+            // sign-in (each client needs its own branding slot — the public
+            // app client's branding does NOT cover it). Gated on the same
+            // McpResource opt-in that created the client, so the baseline stays
+            // byte-identical for pools with no MCP endpoint.
+            if (poolConfig.McpResource is not null && mcpClientId is not null)
+            {
+                var mcpBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, mcpClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-mcp-branding", mcpBrandingArgs,
                     new CustomResourceOptions
                     {
                         Parent = this,
