@@ -774,7 +774,10 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         // specs/McpAgents.md M0-8 and specs/McpAuth.md §7.4.
         if (tenantConfig.McpEnabled == true)
         {
-            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource" })
+            // "/.well-known/oauth-protected-resource*" (prefix) covers BOTH the bare PRM and the RFC 9728
+            // path-suffixed variant (/.well-known/oauth-protected-resource/mcp) the SDK advertises for a
+            // resource with a path. /mcp stays exact (stateless Streamable HTTP is a single endpoint).
+            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource*" })
             {
                 distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
                 {
