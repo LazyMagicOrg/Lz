@@ -102,6 +102,7 @@ public static class AwsLiveVerifier
             var tctx = ctx.ForTenant(tc);
             AddTenantStackChecks(checks, tctx, tk, tc);
             AddTenantPersistentChecks(checks, tctx, tk, tc);
+            AddTenantSmokeChecks(checks, tctx, tk, tc);
         }
         AddSystemPersistentChecks(checks, ctx);
 
@@ -311,6 +312,244 @@ public static class AwsLiveVerifier
     // Check implementations
     // =====================================================================
 
+    // =====================================================================
+    // Catalog — runtime smoke (the E2ETestPlan P0.7 post-deploy gate)
+    // =====================================================================
+
+    private static readonly HttpClient SmokeHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(75), // scale-to-zero Lambda cold-start budget
+    };
+
+    /// <summary>
+    /// Pools missing from (or blank in) a <c>/config</c> bootstrap document,
+    /// given the pool names systemconfig declares. Pure — unit-tested. Every
+    /// declared pool is "missing" when the JSON has no usable authConfigs.
+    /// </summary>
+    public static IReadOnlyList<string> MissingPoolClientIds(
+        string configJson, IEnumerable<string> pools)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(configJson);
+            // Valid-JSON non-object roots ("null", "[]", "42") must classify, not
+            // throw — TryGetProperty on them throws InvalidOperationException.
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("authConfigs", out var auth)
+                || auth.ValueKind != System.Text.Json.JsonValueKind.Object)
+                return pools.ToList();
+            return pools.Where(p =>
+                    !auth.TryGetProperty(p, out var pool)
+                    || pool.ValueKind != System.Text.Json.JsonValueKind.Object
+                    || !pool.TryGetProperty("ClientId", out var clientId)
+                    // Non-string kinds (number/bool/object) survive CFAuthConfig's
+                    // `|| ""` fallback (JS truthiness) — corrupted KVS, classify it.
+                    || clientId.ValueKind != System.Text.Json.JsonValueKind.String
+                    || string.IsNullOrEmpty(clientId.GetString()))
+                .ToList();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return pools.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Marker body OriginVerifyMiddleware writes with its 403 — the ONLY 403 that
+    /// proves the app-side gate is engaged. The Function URL service emits its own
+    /// bare 403 when the public invoke grant is missing (API down, gate unproven).
+    /// </summary>
+    public const string OriginVerifyRejectionMarker = "origin_verification_failed";
+
+    /// <summary>
+    /// Classify the api-health probe response. Pure — unit-tested. Requires the
+    /// x-origin-verified annotation OriginVerifyMiddleware echoes on /health:
+    /// a bare 200 proves nothing, because the distribution rewrites origin 403/404
+    /// to a 200 SPA shell (masking a dead API) and /health is exempt from
+    /// origin-verify rejection (masking edge/origin secret drift).
+    /// </summary>
+    public static (ResourceState State, string Detail) ClassifyApiHealth(
+        int statusCode, string? originVerified, string? contentType)
+    {
+        if (statusCode != 200)
+            return (ResourceState.Absent, $"HTTP {statusCode}");
+        if (originVerified == "true")
+            return (ResourceState.Present,
+                "HTTP 200, x-origin-verified: true (edge header matches the origin secret)");
+        if (originVerified == "false")
+            return (ResourceState.Absent,
+                "HTTP 200 but x-origin-verified: false — CloudFront's x-origin-verify " +
+                "header is missing or does not match LZ_ORIGIN_VERIFY (secret drift: " +
+                "every non-exempt API route is 403ing)");
+        if (contentType != null && contentType.Contains("text/html"))
+            return (ResourceState.Absent,
+                "HTTP 200 but text/html — the CloudFront 403/404→200 SPA rewrite is " +
+                "masking a dead or unrouted API");
+        return (ResourceState.Absent,
+            "HTTP 200 without the x-origin-verified annotation — OriginVerifyMiddleware " +
+            "is not engaged (hosting-startup assembly not loaded, or the deployed image " +
+            "predates the annotation)");
+    }
+
+    /// <summary>
+    /// Classify the function-url-lockout probe response. Pure — unit-tested. Only a
+    /// 403 CARRYING the middleware's marker proves the gate; a bare 403 is the Lambda
+    /// service refusing invocation (public grant missing — API down), and 2xx/404
+    /// means the app booted WITHOUT the gate and is publicly invokable. This is the
+    /// tripwire that caught the live hole — do not widen it.
+    /// </summary>
+    public static (ResourceState State, string Detail) ClassifyFunctionUrlLockout(
+        int statusCode, string body)
+    {
+        if (statusCode == 403 && body.Contains(OriginVerifyRejectionMarker))
+            return (ResourceState.Present,
+                "direct call without x-origin-verify rejected by the origin-verify gate");
+        if (statusCode == 403)
+            return (ResourceState.Absent,
+                "403 without the origin_verification_failed marker — NOT the app-side " +
+                "gate (likely the Function URL's own permission 403: public invoke " +
+                "grant missing, API down, gate unproven)");
+        return (ResourceState.Absent,
+            $"direct unsigned call returned HTTP {statusCode} — expected the gate's 403; " +
+            "a 2xx/404 means the function URL is PUBLICLY invokable (app booted " +
+            "without OriginVerifyMiddleware?)");
+    }
+
+    /// <summary>
+    /// Classify the bff-user-lockout probe response. Pure — unit-tested. An
+    /// unauthenticated GET /bff/user must 401 (401 is NOT in the distribution's
+    /// 403/404→200 rewrite set, so it cannot be masked); a 200 SPA shell means
+    /// /bff fell through to a static-site behavior and login is broken.
+    /// </summary>
+    public static (ResourceState State, string Detail) ClassifyBffUserLockout(
+        int statusCode, string? contentType)
+    {
+        if (statusCode == 401)
+            return (ResourceState.Present,
+                "unauthenticated /bff/user correctly 401s (BFF controller alive)");
+        if (statusCode == 200 && contentType != null && contentType.Contains("text/html"))
+            return (ResourceState.Absent,
+                "HTTP 200 text/html — /bff is not routed to the API origin (fell " +
+                "through to a SPA behavior; BFF login is broken)");
+        return (ResourceState.Absent,
+            $"HTTP {statusCode} — expected 401 from the BFF controller");
+    }
+
+    private static void AddTenantSmokeChecks(
+        List<Func<Task<ResourceCheckResult>>> checks, VerifyContext ctx,
+        string tk, TenantConfig tc)
+    {
+        var domain = tc.RootDomain;
+        if (string.IsNullOrEmpty(domain)) return;
+        var sk = ctx.Config.SystemKey;
+
+        // 1. /config drift detector: the edge bootstrap must serve every declared
+        //    pool with a ClientId — the canary that catches KVS/pool drift after a
+        //    redeploy (pool/client ids reissue on recreate).
+        var pools = ctx.Config.AuthConfigs?.Keys.ToList() ?? new List<string>();
+        checks.Add(() => RunSmoke("edge", "config-bootstrap", $"https://{domain}/config", async () =>
+        {
+            using var resp = await SmokeHttp.GetAsync($"https://{domain}/config");
+            if (!resp.IsSuccessStatusCode)
+                return (ResourceState.Absent, $"HTTP {(int)resp.StatusCode}");
+            var body = await resp.Content.ReadAsStringAsync();
+            var missing = MissingPoolClientIds(body, pools);
+            return missing.Count == 0
+                ? (ResourceState.Present, $"{pools.Count} pool(s) with ClientId")
+                : (ResourceState.Absent, $"missing/blank ClientId for: {string.Join(", ", missing)}");
+        }));
+
+        // 2. API round-trip through the edge: {ApiPrefix}{HealthCheckPath} exercises
+        //    KVS routing, the prefix strip, and the live service — and, via the
+        //    x-origin-verified annotation the middleware echoes on the (rejection-
+        //    exempt) /health path, proves the origin-verify ACCEPT path: that
+        //    CloudFront's injected header actually matches LZ_ORIGIN_VERIFY. A bare
+        //    200 is NOT trusted (see ClassifyApiHealth).
+        var apiPath = ctx.Config.Behaviors?.Apis?.FirstOrDefault()?.Path?.TrimEnd('/');
+        if (!string.IsNullOrEmpty(apiPath))
+        {
+            var healthPath = ctx.System.HostLayerServices.FirstOrDefault()
+                ?.Container?.HealthCheckPath ?? "/health";
+            var url = $"https://{domain}{apiPath}{healthPath}";
+            checks.Add(() => RunSmoke("edge", "api-health", url, async () =>
+            {
+                using var resp = await SmokeHttp.GetAsync(url);
+                var verified = resp.Headers.TryGetValues("x-origin-verified", out var vs)
+                    ? vs.FirstOrDefault() : null;
+                return ClassifyApiHealth((int)resp.StatusCode, verified,
+                    resp.Content.Headers.ContentType?.MediaType);
+            }));
+        }
+
+        // 3. Function-URL lockout: the URL is AuthType=NONE by design (a lambda OAC
+        //    cannot carry REST writes — see AwsLambdaCloudFrontComponent), so the gate
+        //    is the x-origin-verify header enforced app-side (OriginVerifyMiddleware).
+        //    A direct call without the header must 403. Anything else means the gate
+        //    is not engaged — e.g. the hosting-startup assembly missing from the image
+        //    fails NON-fatally and boots the app open. A 2xx/404 is a SECURITY
+        //    finding (publicly invokable function), not mere absence.
+        foreach (var svc in ctx.System.HostLayerServices)
+        {
+            var fnName = $"{sk}-{tk}-{svc.Name}";
+            checks.Add(() => RunSmoke("lambda", "function-url-lockout", fnName, async () =>
+            {
+                string fnUrl;
+                try
+                {
+                    using var lambda = ctx.LambdaClient();
+                    var cfg = await lambda.GetFunctionUrlConfigAsync(
+                        new GetFunctionUrlConfigRequest { FunctionName = fnName });
+                    fnUrl = cfg.FunctionUrl;
+                }
+                catch (Amazon.Lambda.Model.ResourceNotFoundException)
+                {
+                    return (ResourceState.Absent, "function or function URL not found");
+                }
+                using var resp = await SmokeHttp.GetAsync(fnUrl);
+                var body = await resp.Content.ReadAsStringAsync();
+                return ClassifyFunctionUrlLockout((int)resp.StatusCode, body);
+            }));
+        }
+
+        // 4. BFF surface (only when enabled): /bff/* is internet-reachable auth
+        //    surface routed to the API origin without a prefix strip — activation
+        //    failures (session table, DP key ring, token-client metadata, an edge
+        //    misroute into a SPA behavior) otherwise surface only when a real user
+        //    attempts login.
+        if (Lz.Core.Config.ConfigMerger.GetEffectiveBffEnabled(ctx.Config, tc))
+        {
+            var bffUrl = $"https://{domain}/bff/user";
+            checks.Add(() => RunSmoke("edge", "bff-user-lockout", bffUrl, async () =>
+            {
+                using var resp = await SmokeHttp.GetAsync(bffUrl);
+                return ClassifyBffUserLockout((int)resp.StatusCode,
+                    resp.Content.Headers.ContentType?.MediaType);
+            }));
+        }
+    }
+
+    // Internal for Lz.Tests: the exception→Absent mapping is load-bearing (Error
+    // would poison --expect destroyed via the errors-downgrade rule) and must not
+    // drift toward VerifyContext.Run's exception→Error convention.
+    internal static async Task<ResourceCheckResult> RunSmoke(
+        string service, string kind, string name,
+        Func<Task<(ResourceState State, string? Detail)>> probe)
+    {
+        try
+        {
+            var (state, detail) = await probe();
+            return new(ResourceCategory.Smoke, service, kind, name, state, detail);
+        }
+        catch (Exception ex)
+        {
+            // Unreachable surfaces are the EXPECTED post-destroy state — Absent,
+            // never Error (Error would poison --expect verdicts after a destroy).
+            var message = ex.Message.Replace("\r", " ").Replace("\n", " ").Trim();
+            return new(ResourceCategory.Smoke, service, kind, name,
+                ResourceState.Absent, $"{ex.GetType().Name}: {message}");
+        }
+    }
+
     private sealed class VerifyContext
     {
         public SystemConfig Config { get; }
@@ -362,6 +601,12 @@ public static class AwsLiveVerifier
             var region = usEast1 ? UsEast1 : _region;
             return _creds != null ? withCreds(_creds, region) : withDefault(region);
         }
+
+        /// <summary>Lambda client for the smoke checks (function-URL lockout probe).</summary>
+        public IAmazonLambda LambdaClient()
+            => Client<IAmazonLambda>(
+                (c, r) => new AmazonLambdaClient(c, r),
+                r => new AmazonLambdaClient(r));
 
         private static async Task<ResourceCheckResult> Run(
             ResourceCategory category, string service, string kind, string name,

@@ -17,6 +17,17 @@ public enum ResourceCategory
     /// state, survives every destroy by design.
     /// </summary>
     Persistent,
+
+    /// <summary>
+    /// Runtime smoke probe of the DEPLOYED system's public surfaces (the
+    /// E2ETestPlan P0.7 post-deploy gate): the /config edge bootstrap serving
+    /// every declared pool, an API round-trip through CloudFront, and the
+    /// function-URL origin-verify lockout. Present only while deployed AND healthy;
+    /// counted into the <c>--expect deployed</c> verdict alongside Stack.
+    /// Unreachable surfaces report Absent (the expected post-destroy state),
+    /// never Error.
+    /// </summary>
+    Smoke,
 }
 
 /// <summary>

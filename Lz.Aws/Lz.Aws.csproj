@@ -15,6 +15,10 @@
     <ProjectReference Include="..\Lz.Core\Lz.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Lz.Tests" />
+  </ItemGroup>
+
   <!-- Pre-built Lambda package. AwsGateCheckerLambdaComponent looks for
        Lambda/gate-checker.zip relative to Assembly.Location of the loaded
        Lz.Aws.dll. Depending on the host process's assembly load behavior,
@@ -58,6 +62,32 @@
           Condition="!Exists('Lambda\gate-checker.zip')">
     <Warning Text="Lambda/gate-checker.zip is missing. Run Lambda/build-gate-checker.ps1 to build it." />
   </Target>
+
+  <!-- M0-7 Cognito Custom-Auth trigger (inline Node.js). AwsAppRunnerCognitoComponent zips the
+       CognitoCustomAuth/ dir found next to typeof(...).Assembly.Location, so custom-auth.mjs must
+       land at <asmDir>/CognitoCustomAuth/custom-auth.mjs in all three load scenarios — identical to
+       the gate-checker.zip handling above. The source lives at AppRunner/CognitoCustomAuth/, so each
+       item uses Link (local copy) or PackagePath (nupkg) to strip the AppRunner/ prefix.
+
+       ONLY custom-auth.mjs ships — custom-auth.test.mjs is deliberately excluded so the node test
+       file never reaches the deployed Lambda zip. -->
+  <ItemGroup>
+    <!-- Path A: NuGet-cache resolution (lib/ in the nupkg). -->
+    <None Include="AppRunner\CognitoCustomAuth\custom-auth.mjs"
+          Pack="true" PackagePath="lib\$(TargetFramework)\CognitoCustomAuth\custom-auth.mjs" />
+    <!-- Path B: consumer's local bin via contentFiles + PackageCopyToOutput (plugin LoadFrom). -->
+    <None Include="AppRunner\CognitoCustomAuth\custom-auth.mjs"
+          Pack="true" PackagePath="contentFiles\any\$(TargetFramework)\CognitoCustomAuth\custom-auth.mjs">
+      <PackageCopyToOutput>true</PackageCopyToOutput>
+      <BuildAction>None</BuildAction>
+    </None>
+    <!-- Path C: ProjectReference within the lz solution (Lz.Cli -> Lz.Aws) — normal MSBuild copy. -->
+    <None Include="AppRunner\CognitoCustomAuth\custom-auth.mjs">
+      <Link>CognitoCustomAuth\custom-auth.mjs</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Pack>false</Pack>
+    </None>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.AppRunner" Version="4.*" />

@@ -292,12 +292,10 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
 
         // S3-level CORS configuration. The CFResponse CloudFront Function
         // adds Access-Control-Allow-Origin to *successful* origin responses
-        // routed through the default '/*' behavior — but CloudFront's
-        // CustomErrorResponses flow can short-circuit viewer-response on
-        // origin 4xx errors (the SPA-fallback /index.html recursion fails
-        // when CFRequest's dynamic origin rewrite picks a bucket without
-        // /index.html, falling back to the raw S3 error which never gets
-        // CORS injected). Configuring CORS at the S3 level means S3 itself
+        // routed through the default '/*' behavior — but origin 4xx errors
+        // (missing objects answer 403 AccessDenied under OAC-without-
+        // ListBucket) are served raw and never get CORS injected at the
+        // edge. Configuring CORS at the S3 level means S3 itself
         // emits Access-Control-Allow-Origin on its responses including
         // 403/404 — CloudFront passes those headers through. Net effect:
         // browsers see clean 4xx responses with CORS, the WASM client's
@@ -673,7 +671,16 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     },
                 },
             },
-            // Topology-overridable (BuildCustomErrorResponses). Base = the SPA fallback pair.
+            // Topology-overridable (BuildCustomErrorResponses). Base = the SPA fallback pair
+            // (403/404→200 /index.html) for genuine SPA/Fargate tenants. The Lambda topology
+            // (AwsLambdaCloudFrontComponent) OVERRIDES this to return NONE — that distribution-wide
+            // pair is (a) redundant there (CFRequest.js already rewrites extensionless webapp paths
+            // to {appPath}index.html at REQUEST time, so SPA deep links never 404 at the origin) and
+            // (b) harmful: it also intercepted API-origin 403/404s on /*Api/*, and because the
+            // /index.html error fetch resolves against a bucket location without that object,
+            // CloudFront served S3's own 403 AccessDenied XML instead — destroying the API's real
+            // status and body (probed live on match.aiproxydev.click). The Scutara E2E canary
+            // CdnErrorRegime_Canary pins the resulting regime; the override keeps it green.
             CustomErrorResponses = BuildCustomErrorResponses().ToArray(),
             ViewerCertificate = new DistributionViewerCertificateArgs
             {
@@ -755,6 +762,46 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     },
                 },
             });
+        }
+
+        // M0-8 — MCP resource-server paths. Route the bare /mcp (Streamable HTTP) and the RFC 9728 PRM
+        // (/.well-known/oauth-protected-resource) to the API origin (AipHost) — same template as /bff/*
+        // (CachingDisabled + AllViewerExceptHostHeader + the CFRequest viewer-request, which passes these
+        // paths THROUGH unstripped; see CloudFront/CFRequest.js). The API origin carries the x-origin-verify
+        // header, so these reach the container the same gated way /bff does. ADDED ONLY when
+        // tenantConfig.McpEnabled, so tenants without MCP keep a byte-for-byte identical behaviors list.
+        // The bare /mcp URL (not /AipApi/mcp) is load-bearing: it is the token aud + the PRM resource. See
+        // specs/McpAgents.md M0-8 and specs/McpAuth.md §7.4.
+        if (tenantConfig.McpEnabled == true)
+        {
+            // "/.well-known/oauth-protected-resource*" (prefix) covers BOTH the bare PRM and the RFC 9728
+            // path-suffixed variant (/.well-known/oauth-protected-resource/mcp) the SDK advertises for a
+            // resource with a path. /mcp stays exact (stateless Streamable HTTP is a single endpoint).
+            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource*" })
+            {
+                distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
+                {
+                    PathPattern = mcpPath,
+                    TargetOriginId = apiOrigin.OriginId,
+                    ViewerProtocolPolicy = "https-only",
+                    AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                    CachedMethods = { "GET", "HEAD" },
+                    Compress = false,
+                    CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                    OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                    FunctionAssociations =
+                    {
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                        },
+                        new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                        {
+                            EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                        },
+                    },
+                });
+            }
         }
 
         // Topology hook: append extra ordered behaviors (e.g. a commerce path with a

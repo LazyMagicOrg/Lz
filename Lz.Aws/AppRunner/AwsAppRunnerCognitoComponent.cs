@@ -9,6 +9,11 @@ using Pulumi.Aws.Acm;
 using Pulumi.Aws.Cognito;
 using Pulumi.Aws.Cognito.Inputs;
 using Pulumi.Aws.CloudWatch;
+using Pulumi.Aws.DynamoDB;
+using Pulumi.Aws.DynamoDB.Inputs;
+using Pulumi.Aws.Iam;
+using Pulumi.Aws.Lambda;
+using Pulumi.Aws.Lambda.Inputs;
 
 namespace Lz.Aws.AppRunner;
 
@@ -197,6 +202,94 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 };
             }
 
+            // =================================================================
+            // M0-7 — SELLER CUSTOM-AUTH INFRA (opt-in). Provisioned ONLY when poolConfig.CustomAuth is set,
+            // so absent = byte-identical baseline for the ~10 sibling pools. The Lambda + its role + the
+            // vendor-credential table are created HERE, BEFORE the pool, because the pool's LambdaConfig — a
+            // POOL-LEVEL setting — must reference the Lambda ARN. The Cognito invoke Permission and the
+            // seller/buyer clients need the pool, so they follow it below under the same guard.
+            // =================================================================
+            const string vendorCredKeyAttr = "username";
+            const string vendorCredHashAttr = "apiKeyHash";
+            Function? customAuthFn = null;
+            if (poolConfig.CustomAuth is { } customAuth)
+            {
+                var vendorCredTable = new Table($"{poolPrefix}-vendor-creds", new TableArgs
+                {
+                    Name = $"{poolPrefix}-vendor-creds",
+                    BillingMode = "PAY_PER_REQUEST",
+                    HashKey = vendorCredKeyAttr,
+                    Attributes = { new TableAttributeArgs { Name = vendorCredKeyAttr, Type = "S" } },
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Least-privilege role for the challenge Lambda: assumed by Lambda, writes its own logs, and
+                // GetItem ONLY on the vendor-credential table (nothing else).
+                var fnRole = new Role($"{poolPrefix}-custom-auth-role", new RoleArgs
+                {
+                    AssumeRolePolicy =
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"," +
+                        "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}",
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                _ = new RolePolicyAttachment($"{poolPrefix}-custom-auth-logs", new RolePolicyAttachmentArgs
+                {
+                    Role = fnRole.Name,
+                    PolicyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                }, new CustomResourceOptions { Parent = this });
+
+                _ = new RolePolicy($"{poolPrefix}-custom-auth-ddb", new RolePolicyArgs
+                {
+                    Role = fnRole.Id,
+                    Policy = vendorCredTable.Arn.Apply(arn =>
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"," +
+                        "\"Action\":\"dynamodb:GetItem\",\"Resource\":\"" + arn + "\"}]}"),
+                }, new CustomResourceOptions { Parent = this });
+
+                // Inline Node.js source dir shipped next to the assembly (see Lz.Aws.csproj). We resolve it via
+                // the assembly's own Location — NOT AppContext.BaseDirectory — because under plugin load the
+                // running process is the lz runner, whose base dir does NOT contain Lz.Aws's content. This is
+                // the exact idiom AwsGateCheckerLambdaComponent uses for gate-checker.zip.
+                var customAuthDir = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(typeof(AwsAppRunnerCognitoComponent).Assembly.Location)!,
+                    "CognitoCustomAuth");
+                customAuthFn = new Function($"{poolPrefix}-custom-auth", new FunctionArgs
+                {
+                    Name = $"{poolPrefix}-custom-auth",
+                    // Keep on a SUPPORTED Node.js runtime — nodejs20.x is deprecated (2026-04-30). nodejs24.x
+                    // is the newest managed runtime (support to 2028-04-30) and, like all supported Node.js
+                    // runtimes, bundles the AWS SDK for JavaScript v3 — which custom-auth.mjs relies on
+                    // (`import('@aws-sdk/client-dynamodb')`, no node_modules shipped). The file is explicit
+                    // .mjs (ESM), so Node 22/24's module-detection default is irrelevant. Bump before the
+                    // next deprecation; verify the target still bundles the SDK v3.
+                    Runtime = "nodejs24.x",
+                    Handler = "custom-auth.handler",
+                    // No build step, no npm deps (only the runtime-bundled AWS SDK v3); Pulumi zips the dir.
+                    Code = new FileArchive(customAuthDir),
+                    Role = fnRole.Arn,
+                    Timeout = 5,   // Cognito's synchronous-trigger budget.
+                    Environment = new FunctionEnvironmentArgs
+                    {
+                        Variables =
+                        {
+                            { "VENDOR_CRED_TABLE", vendorCredTable.Name },
+                            { "VENDOR_CRED_KEY_ATTR", vendorCredKeyAttr },
+                            { "VENDOR_CRED_HASH_ATTR", vendorCredHashAttr },
+                        },
+                    },
+                    Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
+                }, new CustomResourceOptions { Parent = this });
+
+                // The three challenge triggers → the one Lambda. POOL-LEVEL, so strictly inside this guard.
+                userPoolArgs.LambdaConfig = new UserPoolLambdaConfigArgs
+                {
+                    DefineAuthChallenge = customAuthFn.Arn,
+                    CreateAuthChallenge = customAuthFn.Arn,
+                    VerifyAuthChallengeResponse = customAuthFn.Arn,
+                };
+            }
+
             var userPool = new UserPool($"{poolPrefix}-pool", userPoolArgs,
                 new CustomResourceOptions { Parent = this });
 
@@ -338,6 +431,144 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             }
 
             // =================================================================
+            // MACHINE (client_credentials) CLIENTS — opt-in M2M principals.
+            // Created ONLY when MachineAuth declares clients. When absent (the
+            // default), no resource server, scope, or M2M client exists, so the
+            // deploy plan is byte-for-byte identical to before (same guarantee
+            // as the BFF client). A resource server declares the custom scopes;
+            // each machine client is a NEW confidential app client — Cognito
+            // forbids client_credentials on the public/BFF clients. M0-2.
+            // =================================================================
+            if (poolConfig.MachineAuth is { Clients.Count: > 0 } machineAuth)
+            {
+                if (string.IsNullOrWhiteSpace(machineAuth.Identifier))
+                    throw new InvalidOperationException(
+                        $"Pool '{authType}' MachineAuth declares clients but no Identifier. " +
+                        "Set the resource-server identifier (the scope audience prefix).");
+
+                var resourceServer = new ResourceServer($"{poolPrefix}-resource-server", new ResourceServerArgs
+                {
+                    Identifier = machineAuth.Identifier,
+                    Name = $"{poolPrefix}-resource-server",
+                    UserPoolId = userPool.Id,
+                    Scopes = machineAuth.Scopes.Select(s => new ResourceServerScopeArgs
+                    {
+                        ScopeName = s.Name,
+                        ScopeDescription = string.IsNullOrWhiteSpace(s.Description) ? s.Name : s.Description,
+                    }).ToArray(),
+                }, new CustomResourceOptions { Parent = this });
+
+                var accessMinutes = machineAuth.AccessTokenMinutes > 0 ? machineAuth.AccessTokenMinutes : 60;
+                foreach (var mc in machineAuth.Clients)
+                {
+                    if (string.IsNullOrWhiteSpace(mc.Name))
+                        throw new InvalidOperationException(
+                            $"Pool '{authType}' has a MachineAuth client with empty Name. Check systemconfig.");
+
+                    // Cognito requires scopes on a client_credentials client to be
+                    // resource-server-qualified: "{identifier}/{scope}".
+                    var qualifiedScopes = mc.Scopes.Select(sc => $"{machineAuth.Identifier}/{sc}").ToArray();
+
+                    _ = new UserPoolClient($"{poolPrefix}-m2m-{mc.Name}", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-m2m-{mc.Name}",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = true,
+                        // client_credentials ONLY — no user-auth flow, no callback/logout URLs.
+                        AllowedOauthFlows = { "client_credentials" },
+                        AllowedOauthScopes = { qualifiedScopes },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        AccessTokenValidity = accessMinutes,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            AccessToken = "minutes",
+                        },
+                    }, new CustomResourceOptions { Parent = this, DependsOn = { resourceServer } });
+                }
+            }
+
+            // =================================================================
+            // M0-7 — SELLER/BUYER CLIENTS + the Cognito invoke Permission (opt-in; the pool + Lambda exist
+            // now). Same guard as the pre-pool infra above.
+            // =================================================================
+            if (poolConfig.CustomAuth is { } customAuthClients && customAuthFn is not null)
+            {
+                // Cognito must be allowed to invoke the challenge Lambda; scope the permission to THIS pool so
+                // no other pool (or account principal) can trigger it.
+                _ = new Permission($"{poolPrefix}-custom-auth-invoke", new PermissionArgs
+                {
+                    Action = "lambda:InvokeFunction",
+                    Function = customAuthFn.Name,
+                    Principal = "cognito-idp.amazonaws.com",
+                    SourceArn = userPool.Arn,
+                }, new CustomResourceOptions { Parent = this });
+
+                // The confidential SELLER client: non-interactive Custom-Auth (the vendor presents its API key,
+                // validated by the challenge Lambda) + the ADMIN_USER_PASSWORD_AUTH MVP fallback — both yield a
+                // USER token (sub = the vendor user). GenerateSecret=true (a server-side agent holds it).
+                var sellerSuffix = string.IsNullOrWhiteSpace(customAuthClients.SellerClientName)
+                    ? "seller-agent" : customAuthClients.SellerClientName;
+                _ = new UserPoolClient($"{poolPrefix}-{sellerSuffix}-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-{sellerSuffix}-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = true,
+                    ExplicitAuthFlows =
+                    {
+                        "ALLOW_CUSTOM_AUTH",
+                        "ALLOW_ADMIN_USER_PASSWORD_AUTH",   // MVP fallback — same USER identity as Custom-Auth
+                        "ALLOW_REFRESH_TOKEN_AUTH",
+                    },
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AccessTokenValidity = customAuthClients.AccessTokenMinutes > 0 ? customAuthClients.AccessTokenMinutes : 60,
+                    TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs { AccessToken = "minutes" },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Optional PUBLIC buyer/device client: Auth Code + PKCE (public ⇒ Cognito enforces PKCE),
+                // for on-device buyer agents (§ McpAuth.md).
+                if (!string.IsNullOrWhiteSpace(customAuthClients.BuyerDeviceClientName))
+                {
+                    var buyerDays = customAuthClients.BuyerRefreshTokenDays > 0 ? customAuthClients.BuyerRefreshTokenDays : 90;
+                    _ = new UserPoolClient($"{poolPrefix}-{customAuthClients.BuyerDeviceClientName}-client", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-{customAuthClients.BuyerDeviceClientName}-client",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = false,
+                        // ExplicitAuthFlows OMITTED (see the MCP client): an empty-list drifts against Cognito's
+                        // null; OAuth-only client needs no InitiateAuth flows.
+                        SupportedIdentityProviders = { "COGNITO" },
+                        PreventUserExistenceErrors = "ENABLED",
+                        AllowedOauthFlows = { "code" },
+                        AllowedOauthScopes = { "openid", "profile", "email" },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        CallbackUrls = { callbackUrls.ToArray() },
+                        LogoutUrls = { logoutUrls.ToArray() },
+                        RefreshTokenValidity = buyerDays,
+                        AccessTokenValidity = 60,
+                        IdTokenValidity = 60,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            RefreshToken = "days",
+                            AccessToken = "minutes",
+                            IdToken = "minutes",
+                        },
+                        // Refresh-token ROTATION enabled (see the MCP client) — Feature + RetryGracePeriodSeconds
+                        // both required for a clean round-trip.
+                        RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                        {
+                            Feature = "ENABLED",
+                            RetryGracePeriodSeconds = 60,
+                        },
+                    }, new CustomResourceOptions
+                    {
+                        Parent = this,
+                        IgnoreChanges = { "explicitAuthFlows" },
+                    });
+                }
+            }
+
+            // =================================================================
             // SMARTSTORE CONFIDENTIAL CLIENT (additive, flag-gated) — §8
             // =================================================================
             // A confidential app client for the Smartstore storefront's OpenID
@@ -386,6 +617,97 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
 
                 smartstoreClientId = smartstoreClient.Id;
                 smartstoreClientSecret = smartstoreClient.ClientSecret;
+            }
+
+            // =================================================================
+            // M0-8 — MCP RESOURCE SERVER + PUBLIC PKCE CLIENT (opt-in). A Cognito resource server whose
+            // identifier IS the MCP URL (so a token can carry aud == that URL under RFC 8707), plus a PUBLIC
+            // auth-code + PKCE client granted the qualified scope. Absent ⇒ byte-identical baseline. Distinct
+            // from MachineAuth: that mints client_credentials clients (no sub, no aud); the hosted MCP path
+            // needs auth-code + PKCE — the only Cognito flow yielding sub + scope + aud together. The aud
+            // itself is set at RUNTIME (client sends &resource=<Identifier> at /authorize), not here. See
+            // specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+            // =================================================================
+            // Captured for the ManagedLoginBranding block below: ManagedLoginVersion=2 requires a per-client
+            // branding slot or the hosted UI returns "Login pages unavailable" for THIS client's sign-in (the
+            // buyer/device agent's one-time PKCE login). Null unless McpResource was configured for this pool.
+            Output<string>? mcpClientId = null;
+            if (poolConfig.McpResource is { } mcp)
+            {
+                if (string.IsNullOrWhiteSpace(mcp.Identifier))
+                    throw new InvalidOperationException(
+                        $"Pool '{authType}' McpResource has no Identifier — set the MCP endpoint URL " +
+                        "(it is BOTH the resource-server id and the token aud).");
+
+                var mcpScope = string.IsNullOrWhiteSpace(mcp.Scope) ? "invoke" : mcp.Scope;
+
+                var mcpResourceServer = new ResourceServer($"{poolPrefix}-mcp-resource-server", new ResourceServerArgs
+                {
+                    Identifier = mcp.Identifier,
+                    Name = $"{poolPrefix}-mcp-resource-server",
+                    UserPoolId = userPool.Id,
+                    Scopes =
+                    {
+                        new ResourceServerScopeArgs
+                        {
+                            ScopeName = mcpScope,
+                            ScopeDescription = string.IsNullOrWhiteSpace(mcp.ScopeDescription) ? mcpScope : mcp.ScopeDescription,
+                        },
+                    },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Token-visible qualified scope "{identifier}/{scope}" — what the client requests, Cognito puts
+                // in the scope claim, and AipHost's McpTokenGuard checks. Depends on the resource server.
+                var qualifiedMcpScope = $"{mcp.Identifier}/{mcpScope}";
+                var mcpClientSuffix = string.IsNullOrWhiteSpace(mcp.ClientName) ? "mcp" : mcp.ClientName;
+                var mcpDays = mcp.RefreshTokenDays > 0 ? mcp.RefreshTokenDays : 90;
+
+                var mcpClient = new UserPoolClient($"{poolPrefix}-{mcpClientSuffix}-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-{mcpClientSuffix}-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = false,   // public ⇒ Cognito enforces PKCE (S256); works for device + server
+                    // ExplicitAuthFlows intentionally OMITTED (not empty-list): Cognito stores "no flows" as
+                    // null, and an empty-list in the program drifts perpetually against that null. This is an
+                    // OAuth-only client (refresh via /oauth2/token), so it needs no InitiateAuth flows.
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AllowedOauthFlows = { "code" },
+                    // openid/profile/email for the user identity + the qualified MCP scope for the resource.
+                    AllowedOauthScopes = { "openid", "profile", "email", qualifiedMcpScope },
+                    AllowedOauthFlowsUserPoolClient = true,
+                    CallbackUrls = { callbackUrls.ToArray() },
+                    LogoutUrls = { logoutUrls.ToArray() },
+                    RefreshTokenValidity = mcpDays,
+                    AccessTokenValidity = 60,
+                    IdTokenValidity = 60,
+                    TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                    {
+                        RefreshToken = "days",
+                        AccessToken = "minutes",
+                        IdToken = "minutes",
+                    },
+                    // Refresh-token ROTATION enabled — a stolen refresh token is then single-use. BOTH Feature
+                    // AND RetryGracePeriodSeconds must be set: Feature alone leaves the block incomplete and it
+                    // never round-trips (that mis-read as "the plan ignores it" — the pool is actually on the
+                    // PLUS tier, which supports rotation). The 60s grace tolerates one in-flight retry with the
+                    // just-rotated token.
+                    RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                    {
+                        Feature = "ENABLED",
+                        RetryGracePeriodSeconds = 60,
+                    },
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    DependsOn = { mcpResourceServer },
+                    // Only explicitAuthFlows is ignored: this OAuth-only client sets no InitiateAuth flows, and
+                    // Cognito stores "no flows" as null while the provider would send an empty-list → drift.
+                    // Rotation is MANAGED (not ignored) so Pulumi enforces it and drift means it's really off.
+                    IgnoreChanges = { "explicitAuthFlows" },
+                });
+
+                mcpClientId = mcpClient.Id;
             }
 
             // =================================================================
@@ -536,6 +858,26 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 var ssBrandingArgs = BuildBrandingArgsFromConventionFolder(
                     userPool.Id, smartstoreClientId, authType);
                 new ManagedLoginBranding($"{poolPrefix}-smartstore-branding", ssBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
+            // ManagedLoginVersion=2 also requires a per-client branding for the
+            // public MCP PKCE client. Without it the hosted UI returns "Login
+            // pages unavailable" for the buyer/device agent's one-time PKCE
+            // sign-in (each client needs its own branding slot — the public
+            // app client's branding does NOT cover it). Gated on the same
+            // McpResource opt-in that created the client, so the baseline stays
+            // byte-identical for pools with no MCP endpoint.
+            if (poolConfig.McpResource is not null && mcpClientId is not null)
+            {
+                var mcpBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, mcpClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-mcp-branding", mcpBrandingArgs,
                     new CustomResourceOptions
                     {
                         Parent = this,

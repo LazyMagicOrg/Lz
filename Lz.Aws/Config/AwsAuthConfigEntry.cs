@@ -139,6 +139,28 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     public string BffRoutePrefix { get; set; } = "/bff";
 
     /// <summary>
+    /// Opt-in OAuth2 <c>client_credentials</c> (machine-to-machine) provisioning for this pool.
+    /// When null (the default) NO Cognito resource server, custom scopes, or M2M app clients are
+    /// created — the deploy plan is byte-for-byte identical to before, so existing systems/pools are
+    /// unaffected (same guarantee as <see cref="ProvisionBffClient"/>). Cannot be bolted onto the
+    /// public or BFF client: Cognito forbids mixing <c>client_credentials</c> with the code flow on
+    /// one client, so each machine client is a NEW confidential app client. See McpAgents.md M0-2.
+    /// </summary>
+    public MachineAuthConfig? MachineAuth { get; set; }
+
+    /// <summary>
+    /// Opt-in USER-principal credential provisioning for this pool (the M0-7 seller Custom-Auth + buyer
+    /// PKCE model). When null (the default) NO Custom-Auth Lambda, vendor-credential table, pool
+    /// <c>LambdaConfig</c>, or seller/buyer client is created — the deploy plan is byte-for-byte identical to
+    /// before, so existing systems/pools are unaffected (same guarantee as <see cref="MachineAuth"/>). This is
+    /// DISTINCT from <see cref="MachineAuth"/>: that is app-only <c>client_credentials</c>; this authenticates
+    /// per-vendor Cognito USERS non-interactively (Custom-Auth challenge over a vendor API key). Because the
+    /// <c>LambdaConfig</c> it wires is POOL-LEVEL, every resource here — the Lambda especially — MUST stay
+    /// inside the opt-in guard. See McpAgents.md M0-7 and Lz.Aws/AppRunner/CognitoCustomAuth/custom-auth.mjs.
+    /// </summary>
+    public CustomAuthConfig? CustomAuth { get; set; }
+
+    /// <summary>
     /// When true, provision a confidential Cognito app client
     /// (<c>{poolPrefix}-smartstore-client</c>, <c>GenerateSecret=true</c>) for the
     /// Smartstore storefront's OpenID Connect handler (the
@@ -152,6 +174,118 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// See <c>Platform/SMARTSTORE-COGNITO-AUTH.md §8</c>.
     /// </summary>
     public bool ProvisionSmartstoreClient { get; set; } = false;
+
+    /// <summary>
+    /// Opt-in MCP resource server (M0-8). Present ⇒ the component provisions a Cognito resource server whose
+    /// IDENTIFIER is the MCP endpoint URL (URL form is mandatory so it can serve as the token <c>aud</c> under
+    /// RFC 8707) declaring one custom scope, plus a PUBLIC auth-code + PKCE app client granted that scope. When
+    /// null (the default) nothing is created — byte-for-byte identical, same as <see cref="MachineAuth"/> /
+    /// <see cref="CustomAuth"/>. DISTINCT from <see cref="MachineAuth"/>: that welds its resource server to
+    /// <c>client_credentials</c> clients (which carry neither a user <c>sub</c> nor an <c>aud</c>); the hosted
+    /// MCP path needs auth-code + PKCE, the only Cognito flow that yields <c>sub</c> + scope + <c>aud</c>
+    /// together. See specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+    /// </summary>
+    public McpResourceConfig? McpResource { get; set; }
+}
+
+/// <summary>
+/// Machine-to-machine (<c>client_credentials</c>) provisioning for a pool: one Cognito resource
+/// server declaring custom scopes, plus a roster of confidential app clients that each request a
+/// subset of those scopes. Purely additive — see <see cref="AwsAuthConfigEntry.MachineAuth"/>.
+/// </summary>
+public class MachineAuthConfig
+{
+    /// <summary>
+    /// Resource-server identifier — the audience prefix Cognito prepends to each scope on an issued
+    /// access token (e.g. <c>https://api.aiproxydev.click/scutara</c>). Not a real URL that must
+    /// resolve; it just namespaces the scopes. Required when any <see cref="Clients"/> are declared.
+    /// </summary>
+    public string Identifier { get; set; } = string.Empty;
+
+    /// <summary>Custom scopes to declare on the resource server (surfaced in the <c>scope</c> claim).</summary>
+    public List<MachineScope> Scopes { get; set; } = new();
+
+    /// <summary>The confidential <c>client_credentials</c> app clients to provision.</summary>
+    public List<MachineClientConfig> Clients { get; set; } = new();
+
+    /// <summary>Access-token lifetime, in minutes, for the machine clients. Default <c>60</c>.</summary>
+    public int AccessTokenMinutes { get; set; } = 60;
+}
+
+/// <summary>A custom scope on the resource server, e.g. <c>seller</c> / <c>buyer</c>.</summary>
+public class MachineScope
+{
+    public string Name { get; set; } = string.Empty;
+    public string? Description { get; set; }
+}
+
+/// <summary>
+/// One machine app client. <see cref="Scopes"/> are the bare scope names (e.g. <c>seller</c>); the
+/// component qualifies them as <c>{Identifier}/{scope}</c> for the client's allowed-scope list.
+/// </summary>
+public class MachineClientConfig
+{
+    public string Name { get; set; } = string.Empty;
+    public List<string> Scopes { get; set; } = new();
+}
+
+/// <summary>
+/// USER-principal credential provisioning for a pool (M0-7). Present ⇒ the component provisions: a DynamoDB
+/// table of per-vendor API-key hashes, the Custom-Auth challenge Lambda (from
+/// <c>CognitoCustomAuth/custom-auth.mjs</c>) with its IAM role + Cognito invoke permission, the pool's
+/// <c>LambdaConfig</c> (Define/Create/Verify → that Lambda), and a confidential SELLER app client
+/// (<c>ALLOW_CUSTOM_AUTH</c> + the <c>ALLOW_ADMIN_USER_PASSWORD_AUTH</c> MVP fallback). Optionally a PUBLIC
+/// buyer/device client (Auth Code + PKCE + refresh-token rotation). Purely additive — see
+/// <see cref="AwsAuthConfigEntry.CustomAuth"/>.
+/// </summary>
+public class CustomAuthConfig
+{
+    /// <summary>Name suffix of the confidential seller client (<c>{poolPrefix}-{SellerClientName}-client</c>).</summary>
+    public string SellerClientName { get; set; } = "seller-agent";
+
+    /// <summary>Access-token lifetime, in minutes, for the seller client. Default <c>60</c>.</summary>
+    public int AccessTokenMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// When set, ALSO provision a PUBLIC buyer/device client (<c>{poolPrefix}-{BuyerDeviceClientName}-client</c>,
+    /// <c>GenerateSecret=false</c>) — Auth Code + PKCE (Cognito enforces PKCE for public clients) with
+    /// refresh-token ROTATION enabled. When null, no buyer client is created.
+    /// </summary>
+    public string? BuyerDeviceClientName { get; set; }
+
+    /// <summary>Buyer refresh-token validity, in days (rotation on). Default <c>90</c>. Only consulted when
+    /// <see cref="BuyerDeviceClientName"/> is set.</summary>
+    public int BuyerRefreshTokenDays { get; set; } = 90;
+}
+
+/// <summary>
+/// MCP resource-server provisioning for a pool (M0-8). Creates a Cognito <c>ResourceServer</c> whose identifier
+/// is <see cref="Identifier"/> (the MCP endpoint URL) declaring the single scope <see cref="Scope"/>, plus a
+/// PUBLIC auth-code + PKCE client granted <c>{Identifier}/{Scope}</c>. The token's <c>aud == Identifier</c> is
+/// NOT a provisioning property — it materializes only when the client sends <c>&amp;resource=&lt;Identifier&gt;</c>
+/// at <c>/oauth2/authorize</c> (RFC 8707); provisioning's job is purely (resource server + scope) + (that scope
+/// on a PKCE client). Purely additive — see <see cref="AwsAuthConfigEntry.McpResource"/>.
+/// </summary>
+public class McpResourceConfig
+{
+    /// <summary>
+    /// The MCP endpoint URL, in URL form (e.g. <c>https://match.aiproxydev.click/mcp</c>). Becomes BOTH the
+    /// Cognito resource-server identifier and the token <c>aud</c> AipHost validates. Required. Must match the
+    /// AipHost <c>Mcp:ResourceUrl</c> exactly.
+    /// </summary>
+    public string Identifier { get; set; } = string.Empty;
+
+    /// <summary>The single custom scope name (bare, e.g. <c>invoke</c>). Token-visible as <c>{Identifier}/{Scope}</c>.</summary>
+    public string Scope { get; set; } = "invoke";
+
+    /// <summary>Description surfaced on the resource-server scope. Defaults to the scope name.</summary>
+    public string? ScopeDescription { get; set; }
+
+    /// <summary>Name suffix of the public PKCE MCP client (<c>{poolPrefix}-{ClientName}-client</c>). Default <c>mcp</c>.</summary>
+    public string ClientName { get; set; } = "mcp";
+
+    /// <summary>MCP client refresh-token validity, in days (rotation on). Default <c>90</c>.</summary>
+    public int RefreshTokenDays { get; set; } = 90;
 }
 
 /// <summary>

@@ -111,6 +111,7 @@ class Program
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroyTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterUnlockCommand(rootCommand, systemKeyOption, envOption);
         RegisterStatusCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterVerifyCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterParkCommand(rootCommand, systemKeyOption, envOption);
@@ -178,7 +179,7 @@ class Program
             ("Subtenant", "per-subtenant resources",
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
             ("Misc",      "discovery, codegen, utilities",
-                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers" }),
+                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
@@ -546,12 +547,22 @@ class Program
 
         var platformOption = new Option<string?>("--platform", "Override platform from config");
         var topologyOption = new Option<string?>("--topology", "Override topology from config");
+        var secretOption = new Option<string[]>("--secret",
+            "Supply a required-secret value non-interactively (repeatable): " +
+            "--secret \"<name>:<key>=<value>\", e.g. --secret \"scu/icecat:ApiToken=abc123\". " +
+            "Used to satisfy systemconfig RequiredSecrets from scripts; when omitted and a " +
+            "console is attached, missing values are prompted for (input hidden). NOTE: " +
+            "command-line values can land in shell history — prefer the prompt when running by hand.")
+        {
+            Arity = ArgumentArity.ZeroOrMore,
+        };
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(platformOption);
         cmd.AddOption(topologyOption);
+        cmd.AddOption(secretOption);
 
-        cmd.SetHandler(async (systemKey, env, platform, topology) =>
+        cmd.SetHandler(async (systemKey, env, platform, topology, secretArgs) =>
         {
             RequirePlugin(plugin, "deploysystem");
 
@@ -601,6 +612,16 @@ class Program
                     await AwsStateBootstrapper.BootstrapAsync(
                         config.Profile, config.Region, config.State);
 
+                // Required secrets (systemconfig RequiredSecrets, absent = skip):
+                // verify each exists with all keys BEFORE any deploy step; fill
+                // missing values from --secret args or the hidden interactive
+                // prompt; fail fast with instructions when neither is available.
+                if (config.RequiredSecrets is { Count: > 0 })
+                    await Lz.Aws.Secrets.AwsSecretsEnsurer.EnsureAsync(
+                        config,
+                        Lz.Aws.Secrets.SecretsPlanner.ParseSecretArgs(secretArgs),
+                        PromptSecretValue);
+
                 var (system, factory) = PrepareSystem(plugin!, config);
 
                 Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
@@ -611,9 +632,30 @@ class Program
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 await deployment.DeployFoundationAsync();
             }
-        }, systemKeyOption, envOption, platformOption, topologyOption);
+        }, systemKeyOption, envOption, platformOption, topologyOption, secretOption);
 
         root.AddCommand(cmd);
+    }
+
+    /// <summary>
+    /// Hidden-input console prompt for a required-secret value. Returns null when
+    /// no console is attached (stdin redirected — scripted/CI contexts must use
+    /// --secret instead) or when the user enters nothing.
+    /// </summary>
+    private static string? PromptSecretValue(string secretName, string key)
+    {
+        if (Console.IsInputRedirected)
+            return null;
+        Console.Write($"  Enter value for secret '{secretName}' key '{key}' (input hidden): ");
+        var sb = new System.Text.StringBuilder();
+        while (true)
+        {
+            var k = Console.ReadKey(intercept: true);
+            if (k.Key == ConsoleKey.Enter) { Console.WriteLine(); break; }
+            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
+            if (!char.IsControl(k.KeyChar)) sb.Append(k.KeyChar);
+        }
+        return sb.Length == 0 ? null : sb.ToString();
     }
 
     // ---------------------------------------------------------------
@@ -1245,6 +1287,47 @@ class Program
                 {
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region;
+
+                    // Lambda topologies have no ECS service to roll — the per-tenant
+                    // FUNCTION must be rolled with UpdateFunctionCode (Lambda resolves
+                    // the image digest at update time, so a pushed :latest is invisible
+                    // until then; a tenant Pulumi re-deploy no-ops too since the
+                    // ImageUri string never changes). Same compare/force/wait/dry-run
+                    // semantics as the ECS path.
+                    if (Lz.Aws.Lambda.AwsLambdaContainerUpdater.IsLambdaTopology(config.Topology))
+                    {
+                        var lambdaUpdater = new Lz.Aws.Lambda.AwsLambdaContainerUpdater(profile, region);
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine(
+                            $"=== updatecontainer: tenant {tk} ({config.Environment}, lambda){(dryRun ? " [dry-run]" : "")} ===");
+                        Console.ResetColor();
+
+                        foreach (var (svcName, _) in containersToProcess)
+                        {
+                            // Must match AwsLambdaTenantServiceComponent (function name) and
+                            // deploycontainer/deploytenant (ECR repo) naming.
+                            var functionName = $"{config.SystemKey}-{tk}-{svcName}";
+                            var lambdaEcrRepo =
+                                $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                            try
+                            {
+                                var result = await lambdaUpdater.UpdateIfNewerAsync(
+                                    functionName, lambdaEcrRepo, tag, force, wait, dryRun, Cts.Token);
+                                PrintUpdateResult(result);
+                                if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                                    anyFailure = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                anyFailure = true;
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.WriteLine($"  [error] {functionName}: {ex.Message}");
+                                Console.ResetColor();
+                            }
+                        }
+                        continue;
+                    }
+
                     var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
 
                     // Cluster naming differs by topology: the EcsExpress family (the current
@@ -1602,15 +1685,21 @@ class Program
         var forceOption = new Option<bool>("--force",
             "Empty the S3 bucket before deleting (data loss). Without --force, " +
             "deletion fails if the bucket is non-empty.");
+        var forceDeleteProtectedOption = new Option<bool>("--force-delete-protected",
+            "Delete the subtenant DynamoDB table even if it has deletion " +
+            "protection enabled (disables protection first, then deletes — DATA " +
+            "LOSS). Without this flag, a protected table is left intact and the " +
+            "destroy fails. Separate from --force (which only empties the S3 bucket).");
         var yesOption = new Option<bool>("--yes", "Skip the confirmation prompt.");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
         cmd.AddOption(subtenantKeyOption);
         cmd.AddOption(forceOption);
+        cmd.AddOption(forceDeleteProtectedOption);
         cmd.AddOption(yesOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, force, yes) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, subtenantKey, force, forceDeleteProtected, yes) =>
         {
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -1630,7 +1719,8 @@ class Program
                         "  - S3 bucket " +
                         $"{Lz.Aws.Shared.SubtenantBucketManager.BucketName(config.SystemKey, tenantKey, subtenantKey, config.SystemSuffix)} " +
                         $"will be deleted{(force ? " (emptied first — DATA LOSS)" : "")}.");
-                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS).");
+                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS)" +
+                        $"{(forceDeleteProtected ? "; deletion protection, if enabled, will be DISABLED first (--force-delete-protected)" : " — if it has deletion protection enabled, the destroy will FAIL unless you also pass --force-delete-protected")}.");
                     Console.Write("Type 'yes' to confirm: ");
                     Console.ResetColor();
                     var response = Console.ReadLine();
@@ -1645,7 +1735,7 @@ class Program
                 var region = tenantConfig.Region ?? config.Region;
 
                 await Lz.Aws.Shared.SubtenantProvisioner.DeleteOneAsync(
-                    config, tenantConfig, subtenantKey, profile, region, force);
+                    config, tenantConfig, subtenantKey, profile, region, force, forceDeleteProtected);
 
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine($"Subtenant '{subtenantKey}' destroyed.");
@@ -1655,7 +1745,102 @@ class Program
                     "run `lz deploysubtenants` to refresh KVS. The KVS entry " +
                     "for the destroyed subtenant's domain will need manual cleanup.");
             }
-        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, forceOption, yesOption);
+        }, systemKeyOption, envOption, tenantKeyOption, subtenantKeyOption, forceOption, forceDeleteProtectedOption, yesOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // unlock
+    // ---------------------------------------------------------------
+
+    private static void RegisterUnlockCommand(
+        RootCommand root,
+        Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("unlock",
+            "Release a stale Pulumi state lock on a stack (like `pulumi cancel`). A lock " +
+            "left behind by a hard-killed deploy/destroy (Ctrl+C, crash) blocks further " +
+            "operations with \"the stack is currently locked\". Defaults to the SYSTEM " +
+            "(foundation) stack; pass --tenantkey to unlock a tenant stack. Use ONLY when " +
+            "no deploy/destroy is actually running.");
+
+        var tenantKeyOption = new Option<string?>("--tenantkey",
+            "Unlock the tenant stack {systemkey}-{tenantkey}-{env} instead of the foundation stack.");
+        var yesOption = new Option<bool>("--yes", "Skip the confirmation prompt.");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(tenantKeyOption);
+        cmd.AddOption(yesOption);
+
+        cmd.SetHandler(async (systemKey, env, tenantKey, yes) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                var stackName = string.IsNullOrEmpty(tenantKey)
+                    ? $"{config.SystemKey}-{config.Environment}"
+                    : $"{config.SystemKey}-{tenantKey}-{config.Environment}";
+
+                IReadOnlyList<Lz.Aws.Orchestration.PulumiStateLock.LockRecord> locks;
+                try
+                {
+                    locks = await Lz.Aws.Orchestration.PulumiStateLock.ListAsync(config, stackName);
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Could not read locks for stack '{stackName}': {ex.Message}");
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                    continue;
+                }
+
+                if (locks.Count == 0)
+                {
+                    Console.WriteLine($"Stack '{stackName}': no lock present — nothing to release.");
+                    continue;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Stack '{stackName}' is locked by {locks.Count} lock(s):");
+                foreach (var l in locks)
+                    Console.WriteLine(
+                        $"  - pid {(l.Pid?.ToString() ?? "?")} on host {l.Hostname ?? "?"} " +
+                        $"({l.Username ?? "?"}) since {l.Timestamp ?? "?"}");
+                Console.WriteLine(
+                    "Release the lock ONLY if you are certain no deploy/destroy is still running " +
+                    "(verify the host/PID above). Force-unlocking a live update can corrupt the stack state.");
+                Console.ResetColor();
+
+                if (!yes)
+                {
+                    Console.Write("Type 'yes' to release the lock: ");
+                    if (!string.Equals(Console.ReadLine(), "yes", StringComparison.Ordinal))
+                    {
+                        Console.WriteLine("Aborted.");
+                        continue;
+                    }
+                }
+
+                try
+                {
+                    var removed = await Lz.Aws.Orchestration.PulumiStateLock.ReleaseAsync(config, stackName);
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"Released {removed} lock(s) on stack '{stackName}'. Re-run your deploy now.");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Failed to release lock on '{stackName}': {ex.Message}");
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                }
+            }
+        }, systemKeyOption, envOption, tenantKeyOption, yesOption);
 
         root.AddCommand(cmd);
     }
@@ -1972,13 +2157,15 @@ class Program
         var jsonOption = new Option<bool>("--json",
             "Machine-readable output (one JSON document on stdout)");
         var scopeOption = new Option<string>("--scope", () => "all",
-            "Which categories to check/report: all | stack | persistent");
+            "Which categories to report: all | stack | persistent | smoke");
         var expectOption = new Option<string?>("--expect",
             "Assert an overall state and set the exit code: 'deployed' (every stack " +
-            "resource present) or 'destroyed' (no stack resource present or " +
-            "tombstoned). Persistent resources are always informational. The verdict " +
-            "is computed over ALL stack checks (foundation included, regardless of " +
-            "--scope/--tenantkey filtering of the report).");
+            "resource present AND every runtime smoke probe passing) or 'destroyed' " +
+            "(no stack resource present or tombstoned). Persistent resources are " +
+            "always informational. --scope only filters the REPORT — the verdict " +
+            "always covers every check that ran. --tenantkey, however, narrows which " +
+            "tenants are checked at all: a verdict with --tenantkey attests ONLY that " +
+            "tenant.");
 
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
@@ -1992,9 +2179,9 @@ class Program
             RequirePlugin(plugin, "verify");
 
             scope = scope.ToLowerInvariant();
-            if (scope is not ("all" or "stack" or "persistent"))
+            if (scope is not ("all" or "stack" or "persistent" or "smoke"))
             {
-                Console.Error.WriteLine($"--scope must be all, stack, or persistent. Got '{scope}'.");
+                Console.Error.WriteLine($"--scope must be all, stack, persistent, or smoke. Got '{scope}'.");
                 Environment.ExitCode = 1;
                 return;
             }
@@ -2036,6 +2223,8 @@ class Program
                     r.Category == Lz.Aws.Verification.ResourceCategory.Stack).ToList();
                 var persistent = results.Where(r =>
                     r.Category == Lz.Aws.Verification.ResourceCategory.Persistent).ToList();
+                var smoke = results.Where(r =>
+                    r.Category == Lz.Aws.Verification.ResourceCategory.Smoke).ToList();
                 var errors = results.Where(r =>
                     r.State == Lz.Aws.Verification.ResourceState.Error).ToList();
 
@@ -2043,21 +2232,13 @@ class Program
                 {
                     "stack" => stack,
                     "persistent" => persistent,
+                    "smoke" => smoke,
                     _ => results,
                 };
 
-                // --expect verdict. Tombstones count as "still lingering" for
-                // 'destroyed' and as "not cleanly present" for 'deployed'.
-                bool? expectMet = expect switch
-                {
-                    "deployed" => stack.All(r =>
-                        r.State == Lz.Aws.Verification.ResourceState.Present),
-                    "destroyed" => stack.All(r =>
-                        r.State == Lz.Aws.Verification.ResourceState.Absent),
-                    _ => null,
-                };
-                // Errors make either verdict unreliable — fail the expectation.
-                if (expectMet == true && errors.Count > 0) expectMet = false;
+                // The rules (deployed = stack AND smoke; destroyed = stack-only;
+                // Error downgrades MET) live in the unit-tested VerifyVerdict.
+                bool? expectMet = Lz.Aws.Verification.VerifyVerdict.Compute(expect, results);
 
                 if (json)
                 {
@@ -2083,6 +2264,10 @@ class Program
                                 r.State == Lz.Aws.Verification.ResourceState.Present),
                             persistentAbsent = persistent.Count(r =>
                                 r.State == Lz.Aws.Verification.ResourceState.Absent),
+                            smokePassed = smoke.Count(r =>
+                                r.State == Lz.Aws.Verification.ResourceState.Present),
+                            smokeFailed = smoke.Count(r =>
+                                r.State != Lz.Aws.Verification.ResourceState.Present),
                             errors = errors.Count,
                         },
                         results = reported.Select(r => new
@@ -2127,10 +2312,12 @@ class Program
                                 (r.Detail != null ? $"  [{r.Detail}]" : ""));
                         }
                     }
-                    if (scope != "persistent")
+                    if (scope is "all" or "stack")
                         Print("Stack (Pulumi-managed — gone after destroy):", stack);
-                    if (scope != "stack")
+                    if (scope is "all" or "persistent")
                         Print("Persistent (survives destroy by design):", persistent);
+                    if (scope is "all" or "smoke")
+                        Print("Smoke (runtime probes of the deployed surfaces):", smoke);
 
                     Console.WriteLine();
                     Console.WriteLine($"  Stack: {stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
@@ -2138,6 +2325,7 @@ class Program
                         $"{stack.Count(r => r.State == Lz.Aws.Verification.ResourceState.ScheduledForDeletion)} tombstoned; " +
                         $"Persistent: {persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)} present, " +
                         $"{persistent.Count(r => r.State == Lz.Aws.Verification.ResourceState.Absent)} absent; " +
+                        $"Smoke: {smoke.Count(r => r.State == Lz.Aws.Verification.ResourceState.Present)}/{smoke.Count} passing; " +
                         $"Errors: {errors.Count}");
                     if (expect != null)
                     {

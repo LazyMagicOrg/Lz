@@ -111,6 +111,63 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
         Assert.Equal("OFF", aws.AdvancedSecurityMode);
         Assert.False(aws.IncludeDevCallbackUrls);
         Assert.Null(aws.Groups);
+        // M0-2 backward-compat: MachineAuth absent -> null -> no resource server / M2M client.
+        Assert.Null(aws.MachineAuth);
+    }
+
+    [Fact]
+    public void MachineAuthPopulatesFromYaml()
+    {
+        var path = WriteSystemConfig("""
+            AuthConfigs:
+              tenantauth:
+                MachineAuth:
+                  Identifier: https://api.example.com/scutara
+                  AccessTokenMinutes: 30
+                  Scopes:
+                    - Name: seller
+                      Description: Act as a seller agent
+                    - Name: buyer
+                  Clients:
+                    - Name: seller-agent
+                      Scopes: [seller]
+                    - Name: dual-agent
+                      Scopes: [seller, buyer]
+            """);
+
+        var config = ConfigLoader.LoadSystemConfig(path);
+        var aws = Assert.IsType<AwsAuthConfigEntry>(config.AuthConfigs!["tenantauth"]);
+
+        Assert.NotNull(aws.MachineAuth);
+        var m = aws.MachineAuth!;
+        Assert.Equal("https://api.example.com/scutara", m.Identifier);
+        Assert.Equal(30, m.AccessTokenMinutes);
+        Assert.Equal(2, m.Scopes.Count);
+        Assert.Equal("seller", m.Scopes[0].Name);
+        Assert.Equal("Act as a seller agent", m.Scopes[0].Description);
+        Assert.Null(m.Scopes[1].Description);
+        Assert.Equal(2, m.Clients.Count);
+        Assert.Equal("seller-agent", m.Clients[0].Name);
+        Assert.Equal(new[] { "seller" }, m.Clients[0].Scopes);
+        Assert.Equal(new[] { "seller", "buyer" }, m.Clients[1].Scopes);
+    }
+
+    [Fact]
+    public void MachineAuthDefaultsAccessTokenMinutesTo60()
+    {
+        var path = WriteSystemConfig("""
+            AuthConfigs:
+              tenantauth:
+                MachineAuth:
+                  Identifier: https://api.example.com/scutara
+                  Clients:
+                    - Name: agent
+                      Scopes: [seller]
+            """);
+
+        var config = ConfigLoader.LoadSystemConfig(path);
+        var aws = Assert.IsType<AwsAuthConfigEntry>(config.AuthConfigs!["tenantauth"]);
+        Assert.Equal(60, aws.MachineAuth!.AccessTokenMinutes);
     }
 
     [Fact]

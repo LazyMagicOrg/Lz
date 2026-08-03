@@ -49,11 +49,28 @@ public class SystemConfig
     // When omitted, defaults apply: enabled in prod/staging, disabled elsewhere.
     public BackupConfig? Backup { get; set; }
 
+    // Durability — deletion-protection + point-in-time recovery for the
+    // per-subtenant vault/PII DynamoDB table (see DurabilityConfig). When
+    // omitted, NOTHING is applied and the emitted table is byte-identical to a
+    // pre-durability deploy (the MagicPets/no-opt-in baseline).
+    public DurabilityConfig? Durability { get; set; }
+
+    // VectorStore — OpenSearch Serverless (aoss) collection for the semantic-
+    // matching backend (see VectorStoreConfig). When omitted, nothing aoss-
+    // related is provisioned and no OpenSearch env/IAM reaches the tenant
+    // service — the no-opt-in baseline.
+    public VectorStoreConfig? VectorStore { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 
     // --- Runtime Application Settings ---
     public SecretsManagerConfig? SecretsManager { get; set; }
+
+    // RequiredSecrets — secrets that must exist (with listed JSON keys) before
+    // deploysystem proceeds; missing values are prompted for or supplied via
+    // --secret (see RequiredSecretConfig). Absent = nothing checked.
+    public List<RequiredSecretConfig>? RequiredSecrets { get; set; }
     public string? IntegrationSecretsPath { get; set; }
     public IntegrationsConfig? Integrations { get; set; }
     public Dictionary<string, AuthConfigEntry>? AuthConfigs { get; set; }

@@ -29,7 +29,8 @@ public static class DynamoDbTableCreator
     /// </summary>
     public static async Task<bool> EnsureTableAsync(
         string profile, string region, string tableName,
-        Dictionary<string, string>? tags = null)
+        Dictionary<string, string>? tags = null,
+        TableDurabilityDecision? durability = null)
     {
         var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
         if (!chain.TryGetAWSCredentials(profile, out var credentials))
@@ -39,20 +40,35 @@ public static class DynamoDbTableCreator
             credentials,
             Amazon.RegionEndpoint.GetBySystemName(region));
 
-        return await EnsureTableAsync(client, tableName, tags);
+        return await EnsureTableAsync(client, tableName, tags, durability);
     }
 
     /// <summary>
     /// Ensures a DynamoDB table exists using an existing client.
+    /// <paramref name="durability"/> gates OPTIONAL durability protections
+    /// (deletion protection + PITR). Null or <see cref="TableDurabilityDecision.None"/>
+    /// applies nothing, so the emitted request is byte-identical to a
+    /// pre-durability deploy. The protections are re-asserted idempotently when
+    /// the table already exists (never DISABLED here — disabling is reserved for
+    /// the deliberate --force-delete-protected teardown path).
     /// </summary>
     public static async Task<bool> EnsureTableAsync(
         IAmazonDynamoDB client, string tableName,
-        Dictionary<string, string>? tags = null)
+        Dictionary<string, string>? tags = null,
+        TableDurabilityDecision? durability = null)
     {
+        var decision = durability ?? TableDurabilityDecision.None;
+
         // Check if table already exists
         try
         {
-            await client.DescribeTableAsync(tableName);
+            var existing = await client.DescribeTableAsync(tableName);
+            // Idempotent ensure: re-apply requested protections to an existing
+            // table so opting a deployed system in (or re-running deploy) actually
+            // takes effect. Guarded on the flags, so None is a pure no-op here.
+            await ApplyDurabilityAsync(
+                client, tableName, decision,
+                existing.Table.DeletionProtectionEnabled ?? false);
             return false; // Already exists
         }
         catch (ResourceNotFoundException)
@@ -117,6 +133,12 @@ public static class DynamoDbTableCreator
             BillingMode = BillingMode.PAY_PER_REQUEST,
             Tags = tableTags,
         };
+        // Deletion protection is a create-time field (Nullable<bool>): set it ONLY
+        // when requested, so an unset (null) leaves the request byte-identical to
+        // the pre-durability baseline. PITR is applied separately below — it is
+        // not a CreateTable field and requires the table to be ACTIVE first.
+        if (decision.DeletionProtection)
+            createRequest.DeletionProtectionEnabled = true;
 
         await client.CreateTableAsync(createRequest);
 
@@ -166,7 +188,82 @@ public static class DynamoDbTableCreator
             Console.ResetColor();
         }
 
+        // Apply PITR now that the table is ACTIVE. Deletion protection was already
+        // set in the CreateTable request above, so pass currentDeletionProtection:
+        // decision.DeletionProtection to skip a redundant UpdateTable.
+        await ApplyDurabilityAsync(client, tableName, decision, decision.DeletionProtection);
+
         return true;
+    }
+
+    /// <summary>
+    /// Applies the requested durability protections to an ACTIVE table. Gated on
+    /// the decision flags, so <see cref="TableDurabilityDecision.None"/> is a pure
+    /// no-op (the byte-identical baseline). Deletion protection is only ever
+    /// ENABLED here — never disabled; disabling is reserved for the deliberate
+    /// --force-delete-protected teardown path, so a manual protection is never
+    /// silently stripped by a routine deploy.
+    /// </summary>
+    private static async Task ApplyDurabilityAsync(
+        IAmazonDynamoDB client, string tableName,
+        TableDurabilityDecision decision, bool currentDeletionProtection)
+    {
+        if (!decision.Any) return;
+
+        if (decision.DeletionProtection && !currentDeletionProtection)
+        {
+            await client.UpdateTableAsync(new UpdateTableRequest
+            {
+                TableName = tableName,
+                DeletionProtectionEnabled = true,
+            });
+        }
+
+        if (decision.PointInTimeRecovery)
+            await EnablePitrWithRetryAsync(client, tableName);
+    }
+
+    /// <summary>
+    /// Enables point-in-time recovery, tolerating the transient
+    /// <see cref="ContinuousBackupsUnavailableException"/> ("Backups are being
+    /// enabled for the table … Please retry later") that DynamoDB returns for the
+    /// first several seconds after a table becomes ACTIVE — a fresh table is not
+    /// immediately ready for the continuous-backups subsystem. Retries with backoff
+    /// until it takes or a ~3-minute ceiling is hit (past which the exception
+    /// propagates and fails the deploy loudly — a genuinely unavailable PITR is a
+    /// real problem, not something to swallow). Enabling is idempotent server-side,
+    /// so a re-ensure on an already-PITR table just returns OK.
+    /// </summary>
+    private static async Task EnablePitrWithRetryAsync(IAmazonDynamoDB client, string tableName)
+    {
+        var request = new UpdateContinuousBackupsRequest
+        {
+            TableName = tableName,
+            PointInTimeRecoverySpecification = new PointInTimeRecoverySpecification
+            {
+                PointInTimeRecoveryEnabled = true,
+            },
+        };
+
+        var deadline = DateTime.UtcNow.AddMinutes(3);
+        var delayMs = 3000;
+        var waited = false;
+        while (true)
+        {
+            try
+            {
+                await client.UpdateContinuousBackupsAsync(request);
+                if (waited) Console.WriteLine(" enabled");
+                return;
+            }
+            catch (ContinuousBackupsUnavailableException) when (DateTime.UtcNow < deadline)
+            {
+                if (!waited) { Console.Write($"    Waiting for PITR on {tableName}..."); waited = true; }
+                Console.Write(".");
+                await Task.Delay(delayMs);
+                delayMs = Math.Min(delayMs + 2000, 10000);
+            }
+        }
     }
 
     /// <summary>

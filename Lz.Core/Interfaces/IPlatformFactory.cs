@@ -38,8 +38,22 @@ public interface IPlatformFactory
     /// <summary>
     /// Post-deploy actions to run after Pulumi up for the foundation phase.
     /// Returns null if no post-deploy actions are needed.
+    /// NOTE: invoked by SharedDeployment (`lz deployshared`) — on the Keycloak
+    /// topology this is the Keycloak DB init/seed. `lz deploysystem` does NOT
+    /// run it; see <see cref="GetSystemPostDeployAction"/> for that phase.
     /// </summary>
     IPostDeployAction? GetFoundationPostDeployAction();
+
+    /// <summary>
+    /// Post-deploy action for `lz deploysystem` (the per-environment foundation),
+    /// run after the foundation Pulumi up with the stack outputs. Distinct from
+    /// <see cref="GetFoundationPostDeployAction"/>, which belongs to the
+    /// shared-services phase (`lz deployshared`, Keycloak init) — conflating the
+    /// two would run Keycloak init at the wrong time on that topology. The
+    /// Cognito-based topologies override this to imperatively ensure the
+    /// {SystemKey} system DynamoDB table (idempotent). Default null.
+    /// </summary>
+    IPostDeployAction? GetSystemPostDeployAction() => null;
 
     /// <summary>
     /// Post-deploy action for building/pushing container images and scaling

@@ -181,7 +181,7 @@ public static class AwsStateBootstrapper
         return secretsProviderUrl[9..]; // strip "awskms://"
     }
 
-    private static AmazonS3Client CreateS3Client(string profile, string region)
+    internal static AmazonS3Client CreateS3Client(string profile, string region)
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 

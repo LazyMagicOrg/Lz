@@ -35,7 +35,7 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
     // Lambda-specific components.
     public virtual IComputeEnvironmentComponent CreateComputeEnvironment() => new AwsLambdaComputeComponent();
     public virtual IServiceComponent CreateService() => new AwsLambdaServiceComponent();
-    public virtual ITenantServiceComponent CreateTenantService() => new AwsLambdaTenantServiceComponent(_originHolder);
+    public virtual ITenantServiceComponent CreateTenantService() => new AwsLambdaTenantServiceComponent(_originHolder, _config);
     public virtual ITenantCdnComponent CreateTenantCdn() => new AwsLambdaCloudFrontComponent(_originHolder);
 
     // Reused from AppRunner (no-VPC network, DynamoDB, S3, Cognito, tenant data).
@@ -53,6 +53,9 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
     public virtual ITailscaleComponent? CreateTailscale() => null;
     public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new AwsEcsExpressFoundationPostDeployAction(_config);
+    // deploysystem-phase hook: ensure the {SystemKey} system table (idempotent).
+    public virtual IPostDeployAction? GetSystemPostDeployAction()
+        => new AwsEcsExpressFoundationPostDeployAction(_config);
     public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
     public virtual ITailscaleKeyManager? GetTailscaleKeyManager() => null;
     public virtual ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
@@ -60,22 +63,19 @@ public class AwsLambdaPlatformFactory : IAwsPlatformFactory
 
     // The container image is built/pushed by `lz deploycontainer`; the per-tenant
     // Lambda references {ecr}:latest, so deploycontainer must run before deploytenant.
-    // No ECS-style scale/build post-deploy applies here — but the tenant-phase table
-    // creation ({sk}_{tk} data table + {sk}_{tk}_bff / {sk}_{tk}_cbff session stores)
-    // and the apex-alias verification still must run, same as on EcsExpress. Reuse
-    // AwsEcsExpressPostDeployAction with an EMPTY services list: its ECS
-    // force-new-deployment step iterates zero services and no-ops, while
-    // EnsureTenantTablesAsync / VerifyApexAliasAsync run. Returning null here (as
-    // this method once did) leaves a FRESH lambda-topology system with no tenant/BFF
-    // tables, and every BFF login 500s at the session PutItem
-    // (DynamoBffSessionStore.CreateAsync → ResourceNotFoundException); the flipped
-    // Fargate→Lambda systems never noticed because their tables already existed.
+    // AwsLambdaPostDeployAction does the tenant-phase work: the EcsExpress table
+    // creation + apex verification (reused with an empty services list — returning
+    // null here once left fresh systems with no tenant/BFF tables and 500ing BFF
+    // logins), PLUS a digest-compared UpdateFunctionCode roll of each host-layer
+    // function so deploytenant leaves the tenant on current code — the same
+    // guarantee the ECS topologies give via their task cycle (Lambda resolves the
+    // image digest only at UpdateFunctionCode time; without the roll, a pushed
+    // :latest is silently ignored).
     public virtual IPostDeployAction? GetServiceDeployAction(
         SystemDefinition system, IReadOnlyList<ServiceDefinition> services,
         string? tenantKey = null, TenantConfig? tenantConfig = null)
         => tenantKey != null
-            ? new AwsEcsExpressPostDeployAction(
-                _config, Array.Empty<ServiceDefinition>(), tenantKey, tenantConfig)
+            ? new AwsLambdaPostDeployAction(_config, services, tenantKey, tenantConfig)
             : null;
 
     public virtual ITransitionChecker CreateTransitionChecker() => new AwsAppRunnerTransitionChecker(_config);

@@ -84,50 +84,136 @@ public static class SubtenantProvisioner
             ? $"    {bucketName} — created"
             : $"    {bucketName} — exists (policy re-applied)");
 
-        // DynamoDB table — {sk}_{tk}_{stk}
+        // DynamoDB table — {sk}_{tk}_{stk}. This is the subtenant VAULT/PII table;
+        // system.Durability (when set) gates deletion protection + PITR on it.
         var tableName = $"{sk}_{tk}_{subtenantKey}";
         Console.WriteLine($"  subtenant '{subtenantKey}': ensuring table {tableName}");
+        var durability = TableDurabilityPolicy.ForVaultTable(system.Durability);
         var tableCreated = await DynamoDbTableCreator.EnsureTableAsync(
             profile, region, tableName,
-            new Dictionary<string, string>(tags) { { "Level", "subtenant" } });
+            new Dictionary<string, string>(tags) { { "Level", "subtenant" } },
+            durability);
         Console.WriteLine(tableCreated
             ? $"    {tableName} — created"
             : $"    {tableName} — exists");
+        // Surface the durability protections applied — the requested decision IS
+        // the applied state (ApplyDurabilityAsync applies exactly it, and any
+        // failure throws before 'created' prints). Reported HERE, uniformly for
+        // the create and exists paths, rather than inside DynamoDbTableCreator
+        // where the create-path deletion-protection set is deliberately skipped by
+        // ApplyDurabilityAsync and would go unlogged. Printed only when something
+        // is requested, so a no-opt-in system's output is unchanged.
+        if (durability.Any)
+            Console.WriteLine(
+                $"    {tableName} — durability: deletion protection " +
+                $"{(durability.DeletionProtection ? "ENABLED" : "off")}, " +
+                $"point-in-time recovery {(durability.PointInTimeRecovery ? "ENABLED" : "off")}");
     }
 
     /// <summary>
     /// Destroy the S3 bucket and DynamoDB table for a single subtenant.
     /// When <paramref name="forceEmptyBucket"/> is true the bucket is emptied
     /// before deletion (data loss — callers should confirm with the user).
-    /// The DynamoDB table is always destroyed; no way to empty-first for a
-    /// table.
+    /// <para>
+    /// If the subtenant table has DynamoDB deletion protection enabled, it is
+    /// NOT deleted unless <paramref name="forceDeleteProtected"/> is also set —
+    /// in which case protection is disabled first, then the table is deleted.
+    /// Without the flag, a protected table causes this to throw (the destroy
+    /// fails loudly rather than silently leaving PII behind or silently
+    /// stripping the protection).
+    /// </para>
     /// </summary>
     public static async Task DeleteOneAsync(
         SystemConfig system, TenantConfig tenant, string subtenantKey,
-        string profile, string region, bool forceEmptyBucket)
+        string profile, string region, bool forceEmptyBucket,
+        bool forceDeleteProtected = false)
     {
         var sk = system.SystemKey;
         var tk = tenant.TenantKey;
 
         var bucketName = SubtenantBucketManager.BucketName(
             sk, tk, subtenantKey, system.SystemSuffix);
+        var tableName = $"{sk}_{tk}_{subtenantKey}";
+
+        using var ddb = CreateDynamoClient(profile, region);
+
+        // Resolve the table teardown decision BEFORE any destructive step. A
+        // protected-table refusal must abort the WHOLE destroy — never leave a
+        // deleted bucket beside a surviving table (a half-destroyed subtenant).
+        var (tableExists, isProtected) = await DescribeTableProtectionAsync(ddb, tableName);
+        var action = TableDurabilityPolicy.DecideTeardown(isProtected, forceDeleteProtected);
+        if (action == TableTeardownAction.Refuse)
+            throw new InvalidOperationException(
+                $"DynamoDB table '{tableName}' has deletion protection enabled; refusing " +
+                "to delete it (nothing was destroyed — the S3 bucket is untouched). This is " +
+                "the subtenant vault/PII table; its rows are destroyed by deletion. Re-run " +
+                "with --force-delete-protected to disable protection and delete it (DATA LOSS; " +
+                "ensure the PITR/backup window is an acceptable recovery point first).");
+
+        // Past the gate — both the bucket and the table WILL be destroyed.
         Console.WriteLine($"  deleting bucket {bucketName}");
         await SubtenantBucketManager.DeleteBucketAsync(profile, region, bucketName, forceEmptyBucket);
 
-        var tableName = $"{sk}_{tk}_{subtenantKey}";
         Console.WriteLine($"  deleting table {tableName}");
-        await DeleteDynamoTableAsync(profile, region, tableName);
+        if (!tableExists)
+            return; // Table already gone; bucket handled above.
+        await ExecuteTableTeardownAsync(ddb, tableName, action);
     }
 
-    private static async Task DeleteDynamoTableAsync(string profile, string region, string tableName)
+    private static Amazon.DynamoDBv2.AmazonDynamoDBClient CreateDynamoClient(
+        string profile, string region)
     {
         var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
         if (!chain.TryGetAWSCredentials(profile, out var credentials))
             throw new InvalidOperationException(
                 $"Cannot resolve AWS credentials for profile '{profile}'.");
 
-        using var client = new Amazon.DynamoDBv2.AmazonDynamoDBClient(
+        return new Amazon.DynamoDBv2.AmazonDynamoDBClient(
             credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+    }
+
+    /// <summary>
+    /// (exists, isProtected) for the live table. A missing table is (false,
+    /// false) — nothing to delete and nothing to refuse.
+    /// </summary>
+    private static async Task<(bool exists, bool isProtected)> DescribeTableProtectionAsync(
+        Amazon.DynamoDBv2.IAmazonDynamoDB client, string tableName)
+    {
+        try
+        {
+            var desc = await client.DescribeTableAsync(tableName);
+            return (true, desc.Table.DeletionProtectionEnabled ?? false);
+        }
+        catch (Amazon.DynamoDBv2.Model.ResourceNotFoundException)
+        {
+            return (false, false);
+        }
+    }
+
+    /// <summary>
+    /// Executes the resolved teardown for an existing table. <see
+    /// cref="TableTeardownAction.Refuse"/> is impossible here — it is gated in
+    /// <see cref="DeleteOneAsync"/> before any destructive step.
+    /// </summary>
+    private static async Task ExecuteTableTeardownAsync(
+        Amazon.DynamoDBv2.IAmazonDynamoDB client, string tableName, TableTeardownAction action)
+    {
+        if (action == TableTeardownAction.DisableProtectionThenDelete)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(
+                $"    {tableName} is deletion-protected — disabling protection " +
+                "(--force-delete-protected) before delete.");
+            Console.ResetColor();
+            await client.UpdateTableAsync(new Amazon.DynamoDBv2.Model.UpdateTableRequest
+            {
+                TableName = tableName,
+                DeletionProtectionEnabled = false,
+            });
+            // UpdateTable returns before the change applies; DeleteTable on a
+            // still-UPDATING or still-protected table fails. Wait for it to clear.
+            await WaitForDeletionProtectionClearedAsync(client, tableName);
+        }
 
         try
         {
@@ -136,6 +222,30 @@ public static class SubtenantProvisioner
         catch (Amazon.DynamoDBv2.Model.ResourceNotFoundException)
         {
             // Already gone — no-op
+        }
+    }
+
+    /// <summary>
+    /// Polls until the table is ACTIVE with deletion protection cleared, so a
+    /// following DeleteTable does not race a still-protected or still-UPDATING
+    /// view. Two-minute ceiling — disabling protection is a fast metadata update.
+    /// </summary>
+    private static async Task WaitForDeletionProtectionClearedAsync(
+        Amazon.DynamoDBv2.IAmazonDynamoDB client, string tableName)
+    {
+        var deadline = DateTime.UtcNow.AddMinutes(2);
+        while (true)
+        {
+            var desc = await client.DescribeTableAsync(tableName);
+            if (desc.Table.TableStatus == Amazon.DynamoDBv2.TableStatus.ACTIVE &&
+                desc.Table.DeletionProtectionEnabled != true)
+                return;
+
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException(
+                    $"Deletion protection on '{tableName}' did not clear within 2 minutes.");
+
+            await Task.Delay(2000);
         }
     }
 }

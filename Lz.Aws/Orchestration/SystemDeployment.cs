@@ -156,6 +156,23 @@ public class SystemDeployment
             await foundationServiceDeploy.ExecuteAsync(foundationOutputs);
         }
 
+        // --- Post-deploy: imperative system-scope ensures (e.g. the {SystemKey}
+        // system DynamoDB table on the Cognito topologies). Deliberately a
+        // SEPARATE hook from GetFoundationPostDeployAction, which deployshared
+        // runs in the shared-services account (Keycloak init) — before this hook
+        // existed, systems that never run deployshared (lambda/ecsexpress/
+        // apprunner) ended up with NO system table at all. Idempotent.
+        var systemPostDeploy = _factory.GetSystemPostDeployAction();
+        if (systemPostDeploy != null)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Running system post-deploy actions...");
+            var systemOutputs = result.Outputs.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value.Value);
+            await systemPostDeploy.ExecuteAsync(systemOutputs);
+        }
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("System deployment complete.");
@@ -800,6 +817,16 @@ public class SystemDeployment
         var fileStorage = _factory.CreateFileStorage();
         var fileStorageOutputs = fileStorage.Deploy(_config, networkOutputs);
 
+        // Vector store: OpenSearch Serverless (aoss) collection for semantic
+        // matching — opt-in via systemconfig VectorStore (absent = nothing
+        // provisioned; see VectorStoreConfig). Foundation-owned so it exists in
+        // every account the system deploys to — the original out-of-band
+        // collection was silently left behind by an account migration, which
+        // deploy ownership makes impossible to repeat.
+        Lz.Aws.VectorStore.AwsVectorStoreComponent? vectorStore = null;
+        if (_config.VectorStore != null)
+            vectorStore = new Lz.Aws.VectorStore.AwsVectorStoreComponent(_config);
+
         // Gate Checker: Lambda for verifying EFS/DB data at gate-check time
         IGateCheckerOutputs? gateCheckerOutputs = null;
         var gateCheckerComponent = AwsFactory?.CreateGateChecker();
@@ -903,6 +930,16 @@ public class SystemDeployment
         {
             exports["seederTaskFamily"] = seedTaskOutputs.TaskFamily;
             exports["seederImageRepoUrl"] = seedTaskOutputs.ContainerImageRepositoryUrl;
+        }
+
+        // Tenant stacks consume these via StackReference: the endpoint becomes
+        // the service's OpenSearch__Endpoint env var; the ARN scopes its
+        // aoss:APIAccessAll IAM statement. Absent when not opted in.
+        if (vectorStore != null)
+        {
+            exports["vectorStoreEndpoint"] = vectorStore.CollectionEndpoint;
+            exports["vectorStoreCollectionArn"] = vectorStore.CollectionArn;
+            exports["vectorStoreCollectionName"] = vectorStore.CollectionName;
         }
 
         return new FoundationOutputs(networkOutputs, computeOutputs, databaseOutputs, fileStorageOutputs, gateCheckerOutputs, seedTaskOutputs, exports);

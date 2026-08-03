@@ -60,6 +60,9 @@ public class AwsAppRunnerPlatformFactory : IAwsPlatformFactory
     // Foundation post-deploy: create system-level DynamoDB table
     public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new Lz.Aws.EcsExpress.AwsEcsExpressFoundationPostDeployAction(_config);
+    // deploysystem-phase hook: ensure the {SystemKey} system table (idempotent).
+    public virtual IPostDeployAction? GetSystemPostDeployAction()
+        => new Lz.Aws.EcsExpress.AwsEcsExpressFoundationPostDeployAction(_config);
 
     // No Tailscale
     public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
