@@ -803,14 +803,20 @@ class Program
         var targetPrefixOption = new Option<string?>("--target-prefix",
             "Optional S3 key prefix under /wwwroot/ for static-site deploys (e.g. 'explore' → s3://bucket/wwwroot/explore/). " +
             "Ignored for Blazor WASM deploys.");
+        var appNameOption = new Option<string?>("--appname",
+            "Override the app-name segment of the target bucket ({sk}---webapp-{appname}-{ss}). " +
+            "Defaults to the webapp folder name (lowercased). Use to deploy one app's build into " +
+            "another app's slot without touching routing — e.g. --webapp EventItMud --appname eventit " +
+            "deploys the Mud build into the existing 'eventit' bucket that CloudFront already serves at /.");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
         cmd.AddOption(webappOption);
         cmd.AddOption(projectOption);
         cmd.AddOption(targetPrefixOption);
+        cmd.AddOption(appNameOption);
 
-        cmd.SetHandler(async (systemKey, env, tenantKey, webapp, project, targetPrefix) =>
+        cmd.SetHandler(async (systemKey, env, tenantKey, webapp, project, targetPrefix, appName) =>
         {
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -879,7 +885,12 @@ class Program
                     var topology = Lz.Aws.Topologies.AwsTopologies.Get(config.Topology);
                     if (!topology.UsesCentralAuth)
                     {
-                        var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
+                        // Bucket app-name segment: --appname override if given, else the
+                        // webapp folder name. The override lets one app's build deploy into
+                        // another app's bucket/route (e.g. EventItMud → the 'eventit' slot).
+                        var webappName = (!string.IsNullOrWhiteSpace(appName)
+                            ? appName
+                            : Path.GetFileName(webappFolder)).ToLowerInvariant();
                         bucketName = $"{config.SystemKey}---webapp-{webappName}-{config.SystemSuffix}";
                     }
                     else
@@ -915,7 +926,7 @@ class Program
                     }
                 }
             }
-        }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption, targetPrefixOption);
+        }, systemKeyOption, envOption, tenantKeyOption, webappOption, projectOption, targetPrefixOption, appNameOption);
 
         root.AddCommand(cmd);
     }
