@@ -14,7 +14,9 @@ namespace Lz.Aws;
 /// </summary>
 public static class AwsStateBootstrapper
 {
-    public static async Task BootstrapAsync(string profile, string region, StateConfig state)
+    public static async Task BootstrapAsync(
+        string profile, string region, StateConfig state,
+        int? noncurrentVersionExpirationDays = null)
     {
         var bucketName = ParseBucketName(state.Backend);
         var kmsAlias = ParseKmsAlias(state.SecretsProvider);
@@ -26,7 +28,7 @@ public static class AwsStateBootstrapper
         Console.WriteLine($"  Profile: {profile}");
         Console.WriteLine();
 
-        await EnsureS3BucketAsync(profile, region, bucketName);
+        await EnsureS3BucketAsync(profile, region, bucketName, noncurrentVersionExpirationDays);
         await EnsureKmsKeyAsync(profile, region, kmsAlias);
 
         Console.WriteLine();
@@ -35,17 +37,23 @@ public static class AwsStateBootstrapper
         Console.ResetColor();
     }
 
-    private static async Task EnsureS3BucketAsync(string profile, string region, string bucketName)
+    private static async Task EnsureS3BucketAsync(
+        string profile, string region, string bucketName,
+        int? noncurrentVersionExpirationDays)
     {
         var client = CreateS3Client(profile, region);
 
-        // Check if bucket exists
+        // Check if bucket exists. The bucket is VERSIONED and every `lz` run
+        // writes new state versions, so the hygiene lifecycle (opt-in) must be
+        // ensured on the already-exists path too — not only at creation.
         try
         {
             await client.GetBucketLocationAsync(new GetBucketLocationRequest { BucketName = bucketName });
             Console.ForegroundColor = ConsoleColor.Gray;
-            Console.WriteLine($"  S3 bucket '{bucketName}' already exists. Skipping.");
+            Console.WriteLine($"  S3 bucket '{bucketName}' already exists. Skipping creation.");
             Console.ResetColor();
+            if (noncurrentVersionExpirationDays is int existingDays)
+                await EnsureNoncurrentVersionExpirationAsync(client, bucketName, existingDays);
             return;
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -109,9 +117,45 @@ public static class AwsStateBootstrapper
             },
         });
 
+        // Hygiene opt-in: expire noncurrent state versions (see EnsureNoncurrent...).
+        if (noncurrentVersionExpirationDays is int days)
+            await EnsureNoncurrentVersionExpirationAsync(client, bucketName, days);
+
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("  S3 bucket created and configured.");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Idempotently apply a lifecycle rule expiring NONCURRENT state-object
+    /// versions after <paramref name="days"/> days. Current versions (the live
+    /// Pulumi state) are never touched. PutLifecycleConfiguration replaces the
+    /// bucket's lifecycle config — safe: this bucket carries no other rules.
+    /// </summary>
+    private static async Task EnsureNoncurrentVersionExpirationAsync(
+        IAmazonS3 client, string bucketName, int days)
+    {
+        Console.WriteLine($"  Ensuring state-bucket lifecycle (noncurrent versions > {days}d expire)...");
+        await client.PutLifecycleConfigurationAsync(new PutLifecycleConfigurationRequest
+        {
+            BucketName = bucketName,
+            Configuration = new LifecycleConfiguration
+            {
+                Rules = new List<LifecycleRule>
+                {
+                    new()
+                    {
+                        Id = "lz-hygiene-noncurrent-expire",
+                        Status = LifecycleRuleStatus.Enabled,
+                        Filter = new LifecycleFilter(), // whole bucket
+                        NoncurrentVersionExpiration = new LifecycleRuleNoncurrentVersionExpiration
+                        {
+                            NoncurrentDays = days,
+                        },
+                    },
+                },
+            },
+        });
     }
 
     private static async Task EnsureKmsKeyAsync(string profile, string region, string kmsAlias)

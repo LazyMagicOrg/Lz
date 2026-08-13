@@ -47,4 +47,13 @@ public class ContainerDefinition
     /// from local NuGet sources (not nuget.org).
     /// </summary>
     public bool SyncPackages { get; set; }
+
+    /// <summary>
+    /// Target platform for the buildx build. Default "linux/amd64" — the
+    /// pre-existing baseline. Set "linux/arm64" together with
+    /// LambdaOptions.Architecture = "arm64" for the cheaper Graviton runtime
+    /// (note: cross-building arm64 on an x86 host runs under QEMU emulation
+    /// and is substantially slower).
+    /// </summary>
+    public string Platform { get; set; } = "linux/amd64";
 }

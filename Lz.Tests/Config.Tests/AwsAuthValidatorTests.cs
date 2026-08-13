@@ -27,6 +27,42 @@ public class AwsAuthValidatorTests
         Assert.Contains(errs, e => e.Contains("AdvancedSecurityMode") && e.Contains("FULL"));
     }
 
+    // ---- UserPoolTier (cost-optimization: unpin pools from PLUS) -------------
+
+    [Fact]
+    public void Validate_RejectsUnknownUserPoolTier()
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry { UserPoolTier = "PREMIUM" }), errs);
+        Assert.Contains(errs, e => e.Contains("UserPoolTier") && e.Contains("PREMIUM"));
+    }
+
+    [Theory]
+    [InlineData("LITE", "AUDIT")]
+    [InlineData("ESSENTIALS", "AUDIT")]
+    [InlineData("ESSENTIALS", "ENFORCED")]
+    public void Validate_RejectsNonPlusTierWithThreatProtection(string tier, string asm)
+    {
+        // Threat protection (any non-OFF AdvancedSecurityMode) is PLUS-only; the
+        // contradictory combination must fail HERE, not mid-deploy inside Cognito.
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(
+            WithPool(new AwsAuthConfigEntry { UserPoolTier = tier, AdvancedSecurityMode = asm }), errs);
+        Assert.Contains(errs, e => e.Contains("UserPoolTier") && e.Contains("PLUS"));
+    }
+
+    [Theory]
+    [InlineData("ESSENTIALS", "OFF")]   // the unpin-from-PLUS shape (consumerauth)
+    [InlineData("PLUS", "AUDIT")]        // explicit PLUS with threat protection
+    [InlineData(null, "AUDIT")]          // tier unmanaged — the pre-existing baseline
+    public void Validate_AcceptsCoherentTierCombinations(string? tier, string asm)
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(
+            WithPool(new AwsAuthConfigEntry { UserPoolTier = tier, AdvancedSecurityMode = asm }), errs);
+        Assert.DoesNotContain(errs, e => e.Contains("UserPoolTier"));
+    }
+
     [Theory]
     [InlineData(5)]
     [InlineData(100)]

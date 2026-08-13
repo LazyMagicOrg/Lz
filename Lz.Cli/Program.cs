@@ -556,13 +556,20 @@ class Program
         {
             Arity = ArgumentArity.ZeroOrMore,
         };
+        var tailscaleKeyOption = new Option<string?>("--tailscale-key",
+            "Tailscale API access key to seed into the system secret ({systemkey}/system) before " +
+            "the subnet router deploys. If omitted and the key is not already stored, you are " +
+            "prompted (input hidden) when a console is attached; otherwise the deploy fails asking " +
+            "for --tailscale-key. Create one at https://login.tailscale.com/admin/settings/keys. " +
+            "NOTE: a value on the command line can land in shell history — prefer the prompt by hand.");
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(platformOption);
         cmd.AddOption(topologyOption);
         cmd.AddOption(secretOption);
+        cmd.AddOption(tailscaleKeyOption);
 
-        cmd.SetHandler(async (systemKey, env, platform, topology, secretArgs) =>
+        cmd.SetHandler(async (systemKey, env, platform, topology, secretArgs, tailscaleKey) =>
         {
             RequirePlugin(plugin, "deploysystem");
 
@@ -610,7 +617,8 @@ class Program
                 // Ensure Pulumi state backend (S3 bucket + KMS key) exists
                 if (config.State != null)
                     await AwsStateBootstrapper.BootstrapAsync(
-                        config.Profile, config.Region, config.State);
+                        config.Profile, config.Region, config.State,
+                        config.Hygiene?.S3NoncurrentVersionExpirationDays);
 
                 // Required secrets (systemconfig RequiredSecrets, absent = skip):
                 // verify each exists with all keys BEFORE any deploy step; fill
@@ -630,9 +638,9 @@ class Program
                 Console.WriteLine();
 
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
-                await deployment.DeployFoundationAsync();
+                await deployment.DeployFoundationAsync(tailscaleKey);
             }
-        }, systemKeyOption, envOption, platformOption, topologyOption, secretOption);
+        }, systemKeyOption, envOption, platformOption, topologyOption, secretOption, tailscaleKeyOption);
 
         root.AddCommand(cmd);
     }
@@ -723,7 +731,8 @@ class Program
                             ecrName,
                             config.Profile,
                             config.Region,
-                            tag);
+                            tag,
+                            config.Hygiene?.EcrUntaggedImageRetentionDays);
                     }
 
                     // If a specific foundation container was requested, we're done
@@ -774,7 +783,8 @@ class Program
                             ecrName,
                             profile,
                             region,
-                            tag);
+                            tag,
+                            config.Hygiene?.EcrUntaggedImageRetentionDays);
                     }
                 }
             }
@@ -1952,7 +1962,8 @@ class Program
                 // Ensure Pulumi state backend exists (needed to find the stack)
                 if (config.State != null)
                     await AwsStateBootstrapper.BootstrapAsync(
-                        config.Profile, config.Region, config.State);
+                        config.Profile, config.Region, config.State,
+                        config.Hygiene?.S3NoncurrentVersionExpirationDays);
 
                 var (system, factory) = PrepareSystem(plugin!, config);
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
@@ -1995,7 +2006,8 @@ class Program
                 // Ensure Pulumi state backend exists (needed to find the stack)
                 if (config.State != null)
                     await AwsStateBootstrapper.BootstrapAsync(
-                        config.Profile, config.Region, config.State);
+                        config.Profile, config.Region, config.State,
+                        config.Hygiene?.S3NoncurrentVersionExpirationDays);
 
                 var (system, factory) = PrepareSystem(plugin!, config);
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);

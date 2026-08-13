@@ -17,4 +17,12 @@ public class AwsEcsExpressComputeOutputs : IComputeEnvironmentOutputs
     // ECSExpress-specific
     public required Output<string> ClusterArn { get; init; }
     public required Output<string> CloudMapNamespaceId { get; init; }
+
+    // Private-networking hardening (opt-in). Carried here because the CDN
+    // component receives only compute outputs, never network outputs. Default
+    // null/false keeps non-opt-in siblings unchanged.
+    /// <summary>ARN of the ingress ALB (internal when PrivateNetworking). Feeds the CloudFront VpcOrigin.</summary>
+    public Output<string>? AlbArn { get; init; }
+    /// <summary>True when the topology built private subnets + an internal ALB (opt-in).</summary>
+    public bool PrivateNetworking { get; init; }
 }

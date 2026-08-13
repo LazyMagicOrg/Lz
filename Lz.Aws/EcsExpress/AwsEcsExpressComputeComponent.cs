@@ -72,6 +72,10 @@ public class AwsEcsExpressComputeComponent : ComponentResource, IComputeEnvironm
             InternalIngressEndpoint = Output.Create(""), // No internal ALB
             ClusterArn = cluster.Arn,
             CloudMapNamespaceId = cloudMapNamespace.Id,
+            // Private-network (opt-in) — carried through so the CDN (which only
+            // receives compute outputs) can build a VPC origin to the internal ALB.
+            AlbArn = networkOutputs.AlbArn,
+            PrivateNetworking = networkOutputs.PrivateNetworking,
         };
     }
 }

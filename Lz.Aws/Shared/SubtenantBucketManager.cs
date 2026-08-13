@@ -53,12 +53,51 @@ public static class SubtenantBucketManager
     public static async Task<bool> EnsureBucketAsync(
         string profile, string region, string bucketName, string accountId,
         Dictionary<string, string>? tags = null,
-        IReadOnlyList<string>? corsAllowedOrigins = null)
+        IReadOnlyList<string>? corsAllowedOrigins = null,
+        int? noncurrentVersionExpirationDays = null)
     {
         using var client = CreateClient(profile, region);
         var created = await EnsureBucketCreatedAsync(client, bucketName);
         await ApplyStandardPolicyAsync(client, bucketName, accountId, tags, corsAllowedOrigins);
+
+        // Hygiene opt-in: this bucket is VERSIONED while deployassets syncs with
+        // --delete, so every redeploy strands noncurrent versions forever. When
+        // configured, expire them; null = no lifecycle written (baseline).
+        if (noncurrentVersionExpirationDays is int expireDays)
+            await EnsureNoncurrentVersionExpirationAsync(client, bucketName, expireDays);
+
         return created;
+    }
+
+    /// <summary>
+    /// Idempotently apply a lifecycle rule expiring NONCURRENT object versions
+    /// after <paramref name="days"/> days. Current versions are never touched.
+    /// PutLifecycleConfiguration REPLACES the bucket's lifecycle config — safe
+    /// here because lz-managed buckets carry no other lifecycle rules.
+    /// </summary>
+    private static async Task EnsureNoncurrentVersionExpirationAsync(
+        IAmazonS3 client, string bucketName, int days)
+    {
+        await client.PutLifecycleConfigurationAsync(new PutLifecycleConfigurationRequest
+        {
+            BucketName = bucketName,
+            Configuration = new LifecycleConfiguration
+            {
+                Rules = new List<LifecycleRule>
+                {
+                    new()
+                    {
+                        Id = "lz-hygiene-noncurrent-expire",
+                        Status = LifecycleRuleStatus.Enabled,
+                        Filter = new LifecycleFilter(), // whole bucket
+                        NoncurrentVersionExpiration = new LifecycleRuleNoncurrentVersionExpiration
+                        {
+                            NoncurrentDays = days,
+                        },
+                    },
+                },
+            },
+        });
     }
 
     /// <summary>

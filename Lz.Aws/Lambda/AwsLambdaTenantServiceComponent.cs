@@ -191,6 +191,12 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
             { "AWS_LWA_PORT", container.Port.ToString() },
         };
 
+        // Opt-in log-level override (LambdaOptions.LogLevel) — absent = no env var,
+        // the pre-existing baseline (ASP.NET default Information, which emits
+        // multiple log lines per request into CloudWatch at $/GB ingest).
+        if (!string.IsNullOrEmpty(lambdaOpts.LogLevel))
+            baseVars["Logging__LogLevel__Default"] = lambdaOpts.LogLevel;
+
         // Auth pool env: LZ_AUTH_{POOL}_USERPOOLID for every Cognito pool, read from
         // the foundation stack's auth_userPoolIdsJson map — the SAME source and vars
         // the EcsExpress task definition injects (AwsEcsExpressTenantServiceComponent).
@@ -318,7 +324,7 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
             }),
         };
 
-        var fn = new Function($"{prefix}-fn", new FunctionArgs
+        var fnArgs = new FunctionArgs
         {
             Name = prefix,
             PackageType = "Image",
@@ -326,10 +332,40 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
             Role = execRole.Arn,
             Timeout = lambdaOpts.Timeout > 0 ? lambdaOpts.Timeout : 30,
             MemorySize = lambdaOpts.MemorySize > 0 ? lambdaOpts.MemorySize : 1024,
-            Architectures = { "x86_64" },
+            // Default x86_64 (the baseline). arm64 (~20% cheaper GB-s) requires the
+            // image to be built linux/arm64 — see ContainerDefinition.Platform.
+            Architectures = { lambdaOpts.Architecture },
             Environment = fnEnv,
             Tags = Tags(sk, tk, serviceName),
-        }, new CustomResourceOptions { Parent = this });
+        };
+
+        // Opt-in denial-of-wallet cap (LambdaOptions.ReservedConcurrency): a hard
+        // bound on concurrent executions — and therefore on worst-case spend for the
+        // public Function URL. Null = no reservation, the pre-existing baseline.
+        if (lambdaOpts.ReservedConcurrency is int reserved)
+            fnArgs.ReservedConcurrentExecutions = reserved;
+
+        // Opt-in explicit log group with retention (Hygiene.LambdaLogRetentionDays).
+        // The auto-created /aws/lambda/{name} group never expires and cannot be
+        // adopted by Pulumi without an import, so an explicitly NAMED group is
+        // created instead and wired via LoggingConfig. Absent = auto-create baseline.
+        if (_systemConfig.Hygiene?.LambdaLogRetentionDays is int retentionDays)
+        {
+            var logGroup = new Pulumi.Aws.CloudWatch.LogGroup($"{prefix}-logs",
+                new Pulumi.Aws.CloudWatch.LogGroupArgs
+                {
+                    Name = $"/lz/lambda/{prefix}",
+                    RetentionInDays = retentionDays,
+                    Tags = Tags(sk, tk, serviceName),
+                }, new CustomResourceOptions { Parent = this });
+            fnArgs.LoggingConfig = new Pulumi.Aws.Lambda.Inputs.FunctionLoggingConfigArgs
+            {
+                LogFormat = "Text", // keep the existing plain-text format
+                LogGroup = logGroup.Name,
+            };
+        }
+
+        var fn = new Function($"{prefix}-fn", fnArgs, new CustomResourceOptions { Parent = this });
 
         // PUBLIC Function URL (AuthType=NONE), protected by origin verification.
         // AWS_IAM + CloudFront OAC was tried and CANNOT carry a REST API: OAC signing

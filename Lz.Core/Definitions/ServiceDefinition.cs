@@ -111,6 +111,29 @@ public class LambdaOptions
     public int Timeout { get; set; } = 30;
     public string? Handler { get; set; }
     public string Runtime { get; set; } = "dotnet8";
+
+    /// <summary>
+    /// Function architecture: "x86_64" (default — the pre-existing baseline)
+    /// or "arm64" (~20% cheaper per GB-second; requires the container image to
+    /// be built for linux/arm64 — see ContainerDefinition.Platform).
+    /// </summary>
+    public string Architecture { get; set; } = "x86_64";
+
+    /// <summary>
+    /// When set, caps the function's reserved concurrency — a hard bound on
+    /// worst-case spend for a public Function URL (denial-of-wallet cap).
+    /// Null = no reservation (the pre-existing baseline; account-pool limits
+    /// apply). Note this also caps legitimate burst throughput.
+    /// </summary>
+    public int? ReservedConcurrency { get; set; }
+
+    /// <summary>
+    /// When set, injected as <c>Logging__LogLevel__Default</c> into the
+    /// function environment (e.g. "Warning" to silence per-request
+    /// Information logging and its CloudWatch ingest cost). Null = no env var
+    /// (the pre-existing baseline: ASP.NET default Information level).
+    /// </summary>
+    public string? LogLevel { get; set; }
 }
 
 public class VolumeMount

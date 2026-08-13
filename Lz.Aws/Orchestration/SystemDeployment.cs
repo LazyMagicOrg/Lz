@@ -55,7 +55,7 @@ public class SystemDeployment
     ///   Pulumi up: all infrastructure including Tailscale ASG
     ///   Post-deploy: configure Tailscale — approve routes, disable key expiry, split DNS
     /// </summary>
-    public async Task DeployFoundationAsync()
+    public async Task DeployFoundationAsync(string? tailscaleApiKey = null)
     {
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
         var checker = _factory.CreateTransitionChecker();
@@ -87,23 +87,41 @@ public class SystemDeployment
                 return;
         }
 
-        // --- Tailscale gates (only when VPN is enabled) ---
-        if (_system.UsesVpn)
+        // Acquire the Tailscale key manager once. Non-null on any system whose
+        // factory wires Tailscale — Monro (ecs-fargate-keycloak, always) or Scutara
+        // (EcsExpress when PrivateNetwork.Tailscale). Null on the ~10 plain siblings.
+        var keyManager = AwsFactory?.GetTailscaleKeyManager();
+
+        // --- Tailscale gates + auto-seed (only for systems that use Tailscale) ---
+        // Gate on (UsesVpn || keyManager != null): UsesVpn=true captures Monro (whose
+        // topology declares it); keyManager!=null captures the EcsExpress private
+        // Tailscale opt-in whose topology leaves UsesVpn=false. The ~10 plain siblings
+        // (keyManager==null, UsesVpn==false) skip the whole block — byte-identical.
+        if (_system.UsesVpn || keyManager != null)
         {
+            // Auto-seed the API key BEFORE the gate, so a first-time single-account
+            // deploy (Scutara) is one command: value from --tailscale-key or an
+            // interactive masked prompt, written to the resolved system secret.
+            // No-op when the key is already stored (e.g. Monro's shared/system).
+            if (keyManager != null)
+                await keyManager.EnsureApiKeySeededAsync(tailscaleApiKey);
+
             var tailscaleGates = new List<TransitionRequirement>
             {
                 new TransitionRequirement
                 {
                     Name = "tailscale-api-key",
                     CheckType = TransitionCheckType.SecretEntry,
-                    SecretName = "shared/system",
-                    Profile = _config.Aws().SharedProfile,
-                    Region = _config.Aws().SharedRegion,
+                    SecretName = Lz.Aws.Tailscale.AwsTailscalePostDeployAction.ResolveSystemSecretId(_config),
+                    Profile = _config.Aws().SharedProfile ?? _config.Profile,
+                    Region = !string.IsNullOrEmpty(_config.Aws().SharedRegion)
+                        ? _config.Aws().SharedRegion : _config.Region,
                     CheckTarget = "tailscale-api-key",
                     Description =
                         "Tailscale API key is required for managing subnet routers.\n" +
                         "  1. Create an API key at https://login.tailscale.com/admin/settings/keys\n" +
-                        "  2. Add 'tailscale-api-key' to the 'shared/system' secret in Secrets Manager.\n" +
+                        "  2. Pass it with:  lz deploysystem --tailscale-key <key>\n" +
+                        "     (or add 'tailscale-api-key' to the system secret in Secrets Manager)\n" +
                         "  3. Re-run: lz deploysystem",
                 },
             };
@@ -117,7 +135,6 @@ public class SystemDeployment
         }
 
         // --- Auto-ensure: create/refresh auth key + SSH key if missing or expired ---
-        var keyManager = AwsFactory?.GetTailscaleKeyManager();
         if (keyManager != null)
         {
             await keyManager.EnsureAuthKeyAsync();

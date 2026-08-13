@@ -19,6 +19,7 @@ public static class AwsAuthValidator
     // AWS-SDK-native enum name REQUIRED — the TF provider normalizes it to ON).
     private static readonly string[] _validMfa = { "OFF", "ON", "OPTIONAL" };
     private static readonly string[] _validAsm = { "OFF", "AUDIT", "ENFORCED" };
+    private static readonly string[] _validTiers = { "LITE", "ESSENTIALS", "PLUS" };
 
     public static void Validate(SystemConfig config, List<string> errs)
     {
@@ -93,6 +94,23 @@ public static class AwsAuthValidator
             errs.Add(
                 $"AuthConfigs['{poolName}'].AdvancedSecurityMode '{pool.AdvancedSecurityMode}' is invalid. " +
                 $"Allowed: {string.Join(", ", _validAsm)}.");
+
+        // Feature tier — optional; when present it must be a real tier, and it must
+        // not contradict AdvancedSecurityMode (threat protection is PLUS-only —
+        // Cognito would reject the combination mid-deploy with a far worse error).
+        if (!string.IsNullOrEmpty(pool.UserPoolTier))
+        {
+            if (!_validTiers.Any(v => v.Equals(pool.UserPoolTier, StringComparison.OrdinalIgnoreCase)))
+                errs.Add(
+                    $"AuthConfigs['{poolName}'].UserPoolTier '{pool.UserPoolTier}' is invalid. " +
+                    $"Allowed: {string.Join(", ", _validTiers)} (or omit to leave the tier unmanaged).");
+            else if (!pool.UserPoolTier.Equals("PLUS", StringComparison.OrdinalIgnoreCase)
+                && !pool.AdvancedSecurityMode.Equals("OFF", StringComparison.OrdinalIgnoreCase))
+                errs.Add(
+                    $"AuthConfigs['{poolName}'] sets UserPoolTier={pool.UserPoolTier} with " +
+                    $"AdvancedSecurityMode={pool.AdvancedSecurityMode}, but threat protection requires the " +
+                    "PLUS tier. Either set AdvancedSecurityMode: OFF or UserPoolTier: PLUS (or omit the tier).");
+        }
 
         if (pool.PasswordMinLength < 6 || pool.PasswordMinLength > 99)
             errs.Add(

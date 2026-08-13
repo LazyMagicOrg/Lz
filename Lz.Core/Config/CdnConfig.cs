@@ -18,6 +18,15 @@ public class CdnConfig
     /// convenience).
     /// </summary>
     public CorsConfig? Cors { get; set; }
+
+    /// <summary>
+    /// When true, CloudFront gzip/brotli compression is enabled on the API
+    /// cache behaviors (compression works even with caching disabled) —
+    /// typically 60–80% off JSON data-transfer-out. Default false — the
+    /// pre-existing baseline (uncompressed API responses), byte-identical for
+    /// systems that do not opt in. Static/webapp behaviors already compress.
+    /// </summary>
+    public bool ApiCompress { get; set; } = false;
 }
 
 /// <summary>

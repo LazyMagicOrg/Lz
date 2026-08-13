@@ -3,7 +3,9 @@ using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Interfaces.Outputs;
 using Lz.Aws.AppRunner; // Reuse DynamoDB, FileStorage, Cognito, TenantData, TransitionChecker
-using Lz.Aws.Ecs;       // Reuse SES
+using Lz.Aws.Ecs;       // Reuse SES + AwsTailscaleAsgComponent (Phase 2)
+using Lz.Aws.Config;    // config.Aws().PrivateNetwork (Phase 2 gate)
+using Lz.Aws.Tailscale; // AwsTailscalePostDeployAction (Phase 2)
 using Lz.Aws.Interfaces;
 
 namespace Lz.Aws.EcsExpress;
@@ -38,15 +40,25 @@ public class AwsEcsExpressPlatformFactory : IAwsPlatformFactory
     public virtual IEmailComponent CreateEmail() => new AwsSesComponent();
     public virtual IServiceComponent CreateService() => new AwsAppRunnerServiceComponent(_config);
 
-    // No Tailscale, no Keycloak
-    public virtual ITailscaleComponent? CreateTailscale() => null;
+    // Tailscale subnet router (Phase 2) — opt-in via PrivateNetwork.Tailscale.
+    // Off (default / no PrivateNetwork block) => null, byte-identical to today.
+    public virtual ITailscaleComponent? CreateTailscale()
+        => _config.Aws().PrivateNetwork is { Enabled: true, Tailscale: true }
+            ? new AwsTailscaleAsgComponent()
+            : null;
     public virtual IPostDeployAction? GetFoundationPostDeployAction()
         => new AwsEcsExpressFoundationPostDeployAction(_config);
     // deploysystem-phase hook: ensure the {SystemKey} system table (idempotent).
     public virtual IPostDeployAction? GetSystemPostDeployAction()
         => new AwsEcsExpressFoundationPostDeployAction(_config);
-    public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null) => null;
-    public virtual ITailscaleKeyManager? GetTailscaleKeyManager() => null;
+    public virtual IPostDeployAction? GetTailscalePostDeployAction(SystemDefinition? system = null)
+        => _config.Aws().PrivateNetwork is { Enabled: true, Tailscale: true }
+            ? new AwsTailscalePostDeployAction(_config, system)
+            : null;
+    public virtual ITailscaleKeyManager? GetTailscaleKeyManager()
+        => _config.Aws().PrivateNetwork is { Enabled: true, Tailscale: true }
+            ? new AwsTailscalePostDeployAction(_config)
+            : null;
     public virtual ITenantKeycloakSeeder? GetTenantKeycloakSeeder() => null;
 
     public virtual IPostDeployAction? GetFoundationServiceDeployAction(SystemDefinition system) => null;

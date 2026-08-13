@@ -200,6 +200,142 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
         Console.ResetColor();
     }
 
+    /// <summary>
+    /// Ensure the Tailscale API access key is present in the system secret before
+    /// any auth-key work. No-op when already stored. Value comes from the
+    /// --tailscale-key flag, else an interactive masked prompt; a non-interactive
+    /// run with no key throws a clear "supply --tailscale-key" error. Creates the
+    /// secret when it does not exist. Secret VALUES are never logged.
+    /// </summary>
+    public async Task EnsureApiKeySeededAsync(string? cliKey)
+    {
+        var secretId = ResolveSystemSecretId(_config);
+        var profile = _config.Aws().SharedProfile ?? _config.Profile;
+        var region = !string.IsNullOrEmpty(_config.Aws().SharedRegion)
+            ? _config.Aws().SharedRegion : _config.Region;
+        var smClient = CreateSecretsManagerClient(region, profile);
+
+        // Read the current secret (may not exist yet on a first deploy).
+        var secret = new Dictionary<string, string>();
+        var secretExists = false;
+        try
+        {
+            var current = await smClient.GetSecretValueAsync(
+                new GetSecretValueRequest { SecretId = secretId });
+            secretExists = true;
+            if (!string.IsNullOrEmpty(current.SecretString))
+            {
+                using var doc = JsonDocument.Parse(current.SecretString);
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                    secret[prop.Name] = prop.Value.GetString() ?? "";
+            }
+        }
+        catch (Amazon.SecretsManager.Model.ResourceNotFoundException)
+        {
+            // Secret absent — created below once we have a value.
+        }
+
+        // Decide the value. An explicit --tailscale-key ALWAYS wins — this is how
+        // you CORRECT a bad/expired/wrong key (e.g. after a 401 from the Tailscale
+        // API): re-run with --tailscale-key and it overwrites the stored value.
+        // Otherwise an already-present key is left as-is (no-op); a missing key is
+        // prompted for (masked) when a console is attached, else fail-fast.
+        var existing = GetSecretValue(secret, "tailscale-api-key");
+        var apiKey = cliKey?.Trim();
+
+        if (!string.IsNullOrEmpty(apiKey))
+        {
+            if (apiKey == existing)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  Tailscale API key in '{secretId}' unchanged.");
+                Console.ResetColor();
+                return;
+            }
+            // else: fall through and overwrite with the explicitly-supplied key.
+        }
+        else if (existing != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  Tailscale API key already present in '{secretId}' " +
+                "(pass --tailscale-key to replace it).");
+            Console.ResetColor();
+            return;
+        }
+        else
+        {
+            // Missing + no --tailscale-key: prompt (masked) or fail-fast. No console
+            // attached (CI / automation tool) => do NOT block on an unanswerable
+            // prompt; fail with guidance.
+            if (Console.IsInputRedirected)
+                throw new InvalidOperationException(
+                    $"Tailscale API key is missing from secret '{secretId}' and no interactive " +
+                    "console is attached. Supply it non-interactively:\n" +
+                    "  lz deploysystem --tailscale-key <key>\n" +
+                    "Create a key at https://login.tailscale.com/admin/settings/keys");
+
+            apiKey = PromptMaskedValue(
+                $"  Enter Tailscale API key to store in '{secretId}' (input hidden): ");
+            if (string.IsNullOrEmpty(apiKey))
+                throw new InvalidOperationException(
+                    "No Tailscale API key entered — aborting. Re-run with --tailscale-key <key> " +
+                    "or enter the key when prompted.");
+        }
+
+        secret["tailscale-api-key"] = apiKey;
+        var json = JsonSerializer.Serialize(secret);
+
+        if (secretExists)
+        {
+            await smClient.PutSecretValueAsync(new PutSecretValueRequest
+            {
+                SecretId = secretId,
+                SecretString = json,
+            });
+        }
+        else
+        {
+            await smClient.CreateSecretAsync(new CreateSecretRequest
+            {
+                Name = secretId,
+                Description = $"{_config.SystemKey} system secret (Tailscale + system credentials).",
+                SecretString = json,
+            });
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"  Tailscale API key seeded into '{secretId}'.");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Read a line from the console without echoing the characters (renders a '*'
+    /// per keystroke, honours Backspace). Callers MUST first check
+    /// <see cref="Console.IsInputRedirected"/> — with no console attached
+    /// Console.ReadKey throws.
+    /// </summary>
+    private static string PromptMaskedValue(string prompt)
+    {
+        Console.Write(prompt);
+        var sb = new System.Text.StringBuilder();
+        while (true)
+        {
+            var k = Console.ReadKey(intercept: true);
+            if (k.Key == ConsoleKey.Enter) { Console.WriteLine(); break; }
+            if (k.Key == ConsoleKey.Backspace)
+            {
+                if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); }
+                continue;
+            }
+            if (!char.IsControl(k.KeyChar))
+            {
+                sb.Append(k.KeyChar);
+                Console.Write('*');
+            }
+        }
+        return sb.ToString();
+    }
+
     // ---------------------------------------------------------------
     // ITailscaleKeyManager — SSH key lifecycle
     // ---------------------------------------------------------------
@@ -211,6 +347,16 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     /// </summary>
     public async Task EnsureSshKeyAsync()
     {
+        // The SSH key pair exists solely for SFTP into the EFS gateway that rides
+        // on the Tailscale instances. The private-network Tailscale MVP (EcsExpress)
+        // has no EFS — the instance is a pure subnet router — so there is nothing to
+        // key. Monro (PrivateNetwork unset) still generates the pair. Skip cleanly.
+        if (_config.Aws().PrivateNetwork is { Enabled: true, Tailscale: true })
+        {
+            Console.WriteLine("  Tailscale subnet-router MVP (no EFS/SFTP gateway) — skipping SSH key generation.");
+            return;
+        }
+
         var secret = await GetSharedSecretAsync();
 
         var existingPubKey = GetSecretValue(secret, "tailscale-ssh-public-key");
@@ -438,6 +584,19 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     private const string SharedSecretId = "shared/system";
 
     /// <summary>
+    /// Resolve the system secret id. Cross-account systems (Monro) keep the
+    /// literal <c>shared/system</c> secret in the shared account — detected by a
+    /// configured SharedProfile/SharedSecretArn. Single-account systems (Scutara)
+    /// have neither, so the secret lives in the deploy account as
+    /// <c>{SystemKey}/system</c> (e.g. <c>scu/system</c>).
+    /// </summary>
+    internal static string ResolveSystemSecretId(SystemConfig config)
+        => !string.IsNullOrEmpty(config.Aws().SharedProfile)
+           || !string.IsNullOrEmpty(config.Aws().SharedSecretArn)
+            ? SharedSecretId
+            : $"{config.SystemKey}/system";
+
+    /// <summary>
     /// Read the shared/system secret and return all key-value pairs.
     /// </summary>
     private async Task<Dictionary<string, string>> GetSharedSecretAsync()
@@ -448,7 +607,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
 
         var response = await smClient.GetSecretValueAsync(new GetSecretValueRequest
         {
-            SecretId = SharedSecretId,
+            SecretId = ResolveSystemSecretId(_config),
         });
 
         using var doc = JsonDocument.Parse(response.SecretString);
@@ -496,7 +655,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
 
         await smClient.PutSecretValueAsync(new PutSecretValueRequest
         {
-            SecretId = SharedSecretId,
+            SecretId = ResolveSystemSecretId(_config),
             SecretString = newJson,
         });
     }
