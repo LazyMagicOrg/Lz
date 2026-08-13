@@ -79,7 +79,8 @@ public static class SubtenantProvisioner
         var created = await SubtenantBucketManager.EnsureBucketAsync(
             profile, region, bucketName, accountId,
             new Dictionary<string, string>(tags) { { "Purpose", $"{subtenantKey}-assets" } },
-            corsOrigins);
+            corsOrigins,
+            system.Hygiene?.S3NoncurrentVersionExpirationDays);
         Console.WriteLine(created
             ? $"    {bucketName} — created"
             : $"    {bucketName} — exists (policy re-applied)");

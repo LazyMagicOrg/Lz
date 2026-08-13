@@ -46,7 +46,60 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
     /// </summary>
     protected virtual ApiOriginSpec BuildApiOrigin(
         string prefix, string domain, IComputeEnvironmentOutputs compute)
-        => new()
+    {
+        // Private-networking hardening (opt-in): reach an INTERNAL ALB over a
+        // CloudFront VPC origin instead of the public origin.{domain} custom
+        // origin. This eliminates the public origin entirely, so there is
+        // nothing to bypass (closes the lz-tenantid/lz-config spoof P0 at the
+        // source — Platform/FargateHardening.md §4 option A). VpcOrigin GA
+        // 2024-11-20; Pulumi.Aws 7.* includes aws.cloudfront.VpcOrigin.
+        var ecsCompute = compute as AwsEcsExpressComputeOutputs;
+        if (ecsCompute?.PrivateNetworking == true)
+        {
+            var vpcOrigin = new VpcOrigin($"{prefix}-api-vpc-origin", new VpcOriginArgs
+            {
+                VpcOriginEndpointConfig = new VpcOriginVpcOriginEndpointConfigArgs
+                {
+                    Name = $"{prefix}-api-vpc-origin",
+                    Arn = ecsCompute.AlbArn!,          // internal ALB ARN
+                    HttpPort = 80,
+                    HttpsPort = 443,
+                    OriginProtocolPolicy = "https-only",
+                    OriginSslProtocols = new VpcOriginVpcOriginEndpointConfigOriginSslProtocolsArgs
+                    {
+                        Items = { "TLSv1.2" },
+                        Quantity = 1,
+                    },
+                },
+            }, new CustomResourceOptions { Parent = this });
+
+            return new ApiOriginSpec
+            {
+                OriginId = "alb-origin", // unchanged → ordered behaviors that target
+                                         // apiOrigin.OriginId need no edit
+                Origin = new DistributionOriginArgs
+                {
+                    OriginId = "alb-origin",
+                    // CloudFront requires a DomainName on every origin even with a
+                    // VpcOriginConfig. For a VPC origin it is NOT DNS-resolved (CloudFront
+                    // reaches the ALB via VpcOriginId), but it IS the Host header AND the
+                    // name CloudFront validates the ALB's TLS cert against under https-only.
+                    // It must therefore match the ALB cert (SAN *.{domain}); the ALB's own
+                    // internal-*.elb.amazonaws.com name fails cert validation and breaks the
+                    // origin. origin.{domain} matches the wildcard cert and needs no Route 53
+                    // record (unused for VPC-origin connectivity).
+                    DomainName = $"origin.{domain}",
+                    VpcOriginConfig = new DistributionOriginVpcOriginConfigArgs
+                    {
+                        VpcOriginId = vpcOrigin.Id,
+                    },
+                    // NO CustomOriginConfig when VpcOriginConfig is set.
+                },
+            };
+        }
+
+        // OFF — byte-for-byte the previous public custom origin.
+        return new ApiOriginSpec
         {
             OriginId = "alb-origin",
             Origin = new DistributionOriginArgs
@@ -61,6 +114,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 },
             },
         };
+    }
 
     /// <summary>
     /// Hook invoked after the distribution is created so a topology can grant
@@ -499,7 +553,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     ViewerProtocolPolicy = "https-only",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
-                    Compress = false,
+                    Compress = cdn.ApiCompress, // opt-in gzip/brotli on API JSON (default false = baseline)
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
                     OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
                     FunctionAssociations =
@@ -609,7 +663,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     ViewerProtocolPolicy = "https-only",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
-                    Compress = false,
+                    Compress = cdn.ApiCompress, // opt-in gzip/brotli on API JSON (default false = baseline)
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
                     OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
                     FunctionAssociations =
@@ -717,7 +771,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 ViewerProtocolPolicy = "https-only",
                 AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                 CachedMethods = { "GET", "HEAD" },
-                Compress = false,
+                Compress = cdn.ApiCompress, // opt-in gzip/brotli on API JSON (default false = baseline)
                 CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
                 OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
                 FunctionAssociations =
@@ -747,7 +801,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                 ViewerProtocolPolicy = "https-only",
                 AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                 CachedMethods = { "GET", "HEAD" },
-                Compress = false,
+                Compress = cdn.ApiCompress, // opt-in gzip/brotli on API JSON (default false = baseline)
                 CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
                 OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
                 FunctionAssociations =
@@ -786,7 +840,7 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
                     ViewerProtocolPolicy = "https-only",
                     AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
                     CachedMethods = { "GET", "HEAD" },
-                    Compress = false,
+                    Compress = cdn.ApiCompress, // opt-in gzip/brotli on API JSON (default false = baseline)
                     CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
                     OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
                     FunctionAssociations =

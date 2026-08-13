@@ -216,6 +216,62 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
+        // SSM PARAMETER STORE READ (task role) — mirrors the Lambda exec role
+        // (AwsLambdaTenantServiceComponent grants the same on parameter/{sk}/{env}[/*]).
+        // =====================================================================
+        // AipHost's ConfigureHostBuilder layers /{sk}/{env}/* from SSM Parameter Store
+        // over env/appsettings — OpenSearch:Endpoint, Mcp:ResourceUrl/Scope/Issuer, etc.
+        // That source is Optional=true, so WITHOUT this grant the read AccessDenies
+        // SILENTLY: those keys go missing, the MCP surface never registers (/mcp 500s
+        // on the schemeless fallback challenge; the PRM 404s), and OpenSearch config is
+        // lost. Unconditional (not private-flag-gated): every EcsExpress tenant needs it,
+        // exactly as the Lambda topology already grants it.
+        new RolePolicy($"{prefix}-ssm", new RolePolicyArgs
+        {
+            Role = taskRole.Id,
+            Policy = Output.Tuple(callerId.Apply(c => c.AccountId), awsRegion.Apply(r => r.Name))
+                .Apply(ids => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [""ssm:GetParameter"", ""ssm:GetParameters"", ""ssm:GetParametersByPath""],
+                        ""Resource"": [
+                            ""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter/{sk}/{env}"",
+                            ""arn:aws:ssm:{ids.Item2}:{ids.Item1}:parameter/{sk}/{env}/*""
+                        ]
+                    }}]
+                }}"),
+        }, new CustomResourceOptions { Parent = this });
+
+        // =====================================================================
+        // SSM / ECS-EXEC TASK-ROLE IAM (additive, private-flag-gated)
+        // =====================================================================
+        // ECS Exec's SSM data channel needs these four ssmmessages actions on the
+        // TASK role. Created ONLY when private networking is on — a public-subnet
+        // sibling gets no new policy, so its plan is unchanged. This is the ops
+        // break-glass for the private-subnet topology (Platform/FargateHardening.md).
+        if (networkOutputs.PrivateNetworking)
+        {
+            new RolePolicy($"{prefix}-ssmmessages", new RolePolicyArgs
+            {
+                Role = taskRole.Id,
+                Policy = @"{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [
+                            ""ssmmessages:CreateControlChannel"",
+                            ""ssmmessages:CreateDataChannel"",
+                            ""ssmmessages:OpenControlChannel"",
+                            ""ssmmessages:OpenDataChannel""
+                        ],
+                        ""Resource"": ""*""
+                    }]
+                }",
+            }, new CustomResourceOptions { Parent = this });
+        }
+
+        // =====================================================================
         // BFF DATA PROTECTION IAM (additive, flag-gated) — §8.4
         // =====================================================================
         // The BFF persists its ASP.NET Data Protection key ring to an SSM
@@ -390,7 +446,10 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         }, new CustomResourceOptions { Parent = this });
 
         // =====================================================================
-        // ECS SERVICE — public subnets, public IP, no NAT
+        // ECS SERVICE
+        //   flag OFF: public subnets + AssignPublicIp=true (no NAT) — unchanged.
+        //   flag ON : private subnets + AssignPublicIp=false (egress via NAT),
+        //             ECS Exec enabled for SSM break-glass.
         // =====================================================================
 
         var ecsService = new Service($"{prefix}-service", new ServiceArgs
@@ -400,11 +459,18 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
             TaskDefinition = taskDef.Arn,
             DesiredCount = 1,
             LaunchType = "FARGATE",
+            // SSM Session Manager / ECS Exec break-glass. false == the provider
+            // default, so when the flag is OFF this is byte-identical to omitting
+            // it (no plan diff).
+            EnableExecuteCommand = networkOutputs.PrivateNetworking,
             NetworkConfiguration = new ServiceNetworkConfigurationArgs
             {
-                Subnets = networkOutputs.PublicSubnetIds,
+                // OFF resolves to PublicSubnetIds + AssignPublicIp=true (today).
+                Subnets = networkOutputs.PrivateNetworking
+                    ? networkOutputs.PrivateSubnetIds
+                    : networkOutputs.PublicSubnetIds,
                 SecurityGroups = { networkOutputs.EcsTaskSecurityGroupId },
-                AssignPublicIp = true,  // KEY DIFFERENCE — no NAT needed
+                AssignPublicIp = !networkOutputs.PrivateNetworking,
             },
             LoadBalancers =
             {

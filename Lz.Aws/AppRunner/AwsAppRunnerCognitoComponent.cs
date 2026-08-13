@@ -192,8 +192,14 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 };
             }
 
-            // Advanced Security Mode — opt-in per pool. ENFORCED incurs per-MAU
-            // pricing; AUDIT logs risk events without enforcement.
+            // Advanced Security Mode — opt-in per pool. Under the feature-tier
+            // model (2024-11+), ANY non-OFF value requires — and silently lands
+            // the pool on — the PLUS tier, which bills every MAU at the Plus
+            // rate with no free tier. AUDIT-only telemetry additionally needs a
+            // LogDeliveryConfiguration to go anywhere; without one it is pure
+            // per-MAU cost. Prefer leaving this OFF unless threat protection is
+            // actually consumed, and see UserPoolTier below to manage the tier
+            // explicitly.
             if (!poolConfig.AdvancedSecurityMode.Equals("OFF", StringComparison.OrdinalIgnoreCase))
             {
                 userPoolArgs.UserPoolAddOns = new UserPoolUserPoolAddOnsArgs
@@ -201,6 +207,15 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                     AdvancedSecurityMode = poolConfig.AdvancedSecurityMode,
                 };
             }
+
+            // Explicit feature tier — opt-in. Null = tier not managed (the
+            // byte-identical baseline: Pulumi sends no tier, existing pools
+            // keep theirs). Set ESSENTIALS to unpin a pool that a since-removed
+            // AdvancedSecurityMode left on PLUS: rotation + TOTP survive the
+            // downgrade; threat protection does not (it needs PLUS, which is
+            // why the validator refuses the contradictory combination).
+            if (!string.IsNullOrEmpty(poolConfig.UserPoolTier))
+                userPoolArgs.UserPoolTier = poolConfig.UserPoolTier.ToUpperInvariant();
 
             // =================================================================
             // M0-7 — SELLER CUSTOM-AUTH INFRA (opt-in). Provisioned ONLY when poolConfig.CustomAuth is set,

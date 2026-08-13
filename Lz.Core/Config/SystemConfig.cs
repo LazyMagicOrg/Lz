@@ -61,6 +61,11 @@ public class SystemConfig
     // service — the no-opt-in baseline.
     public VectorStoreConfig? VectorStore { get; set; }
 
+    // Hygiene — opt-in caps for unbounded-growth resources (untagged ECR
+    // images, S3 noncurrent versions, Lambda log retention). When omitted,
+    // NOTHING is applied — byte-identical baseline (see HygieneConfig).
+    public HygieneConfig? Hygiene { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 

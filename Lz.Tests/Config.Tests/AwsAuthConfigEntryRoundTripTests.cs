@@ -171,6 +171,53 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
     }
 
     [Fact]
+    public void UserPoolTierPopulatesFromYaml_AndDefaultsToNull()
+    {
+        // Cost-optimization: ESSENTIALS unpins a pool that AdvancedSecurityMode
+        // once landed on PLUS. Absent must stay NULL — "tier not managed", the
+        // byte-identical baseline for sibling systems.
+        var path = WriteSystemConfig("""
+            AuthConfigs:
+              consumerauth:
+                UserPoolTier: ESSENTIALS
+              tenantauth: {}
+            """);
+
+        var config = ConfigLoader.LoadSystemConfig(path);
+        Assert.Equal("ESSENTIALS",
+            Assert.IsType<AwsAuthConfigEntry>(config.AuthConfigs!["consumerauth"]).UserPoolTier);
+        Assert.Null(
+            Assert.IsType<AwsAuthConfigEntry>(config.AuthConfigs!["tenantauth"]).UserPoolTier);
+    }
+
+    [Fact]
+    public void HygieneBlockPopulatesFromYaml_AndDefaultsToNull()
+    {
+        // The unbounded-growth caps (ECR untagged images, S3 noncurrent versions,
+        // Lambda log retention). Omitted block -> null -> nothing applied.
+        var path = WriteSystemConfig("""
+            AuthConfigs:
+              tenantauth: {}
+            Hygiene:
+              EcrUntaggedImageRetentionDays: 7
+              S3NoncurrentVersionExpirationDays: 30
+              LambdaLogRetentionDays: 14
+            """);
+
+        var config = ConfigLoader.LoadSystemConfig(path);
+        Assert.NotNull(config.Hygiene);
+        Assert.Equal(7, config.Hygiene!.EcrUntaggedImageRetentionDays);
+        Assert.Equal(30, config.Hygiene.S3NoncurrentVersionExpirationDays);
+        Assert.Equal(14, config.Hygiene.LambdaLogRetentionDays);
+
+        var without = ConfigLoader.LoadSystemConfig(WriteSystemConfig("""
+            AuthConfigs:
+              tenantauth: {}
+            """, "systemconfig.u.dev.yaml"));
+        Assert.Null(without.Hygiene);
+    }
+
+    [Fact]
     public void MultipleAuthEntriesAllMaterialiseAsAws()
     {
         var path = WriteSystemConfig("""

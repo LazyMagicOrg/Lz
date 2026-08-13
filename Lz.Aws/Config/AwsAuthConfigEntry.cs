@@ -50,9 +50,24 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// <summary>
     /// Advanced Security mode (UserPoolAddOns). One of <c>OFF</c> |
     /// <c>AUDIT</c> | <c>ENFORCED</c>. <c>AUDIT</c> logs risk events;
-    /// <c>ENFORCED</c> enables risk-based auth.
+    /// <c>ENFORCED</c> enables risk-based auth. NOTE: any non-OFF value
+    /// requires (and silently lands the pool on) the PLUS feature tier,
+    /// which bills every MAU at the Plus rate with no free tier — see
+    /// <see cref="UserPoolTier"/>.
     /// </summary>
     public string AdvancedSecurityMode { get; set; } = "OFF";
+
+    /// <summary>
+    /// Explicit Cognito feature tier for the pool: <c>LITE</c> |
+    /// <c>ESSENTIALS</c> | <c>PLUS</c>. Null (default) = the tier is NOT
+    /// managed — the pool keeps whatever tier it has (byte-identical
+    /// baseline; new pools default per Cognito's own rules, existing pools
+    /// keep their current tier). Set <c>ESSENTIALS</c> to unpin a pool that
+    /// was landed on PLUS by a since-removed AdvancedSecurityMode — Essentials
+    /// keeps refresh-token rotation and TOTP MFA at a lower per-MAU rate with
+    /// a free tier. Threat protection requires PLUS.
+    /// </summary>
+    public string? UserPoolTier { get; set; }
 
     /// <summary>
     /// Cognito groups to create inside this pool. Surfaced in JWTs as the

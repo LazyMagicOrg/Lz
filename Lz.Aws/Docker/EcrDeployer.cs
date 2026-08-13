@@ -13,6 +13,11 @@ public class EcrDeployer
 {
     /// <summary>
     /// Build a Docker image and push it to an ECR repository.
+    /// <paramref name="untaggedImageRetentionDays"/> (Hygiene opt-in): when set,
+    /// an ECR lifecycle policy expiring UNTAGGED images older than that many
+    /// days is ensured on the repository; null = no policy is written — the
+    /// pre-existing baseline (every push of a reused tag orphans the prior
+    /// digest, which then accrues storage forever).
     /// </summary>
     public async Task DeployAsync(
         string serviceName,
@@ -21,7 +26,8 @@ public class EcrDeployer
         string ecrRepoName,
         string profile,
         string region,
-        string tag)
+        string tag,
+        int? untaggedImageRetentionDays = null)
     {
         // Resolve paths
         var contextPath = Path.GetFullPath(Path.Combine(configDirectory, container.Context));
@@ -54,6 +60,10 @@ public class EcrDeployer
         // 3. Ensure ECR repo exists
         await EnsureEcrRepoAsync(profile, region, ecrRepoName);
 
+        // 3b. Hygiene opt-in: cap untagged-image growth with a lifecycle policy.
+        if (untaggedImageRetentionDays is int retentionDays)
+            await EnsureUntaggedLifecyclePolicyAsync(profile, region, ecrRepoName, retentionDays);
+
         // 4. Sync local NuGet packages into build context (if configured)
         if (container.SyncPackages)
         {
@@ -67,7 +77,7 @@ public class EcrDeployer
 
         // 5. Docker build
         Console.WriteLine($"Building Docker image '{serviceName}'...");
-        await DockerBuildAsync(contextPath, dockerfilePath, localImage, container.BuildArgs);
+        await DockerBuildAsync(contextPath, dockerfilePath, localImage, container.BuildArgs, container.Platform);
 
         // 6. Tag and push
         Console.WriteLine($"Tagging image as {imageUri}...");
@@ -124,7 +134,8 @@ public class EcrDeployer
 
     private async Task DockerBuildAsync(
         string contextPath, string dockerfilePath,
-        string imageName, Dictionary<string, string>? buildArgs)
+        string imageName, Dictionary<string, string>? buildArgs,
+        string platform = "linux/amd64")
     {
         var buildArgStr = "";
         if (buildArgs != null)
@@ -139,13 +150,54 @@ public class EcrDeployer
         // CreateFunction rejects that ("image manifest, config or layer media type
         // ... is not supported"), even though ECS/Fargate accepts it. A plain
         // `docker build` on modern Docker Desktop produces exactly that index, so we
-        // use `buildx --provenance=false --sbom=false --platform linux/amd64`, which
+        // use `buildx --provenance=false --sbom=false --platform <target>`, which
         // yields a single-platform image manifest that BOTH Lambda and Fargate accept.
-        // (The same image serves both the lambda-* and ecs-* topologies.)
-        Console.WriteLine("  (buildx → linux/amd64, attestations off for Lambda compatibility)");
+        // (The same image serves both the lambda-* and ecs-* topologies.) The target
+        // comes from ContainerDefinition.Platform (default linux/amd64; linux/arm64
+        // pairs with LambdaOptions.Architecture=arm64 and cross-builds under QEMU
+        // on an x86 host — slower, but the pushed manifest is what matters).
+        Console.WriteLine($"  (buildx → {platform}, attestations off for Lambda compatibility)");
         await RunAsync("docker",
-            $"buildx build --no-cache --provenance=false --sbom=false --platform linux/amd64 " +
+            $"buildx build --no-cache --provenance=false --sbom=false --platform {platform} " +
             $"-f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
+    }
+
+    /// <summary>
+    /// Idempotently apply a lifecycle policy expiring UNTAGGED images older than
+    /// <paramref name="retentionDays"/>. Tagged images are never selected by the
+    /// rule, so `:latest` (and any pinned tags) are untouched.
+    /// </summary>
+    private async Task EnsureUntaggedLifecyclePolicyAsync(
+        string profile, string region, string repoName, int retentionDays)
+    {
+        var policy =
+            "{\"rules\":[{" +
+                "\"rulePriority\":1," +
+                "\"description\":\"lz hygiene: expire untagged images\"," +
+                "\"selection\":{" +
+                    "\"tagStatus\":\"untagged\"," +
+                    "\"countType\":\"sinceImagePushed\"," +
+                    "\"countUnit\":\"days\"," +
+                    $"\"countNumber\":{retentionDays}" +
+                "}," +
+                "\"action\":{\"type\":\"expire\"}" +
+            "}]}";
+
+        // JSON as a CLI arg survives quoting differently per OS shell; write to a
+        // temp file and pass file:// which is quoting-proof on both.
+        var tmp = Path.Combine(Path.GetTempPath(), $"ecr-lifecycle-{repoName}.json");
+        await File.WriteAllTextAsync(tmp, policy);
+        try
+        {
+            Console.WriteLine($"  Ensuring ECR lifecycle policy (untagged > {retentionDays}d expire)...");
+            await RunAsync("aws",
+                $"ecr put-lifecycle-policy --profile {profile} --region {region} " +
+                $"--repository-name {repoName} --lifecycle-policy-text file://{tmp}");
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { /* best-effort temp cleanup */ }
+        }
     }
 
     /// <summary>

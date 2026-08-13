@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Lz.Core.Interfaces.Outputs;
+using Lz.Aws.Interfaces.Outputs;
 using Pulumi;
 
 namespace Lz.Aws.Ecs;
@@ -9,7 +10,7 @@ namespace Lz.Aws.Ecs;
 /// Other AWS components can safely cast INetworkOutputs to this type since
 /// the factory guarantees all components are from the same platform.
 /// </summary>
-public class AwsNetworkOutputs : INetworkOutputs
+public class AwsNetworkOutputs : INetworkOutputs, IPrivateNetworkOutputs
 {
     // INetworkOutputs implementation (cloud-agnostic)
     public required Output<string> NetworkId { get; init; }

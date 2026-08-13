@@ -38,7 +38,10 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
     public ITailscaleOutputs Deploy(SystemConfig config, INetworkOutputs network, IFileStorageOutputs fileStorage)
     {
         var prefix = config.SystemKey;
-        var awsNetwork = (AwsNetworkOutputs)network;
+        // Accept any topology's private-network outputs via the shared contract
+        // (Ecs AwsNetworkOutputs or EcsExpress AwsEcsExpressNetworkOutputs) rather
+        // than casting to one concrete type.
+        var privateNet = (IPrivateNetworkOutputs)network;
         var ecs = config.Aws().ECS ?? new EcsConfig();
         var instanceType = ecs.TailscaleInstanceType;
         var desiredCapacity = ecs.TailscaleDesiredCapacity;
@@ -138,7 +141,7 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
 
         // Description references the NAT gateway ID to create an implicit Pulumi
         // dependency — ensures instances don't launch until NAT is provisioned.
-        var ltDescription = awsNetwork.NatGatewayId.Apply(
+        var ltDescription = privateNet.NatGatewayId.Apply(
             natId => $"Tailscale subnet router (nat: {natId})");
 
         var launchTemplate = new LaunchTemplate($"{prefix}-tailscale-lt", new LaunchTemplateArgs
@@ -158,7 +161,7 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
                 new Pulumi.Aws.Ec2.Inputs.LaunchTemplateNetworkInterfaceArgs
                 {
                     AssociatePublicIpAddress = "false",
-                    SecurityGroups = { awsNetwork.TailscaleSecurityGroupId },
+                    SecurityGroups = { privateNet.TailscaleSecurityGroupId },
                 },
             },
             TagSpecifications =
@@ -265,13 +268,56 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
         var vpcCidr = config.VpcCidr;
         var efsRegion = config.Region; // EFS is always in the deployment region
 
-        // Tailscale keys always live in shared/system — use ARN for cross-account access
+        // Instances read the Tailscale keys at boot. Monro points at the shared
+        // secret ARN (cross-account); when no shared ARN is configured the secret
+        // lives in THIS account under "{SystemKey}/system" (e.g. scu/system).
         var secretId = !string.IsNullOrEmpty(config.Aws().SharedSecretArn)
             ? config.Aws().SharedSecretArn
-            : "shared/system";
+            : $"{prefix}/system";
         var secretRegion = !string.IsNullOrEmpty(config.Aws().SharedRegion)
             ? config.Aws().SharedRegion
             : config.Region;
+
+        // EFS + SFTP gateway is OPTIONAL. Topologies without EFS (e.g. EcsExpress,
+        // whose FileStorage is a stub returning "") skip the mount + SSH gateway
+        // entirely — the instance is then a pure Tailscale subnet router.
+        var efsAndSsh = string.IsNullOrEmpty(fileSystemId) ? "" : $@"
+# ===================================================================
+# EFS — mount the shared filesystem for SFTP access
+# ===================================================================
+
+yum install -y amazon-efs-utils nfs-utils
+
+mkdir -p /efs
+mount -t efs -o tls,iam {fileSystemId}:/ /efs
+echo '{fileSystemId}:/ /efs efs _netdev,tls,iam 0 0' >> /etc/fstab
+
+# Symlink EFS into ec2-user home for easy WinSCP browsing
+ln -sf /efs /home/ec2-user/efs
+
+echo 'EFS mounted at /efs'
+
+# ===================================================================
+# SSH — configure key-based access for SFTP (WinSCP)
+# ===================================================================
+
+SSH_PUB_KEY=$(echo ""$SECRET_JSON"" | python3 -c ""import sys,json; print(json.load(sys.stdin).get('tailscale-ssh-public-key',''))"")
+
+if [ -n ""$SSH_PUB_KEY"" ]; then
+    mkdir -p /home/ec2-user/.ssh
+    echo ""$SSH_PUB_KEY"" >> /home/ec2-user/.ssh/authorized_keys
+    chmod 700 /home/ec2-user/.ssh
+    chmod 600 /home/ec2-user/.ssh/authorized_keys
+    chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+    echo 'SSH public key configured for ec2-user'
+fi
+
+# Ensure sshd is enabled and running
+systemctl enable sshd
+systemctl start sshd
+
+echo 'Instance setup complete: Tailscale + EFS + SSH'
+";
 
         return $@"#!/bin/bash
 set -euo pipefail
@@ -343,43 +389,7 @@ tailscale up \
     --hostname=""{prefix}-{config.Environment}-efs""
 
 echo 'Tailscale subnet router started successfully'
-
-# ===================================================================
-# EFS — mount the shared filesystem for SFTP access
-# ===================================================================
-
-yum install -y amazon-efs-utils nfs-utils
-
-mkdir -p /efs
-mount -t efs -o tls,iam {fileSystemId}:/ /efs
-echo '{fileSystemId}:/ /efs efs _netdev,tls,iam 0 0' >> /etc/fstab
-
-# Symlink EFS into ec2-user home for easy WinSCP browsing
-ln -sf /efs /home/ec2-user/efs
-
-echo 'EFS mounted at /efs'
-
-# ===================================================================
-# SSH — configure key-based access for SFTP (WinSCP)
-# ===================================================================
-
-SSH_PUB_KEY=$(echo ""$SECRET_JSON"" | python3 -c ""import sys,json; print(json.load(sys.stdin).get('tailscale-ssh-public-key',''))"")
-
-if [ -n ""$SSH_PUB_KEY"" ]; then
-    mkdir -p /home/ec2-user/.ssh
-    echo ""$SSH_PUB_KEY"" >> /home/ec2-user/.ssh/authorized_keys
-    chmod 700 /home/ec2-user/.ssh
-    chmod 600 /home/ec2-user/.ssh/authorized_keys
-    chown -R ec2-user:ec2-user /home/ec2-user/.ssh
-    echo 'SSH public key configured for ec2-user'
-fi
-
-# Ensure sshd is enabled and running
-systemctl enable sshd
-systemctl start sshd
-
-echo 'Instance setup complete: Tailscale + EFS + SSH'
-";
+{efsAndSsh}";
     }
 
     private static InputMap<string> Tags(string prefix) => new()

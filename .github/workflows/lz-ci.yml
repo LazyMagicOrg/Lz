@@ -1,0 +1,28 @@
+# CI gate for Lz. Runs the two dependency-free suites this repo owns: the Cognito Custom-Auth trigger's
+# pure decision core (node:test) and the Lz config/merge/validators + smoke-probe logic (xUnit). Both
+# restore from nuget.org — no private LazyMagic feed and no prior LazyMagic build are needed (Lz.Core/
+# Lz.Aws reference only third-party packages). See specs/TestCoverage.md in the Scutara repo.
+name: lz-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Cognito Custom-Auth trigger — the fail-closed / single-shot / constant-time decision core (13 cases).
+      - run: node --test Lz.Aws/AppRunner/CognitoCustomAuth/custom-auth.test.mjs
+
+      # Lz config load/merge/validators, DynamoDB/VectorStore/Secrets policy, and lz-verify smoke logic
+      # (~244). Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
+      - run: dotnet test Lz.slnx -c Debug

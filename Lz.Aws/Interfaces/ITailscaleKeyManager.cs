@@ -7,6 +7,17 @@ namespace Lz.Aws.Interfaces;
 public interface ITailscaleKeyManager
 {
     /// <summary>
+    /// Ensure the Tailscale API access key is present in the system secret
+    /// ({systemkey}/system, or shared/system on cross-account systems) BEFORE any
+    /// auth-key work. No-op when already stored. Otherwise the value is taken from
+    /// <paramref name="cliKey"/> (the --tailscale-key flag); if that is empty and a
+    /// console is attached it is prompted for (masked); with no console attached it
+    /// throws, instructing the caller to pass --tailscale-key. Creates the secret
+    /// if it does not yet exist.
+    /// </summary>
+    Task EnsureApiKeySeededAsync(string? cliKey);
+
+    /// <summary>
     /// Ensure a valid Tailscale auth key exists in the shared secret.
     /// If the existing key is missing, expired, or revoked, creates a new
     /// one via the Tailscale API and writes it to Secrets Manager.

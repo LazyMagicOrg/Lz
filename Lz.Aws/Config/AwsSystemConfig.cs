@@ -19,6 +19,13 @@ public class AwsSystemConfig : SystemConfig
     public AppRunnerConfig? AppRunner { get; set; }
     public FargateConfig? Fargate { get; set; }
 
+    // PrivateNetwork — OPT-IN private-subnet hardening for the EcsExpress
+    // topology (Phase 1, Platform/FargateHardening.md). Absent / Enabled=false
+    // ⇒ NOTHING changes; the emitted plan is byte-identical to a public-subnet
+    // deploy (the HygieneConfig/DurabilityConfig opt-in-null contract). Read
+    // where SystemConfig is in scope via config.Aws().PrivateNetwork.
+    public PrivateNetworkConfig? PrivateNetwork { get; set; }
+
     // Cross-account shared services. SharedProfile is from YAML
     // (e.g. "monro-shared"); the rest are resolved by the CLI at startup.
     public string? SharedProfile { get; set; }
