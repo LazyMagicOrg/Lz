@@ -301,6 +301,36 @@ public class McpResourceConfig
 
     /// <summary>MCP client refresh-token validity, in days (rotation on). Default <c>90</c>.</summary>
     public int RefreshTokenDays { get; set; } = 90;
+
+    /// <summary>
+    /// Optional PER-SURFACE static PKCE clients (BuyerOnboarding.md item #9) — one per assistant
+    /// connector directory (Claude, ChatGPT, Copilot, …), each carrying that surface's EXACT redirect
+    /// URI(s) and its own ManagedLoginBranding slot. A dedicated client per surface isolates token
+    /// revocation and usage attribution, and exists because Cognito has no DCR/CIMD — the client id
+    /// is registered with the directory out-of-band. Empty ⇒ byte-identical baseline.
+    /// </summary>
+    public List<McpSurfaceClientConfig> SurfaceClients { get; set; } = new();
+}
+
+/// <summary>
+/// One connector-surface PKCE client on the MCP resource server. The client is PUBLIC
+/// (<c>GenerateSecret=false</c> ⇒ Cognito enforces PKCE S256), auth-code only, granted the qualified
+/// MCP scope + openid/profile/email, with refresh-token rotation — the same posture as the base MCP
+/// client, differing only in name and callback URLs.
+/// </summary>
+public class McpSurfaceClientConfig
+{
+    /// <summary>Surface name suffix (e.g. <c>claude</c>) — the client is <c>{poolPrefix}-mcp-{Name}-client</c>.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The surface's EXACT OAuth redirect URI(s) (e.g. <c>https://claude.ai/api/mcp/auth_callback</c>).
+    /// Cognito rejects any non-exact redirect (<c>redirect_mismatch</c>); no wildcards. Required.
+    /// </summary>
+    public List<string> CallbackUrls { get; set; } = new();
+
+    /// <summary>Refresh-token validity, in days (rotation on). Default <c>90</c>.</summary>
+    public int RefreshTokenDays { get; set; } = 90;
 }
 
 /// <summary>

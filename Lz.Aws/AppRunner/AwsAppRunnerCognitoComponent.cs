@@ -647,6 +647,9 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
             // branding slot or the hosted UI returns "Login pages unavailable" for THIS client's sign-in (the
             // buyer/device agent's one-time PKCE login). Null unless McpResource was configured for this pool.
             Output<string>? mcpClientId = null;
+            // Per-surface connector clients (BuyerOnboarding.md #9) — each needs its own branding slot
+            // below, so (name, id) pairs are collected here. Empty unless SurfaceClients are configured.
+            var mcpSurfaceClientIds = new List<(string Name, Output<string> Id)>();
             if (poolConfig.McpResource is { } mcp)
             {
                 if (string.IsNullOrWhiteSpace(mcp.Identifier))
@@ -723,6 +726,65 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 });
 
                 mcpClientId = mcpClient.Id;
+
+                // =============================================================
+                // PER-SURFACE STATIC PKCE CLIENTS (BuyerOnboarding.md #9) — one
+                // per assistant connector directory (Claude first). Cognito has
+                // no DCR/CIMD, so each directory gets a dedicated hand-registered
+                // client id conveyed out-of-band, carrying that surface's EXACT
+                // redirect URI(s) (Cognito refuses any non-exact redirect). Same
+                // public-PKCE posture as the base MCP client — auth-code only,
+                // qualified MCP scope, refresh rotation — differing only in name
+                // and callbacks. Additive: no SurfaceClients ⇒ byte-identical.
+                // =============================================================
+                foreach (var surface in mcp.SurfaceClients)
+                {
+                    if (string.IsNullOrWhiteSpace(surface.Name))
+                        throw new InvalidOperationException(
+                            $"Pool '{authType}' McpResource has a SurfaceClient with empty Name. Check systemconfig.");
+                    if (surface.CallbackUrls.Count == 0 || surface.CallbackUrls.Any(string.IsNullOrWhiteSpace))
+                        throw new InvalidOperationException(
+                            $"Pool '{authType}' McpResource SurfaceClient '{surface.Name}' needs at least one " +
+                            "non-empty CallbackUrl (the surface's exact OAuth redirect URI).");
+
+                    var surfaceDays = surface.RefreshTokenDays > 0 ? surface.RefreshTokenDays : 90;
+                    var surfaceClient = new UserPoolClient($"{poolPrefix}-mcp-{surface.Name}-client", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-mcp-{surface.Name}-client",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = false,   // public ⇒ Cognito enforces PKCE (S256)
+                        // ExplicitAuthFlows OMITTED (not empty-list) — same null-vs-empty drift rule as
+                        // the base MCP client; this is an OAuth-only client.
+                        SupportedIdentityProviders = { "COGNITO" },
+                        PreventUserExistenceErrors = "ENABLED",
+                        AllowedOauthFlows = { "code" },
+                        AllowedOauthScopes = { "openid", "profile", "email", qualifiedMcpScope },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        CallbackUrls = { surface.CallbackUrls.ToArray() },
+                        LogoutUrls = { logoutUrls.ToArray() },
+                        RefreshTokenValidity = surfaceDays,
+                        AccessTokenValidity = 60,
+                        IdTokenValidity = 60,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            RefreshToken = "days",
+                            AccessToken = "minutes",
+                            IdToken = "minutes",
+                        },
+                        RefreshTokenRotation = new UserPoolClientRefreshTokenRotationArgs
+                        {
+                            Feature = "ENABLED",
+                            RetryGracePeriodSeconds = 60,
+                        },
+                    }, new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { mcpResourceServer },
+                        IgnoreChanges = { "explicitAuthFlows" },
+                    });
+
+                    mcpSurfaceClientIds.Add((surface.Name, surfaceClient.Id));
+                }
             }
 
             // =================================================================
@@ -893,6 +955,23 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
                 var mcpBrandingArgs = BuildBrandingArgsFromConventionFolder(
                     userPool.Id, mcpClientId, authType);
                 new ManagedLoginBranding($"{poolPrefix}-mcp-branding", mcpBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
+            // …and for EACH per-surface connector client (BuyerOnboarding.md #2/#9): every hosted-UI
+            // client needs its own branding slot under ManagedLoginVersion=2, or that surface's
+            // "Connect" sign-in shows "Login pages unavailable" — a runtime failure the deploy does
+            // not catch. Gated on the same SurfaceClients opt-in that created the clients.
+            foreach (var (surfaceName, surfaceClientId) in mcpSurfaceClientIds)
+            {
+                var surfaceBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, surfaceClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-mcp-{surfaceName}-branding", surfaceBrandingArgs,
                     new CustomResourceOptions
                     {
                         Parent = this,
