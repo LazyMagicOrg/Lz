@@ -27,6 +27,33 @@ public class CdnConfig
     /// systems that do not opt in. Static/webapp behaviors already compress.
     /// </summary>
     public bool ApiCompress { get; set; } = false;
+
+    /// <summary>
+    /// Opt-in WAFv2 WebACL on the distribution. Null/omitted → no WebACL —
+    /// the pre-existing baseline, byte-identical for systems that do not opt
+    /// in. See <see cref="WafConfig"/>.
+    /// </summary>
+    public WafConfig? Waf { get; set; }
+}
+
+/// <summary>
+/// WAFv2 WebACL settings for the CDN distribution (BuyerOnboarding.md item #9 — denial-of-wallet
+/// protection in front of a self-serve signup surface). The ACL default-ALLOWS and carries a single
+/// per-IP rate-based BLOCK rule; a connector-egress IP allowlist is deliberately NOT modeled yet —
+/// directory egress ranges are published per vendor and change, and a wrong allowlist 403s all
+/// directory traffic undiagnosably at the edge. Add an allowlist rule only with authoritative,
+/// maintained ranges. CLOUDFRONT-scope ACLs must live in us-east-1; the component handles that.
+/// </summary>
+public class WafConfig
+{
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Per-IP request ceiling over WAF's rolling 5-minute window; requests beyond it are blocked
+    /// (403) until the rate drops. Default 2000 — far above legitimate per-user traffic, low enough
+    /// to blunt a single-source flood. WAF's floor is 100.
+    /// </summary>
+    public int RateLimitPer5Min { get; set; } = 2000;
 }
 
 /// <summary>

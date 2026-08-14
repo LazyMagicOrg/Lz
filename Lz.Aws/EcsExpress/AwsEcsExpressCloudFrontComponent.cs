@@ -459,6 +459,63 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
         var aliases = new InputList<string> { domain, $"*.{domain}" };
 
         // =====================================================================
+        // WAF (opt-in, CDN.Waf.Enabled) — a default-allow WebACL with one
+        // per-IP rate-based BLOCK rule: denial-of-wallet protection in front
+        // of the self-serve buyer surface (BuyerOnboarding.md #9). CLOUDFRONT-
+        // scope ACLs MUST be created in us-east-1 (the existing usEast1
+        // provider); association is by ARN via DistributionArgs.WebAclId.
+        // No Waf block ⇒ no WebACL ⇒ byte-identical baseline.
+        // =====================================================================
+
+        Pulumi.Aws.WafV2.WebAcl? webAcl = null;
+        if (cdn.Waf is { Enabled: true } waf)
+        {
+            var rateLimit = waf.RateLimitPer5Min >= 100 ? waf.RateLimitPer5Min : 2000;
+            webAcl = new Pulumi.Aws.WafV2.WebAcl($"{prefix}-cf-waf", new Pulumi.Aws.WafV2.WebAclArgs
+            {
+                Name = $"{prefix}-cf-waf",
+                Scope = "CLOUDFRONT",
+                Description = $"{sk}/{tk} {env}: per-IP rate cap in front of the CDN",
+                DefaultAction = new Pulumi.Aws.WafV2.Inputs.WebAclDefaultActionArgs
+                {
+                    Allow = new Pulumi.Aws.WafV2.Inputs.WebAclDefaultActionAllowArgs(),
+                },
+                Rules =
+                {
+                    new Pulumi.Aws.WafV2.Inputs.WebAclRuleArgs
+                    {
+                        Name = "per-ip-rate-cap",
+                        Priority = 1,
+                        Action = new Pulumi.Aws.WafV2.Inputs.WebAclRuleActionArgs
+                        {
+                            Block = new Pulumi.Aws.WafV2.Inputs.WebAclRuleActionBlockArgs(),
+                        },
+                        Statement = new Pulumi.Aws.WafV2.Inputs.WebAclRuleStatementArgs
+                        {
+                            RateBasedStatement = new Pulumi.Aws.WafV2.Inputs.WebAclRuleStatementRateBasedStatementArgs
+                            {
+                                Limit = rateLimit,
+                                AggregateKeyType = "IP",
+                            },
+                        },
+                        VisibilityConfig = new Pulumi.Aws.WafV2.Inputs.WebAclRuleVisibilityConfigArgs
+                        {
+                            CloudwatchMetricsEnabled = true,
+                            MetricName = $"{prefix}-cf-waf-rate",
+                            SampledRequestsEnabled = true,
+                        },
+                    },
+                },
+                VisibilityConfig = new Pulumi.Aws.WafV2.Inputs.WebAclVisibilityConfigArgs
+                {
+                    CloudwatchMetricsEnabled = true,
+                    MetricName = $"{prefix}-cf-waf",
+                    SampledRequestsEnabled = true,
+                },
+            }, new CustomResourceOptions { Parent = this, Provider = usEast1 });
+        }
+
+        // =====================================================================
         // CLOUDFRONT DISTRIBUTION — ALB origin + S3 origin
         // =====================================================================
 
@@ -473,6 +530,8 @@ public class AwsEcsExpressCloudFrontComponent : ComponentResource, ITenantCdnCom
             DefaultRootObject = BuildDefaultRootObject(tenantConfig, cdn),
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
+            // Opt-in WAF association (see the WebACL above); null when not configured — the baseline.
+            WebAclId = webAcl?.Arn!,
             Origins =
             {
                 new DistributionOriginArgs
