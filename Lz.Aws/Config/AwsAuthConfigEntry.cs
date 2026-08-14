@@ -310,6 +310,26 @@ public class McpResourceConfig
     /// is registered with the directory out-of-band. Empty ⇒ byte-identical baseline.
     /// </summary>
     public List<McpSurfaceClientConfig> SurfaceClients { get; set; } = new();
+
+    /// <summary>
+    /// Optional MACHINE (client_credentials) clients granted the qualified MCP scope
+    /// (HostedMcpParity.md row 9) — headless principals that can call the hosted <c>/mcp</c>
+    /// endpoint without a browser, e.g. the automated live-verification probe. Confidential clients
+    /// (secret readable via <c>DescribeUserPoolClient</c> with operator credentials — no extra secret
+    /// plumbing). Empty ⇒ byte-identical baseline.
+    /// </summary>
+    public List<McpM2mClientConfig> M2mClients { get; set; } = new();
+}
+
+/// <summary>One machine client on the MCP resource server — client_credentials, the qualified MCP
+/// scope only.</summary>
+public class McpM2mClientConfig
+{
+    /// <summary>Name suffix: the client is <c>{poolPrefix}-mcp-m2m-{Name}</c>.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Access-token lifetime, in minutes. Default <c>60</c>.</summary>
+    public int AccessTokenMinutes { get; set; } = 60;
 }
 
 /// <summary>

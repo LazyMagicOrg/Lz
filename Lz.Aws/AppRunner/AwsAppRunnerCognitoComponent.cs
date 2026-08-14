@@ -785,6 +785,38 @@ public class AwsAppRunnerCognitoComponent : ComponentResource, IAuthServiceCompo
 
                     mcpSurfaceClientIds.Add((surface.Name, surfaceClient.Id));
                 }
+
+                // =============================================================
+                // MCP MACHINE CLIENTS (HostedMcpParity row 9) — headless
+                // client_credentials principals granted the qualified MCP scope,
+                // so automated verification (and future server-side agents) can
+                // call the hosted /mcp without a browser. Same shape as the
+                // MachineAuth M2M clients; no branding (no hosted UI), no
+                // callbacks. Empty M2mClients ⇒ byte-identical baseline.
+                // =============================================================
+                foreach (var m2m in mcp.M2mClients)
+                {
+                    if (string.IsNullOrWhiteSpace(m2m.Name))
+                        throw new InvalidOperationException(
+                            $"Pool '{authType}' McpResource has an M2mClient with empty Name. Check systemconfig.");
+
+                    var m2mMinutes = m2m.AccessTokenMinutes > 0 ? m2m.AccessTokenMinutes : 60;
+                    _ = new UserPoolClient($"{poolPrefix}-mcp-m2m-{m2m.Name}", new UserPoolClientArgs
+                    {
+                        Name = $"{poolPrefix}-mcp-m2m-{m2m.Name}",
+                        UserPoolId = userPool.Id,
+                        GenerateSecret = true,
+                        // client_credentials ONLY — no user-auth flow, no callback/logout URLs.
+                        AllowedOauthFlows = { "client_credentials" },
+                        AllowedOauthScopes = { qualifiedMcpScope },
+                        AllowedOauthFlowsUserPoolClient = true,
+                        AccessTokenValidity = m2mMinutes,
+                        TokenValidityUnits = new UserPoolClientTokenValidityUnitsArgs
+                        {
+                            AccessToken = "minutes",
+                        },
+                    }, new CustomResourceOptions { Parent = this, DependsOn = { mcpResourceServer } });
+                }
             }
 
             // =================================================================
