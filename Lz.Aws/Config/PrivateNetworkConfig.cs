@@ -40,4 +40,22 @@ public class PrivateNetworkConfig
     /// Platform/FargateHardening.md §5 and Platform/TailscaleMultiEnv.md.
     /// </summary>
     public bool Tailscale { get; set; } = false;
+
+    /// <summary>
+    /// Subdomain labels registered as Tailscale split-DNS entries on every
+    /// <c>lz deploytenant</c> — each label <c>h</c> becomes an entry
+    /// <c>h.{tenant RootDomain}</c> → the VPC DNS resolver (CIDR base + 2), so
+    /// tailnet users resolve those names to VPC-internal targets (per-name
+    /// private hosted zones → internal ALB) while every other name in the
+    /// domain keeps public resolution. Requires <see cref="Enabled"/> +
+    /// <see cref="Tailscale"/>. Default EMPTY = no tailnet DNS calls at all —
+    /// systems without the opt-in are byte-identical (the same discipline as
+    /// the rest of this block). Ported from the Monro/Ecs topology's
+    /// UpdateTenantSplitDnsAsync, which hardcoded its two subdomains; here the
+    /// list is config so the framework stays product-neutral. Entries are
+    /// applied with the Tailscale API's PATCH (merge) semantics and accumulate
+    /// across tenants; removing a label from this list does NOT delete the
+    /// tailnet entry (prune manually in the admin console if ever needed).
+    /// </summary>
+    public List<string> SplitDnsHosts { get; set; } = new();
 }

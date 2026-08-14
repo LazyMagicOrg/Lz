@@ -622,8 +622,11 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
 
     /// <summary>
     /// Retrieve the Tailscale API key from Secrets Manager.
+    /// Public so other Tailscale-touching steps (e.g. the EcsExpress factory's
+    /// UpdateTenantSplitDnsAsync) resolve the key through this single path and
+    /// can never drift from the post-deploy action on where the key lives.
     /// </summary>
-    private async Task<string> GetTailscaleApiKeyAsync()
+    public async Task<string> GetTailscaleApiKeyAsync()
     {
         var secret = await GetSharedSecretAsync();
         return GetSecretValue(secret, "tailscale-api-key")

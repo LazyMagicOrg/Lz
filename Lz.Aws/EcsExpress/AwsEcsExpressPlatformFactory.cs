@@ -30,7 +30,63 @@ public class AwsEcsExpressPlatformFactory : IAwsPlatformFactory
     public virtual ITenantServiceComponent CreateTenantService() => new AwsEcsExpressTenantServiceComponent(_config);
     public virtual ITenantCdnComponent CreateTenantCdn() => new AwsEcsExpressCloudFrontComponent();
     public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
-    public virtual Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;
+
+    /// <summary>
+    /// Tailscale split DNS for the tenant's VPN-only names — the EcsExpress port
+    /// of the Ecs topology's implementation, invoked by SystemDeployment after
+    /// every tenant Pulumi up. Config-driven where Ecs hardcodes shop./auth.:
+    /// each PrivateNetwork.SplitDnsHosts label h becomes an entry
+    /// h.{RootDomain} → the VPC resolver, applied via the Tailscale API's PATCH
+    /// (merge) semantics — only the named domains are touched, so tailnet DNS
+    /// config owned by other systems/environments is never clobbered.
+    /// Triple-gated no-op (empty list / no PrivateNetwork+Tailscale opt-in /
+    /// no RootDomain) so the sibling systems stay byte-identical. Failures are
+    /// warn-and-continue: a tailnet-side hiccup (or an API key without DNS
+    /// scope) must not fail a tenant deploy — the printed fallback is the same
+    /// one-line admin-console step the automation replaces.
+    /// </summary>
+    public virtual async Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig)
+    {
+        var pn = _config.Aws().PrivateNetwork;
+        var hosts = pn is { Enabled: true, Tailscale: true } ? pn.SplitDnsHosts : null;
+        if (hosts == null || hosts.Count == 0 || string.IsNullOrEmpty(tenantConfig.RootDomain))
+            return;
+
+        var resolver = Tailscale.AwsTailscalePostDeployAction.CalculateVpcDnsResolver(_config.VpcCidr);
+        var entries = new Dictionary<string, string[]>();
+        foreach (var h in hosts)
+        {
+            var label = h?.Trim().TrimEnd('.');
+            if (string.IsNullOrEmpty(label)) continue;
+            entries[$"{label}.{tenantConfig.RootDomain}"] = new[] { resolver };
+        }
+        if (entries.Count == 0) return;
+
+        try
+        {
+            var apiKey = await new Tailscale.AwsTailscalePostDeployAction(_config).GetTailscaleApiKeyAsync();
+            Console.WriteLine("Updating Tailscale split DNS for tenant VPN-only names...");
+            foreach (var (domain, resolvers) in entries)
+                Console.WriteLine($"  {domain} → {resolvers[0]}");
+
+            using var client = new Lz.Core.Tailscale.TailscaleApiClient(apiKey);
+            await client.SetSplitDnsAsync(entries);
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("  Tailscale split DNS updated.");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Warning: Tailscale split DNS update failed: {ex.Message}");
+            Console.WriteLine("  (A 403 usually means the stored tailscale-api-key lacks DNS write scope.)");
+            Console.WriteLine("  Manual fallback — Tailscale admin console → DNS → split DNS:");
+            foreach (var (domain, resolvers) in entries)
+                Console.WriteLine($"    {domain} → nameserver {resolvers[0]}");
+            Console.ResetColor();
+        }
+    }
 
     // Reused from AppRunner topology (DynamoDB, S3/Secrets, Cognito, stub FileStorage)
     public virtual IDatabaseComponent CreateDatabase() => new AwsAppRunnerDynamoDbComponent();
