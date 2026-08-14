@@ -27,7 +27,7 @@ public class AwsEcsExpressPlatformFactory : IAwsPlatformFactory
     // ECSExpress-specific components
     public virtual ISystemNetworkComponent CreateNetwork() => new AwsEcsExpressNetworkComponent();
     public virtual IComputeEnvironmentComponent CreateComputeEnvironment() => new AwsEcsExpressComputeComponent();
-    public virtual ITenantServiceComponent CreateTenantService() => new AwsEcsExpressTenantServiceComponent();
+    public virtual ITenantServiceComponent CreateTenantService() => new AwsEcsExpressTenantServiceComponent(_config);
     public virtual ITenantCdnComponent CreateTenantCdn() => new AwsEcsExpressCloudFrontComponent();
     public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
     public virtual Task UpdateTenantSplitDnsAsync(TenantConfig tenantConfig) => Task.CompletedTask;

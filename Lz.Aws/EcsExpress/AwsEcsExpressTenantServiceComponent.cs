@@ -21,9 +21,14 @@ namespace Lz.Aws.EcsExpress;
 /// </summary>
 public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantServiceComponent
 {
-    public AwsEcsExpressTenantServiceComponent()
+    /// <summary>System-scoped config (VectorStore opt-in, …). Null-tolerant: the parameterless path
+    /// keeps compiling and a null config simply gates every config-keyed addition OFF.</summary>
+    private readonly SystemConfig? _systemConfig;
+
+    public AwsEcsExpressTenantServiceComponent(SystemConfig? systemConfig = null)
         : base("lz:aws:EcsExpressTenantService", "tenant-service", ResourceArgs.Empty, null)
     {
+        _systemConfig = systemConfig;
     }
 
     /// <summary>ALB listener-rule priority for this service's rule. Base: 10.</summary>
@@ -343,11 +348,65 @@ public class AwsEcsExpressTenantServiceComponent : ComponentResource, ITenantSer
         var authUserPoolIdsJson = foundationAuthRef.GetOutput("auth_userPoolIdsJson")
             .Apply(v => v as string ?? "{}");
 
-        var containerDefs = Output.Tuple(imageUri, bffValueOutputs, authUserPoolIdsJson).Apply(t =>
+        // =====================================================================
+        // Vector store (aoss) — additive, opt-in via systemconfig VectorStore.
+        // MIRRORS AwsLambdaTenantServiceComponent exactly (this was a live-bitten
+        // Lambda→ECS parity gap: the walk's first Match write 403'd, and the
+        // task crash-looped once the endpoint appeared, because aoss auth is
+        // TWO-LAYER — IAM aoss:APIAccessAll AND a data-access policy grant —
+        // and the ECS task role had neither, nor the endpoint env var):
+        //  (1) aoss:APIAccessAll on the TASK role, collection-scoped when the
+        //      foundation exported the ARN;
+        //  (2) a PER-TENANT data-access policy granting that role — aoss allows
+        //      several per collection, so the tenant grants its OWN role instead
+        //      of mutating the foundation's policy;
+        //  (3) the OpenSearch__Endpoint container env var (added below).
+        // A system without VectorStore gets none of this — byte-identical plan.
+        // =====================================================================
+        var vectorStoreEndpoint = Output.Create(string.Empty);
+        if (_systemConfig?.VectorStore != null)
+        {
+            var collectionName = Lz.Aws.VectorStore.VectorStorePolicy.CollectionName(_systemConfig);
+            vectorStoreEndpoint = foundationAuthRef.GetOutput("vectorStoreEndpoint")
+                .Apply(v => v as string ?? string.Empty);
+            var collectionArn = foundationAuthRef.GetOutput("vectorStoreCollectionArn")
+                .Apply(v => v as string ?? string.Empty);
+
+            new RolePolicy($"{prefix}-aoss", new RolePolicyArgs
+            {
+                Role = taskRole.Id,
+                Policy = collectionArn.Apply(arn => $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": [""aoss:APIAccessAll""],
+                        ""Resource"": ""{(string.IsNullOrEmpty(arn) ? "arn:aws:aoss:*:*:collection/*" : arn)}""
+                    }}]
+                }}"),
+            }, new CustomResourceOptions { Parent = this });
+
+            new Pulumi.Aws.OpenSearch.ServerlessAccessPolicy($"{prefix}-aoss-data",
+                new Pulumi.Aws.OpenSearch.ServerlessAccessPolicyArgs
+                {
+                    Name = Lz.Aws.VectorStore.VectorStorePolicy.TenantAccessPolicyName(collectionName, tk),
+                    Type = "data",
+                    Description = $"lz: data access for the {tk} tenant service task role",
+                    Policy = taskRole.Arn.Apply(arn =>
+                        Lz.Aws.VectorStore.VectorStorePolicy.DataAccessPolicyJson(collectionName, new[] { arn })),
+                }, new CustomResourceOptions { Parent = this });
+        }
+
+        var containerDefs = Output.Tuple(imageUri, bffValueOutputs, authUserPoolIdsJson, vectorStoreEndpoint).Apply(t =>
         {
             var image = t.Item1;
             var bffValues = t.Item2;
             var authJson = t.Item3;
+
+            // aoss endpoint (config key OpenSearch:Endpoint via the ASP.NET double-underscore env
+            // convention) — present only when the system opted into VectorStore AND the foundation
+            // exported it, so a non-opted system's environment array is unchanged.
+            if (!string.IsNullOrEmpty(t.Item4))
+                baseEnv.Add(new("OpenSearch__Endpoint", t.Item4));
 
             var envList = baseEnv.Select(kv => new { name = kv.Key, value = kv.Value }).ToList();
 
