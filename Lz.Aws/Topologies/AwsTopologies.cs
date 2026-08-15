@@ -1,10 +1,17 @@
-using Lz.Aws.AppRunner;
 using Lz.Aws.Config;
-using Lz.Aws.Ecs;
-using Lz.Aws.EcsExpress;
-using Lz.Aws.Lambda;
 using Lz.Aws.Interfaces;
 using Lz.Core.Config;
+using Lz.Aws.Auth;
+using Lz.Aws.Compute.Fargate;
+using Lz.Aws.Compute.FargateAlb;
+using Lz.Aws.Compute.Lambda;
+using Lz.Aws.Data;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
+using Lz.Aws.Shared;
+using Lz.Aws.Storage;
+using Lz.Aws.Tailscale;
+using Lz.Aws.Interfaces.Outputs;
 
 namespace Lz.Aws.Topologies;
 
@@ -17,7 +24,7 @@ namespace Lz.Aws.Topologies;
 /// <remarks>
 /// The built-in topologies are exposed as <c>static readonly</c> fields
 /// (<see cref="EcsFargateKeycloak"/>, <see cref="EcsFargateCognitoDynamodb"/>,
-/// <see cref="AppRunner"/>). Plugins contribute additional or overriding
+/// <see cref="LambdaCognitoDynamodb"/>). Plugins contribute additional or overriding
 /// topologies via <see cref="ILzPlugin.RegisterTopologies"/>, which calls
 /// <see cref="Register"/> and optionally <see cref="DeriveFrom"/>.
 /// The registry is single-writer / multi-reader: all <c>Register</c> calls
@@ -51,7 +58,7 @@ public static class AwsTopologies
         UsesCentralAuth = true,
         UsesInVpcGateChecker = true,
         UsesSeedTask = true,
-        CreateFactory = config => new AwsEcsPlatformFactory(config),
+        CreateFactory = config => new AwsEcsFargateKeycloakPlatformFactory(config),
         ValidateConfig = (cfg, errs) =>
         {
             AwsNamingValidator.ValidateSystemKeys(cfg, errs);
@@ -87,44 +94,13 @@ public static class AwsTopologies
         UsesCentralAuth = false,
         UsesInVpcGateChecker = false,
         UsesSeedTask = false,
-        CreateFactory = config => new AwsEcsExpressPlatformFactory(config),
+        CreateFactory = config => new AwsEcsFargateCognitoDynamodbPlatformFactory(config),
         ValidateConfig = (cfg, errs) =>
         {
             AwsNamingValidator.ValidateSystemKeys(cfg, errs);
             if (string.IsNullOrEmpty(cfg.VpcCidr))
                 errs.Add("VpcCidr is required for the ecs-fargate-cognito-dynamodb topology.");
             RequireAuthConfigs(cfg, errs, "ecs-fargate-cognito-dynamodb");
-        },
-    };
-
-    /// <summary>
-    /// Fully serverless topology — AppRunner + Cognito + DynamoDB. No VPC,
-    /// no NAT, no shared filesystem. Scales to zero; cold-start cost applies.
-    /// </summary>
-    public static readonly AwsTopology AppRunner = new()
-    {
-        Name = "apprunner",
-        Summary = "AWS AppRunner + Cognito + DynamoDB + S3",
-        Description = """
-            Serverless-container topology. AppRunner hosts the application,
-            scaling request-driven. Cognito for auth, DynamoDB for data, S3 for
-            tenant assets. No VPC, no NAT, no shared filesystem. Simplest to
-            operate; suits smaller systems without long-running workloads.
-            """,
-        Compute = AwsComputeKind.AppRunner,
-        Data = AwsDataKind.DynamoDb,
-        FileStorage = AwsFileStorageKind.S3,
-        Auth = AwsAuthKind.Cognito,
-        HasPrivateNetwork = false,
-        UsesVpn = false,
-        UsesCentralAuth = false,
-        UsesInVpcGateChecker = false,
-        UsesSeedTask = false,
-        CreateFactory = config => new AwsAppRunnerPlatformFactory(config),
-        ValidateConfig = (cfg, errs) =>
-        {
-            AwsNamingValidator.ValidateSystemKeys(cfg, errs);
-            RequireAuthConfigs(cfg, errs, "apprunner");
         },
     };
 
@@ -162,7 +138,7 @@ public static class AwsTopologies
         UsesCentralAuth = false,
         UsesInVpcGateChecker = false,
         UsesSeedTask = false,
-        CreateFactory = config => new AwsLambdaPlatformFactory(config),
+        CreateFactory = config => new AwsLambdaCognitoDynamodbPlatformFactory(config),
         ValidateConfig = (cfg, errs) =>
         {
             AwsNamingValidator.ValidateSystemKeys(cfg, errs);
@@ -195,7 +171,6 @@ public static class AwsTopologies
         {
             [EcsFargateKeycloak.Name] = EcsFargateKeycloak,
             [EcsFargateCognitoDynamodb.Name] = EcsFargateCognitoDynamodb,
-            [AppRunner.Name] = AppRunner,
             [LambdaCognitoDynamodb.Name] = LambdaCognitoDynamodb,
         };
 

@@ -1,6 +1,19 @@
 using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Lz.Aws.Auth;
+using Lz.Aws.Compute.Fargate;
+using Lz.Aws.Compute.FargateAlb;
+using Lz.Aws.Compute.Lambda;
+using Lz.Aws.Data;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
+using Lz.Aws.Storage;
+using Lz.Aws.Tailscale;
+using Lz.Aws.Topologies;
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
+using Lz.Aws.Interfaces.Outputs;
 
 namespace Lz.Aws.Shared;
 
@@ -47,7 +60,7 @@ public static class SubtenantBucketManager
     /// CORS configuration is set — bucket-level CORS responses won't carry
     /// the header, and CloudFront-level CORS via CFResponse remains the
     /// only path. Pulumi-managed tenant bucket gets the same configuration
-    /// in <c>AwsEcsExpressCloudFrontComponent.cs</c> via
+    /// in <c>AwsCloudFrontKvsComponent.cs</c> via
     /// <c>BucketCorsConfigurationV2</c>; this parameter is the imperative
     /// equivalent for subtenant buckets which Pulumi doesn't manage.</param>
     public static async Task<bool> EnsureBucketAsync(

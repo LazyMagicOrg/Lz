@@ -89,12 +89,12 @@ public class SystemDeployment
 
         // Acquire the Tailscale key manager once. Non-null on any system whose
         // factory wires Tailscale — Monro (ecs-fargate-keycloak, always) or Scutara
-        // (EcsExpress when PrivateNetwork.Tailscale). Null on the ~10 plain siblings.
+        // (Fargate when PrivateNetwork.Tailscale). Null on the ~10 plain siblings.
         var keyManager = AwsFactory?.GetTailscaleKeyManager();
 
         // --- Tailscale gates + auto-seed (only for systems that use Tailscale) ---
         // Gate on (UsesVpn || keyManager != null): UsesVpn=true captures Monro (whose
-        // topology declares it); keyManager!=null captures the EcsExpress private
+        // topology declares it); keyManager!=null captures the Fargate private
         // Tailscale opt-in whose topology leaves UsesVpn=false. The ~10 plain siblings
         // (keyManager==null, UsesVpn==false) skip the whole block — byte-identical.
         if (_system.UsesVpn || keyManager != null)
@@ -686,7 +686,7 @@ public class SystemDeployment
     /// Infer the deployed topology from the Pulumi state's component-resource types.
     /// Tenant stacks are definitive (each topology has a distinct tenant-service
     /// type). Foundation stacks are definitive except that apprunner and
-    /// lambda-cognito-dynamodb share the AppRunner (no-VPC) network — for that
+    /// lambda-cognito-dynamodb share the same no-VPC network — for that
     /// pair the tenant compute is the tiebreaker, so the foundation reports the
     /// ambiguity honestly.
     /// </summary>
@@ -927,7 +927,7 @@ public class SystemDeployment
                 // Combined poolName -> userPoolId map (JSON) so a tenant stack can
                 // emit the LZ_AUTH_{POOL}_USERPOOLID env vars the AppHost's
                 // DiscoverAuthenticators REQUIRES, without enumerating dynamic
-                // per-pool stack-output keys. (The EcsExpress topology previously
+                // per-pool stack-output keys. (The Fargate topology previously
                 // never injected these, so its AppHost container crash-looped with
                 // "No authenticators configured.")
                 var poolIdEntries = poolOutputs.Pools

@@ -1,7 +1,4 @@
-using Lz.Aws.AppRunner;
-using Lz.Aws.Ecs;
-using Lz.Aws.EcsExpress;
-using Lz.Aws.Lambda;
+using Lz.Aws.Topologies;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;
 
@@ -13,7 +10,7 @@ namespace Lz.Tests.Orchestration.Tests;
 /// on the Keycloak topology it is the Keycloak DB init that `lz deployshared`
 /// runs in the shared-services account, while the Cognito topologies used it
 /// for the {SystemKey} system-table ensure — which NOTHING invoked, so a fresh
-/// lambda/ecsexpress/apprunner system ended up with no system table (observed
+/// lambda/fargate system ended up with no system table (observed
 /// live: the scu account was missing the `scu` table after a full deploy).
 /// GetSystemPostDeployAction is the deploysystem-phase hook: table-ensure on
 /// the Cognito factories, default-null elsewhere so the Keycloak topology's
@@ -32,22 +29,15 @@ public class SystemPostDeployActionTests
     [Fact]
     public void LambdaFactory_SystemPostDeploy_IsTheSystemTableEnsure()
     {
-        IPlatformFactory factory = new AwsLambdaPlatformFactory(Config());
-        Assert.IsType<AwsEcsExpressFoundationPostDeployAction>(factory.GetSystemPostDeployAction());
+        IPlatformFactory factory = new AwsLambdaCognitoDynamodbPlatformFactory(Config());
+        Assert.IsType<AwsEcsFargateCognitoDynamodbFoundationPostDeployAction>(factory.GetSystemPostDeployAction());
     }
 
     [Fact]
-    public void EcsExpressFactory_SystemPostDeploy_IsTheSystemTableEnsure()
+    public void EcsFargateCognitoDynamodbFactory_SystemPostDeploy_IsTheSystemTableEnsure()
     {
-        IPlatformFactory factory = new AwsEcsExpressPlatformFactory(Config());
-        Assert.IsType<AwsEcsExpressFoundationPostDeployAction>(factory.GetSystemPostDeployAction());
-    }
-
-    [Fact]
-    public void AppRunnerFactory_SystemPostDeploy_IsTheSystemTableEnsure()
-    {
-        IPlatformFactory factory = new AwsAppRunnerPlatformFactory(Config());
-        Assert.IsType<AwsEcsExpressFoundationPostDeployAction>(factory.GetSystemPostDeployAction());
+        IPlatformFactory factory = new AwsEcsFargateCognitoDynamodbPlatformFactory(Config());
+        Assert.IsType<AwsEcsFargateCognitoDynamodbFoundationPostDeployAction>(factory.GetSystemPostDeployAction());
     }
 
     [Fact]
@@ -55,7 +45,7 @@ public class SystemPostDeployActionTests
     {
         // The Keycloak topology's GetFoundationPostDeployAction (DB init/seed)
         // belongs to deployshared; deploysystem must NOT gain a hook for it.
-        IPlatformFactory factory = new AwsEcsPlatformFactory(Config());
+        IPlatformFactory factory = new AwsEcsFargateKeycloakPlatformFactory(Config());
         Assert.Null(factory.GetSystemPostDeployAction());
     }
 
@@ -72,7 +62,7 @@ public class SystemPostDeployActionTests
         // deploytenant on ECS re-pulls :latest via the task cycle; the Lambda
         // topology gets the SAME leave-the-tenant-on-current-code guarantee via
         // AwsLambdaPostDeployAction's digest-compared UpdateFunctionCode roll.
-        IPlatformFactory factory = new AwsLambdaPlatformFactory(Config());
+        IPlatformFactory factory = new AwsLambdaCognitoDynamodbPlatformFactory(Config());
         var action = factory.GetServiceDeployAction(
             new TestSystem(), Array.Empty<Lz.Core.Definitions.ServiceDefinition>(),
             "mp", new TenantConfig());
@@ -82,7 +72,7 @@ public class SystemPostDeployActionTests
     [Fact]
     public void LambdaFactory_NonTenantServiceAction_StaysNull()
     {
-        IPlatformFactory factory = new AwsLambdaPlatformFactory(Config());
+        IPlatformFactory factory = new AwsLambdaCognitoDynamodbPlatformFactory(Config());
         Assert.Null(factory.GetServiceDeployAction(
             new TestSystem(), Array.Empty<Lz.Core.Definitions.ServiceDefinition>()));
     }

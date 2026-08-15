@@ -5,7 +5,7 @@ namespace Lz.Aws.Config;
 /// <summary>
 /// AWS-specific extension of <see cref="TenantConfig"/>. Holds fields whose
 /// semantics only make sense on AWS: ACM certificate ARN, Route 53 hosted
-/// zone ID, cross-account Secrets Manager/KMS ARNs, and ECS/AppRunner sizing.
+/// zone ID, cross-account Secrets Manager/KMS ARNs, and ECS/Fargate sizing.
 /// </summary>
 public class AwsTenantConfig : TenantConfig
 {
@@ -22,6 +22,5 @@ public class AwsTenantConfig : TenantConfig
     // Per-tenant infrastructure overrides. See AwsSystemConfig for topology
     // mapping. Any omitted block falls back to the system-level value.
     public EcsConfig? ECS { get; set; }
-    public AppRunnerConfig? AppRunner { get; set; }
     public FargateConfig? Fargate { get; set; }
 }

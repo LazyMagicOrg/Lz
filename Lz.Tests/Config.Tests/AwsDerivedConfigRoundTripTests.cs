@@ -33,7 +33,7 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
     {
         var path = WriteFile("systemconfig.t.dev.yaml", """
             Platform: aws
-            Topology: apprunner
+            Topology: ecs-fargate-cognito-dynamodb
             SystemSuffix: test
             Profile: dummy
             Region: us-west-2
@@ -44,7 +44,7 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
             TrustedAccountIds:
               - "111122223333"
               - "444455556666"
-            AppRunner:
+            Fargate:
               Cpu: 2048
               Memory: 4096
               Port: 9090
@@ -58,10 +58,10 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
         Assert.Equal("arn:aws:secretsmanager:us-east-1:123:secret:shared/system", aws.SharedSecretArn);
         Assert.Equal("arn:aws:kms:us-east-1:123:key/abc", aws.SharedKmsKeyArn);
         Assert.Equal(new[] { "111122223333", "444455556666" }, aws.TrustedAccountIds);
-        Assert.NotNull(aws.AppRunner);
-        Assert.Equal(2048, aws.AppRunner!.Cpu);
-        Assert.Equal(4096, aws.AppRunner.Memory);
-        Assert.Equal(9090, aws.AppRunner.Port);
+        Assert.NotNull(aws.Fargate);
+        Assert.Equal(2048, aws.Fargate!.Cpu);
+        Assert.Equal(4096, aws.Fargate.Memory);
+        Assert.Equal(9090, aws.Fargate.Port);
     }
 
     [Fact]
@@ -74,7 +74,7 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
             HostedZoneId: Z1234567890
             SharedSecretArn: arn:aws:secretsmanager:us-east-1:123:secret:shared/system
             SharedKmsKeyArn: arn:aws:kms:us-east-1:123:key/abc
-            AppRunner:
+            Fargate:
               Cpu: 1024
               Memory: 2048
             """);
@@ -85,8 +85,8 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
         Assert.Equal("arn:aws:acm:us-west-2:123:certificate/abc", aws.AcmCertificateArn);
         Assert.Equal("Z1234567890", aws.HostedZoneId);
         Assert.Equal("arn:aws:secretsmanager:us-east-1:123:secret:shared/system", aws.SharedSecretArn);
-        Assert.NotNull(aws.AppRunner);
-        Assert.Equal(1024, aws.AppRunner!.Cpu);
+        Assert.NotNull(aws.Fargate);
+        Assert.Equal(1024, aws.Fargate!.Cpu);
     }
 
     [Fact]
@@ -149,17 +149,17 @@ public class AwsDerivedConfigRoundTripTests : IDisposable
     {
         var sysPath = WriteFile("systemconfig.t.dev.yaml", """
             Platform: aws
-            Topology: apprunner
+            Topology: ecs-fargate-cognito-dynamodb
             SystemSuffix: test
             Profile: dummy
             Region: us-west-2
-            AppRunner:
+            Fargate:
               Port: 7777
             """);
         var sys = ConfigLoader.LoadSystemConfig(sysPath);
 
         // The .Aws() extension resolves cleanly for AWS-loaded configs.
-        Assert.Equal(7777, sys.Aws().AppRunner!.Port);
+        Assert.Equal(7777, sys.Aws().Fargate!.Port);
     }
 
     private string WriteFile(string name, string contents)

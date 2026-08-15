@@ -1,5 +1,18 @@
 using Lz.Aws.DynamoDB;
 using Lz.Core.Config;
+using Lz.Aws.Auth;
+using Lz.Aws.Compute.Fargate;
+using Lz.Aws.Compute.FargateAlb;
+using Lz.Aws.Compute.Lambda;
+using Lz.Aws.Data;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
+using Lz.Aws.Storage;
+using Lz.Aws.Tailscale;
+using Lz.Aws.Topologies;
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
+using Lz.Aws.Interfaces.Outputs;
 
 namespace Lz.Aws.Shared;
 
@@ -57,7 +70,7 @@ public static class SubtenantProvisioner
 
         // Build CORS allowed-origins list from tenantconfig.CDN.Cors. Same
         // semantics as the Pulumi-managed tenant bucket
-        // (AwsEcsExpressCloudFrontComponent.cs): AllowLocalhostDev=true
+        // (AwsCloudFrontKvsComponent.cs): AllowLocalhostDev=true
         // injects http(s)://localhost:* and AllowedOrigins entries are
         // passed through verbatim. When neither is set, the list is empty
         // and SubtenantBucketManager skips PutCORSConfiguration so an

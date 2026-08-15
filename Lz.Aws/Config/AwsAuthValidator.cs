@@ -10,7 +10,7 @@ namespace Lz.Aws.Config;
 /// </summary>
 /// <remarks>
 /// Called from <c>AwsTopologies.RequireAuthConfigs</c> for Cognito topologies.
-/// The same checks used to live inline in <c>AwsAppRunnerCognitoComponent</c>;
+/// The same checks used to live inline in <c>AwsCognitoComponent</c>;
 /// keeping them here lets the CLI surface them before any AWS call is made.
 /// </remarks>
 public static class AwsAuthValidator

@@ -51,7 +51,7 @@ public interface IAwsPlatformFactory : IPlatformFactory
     /// <summary>
     /// Create a gate-checker component that deploys a Lambda for verifying
     /// EFS/database state from within the VPC. Returns null if the topology
-    /// doesn't use in-VPC gate checks (e.g. AppRunner).
+    /// doesn't use in-VPC gate checks (e.g. the serverless topologies).
     /// </summary>
     IGateCheckerComponent? CreateGateChecker();
 

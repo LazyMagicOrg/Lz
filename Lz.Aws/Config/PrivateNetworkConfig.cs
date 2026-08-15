@@ -1,7 +1,7 @@
 namespace Lz.Aws.Config;
 
 /// <summary>
-/// OPT-IN private-subnet hardening for the EcsExpress topology family
+/// OPT-IN private-subnet hardening for the Fargate topology family
 /// (ecs-fargate-cognito-dynamodb). Phase 1 of Platform/FargateHardening.md.
 ///
 /// <para>ABSENT = OFF, DELIBERATELY. When this block is omitted — or
@@ -15,7 +15,7 @@ namespace Lz.Aws.Config;
 /// <see cref="Lz.Core.Config.HygieneConfig"/> /
 /// <see cref="Lz.Core.Config.DurabilityConfig"/>. Lives on
 /// <see cref="AwsSystemConfig"/> (not the platform-neutral base) because every
-/// field it governs is AWS-only, exactly like the ECS/AppRunner/Fargate blocks.</para>
+/// field it governs is AWS-only, exactly like the ECS/Fargate blocks.</para>
 ///
 /// <para>Phase 1 scope: NAT-only egress + FREE S3/DynamoDB GATEWAY endpoints
 /// (no interface endpoints); CloudFront VPC ORIGIN → INTERNAL ALB; SSM Session
@@ -25,7 +25,7 @@ public class PrivateNetworkConfig
 {
     /// <summary>
     /// Master switch for the private-subnet topology. Default <c>false</c>.
-    /// When false (or the whole block absent) the EcsExpress network/service/
+    /// When false (or the whole block absent) the Fargate network/service/
     /// CloudFront components emit their current public-subnet plan unchanged.
     /// </summary>
     public bool Enabled { get; set; } = false;

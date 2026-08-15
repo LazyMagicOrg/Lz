@@ -4,6 +4,19 @@ using System.Linq;
 using System.Text;
 using NUglify;
 using NUglify.JavaScript;
+using Lz.Aws.Auth;
+using Lz.Aws.Compute.Fargate;
+using Lz.Aws.Compute.FargateAlb;
+using Lz.Aws.Compute.Lambda;
+using Lz.Aws.Data;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
+using Lz.Aws.Storage;
+using Lz.Aws.Tailscale;
+using Lz.Aws.Topologies;
+using Lz.Aws.Config;
+using Lz.Aws.Interfaces;
+using Lz.Aws.Interfaces.Outputs;
 
 namespace Lz.Aws.Shared;
 
@@ -13,7 +26,7 @@ namespace Lz.Aws.Shared;
 /// whitespace + comments only, identifiers preserved), and validates against
 /// the 10 KB CloudFront Functions code-size limit.
 ///
-/// Central home so the AppRunner / ECS / EcsExpress CloudFront components all
+/// Central home so the KVS and static CloudFront components all
 /// emit identical, size-checked, minified code.
 /// </summary>
 public static class CfFunctionCodePrep

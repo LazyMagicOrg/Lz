@@ -4,7 +4,7 @@ namespace Lz.Aws.Config;
 
 /// <summary>
 /// AWS-specific extension of <see cref="SystemConfig"/>. Holds fields whose
-/// semantics only make sense on AWS: ECS/AppRunner sizing, shared-services
+/// semantics only make sense on AWS: ECS/Fargate sizing, shared-services
 /// account identifiers (profile, region, secret/KMS ARNs), and cross-account
 /// trust. Materialised from the same systemconfig YAML the user already writes
 /// via <see cref="AwsConfigExtensions"/>'s <c>WithTypeMapping&lt;SystemConfig,
@@ -13,14 +13,13 @@ namespace Lz.Aws.Config;
 public class AwsSystemConfig : SystemConfig
 {
     // Infrastructure sizing. EcsConfig applies to the ecs-fargate-keycloak
-    // topology (richer per-service shape); AppRunnerConfig applies to the
-    // apprunner topology; FargateConfig applies to ecs-fargate-cognito-dynamodb.
+    // topology (richer per-service shape); FargateConfig applies to
+    // ecs-fargate-cognito-dynamodb (and lambda-cognito-dynamodb).
     public EcsConfig? ECS { get; set; }
-    public AppRunnerConfig? AppRunner { get; set; }
     public FargateConfig? Fargate { get; set; }
 
-    // PrivateNetwork — OPT-IN private-subnet hardening for the EcsExpress
-    // topology (Phase 1, Platform/FargateHardening.md). Absent / Enabled=false
+    // PrivateNetwork — OPT-IN private-subnet hardening for the Fargate
+    // (ecs-fargate-cognito-dynamodb) topology (Phase 1, Platform/FargateHardening.md). Absent / Enabled=false
     // ⇒ NOTHING changes; the emitted plan is byte-identical to a public-subnet
     // deploy (the HygieneConfig/DurabilityConfig opt-in-null contract). Read
     // where SystemConfig is in scope via config.Aws().PrivateNetwork.

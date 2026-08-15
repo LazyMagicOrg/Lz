@@ -23,10 +23,10 @@ the codebase.
 
 | File | Strategy today |
 |------|----------------|
-| `Lz.Aws/AppRunner/AwsAppRunnerTenantDataComponent.cs:40` | `RecoveryWindowInDays = 0` on non-prod (fixed 0.9.241) |
-| `Lz.Aws/Ecs/AwsRdsComponent.cs:154` | `RetainOnDelete = true` |
-| `Lz.Aws/Ecs/AwsSesComponent.cs:146` | `RetainOnDelete = true` |
-| `Lz.Aws/Ecs/AwsTenantDataComponent.cs:60` | `RetainOnDelete = true` |
+| `Lz.Aws/Data/AwsTenantDataComponent.cs` (ex-AppRunner) | `RecoveryWindowInDays = 0` on non-prod (fixed 0.9.241) |
+| `Lz.Aws/Data/AwsRdsComponent.cs` | `RetainOnDelete = true` |
+| `Lz.Aws/Ops/AwsSesComponent.cs` | `RetainOnDelete = true` |
+| `Lz.Aws/Data/AwsFargateAlbTenantDataComponent.cs` | `RetainOnDelete = true` |
 
 `RetainOnDelete = true` keeps the AWS secret alive when Pulumi destroys the
 stack, which is fine for "stack-gone, secret-preserved" semantics — but on
@@ -46,7 +46,7 @@ RecoveryWindowInDays = env is "prod" or "staging" ? 30 : 0,
 Drop `RetainOnDelete = true` on those same non-prod paths. Keep
 `Protect = true` on prod so destroys require explicit operator action.
 
-**Why deferred.** Only the AppRunner tenant secret was causing a live
+**Why deferred.** Only the (ex-AppRunner) tenant secret was causing a live
 blocker. The other three work fine today because they're not exercised in a
 destroy/redeploy loop.
 
@@ -56,9 +56,9 @@ destroy/redeploy loop.
 
 **Symptom.** None. The Bedrock statement in the tenant task policy is
 `Resource: "*"`. See
-[AwsEcsExpressTenantServiceComponent.cs:154](Lz.Aws/EcsExpress/AwsEcsExpressTenantServiceComponent.cs:154),
-[AwsAppRunnerTenantServiceComponent.cs:155](Lz.Aws/AppRunner/AwsAppRunnerTenantServiceComponent.cs:155),
-[AwsAppRunnerServiceComponent.cs:120](Lz.Aws/AppRunner/AwsAppRunnerServiceComponent.cs:120).
+[AwsFargateTenantServiceComponent.cs](Lz.Aws/Compute/Fargate/AwsFargateTenantServiceComponent.cs) and
+[AwsFargateServiceComponent.cs](Lz.Aws/Compute/Fargate/AwsFargateServiceComponent.cs)
+(the third site, the apprunner-topology tenant service, was deleted in 0.11.0).
 
 **Context.** The deep-pass security audit flagged these. Cognito and
 CloudFront scoping landed in 0.9.237; Bedrock stayed broad because
@@ -192,44 +192,27 @@ cache the original plugin-init error and include it in the
 
 ---
 
-## Topology coupling — Express reuses AppRunner components
+## ~~Topology coupling — Express reuses AppRunner components~~ (RESOLVED 0.11.0)
 
-**Symptom.** None.
-`AwsEcsExpressPlatformFactory.cs:34-39` instantiates
-`AwsAppRunnerDynamoDbComponent`, `AwsAppRunnerFileStorageComponent`,
-`AwsAppRunnerCognitoComponent`, `AwsAppRunnerTenantDataComponent`, and
-`AwsAppRunnerServiceComponent`.
-
-**Context.** The Express topology (`ecs-fargate-cognito-dynamodb`) was
-ported from the AppRunner topology and reuses several components.
-Legitimate "same shape, different compute" sharing — but if someone makes
-an AppRunner-only change to one of these components, it breaks Express
-silently.
-
-**Suggested fix.** Either:
-- Move the shared components to `Lz.Aws/Shared/` and rename (drop the
-  `AppRunner` prefix from types that aren't AppRunner-specific).
-- Add cross-topology tests that exercise both factories against shared
-  components.
-
-**Why deferred.** AppRunner is being retired (per AWS), at which point
-the ownership question answers itself: the code moves to live under the
-surviving Express topology.
+**Resolved by the 0.11.0 axis restructure**
+([Migrations/AxisRestructure.md](Migrations/AxisRestructure.md)): the
+apprunner topology was retired and the shared components were moved to
+capability folders and renamed by capability —
+`AwsDynamoDbComponent` (Data/), `AwsS3FileStorageComponent` (Storage/),
+`AwsCognitoComponent` (Auth/), `AwsTenantDataComponent` (Data/), and
+`AwsFargateServiceComponent` (Compute/Fargate/). No component carries a
+topology name any more, so there is no "AppRunner-only change" to make.
 
 ---
 
-## Orphaned cross-topology action wiring
+## ~~Orphaned cross-topology action wiring~~ (RESOLVED 0.11.0)
 
-**Symptom.** None.
-`AwsEcsExpressFoundationPostDeployAction` is only instantiated from
-`AwsAppRunnerPlatformFactory.cs:49` — suspicious cross-topology
-coupling found by the dead-code audit.
-
-**Suggested fix.** Confirm whether the AppRunner factory should be
-using the AppRunner post-deploy action instead. If yes, rename / rewire.
-If the reuse is deliberate, add a comment explaining why.
-
-**Why deferred.** Works today; low risk of regression.
+**Resolved by the 0.11.0 axis restructure**: the apprunner platform factory
+was deleted. The system-table-ensure post-deploy action it shared is now
+`Topologies/AwsEcsFargateCognitoDynamodbFoundationPostDeployAction`,
+instantiated by the two Cognito-topology factories that legitimately share
+it (Fargate + Lambda), which is pinned by
+`SystemPostDeployActionTests`.
 
 ---
 

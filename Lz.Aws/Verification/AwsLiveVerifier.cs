@@ -48,8 +48,8 @@ namespace Lz.Aws.Verification;
 ///   Persistent — imperative layer; survives destroy by design.
 ///
 /// Naming conventions are mirrored from the components that create the
-/// resources (AwsAppRunnerCognitoComponent, AwsAppRunnerTenantDataComponent,
-/// AwsLambdaTenantServiceComponent, AwsEcsExpressCloudFrontComponent,
+/// resources (AwsCognitoComponent, AwsTenantDataComponent,
+/// AwsLambdaTenantServiceComponent, AwsCloudFrontKvsComponent,
 /// SubtenantBucketManager/Provisioner, EcrDeployer call sites, BffWiring).
 /// If a component's naming changes, this catalog must change with it.
 ///
@@ -60,7 +60,7 @@ namespace Lz.Aws.Verification;
 /// </summary>
 public static class AwsLiveVerifier
 {
-    // Mirrors AwsAppRunnerCognitoComponent.DomainPrefixMap.
+    // Mirrors AwsCognitoComponent.DomainPrefixMap.
     private static readonly Dictionary<string, string> DomainPrefixMap = new()
     {
         ["tenantauth"] = "auth",
@@ -126,7 +126,7 @@ public static class AwsLiveVerifier
 
         foreach (var auth in authTypes)
         {
-            // AwsAppRunnerCognitoComponent: Name = {sk}-{suffix}-{env}-{authType}
+            // AwsCognitoComponent: Name = {sk}-{suffix}-{env}-{authType}
             var poolName = $"{sk}-{ss}-{env}-{auth}";
             checks.Add(() => ctx.CheckUserPool(poolName));
 
@@ -147,7 +147,7 @@ public static class AwsLiveVerifier
                 $"/aws/cognito/{sk}-{env}-{auth}", ResourceCategory.Stack));
         }
 
-        // Regional ACM cert for the system domain (AwsAppRunnerNetworkComponent).
+        // Regional ACM cert for the system domain (AwsLambdaNetworkComponent).
         checks.Add(() => ctx.CheckAcmCert(domain, usEast1: false,
             kind: "acm-cert (regional)"));
     }
@@ -175,7 +175,7 @@ public static class AwsLiveVerifier
             checks.Add(() => ctx.CheckIamRoleByPrefix($"{prefix}-{svc.Name}-exec"));
         }
 
-        // AwsEcsExpressCloudFrontComponent (Lambda CDN subclasses it):
+        // AwsCloudFrontKvsComponent (Lambda CDN subclasses it):
         checks.Add(() => ctx.CheckDistributionByAlias(rootDomain));
         // One check per edge function (set mirrors the component; the physical
         // names are Pulumi auto-names, {sk}-{tk}-{name}-fn-{suffix}). Individual
@@ -187,7 +187,7 @@ public static class AwsLiveVerifier
         checks.Add(() => ctx.CheckOriginAccessControl($"{prefix}-oac"));
         checks.Add(() => ctx.CheckCachePolicy($"{prefix}-cache-host-keyed-{env}"));
 
-        // AwsAppRunnerTenantDataComponent: tenant secret — SecretPrefix or {sk}/{tk};
+        // AwsTenantDataComponent: tenant secret — SecretPrefix or {sk}/{tk};
         // RecoveryWindowInDays=0 on non-prod means NO tombstone should ever linger.
         var secretName = tc.SecretsManager?.SecretPrefix ?? $"{sk}/{tk}";
         checks.Add(() => ctx.CheckSecret(secretName));
@@ -482,7 +482,7 @@ public static class AwsLiveVerifier
         }
 
         // 3. Function-URL lockout: the URL is AuthType=NONE by design (a lambda OAC
-        //    cannot carry REST writes — see AwsLambdaCloudFrontComponent), so the gate
+        //    cannot carry REST writes — see AwsCloudFrontKvsLambdaComponent), so the gate
         //    is the x-origin-verify header enforced app-side (OriginVerifyMiddleware).
         //    A direct call without the header must 403. Anything else means the gate
         //    is not engaged — e.g. the hosting-startup assembly missing from the image

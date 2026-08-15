@@ -111,7 +111,7 @@ public class ConfigLoaderExtensionsTests : IDisposable
 
         // `platform:` is nested under another key — must NOT switch active platform
         var yaml = """
-                   Topology: apprunner
+                   Topology: lambda-cognito-dynamodb
                    SystemSuffix: test
                    Profile: dummy
                    Region: us-west-2
@@ -132,7 +132,7 @@ public class ConfigLoaderExtensionsTests : IDisposable
     {
         var lines = new List<string>();
         if (platform != null) lines.Add($"Platform: {platform}");
-        lines.Add("Topology: apprunner");
+        lines.Add("Topology: lambda-cognito-dynamodb");
         lines.Add("SystemSuffix: test");
         lines.Add("Profile: dummy");
         lines.Add("Region: us-west-2");

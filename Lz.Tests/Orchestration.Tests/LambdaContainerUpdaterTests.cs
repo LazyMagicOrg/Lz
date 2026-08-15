@@ -1,4 +1,4 @@
-using Lz.Aws.Lambda;
+using Lz.Aws.Compute.Lambda;
 
 namespace Lz.Tests.Orchestration.Tests;
 

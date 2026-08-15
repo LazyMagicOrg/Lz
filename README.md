@@ -10,7 +10,7 @@ details, and `FutureIssues.md` for known deferred improvements.
 | Project | Purpose |
 |---------|---------|
 | `Lz.Core` | Platform-neutral config, interfaces, orchestration scaffolding. Speaks in shapes only — no AWS/Azure vocabulary. |
-| `Lz.Aws` | AWS-specific config types (AwsSystemConfig/AwsTenantConfig/AwsSharedConfig), derived via `IConfigExtensions` YAML type mappings. Pulumi components, ECS/AppRunner/EcsExpress topologies, Cognito/Keycloak/Tailscale/ACM implementations, AWS-shaped orchestration. |
+| `Lz.Aws` | AWS-specific config types (AwsSystemConfig/AwsTenantConfig/AwsSharedConfig), derived via `IConfigExtensions` YAML type mappings. Pulumi components, the ecs-fargate-keycloak / ecs-fargate-cognito-dynamodb / lambda-cognito-dynamodb topologies (axis-structured since 0.11.0: Compute/Auth/Data/Storage/Edge/Ops + Topologies/), Cognito/Keycloak/Tailscale/ACM implementations, AWS-shaped orchestration. |
 | `Lz.Azure` | Stub `IPlatformFactory` placeholder. |
 | `Lz.Cli` | `dotnet tool` entry point, plugin discovery, command routing. |
 | `Lz.Runner` | Thin dispatcher that resolves the correct `Lz.Cli` nupkg from NuGet feeds walked up from the current directory. |

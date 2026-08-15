@@ -16,6 +16,16 @@ using Lz.Aws.Config;
 using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Task = System.Threading.Tasks.Task;
+using Lz.Aws.Auth;
+using Lz.Aws.Compute.Fargate;
+using Lz.Aws.Compute.FargateAlb;
+using Lz.Aws.Compute.Lambda;
+using Lz.Aws.Data;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
+using Lz.Aws.Shared;
+using Lz.Aws.Storage;
+using Lz.Aws.Topologies;
 
 namespace Lz.Aws.Tailscale;
 
@@ -348,7 +358,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
     public async Task EnsureSshKeyAsync()
     {
         // The SSH key pair exists solely for SFTP into the EFS gateway that rides
-        // on the Tailscale instances. The private-network Tailscale MVP (EcsExpress)
+        // on the Tailscale instances. The private-network Tailscale MVP (Fargate)
         // has no EFS — the instance is a pure subnet router — so there is nothing to
         // key. Monro (PrivateNetwork unset) still generates the pair. Skip cleanly.
         if (_config.Aws().PrivateNetwork is { Enabled: true, Tailscale: true })
@@ -622,7 +632,7 @@ public class AwsTailscalePostDeployAction : IPostDeployAction, ITailscaleKeyMana
 
     /// <summary>
     /// Retrieve the Tailscale API key from Secrets Manager.
-    /// Public so other Tailscale-touching steps (e.g. the EcsExpress factory's
+    /// Public so other Tailscale-touching steps (e.g. the Fargate factory's
     /// UpdateTenantSplitDnsAsync) resolve the key through this single path and
     /// can never drift from the post-deploy action on where the key lives.
     /// </summary>

@@ -9,8 +9,10 @@ using Lz.Core.Plugin;
 using Lz.Core.Validation;
 using Lz.Aws;
 using Lz.Aws.Config;
+using Lz.Aws.Compute.Lambda;
 using Lz.Aws.Docker;
-using Lz.Aws.Ecs;
+using Lz.Aws.Edge;
+using Lz.Aws.Ops;
 using Lz.Aws.Webapp;
 using LzGen = Lz.Gen;
 
@@ -355,7 +357,7 @@ class Program
 
                 var themesBucket = $"keycloak-themes-{sharedConfig.SharedSuffix}";
                 Console.WriteLine($"Deploying theme '{themeName}' from {themeSourcePath}...");
-                var runner = new Lz.Aws.Lambda.AwsLambdaThemeDeployRunner(config, themesBucket);
+                var runner = new AwsLambdaThemeDeployRunner(config, themesBucket);
                 var success = await runner.DeployThemeAsync(themeName, themeSourcePath);
 
                 if (!success)
@@ -1209,7 +1211,7 @@ class Program
     //
     // Zero-downtime alternative to deploytenant for the common case of "just
     // ship the new container image". deploytenant scales the ECS service to 0
-    // during the Pulumi 'up' (AwsEcsTenantServiceComponent starts at
+    // during the Pulumi 'up' (AwsFargateAlbTenantServiceComponent starts at
     // DesiredCount=0) and the post-deploy action scales it back — that gap is
     // the outage. updatecontainer instead issues a rolling UpdateService
     // (ForceNewDeployment=true) with DesiredCount untouched, so ECS replaces
@@ -1304,9 +1306,9 @@ class Program
                     // until then; a tenant Pulumi re-deploy no-ops too since the
                     // ImageUri string never changes). Same compare/force/wait/dry-run
                     // semantics as the ECS path.
-                    if (Lz.Aws.Lambda.AwsLambdaContainerUpdater.IsLambdaTopology(config.Topology))
+                    if (AwsLambdaContainerUpdater.IsLambdaTopology(config.Topology))
                     {
-                        var lambdaUpdater = new Lz.Aws.Lambda.AwsLambdaContainerUpdater(profile, region);
+                        var lambdaUpdater = new AwsLambdaContainerUpdater(profile, region);
                         Console.ForegroundColor = ConsoleColor.Cyan;
                         Console.WriteLine(
                             $"=== updatecontainer: tenant {tk} ({config.Environment}, lambda){(dryRun ? " [dry-run]" : "")} ===");
@@ -1324,7 +1326,7 @@ class Program
                                 var result = await lambdaUpdater.UpdateIfNewerAsync(
                                     functionName, lambdaEcrRepo, tag, force, wait, dryRun, Cts.Token);
                                 PrintUpdateResult(result);
-                                if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                                if (result.Outcome == UpdateOutcome.Failed)
                                     anyFailure = true;
                             }
                             catch (Exception ex)
@@ -1338,7 +1340,7 @@ class Program
                         continue;
                     }
 
-                    var updater = new Lz.Aws.Ecs.AwsContainerUpdater(profile, region);
+                    var updater = new AwsContainerUpdater(profile, region);
 
                     // Cluster naming differs by topology: the EcsExpress family (the current
                     // ecs-fargate-* / lambda-* topologies) names it {sk}-{env}-cluster; the
@@ -1366,7 +1368,7 @@ class Program
 
                     foreach (var (svcName, _) in containersToProcess)
                     {
-                        // Must match AwsEcsTenantServiceComponent (service) and
+                        // Must match AwsFargateAlbTenantServiceComponent (service) and
                         // deploycontainer/deploytenant (ECR repo) naming.
                         var ecsService = $"{config.SystemKey}-{tk}-{svcName}";
                         var ecrRepo =
@@ -1377,7 +1379,7 @@ class Program
                             var result = await updater.UpdateIfNewerAsync(
                                 cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token);
                             PrintUpdateResult(result);
-                            if (result.Outcome == Lz.Aws.Ecs.UpdateOutcome.Failed)
+                            if (result.Outcome == UpdateOutcome.Failed)
                                 anyFailure = true;
                         }
                         catch (Exception ex)
@@ -1398,17 +1400,17 @@ class Program
         root.AddCommand(cmd);
     }
 
-    private static void PrintUpdateResult(Lz.Aws.Ecs.ContainerUpdateResult r)
+    private static void PrintUpdateResult(ContainerUpdateResult r)
     {
         var (color, label) = r.Outcome switch
         {
-            Lz.Aws.Ecs.UpdateOutcome.UpToDate       => (ConsoleColor.DarkGray, "up-to-date"),
-            Lz.Aws.Ecs.UpdateOutcome.Deployed       => (ConsoleColor.Green,    "deploying "),
-            Lz.Aws.Ecs.UpdateOutcome.Verified       => (ConsoleColor.Green,    "verified  "),
-            Lz.Aws.Ecs.UpdateOutcome.WouldDeploy    => (ConsoleColor.Yellow,   "would-depl"),
-            Lz.Aws.Ecs.UpdateOutcome.NoEcrImage     => (ConsoleColor.Yellow,   "no-image  "),
-            Lz.Aws.Ecs.UpdateOutcome.NoRunningTasks => (ConsoleColor.Yellow,   "not-running"),
-            Lz.Aws.Ecs.UpdateOutcome.Failed         => (ConsoleColor.Red,      "FAILED    "),
+            UpdateOutcome.UpToDate       => (ConsoleColor.DarkGray, "up-to-date"),
+            UpdateOutcome.Deployed       => (ConsoleColor.Green,    "deploying "),
+            UpdateOutcome.Verified       => (ConsoleColor.Green,    "verified  "),
+            UpdateOutcome.WouldDeploy    => (ConsoleColor.Yellow,   "would-depl"),
+            UpdateOutcome.NoEcrImage     => (ConsoleColor.Yellow,   "no-image  "),
+            UpdateOutcome.NoRunningTasks => (ConsoleColor.Yellow,   "not-running"),
+            UpdateOutcome.Failed         => (ConsoleColor.Red,      "FAILED    "),
             _                                       => (ConsoleColor.Gray,     "?         "),
         };
         Console.ForegroundColor = color;
@@ -1474,7 +1476,7 @@ class Program
 
                     try
                     {
-                        var updater = new Lz.Aws.Ecs.AwsEdgeUpdater(
+                        var updater = new AwsEdgeUpdater(
                             config.SystemKey, profile, region);
                         var results = await updater.UpdateAsync(
                             tk,
@@ -1491,7 +1493,7 @@ class Program
                         foreach (var r in results)
                             PrintEdgeResult(r);
 
-                        if (results.Any(r => r.Outcome == Lz.Aws.Ecs.EdgeUpdateOutcome.Failed))
+                        if (results.Any(r => r.Outcome == EdgeUpdateOutcome.Failed))
                             anyFailure = true;
                     }
                     catch (Exception ex)
@@ -1511,14 +1513,14 @@ class Program
         root.AddCommand(cmd);
     }
 
-    private static void PrintEdgeResult(Lz.Aws.Ecs.EdgeFunctionResult r)
+    private static void PrintEdgeResult(EdgeFunctionResult r)
     {
         var (color, label) = r.Outcome switch
         {
-            Lz.Aws.Ecs.EdgeUpdateOutcome.Updated  => (ConsoleColor.Green,    "published "),
-            Lz.Aws.Ecs.EdgeUpdateOutcome.Skipped  => (ConsoleColor.DarkGray, "skipped   "),
-            Lz.Aws.Ecs.EdgeUpdateOutcome.NotFound => (ConsoleColor.Yellow,   "not-found "),
-            Lz.Aws.Ecs.EdgeUpdateOutcome.Failed   => (ConsoleColor.Red,      "FAILED    "),
+            EdgeUpdateOutcome.Updated  => (ConsoleColor.Green,    "published "),
+            EdgeUpdateOutcome.Skipped  => (ConsoleColor.DarkGray, "skipped   "),
+            EdgeUpdateOutcome.NotFound => (ConsoleColor.Yellow,   "not-found "),
+            EdgeUpdateOutcome.Failed   => (ConsoleColor.Red,      "FAILED    "),
             _                                      => (ConsoleColor.Gray,     "?         "),
         };
         Console.ForegroundColor = color;
@@ -1592,7 +1594,7 @@ class Program
 
                     try
                     {
-                        await Lz.Aws.Ecs.AwsTenantConfigPublisher.PublishAsync(
+                        await AwsTenantConfigPublisher.PublishAsync(
                             monorepoRoot, config, tk, tenantConfig, invalidate, dryRun);
                     }
                     catch (Exception ex)
@@ -2429,7 +2431,7 @@ class Program
                     Console.WriteLine($"=== Parking tenant '{tk}' ===");
                     Console.ResetColor();
 
-                    var manager = new Lz.Aws.Ecs.AwsParkManager(
+                    var manager = new AwsParkManager(
                         config.SystemKey, profile, region);
                     await manager.ParkAsync(
                         tk,
@@ -2481,7 +2483,7 @@ class Program
                     Console.WriteLine($"=== Unparking tenant '{tk}' ===");
                     Console.ResetColor();
 
-                    var manager = new Lz.Aws.Ecs.AwsParkManager(
+                    var manager = new AwsParkManager(
                         config.SystemKey, profile, region);
                     await manager.UnparkAsync(tk, tenantConfig.RootDomain, tenantConfig.LegacyDomains);
                 }

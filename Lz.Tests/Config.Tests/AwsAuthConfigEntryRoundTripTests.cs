@@ -241,7 +241,7 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
         // apprunner topology keeps validator requirements minimal.
         var yaml =
             "Platform: aws\n" +
-            "Topology: apprunner\n" +
+            "Topology: lambda-cognito-dynamodb\n" +
             "SystemSuffix: test\n" +
             "Profile: dummy\n" +
             "Region: us-west-2\n" +

@@ -171,7 +171,7 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// DISTINCT from <see cref="MachineAuth"/>: that is app-only <c>client_credentials</c>; this authenticates
     /// per-vendor Cognito USERS non-interactively (Custom-Auth challenge over a vendor API key). Because the
     /// <c>LambdaConfig</c> it wires is POOL-LEVEL, every resource here — the Lambda especially — MUST stay
-    /// inside the opt-in guard. See McpAgents.md M0-7 and Lz.Aws/AppRunner/CognitoCustomAuth/custom-auth.mjs.
+    /// inside the opt-in guard. See McpAgents.md M0-7 and Lz.Aws/Auth/CognitoCustomAuth/custom-auth.mjs.
     /// </summary>
     public CustomAuthConfig? CustomAuth { get; set; }
 

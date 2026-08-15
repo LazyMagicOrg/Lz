@@ -51,10 +51,9 @@ public static class AwsConfigMerger
     /// Resolution order:
     ///   1. <c>tenant.Fargate</c> (explicit per-tenant override)
     ///   2. <c>system.Fargate</c> (system-level setting)
-    ///   3. Back-compat: pre-<c>Fargate</c> configs used <c>AppRunner:</c>;
-    ///      fall back to <c>tenant.AppRunner</c> → <c>system.AppRunner</c>,
-    ///      mapping the shared fields.
-    ///   4. Defaults from a new <see cref="FargateConfig"/>.
+    ///   3. Defaults from a new <see cref="FargateConfig"/>.
+    /// (The legacy pre-<c>Fargate</c> YAML sizing fallback was removed in
+    /// 0.11.0 with the apprunner-topology retirement.)
     /// </summary>
     public static FargateConfig GetEffectiveFargateConfig(SystemConfig system, TenantConfig tenant)
     {
@@ -64,43 +63,21 @@ public static class AwsConfigMerger
         var fargate = tenAws?.Fargate ?? sysAws?.Fargate;
         if (fargate != null) return fargate;
 
-        // Back-compat: fall back to the legacy AppRunner: block. Emits nothing
-        // to logs; callers may want to warn once when this path is exercised.
-        var appRunner = tenAws?.AppRunner ?? sysAws?.AppRunner;
-        if (appRunner != null)
-        {
-            return new FargateConfig
-            {
-                Cpu = appRunner.Cpu,
-                Memory = appRunner.Memory,
-                Port = appRunner.Port,
-                HealthCheckPath = appRunner.HealthCheckPath,
-                LogRetentionDays = appRunner.LogRetentionDays,
-                // AppRunner used MinSize/MaxSize for autoscaling bounds; Fargate
-                // uses DesiredCount. Default to 1 — matches prior behaviour.
-                DesiredCount = 1,
-            };
-        }
-
         return new FargateConfig();
     }
 
     /// <summary>
     /// Resolve log retention (days) for a system-scoped AWS resource under a
-    /// Fargate- or AppRunner-based topology. Checks <c>system.Fargate</c>
-    /// first (new), then <c>system.AppRunner</c> (legacy), then defaults to 3.
+    /// Fargate-based topology. Checks <c>system.Fargate</c>, then defaults to 3.
     /// Used by cross-topology components like
-    /// <see cref="Lz.Aws.AppRunner.AwsAppRunnerCognitoComponent"/> that are
-    /// instantiated under both the <c>apprunner</c> and
-    /// <c>ecs-fargate-cognito-dynamodb</c> topologies — reading the
-    /// <c>AppRunner:</c> block directly would miss the <c>Fargate:</c>
-    /// setting on Fargate-topology systems.
+    /// <see cref="Lz.Aws.Auth.AwsCognitoComponent"/> that are instantiated under
+    /// both the <c>ecs-fargate-cognito-dynamodb</c> and
+    /// <c>lambda-cognito-dynamodb</c> topologies.
     /// </summary>
     public static int GetEffectiveSystemLogRetentionDays(SystemConfig system)
     {
         var sysAws = system as AwsSystemConfig;
         return sysAws?.Fargate?.LogRetentionDays
-            ?? sysAws?.AppRunner?.LogRetentionDays
             ?? 3;
     }
 }

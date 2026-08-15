@@ -8,7 +8,7 @@ namespace Lz.Aws.Interfaces.Outputs;
 /// ASG: the private subnets it launches into (inherited from INetworkOutputs),
 /// the NAT gateway it depends on for egress, and the security group it attaches.
 /// Implemented by every AWS network-outputs type that can carry Tailscale
-/// (AwsNetworkOutputs, AwsEcsExpressNetworkOutputs) so AwsTailscaleAsgComponent
+/// (AwsFargateAlbNetworkOutputs, AwsFargateNetworkOutputs) so AwsTailscaleAsgComponent
 /// reads them through this contract instead of casting to one concrete type.
 /// </summary>
 public interface IPrivateNetworkOutputs : INetworkOutputs

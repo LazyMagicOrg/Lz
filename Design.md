@@ -84,7 +84,7 @@ Deployments are split into phases that correspond to manual intervention points.
 ### Lz.Core — Platform-neutral interfaces, config, orchestration scaffolding, plugin contract
 
 `Lz.Core` speaks in shapes only — it knows nothing about AWS, Azure, or any
-specific cloud target. Platform-specific types (AWS ECS/AppRunner sizing,
+specific cloud target. Platform-specific types (AWS ECS/Fargate sizing,
 cross-account secret ARNs, Tailscale, Keycloak seeding) live in platform
 libraries and are materialised via `IConfigExtensions` (see
 `Design/TargetIsolation.md`).
@@ -178,7 +178,7 @@ not Lz.Cli — share the same discovery logic the CLI uses.
 
 ### Lz.Aws — AWS Pulumi components + AWS-shaped config, interfaces, orchestration
 
-AWS-named vocabulary (Cognito, ECS, AppRunner, Keycloak, Tailscale, ACM,
+AWS-named vocabulary (Cognito, ECS, Fargate, Keycloak, Tailscale, ACM,
 Route 53, S3 seed bucket, gate-checker Lambda) lives here — not in
 `Lz.Core`. `AwsConfigExtensions` registers YAML type mappings so
 systemconfig/tenantconfig materialise as `AwsSystemConfig` /
@@ -187,12 +187,12 @@ systemconfig/tenantconfig materialise as `AwsSystemConfig` /
 ```
 Lz.Aws/
 ├── Config/
-│   ├── AwsSystemConfig.cs           # Adds ECS/AppRunner/SharedSecretArn/TrustedAccountIds/...
-│   ├── AwsTenantConfig.cs           # Adds ECS/AppRunner/AcmCertificateArn/HostedZoneId/...
+│   ├── AwsSystemConfig.cs           # Adds ECS/Fargate/SharedSecretArn/TrustedAccountIds/...
+│   ├── AwsTenantConfig.cs           # Adds ECS/Fargate/AcmCertificateArn/HostedZoneId/...
 │   ├── AwsSharedConfig.cs           # Adds Keycloak/Tailscale sizing/TrustedAccountIds
 │   ├── AwsAuthConfigEntry.cs        # Cognito MFA/password/groups/advanced-security
 │   ├── EcsConfig.cs                 # ECS deployment section
-│   ├── AppRunnerConfig.cs           # AppRunner deployment section
+│   ├── FargateConfig.cs             # Fargate sizing section
 │   ├── KeycloakSeedConfig.cs        # Keycloak realm/client/role/group seed model
 │   ├── BootstrapCredsConfig.cs      # SMTP/Keycloak bootstrap credentials
 │   ├── AwsConfigExtensions.cs       # IConfigExtensions: registers WithTypeMapping<...>
@@ -212,30 +212,39 @@ Lz.Aws/
 ├── Orchestration/
 │   ├── SystemDeployment.cs          # Foundation + tenant orchestrator (AWS-ECS-shaped phases)
 │   └── SharedDeployment.cs          # Shared-services (Keycloak + Tailscale) orchestrator
-├── Ecs/                             # ECS + ALB topology
-│   ├── AwsEcsPlatformFactory.cs     # Implements IAwsPlatformFactory
-│   ├── AwsEcsNetworkComponent.cs    # VPC, subnets, NAT, ALBs, security groups, DNS, certs
-│   ├── AwsEcsClusterComponent.cs    # ECS cluster, Cloud Map namespace
-│   ├── AwsRdsComponent.cs           # RDS PostgreSQL + system secret
-│   ├── AwsEfsComponent.cs           # EFS + mount targets
-│   ├── AwsEcsServiceComponent.cs    # System-level ECS service
-│   ├── AwsEcsTenantServiceComponent.cs  # Per-tenant dedicated ECS service
-│   ├── AwsKeycloakEcsComponent.cs   # Keycloak ECS task + service + listener rules
-│   ├── AwsCloudFrontComponent.cs    # CloudFront + S3 + OAC + DNS records
-│   ├── AwsSesComponent.cs           # SES domain identity, DKIM, SMTP user, credentials
-│   ├── AwsTenantDataComponent.cs    # Per-tenant EFS access points + tenant secret
-│   ├── AwsTailscaleAsgComponent.cs  # Tailscale EC2 ASG subnet router
-│   ├── AwsSeedTaskComponent.cs      # ECS task definition for data seeding
-│   ├── AwsTransitionChecker.cs      # Gate-check via Secrets Manager / Lambda
-│   ├── AwsFoundationPostDeployAction.cs  # DB init, Keycloak seed, OIDC secret storage
-│   ├── AwsServicesPostDeployAction.cs    # Docker build/push/scale per-service
-│   ├── AwsTenantKeycloakSeeder.cs   # Per-tenant realm seeder (ITenantKeycloakSeeder)
-│   └── ...
-├── AppRunner/                       # AppRunner topology (serverless containers)
-├── EcsExpress/                      # ECS in public subnets (no NAT)
-├── Lambda/                          # Gate-checker + theme-deploy Lambdas
-├── Keycloak/                        # Keycloak admin client + seeder
-├── Tailscale/                       # Tailscale API client + post-deploy
+├── Topologies/                      # Assembly locus: registry + factories + topology-bound actions/lookups
+│   ├── AwsTopologies.cs             # Registry of the built-in topologies
+│   ├── AwsEcsFargateCognitoDynamodbPlatformFactory.cs  # ecs-fargate-cognito-dynamodb
+│   ├── AwsEcsFargateKeycloakPlatformFactory.cs         # ecs-fargate-keycloak
+│   ├── AwsLambdaCognitoDynamodbPlatformFactory.cs      # lambda-cognito-dynamodb
+│   ├── Aws*FoundationPostDeployAction.cs / Aws*FoundationLookup.cs / ...
+│   └── AwsServicesPostDeployAction.cs   # Docker build/push/scale per-service
+├── Compute/
+│   ├── Fargate/                     # Modern Cognito+DynamoDB Fargate lineage (unqualified names)
+│   │   ├── AwsFargateNetworkComponent.cs / AwsFargateComputeComponent.cs
+│   │   ├── AwsFargateTenantServiceComponent.cs / AwsFargateServiceComponent.cs
+│   │   └── AwsFargate{Network,Compute}Outputs.cs
+│   ├── FargateAlb/                  # Dual-ALB keycloak lineage (FargateAlb family tag)
+│   │   ├── AwsFargateAlbNetworkComponent.cs / AwsFargateAlbClusterComponent.cs
+│   │   ├── AwsFargateAlb{TenantService,Service}Component.cs
+│   │   ├── AwsFargateAlb{Network,Compute,Service}Outputs.cs
+│   │   ├── AwsFargateAlbTransitionChecker.cs
+│   │   └── AwsTenantDnsAndCertComponent.cs
+│   └── Lambda/                      # Serverless container-Lambda compute + runners
+│       ├── AwsLambdaInfra.cs / AwsLambdaTenantServiceComponent.cs
+│       ├── AwsLambdaNetworkComponent.cs (no-VPC network, ex-apprunner)
+│       └── AwsLambda{ConfigInit,AdminSetup,PostSeed,ThemeDeploy}Runner.cs, AwsLambdaContainerUpdater.cs
+├── Auth/                            # AwsCognitoComponent (+CognitoCustomAuth/), AwsKeycloakServiceComponent,
+│                                    # AwsTenantKeycloakSeeder, SmartstoreCognitoWiring
+├── Data/                            # AwsDynamoDbComponent, AwsRdsComponent, AwsTenantDataComponent,
+│                                    # AwsFargateAlbTenantDataComponent + outputs
+├── Storage/                         # AwsS3FileStorageComponent, AwsEfsComponent
+├── Edge/                            # AwsCloudFrontKvsComponent (+Lambda variant), AwsCloudFrontStaticComponent, AwsEdgeUpdater
+├── Ops/                             # Ses, SeedTask/SeedRunner, ParkManager, ContainerUpdater,
+│                                    # GateChecker Lambda, TransitionChecker, PrivateZoneCleanup, TenantConfigPublisher
+├── Shims/                           # [Obsolete] 0.11.0 rename shims (Lz.Aws.{Ecs,EcsExpress,AppRunner,Lambda})
+├── Lambda/                          # ASSETS ONLY: gate-checker.zip + build script (runtime path is frozen)
+├── Tailscale/                       # Tailscale API client + ASG component + post-deploy
 ├── Docker/                          # Shared docker build/push helpers
 ├── DynamoDB/                        # Per-tenant table provisioning
 ├── Webapp/                          # Blazor WASM S3 bucket provisioning
@@ -526,7 +535,10 @@ Defined in [`Lz.Aws/Topologies/AwsTopologies.cs`](Lz.Aws/Topologies/AwsTopologie
 |---|---|---|---|---|---|---|---|
 | `ecs-fargate-keycloak` | Fargate (private) | RDS | EFS | Keycloak | private | Tailscale | yes |
 | `ecs-fargate-cognito-dynamodb` | Fargate (public) | DynamoDB | S3 | Cognito | public | — | — |
-| `apprunner` | AppRunner | DynamoDB | S3 | Cognito | — | — | — |
+| `lambda-cognito-dynamodb` | Lambda (container) | DynamoDB | S3 | Cognito | — | — | — |
+
+(The `apprunner` topology was retired in 0.11.0 — see
+[Migrations/AxisRestructure.md](Migrations/AxisRestructure.md).)
 
 Each descriptor carries:
 - **Axis flags** (`Compute`, `Data`, `FileStorage`, `Auth`, `HasPrivateNetwork`,
@@ -539,10 +551,10 @@ Each descriptor carries:
   `ecs-fargate-keycloak` requires `VpcCidr` and `CentralAuthDomain`).
   Invoked by the CLI after systemconfig parsing, before factory construction.
 
-Topologies are **not** composed from orthogonal axes. `AppRunner + EFS` is
-not a real AWS topology (AppRunner can't mount EFS), so we don't pretend
-axes are independent. Each descriptor pins every axis, and callers select
-by name.
+Topologies are **not** composed from orthogonal axes. `Lambda + EFS` is
+not a real AWS topology (the container Lambda doesn't mount EFS here), so we
+don't pretend axes are independent. Each descriptor pins every axis, and
+callers select by name.
 
 ### Extending and overriding topologies in a plugin
 
@@ -574,7 +586,7 @@ you subclass an existing `IAwsPlatformFactory` and override a few methods.
 
 ```csharp
 // in BCProjNew/Deploy/BcCustomPlatformFactory.cs
-public class BcCustomPlatformFactory : AwsEcsExpressPlatformFactory
+public class BcCustomPlatformFactory : AwsEcsFargateCognitoDynamodbPlatformFactory
 {
     public BcCustomPlatformFactory(SystemConfig config) : base(config) { }
 
@@ -608,8 +620,9 @@ AwsTopologies.Register(myReplacement, allowOverride: true);
 ```
 
 To support subclassing, all `Create*` / `Get*` methods on the built-in
-AWS platform factories (`AwsEcsPlatformFactory`,
-`AwsAppRunnerPlatformFactory`, `AwsEcsExpressPlatformFactory`) are
+AWS platform factories (`AwsEcsFargateKeycloakPlatformFactory`,
+`AwsEcsFargateCognitoDynamodbPlatformFactory`,
+`AwsLambdaCognitoDynamodbPlatformFactory`) are
 `virtual`. Plugins override only the components they care to replace;
 everything else inherits from the base factory.
 
@@ -821,7 +834,7 @@ DefaultTenant: "myprojectdev.click"
 
 # Platform and topology — topology names are registered in Lz.Aws.Topologies.AwsTopologies
 Platform: aws                            # aws (azure planned)
-Topology: ecs-fargate-keycloak           # ecs-fargate-keycloak | ecs-fargate-cognito-dynamodb | apprunner
+Topology: ecs-fargate-keycloak           # ecs-fargate-keycloak | ecs-fargate-cognito-dynamodb | lambda-cognito-dynamodb
 
 # Pulumi state — auto-generated from SystemSuffix at load time. Not in YAML.
 # Generated:  s3://myproject-dev-pulumi-state-496a-ffff?region=us-west-2

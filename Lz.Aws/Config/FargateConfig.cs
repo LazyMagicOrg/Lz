@@ -7,12 +7,10 @@ namespace Lz.Aws.Config;
 /// per-service shape).
 /// </summary>
 /// <remarks>
-/// Historically these knobs lived under the <c>AppRunner:</c> YAML block
-/// because the ECS Express topology was ported from the AppRunner topology
-/// and reused <see cref="AppRunnerConfig"/> by accident. Systems using
-/// <c>ecs-fargate-cognito-dynamodb</c> should declare <c>Fargate:</c>
-/// instead — the factory prefers this block when present and falls back
-/// to the legacy <c>AppRunner:</c> values only for backward compatibility.
+/// Historically these knobs lived under a legacy YAML block inherited from the
+/// retired apprunner topology (the Fargate topology was ported from it and
+/// reused its config class by accident). The legacy block and its fallback
+/// were removed in 0.11.0 — declare <c>Fargate:</c>.
 /// </remarks>
 public class FargateConfig
 {

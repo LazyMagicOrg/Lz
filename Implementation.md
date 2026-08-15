@@ -64,15 +64,15 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   └── Shared/                          # AzurePostgresComponent, AzureFrontDoorComponent, etc.
   │   │   └── ILzPlugin.cs                  # Plugin contract for system-specific DLLs
   │   └── Validation/                       # TopologyValidator
-  ├── Lz.Aws/                               # AWS-specific: ECS/AppRunner, Cognito, Tailscale, Keycloak
+  ├── Lz.Aws/                               # AWS-specific: ECS/Fargate/Lambda, Cognito, Tailscale, Keycloak
   │   ├── Lz.Aws.csproj                     # net10.0, depends on Lz.Core + Pulumi.Aws
   │   ├── Config/
-  │   │   ├── AwsSystemConfig.cs            # ECS/AppRunner/SharedSecretArn/TrustedAccountIds/...
-  │   │   ├── AwsTenantConfig.cs            # ECS/AppRunner/AcmCertificateArn/HostedZoneId/...
+  │   │   ├── AwsSystemConfig.cs            # ECS/Fargate/SharedSecretArn/TrustedAccountIds/...
+  │   │   ├── AwsTenantConfig.cs            # ECS/Fargate/AcmCertificateArn/HostedZoneId/...
   │   │   ├── AwsSharedConfig.cs            # Keycloak/Tailscale sizing/TrustedAccountIds
   │   │   ├── AwsAuthConfigEntry.cs         # Cognito MFA/password/groups/advanced-security
   │   │   ├── EcsConfig.cs                  # ECS deployment section
-  │   │   ├── AppRunnerConfig.cs            # AppRunner deployment section
+  │   │   ├── FargateConfig.cs              # Fargate sizing section
   │   │   ├── KeycloakSeedConfig.cs         # Keycloak seed model
   │   │   ├── BootstrapCredsConfig.cs       # SMTP/Keycloak bootstrap creds
   │   │   ├── AwsConfigExtensions.cs        # IConfigExtensions: registers all AWS type mappings
@@ -81,10 +81,11 @@ Lzm repo (published as NuGet packages + dotnet global tool):
   │   │   └── AwsConfigCast.cs              # .Aws() extension helpers
   │   ├── Interfaces/                       # IAwsPlatformFactory + AWS-named capabilities
   │   ├── Orchestration/                    # SystemDeployment, SharedDeployment (AWS-ECS-shaped)
-  │   ├── Ecs/                              # ECS + ALB topology components
-  │   ├── AppRunner/                        # AppRunner topology components
-  │   ├── EcsExpress/                       # ECS in public subnets (no NAT)
-  │   ├── Lambda/                           # Gate-checker + theme-deploy Lambdas
+  │   ├── Topologies/                       # Registry + factories + topology-bound actions/lookups
+  │   ├── Compute/{Fargate,FargateAlb,Lambda}/  # Compute components by capability (0.11.0 axis layout)
+  │   ├── Auth/ Data/ Storage/ Edge/ Ops/   # Capability folders (Cognito/Keycloak, DynamoDB/RDS, S3/EFS, CloudFront, ops)
+  │   ├── Shims/                            # [Obsolete] 0.11.0 rename shims for the retired namespaces
+  │   ├── Lambda/                           # Assets only: gate-checker.zip + build script
   │   ├── Keycloak/                         # Keycloak admin client + seeder
   │   ├── Tailscale/                        # Tailscale API client + post-deploy
   │   ├── Docker/                           # Shared docker build/push helpers
