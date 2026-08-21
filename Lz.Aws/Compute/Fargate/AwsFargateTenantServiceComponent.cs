@@ -214,7 +214,7 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
                     ""Statement"": [
                         {{ ""Effect"": ""Allow"", ""Action"": [""bedrock:InvokeModel"", ""bedrock:InvokeModelWithResponseStream""], ""Resource"": ""*"" }},
                         {{ ""Effect"": ""Allow"",
-                           ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers""],
+                           ""Action"": [""cognito-idp:AdminCreateUser"", ""cognito-idp:AdminDeleteUser"", ""cognito-idp:AdminGetUser"", ""cognito-idp:AdminUpdateUserAttributes"", ""cognito-idp:ListUsers"", ""cognito-idp:AdminDisableUser"", ""cognito-idp:AdminEnableUser"", ""cognito-idp:AdminUserGlobalSignOut""],
                            ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*"" }},
                         {{ ""Effect"": ""Allow"",
                            ""Action"": [""cognito-identity:GetId"", ""cognito-identity:GetCredentialsForIdentity"", ""cognito-identity:GetOpenIdTokenForDeveloperIdentity""],
