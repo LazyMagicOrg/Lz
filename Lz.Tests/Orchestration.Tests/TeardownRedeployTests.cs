@@ -99,7 +99,7 @@ public class TeardownRedeployTests
         // would silently test old destroy/verify semantics. The runner prints
         // the feed it resolved from; require it to live under the repo root.
         Assert.True(
-            version.StdOut.Contains(Path.Combine(harness.RepoRoot, "lz", "Packages"),
+            version.StdOut.Contains(Path.Combine(harness.LzRepoRoot, "Packages"),
                 StringComparison.OrdinalIgnoreCase),
             "lz resolved its CLI from a feed OUTSIDE this repo — the drill would " +
             $"exercise the wrong lz build. --version said:\n{version.StdOut}");

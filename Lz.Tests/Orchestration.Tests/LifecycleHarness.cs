@@ -15,7 +15,16 @@ namespace Lz.Tests.Orchestration.Tests;
 /// </summary>
 public sealed class LifecycleHarness
 {
+    /// <summary>The workspace root — where the systemconfig lives.</summary>
     public string RepoRoot { get; }
+
+    /// <summary>
+    /// The Lz repository itself. Distinct from <see cref="RepoRoot"/>: Lz used to sit directly in
+    /// the workspace root and now lives under <c>repos/</c>, so anything needing Lz's own tree must
+    /// locate it rather than assume a fixed offset from the workspace.
+    /// </summary>
+    public string LzRepoRoot { get; }
+
     public string ArtifactsDir { get; }
 
     private int _step;
@@ -23,10 +32,28 @@ public sealed class LifecycleHarness
     public LifecycleHarness()
     {
         RepoRoot = FindRepoRoot();
+        LzRepoRoot = FindLzRepoRoot();
         ArtifactsDir = Path.Combine(
-            RepoRoot, "lz", "Lz.Tests", "Orchestration.Tests", "artifacts",
+            LzRepoRoot, "Lz.Tests", "Orchestration.Tests", "artifacts",
             DateTime.Now.ToString("yyyyMMdd-HHmmss"));
         Directory.CreateDirectory(ArtifactsDir);
+    }
+
+    /// <summary>
+    /// Walk up from the test bin for <c>Lz.slnx</c>. Anchoring on the solution file makes this
+    /// survive relocation of the Lz repo — the previous code joined a hardcoded "lz" onto the
+    /// workspace root, which broke silently when Lz moved under <c>repos/</c>.
+    /// </summary>
+    public static string FindLzRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            if (dir.GetFiles("Lz.slnx").Length > 0) return dir.FullName;
+            dir = dir.Parent;
+        }
+        throw new InvalidOperationException(
+            $"Could not locate the Lz repo root (no Lz.slnx walking up from {AppContext.BaseDirectory}).");
     }
 
     /// <summary>

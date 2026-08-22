@@ -6,6 +6,7 @@ using Lz.Core.Interfaces;
 using Lz.Core.Orchestration;
 using Lz.Aws.Orchestration;
 using Lz.Core.Plugin;
+using Lz.Core.Repos;
 using Lz.Core.Validation;
 using Lz.Aws;
 using Lz.Aws.Config;
@@ -120,6 +121,7 @@ class Program
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
         RegisterGetTenantsCommand(rootCommand);
+        RegisterReposCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
@@ -2678,6 +2680,97 @@ class Program
     // No --tenant filter: a single system can have multiple tenants
     // (bcs is the only tenant today, but the schema is multi-tenant)
     // and the picker wants the whole directory.
+    // ---------------------------------------------------------------
+    // lz repos — per-repository status across a multi-repo workspace.
+    //
+    // Deliberately loads NO lz config: this works in any multi-repo checkout, which is what makes
+    // it useful outside a deployed system. Note it is distinct from `lz status`, which reports
+    // DEPLOYMENT state.
+    // ---------------------------------------------------------------
+    private static void RegisterReposCommand(RootCommand root)
+    {
+        var cmd = new Command("repos",
+            "Report git status for every repository in the workspace: branch, latest commit, " +
+            "working tree, release markers, and ahead/behind vs the tracked upstream.");
+
+        var rootOpt = new Option<string?>("--root",
+            "Workspace root (default: nearest ancestor containing a repos/ folder, else the nearest git repo).");
+        var noFetchOpt = new Option<bool>("--no-fetch", () => false,
+            "Work entirely offline: no fetch and no remote marker lookup. Much faster, but " +
+            "ahead/behind is then as of the last fetch and the Tags column reads (offline).");
+        var jsonOpt = new Option<bool>("--json", () => false,
+            "Machine-readable output (one JSON document on stdout).");
+        var tagsOpt = new Option<string>("--tags", () => "prod,test",
+            "Comma-separated release markers to report. Empty string disables marker lookup " +
+            "(one fewer network round trip per repo).");
+        var concurrencyOpt = new Option<int>("--concurrency", () => 8,
+            "How many repositories to inspect at once.");
+
+        cmd.AddOption(rootOpt);
+        cmd.AddOption(noFetchOpt);
+        cmd.AddOption(jsonOpt);
+        cmd.AddOption(tagsOpt);
+        cmd.AddOption(concurrencyOpt);
+
+        cmd.SetHandler(async (string? rootPath, bool noFetch, bool json, string tags, int concurrency) =>
+        {
+            try
+            {
+                var workspaceRoot = rootPath is null
+                    ? RepoDiscovery.FindWorkspaceRoot()
+                    : Path.GetFullPath(rootPath);
+
+                if (!Directory.Exists(workspaceRoot))
+                {
+                    Console.Error.WriteLine($"Workspace root not found: {workspaceRoot}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var options = new RepoStatusOptions
+                {
+                    Root = workspaceRoot,
+                    Fetch = !noFetch,
+                    Tags = tags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                    MaxConcurrency = concurrency,
+                };
+
+                var rows = await new RepoStatusCollector().CollectAsync(options);
+
+                if (rows.Count == 0)
+                {
+                    // Not an error: a directory with no repositories is a legitimate answer.
+                    if (json) Console.Out.WriteLine(RepoStatusRenderer.ToJson(rows, workspaceRoot));
+                    else Console.Out.WriteLine($"No git repositories found under {workspaceRoot}");
+                    Environment.ExitCode = 0;
+                    return;
+                }
+
+                if (json)
+                {
+                    Console.Out.WriteLine(RepoStatusRenderer.ToJson(rows, workspaceRoot));
+                }
+                else
+                {
+                    Console.Out.WriteLine($"workspace: {workspaceRoot}");
+                    Console.Out.WriteLine();
+                    Console.Out.Write(RepoStatusRenderer.ToTable(rows));
+                    Console.Out.WriteLine();
+                    Console.Out.WriteLine(RepoStatusRenderer.ToSummary(rows));
+                }
+
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"repos: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, rootOpt, noFetchOpt, jsonOpt, tagsOpt, concurrencyOpt);
+
+        root.AddCommand(cmd);
+    }
+
     // ---------------------------------------------------------------
     private static void RegisterGetTenantsCommand(RootCommand root)
     {
