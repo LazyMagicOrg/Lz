@@ -21,8 +21,12 @@ jobs:
           node-version: '22'
 
       # Cognito Custom-Auth trigger — the fail-closed / single-shot / constant-time decision core (13 cases).
-      - run: node --test Lz.Aws/AppRunner/CognitoCustomAuth/custom-auth.test.mjs
+      # Path note: this lives under Lz.Aws/Auth/, NOT Lz.Aws/AppRunner/ — the 0.11.0 axis restructure
+      # (40c5517) retired the AppRunner topology and moved it. Because a failing step aborts the job,
+      # naming the old path silently took `dotnet test` below down with it.
+      - run: node --test Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
 
       # Lz config load/merge/validators, DynamoDB/VectorStore/Secrets policy, and lz-verify smoke logic
-      # (~244). Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
+      # (252 cases over 174 methods). Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj
+      # build fails MSB4019.
       - run: dotnet test Lz.slnx -c Debug
