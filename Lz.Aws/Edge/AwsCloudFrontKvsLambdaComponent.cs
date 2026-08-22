@@ -81,18 +81,9 @@ public class AwsCloudFrontKvsLambdaComponent : AwsCloudFrontKvsComponent
         };
     }
 
-    /// <summary>
-    /// Return NONE — override the base SPA fallback pair (403/404→200 /index.html). On this topology that
-    /// pair is redundant (CFRequest.js already rewrites extensionless webapp paths to {appPath}index.html
-    /// at REQUEST time, so SPA deep links never 404 at the origin) and harmful: being distribution-wide it
-    /// also intercepted API-origin 403/404s on /*Api/*, and the /index.html error fetch resolved against a
-    /// bucket location without that object, so CloudFront served S3's own 403 AccessDenied XML in place of
-    /// the API's real status and body (a missing route and an ownership refusal became indistinguishable;
-    /// probed live on match.aiproxydev.click). Authentic API errors are pinned by the Scutara E2E canary
-    /// CdnErrorRegime_Canary.
-    /// </summary>
-    protected override IEnumerable<DistributionCustomErrorResponseArgs> BuildCustomErrorResponses()
-        => System.Array.Empty<DistributionCustomErrorResponseArgs>();
+    // No BuildCustomErrorResponses override: the base is NONE for every topology since
+    // 2026-08-20 (the no-rewrite regime this subclass pioneered on 2026-07-30 — see the
+    // base method doc for the full rationale).
 
     // No ConfigureApiOriginAccess override: the base is a no-op, and with a public
     // Function URL there is no CloudFront invoke permission to grant — the public

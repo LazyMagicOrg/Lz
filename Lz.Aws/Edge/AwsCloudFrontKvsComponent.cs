@@ -207,18 +207,30 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
         => cdn.DefaultRootObject ?? "app/index.html";
 
     /// <summary>
-    /// Topology-overridable CustomErrorResponses. Base: the SPA fallback pair
-    /// (403/404 → /index.html) that lets deep links into the S3-served WASM apps
-    /// resolve. These are DISTRIBUTION-GLOBAL — a topology whose default behavior
-    /// is a server app (which must serve its own 4xx pages) overrides this to
-    /// return none.
+    /// Topology-overridable CustomErrorResponses. Base: NONE. The original base was the SPA
+    /// fallback pair (403/404 → 200 /index.html), and it is deliberately gone because on this
+    /// component the pair is broken-by-construction and harmful:
+    ///
+    ///  * REDUNDANT — the viewer-request function (CFRequest.js) rewrites extensionless
+    ///    webapp/staticsite paths to the app shell at REQUEST time, so SPA deep links never
+    ///    404 at the origin.
+    ///  * BROKEN — the /index.html error fetch resolves against the assets-bucket ROOT, which
+    ///    under the KVS-webapp-at-root convention holds per-app folders and never a root
+    ///    index.html, so the fetch itself 403s (AccessDenied, no s3:ListBucket).
+    ///  * HARMFUL — the pair is DISTRIBUTION-GLOBAL: it also intercepted API-origin 403/404s
+    ///    on /*Api/*, replacing the API's authentic status and body with S3's 403 AccessDenied
+    ///    XML (a missing route and an ownership refusal became indistinguishable).
+    ///
+    /// First probed live on the Lambda topology and fixed 2026-07-30 via an override in
+    /// AwsCloudFrontKvsLambdaComponent only; the Fargate migration reintroduced the pair
+    /// because the ecs-fargate factory uses this base directly — probed live again on
+    /// ecs-fargate-cognito-dynamodb (match.aiproxydev.click, 2026-08-20). The no-rewrite
+    /// regime is now the base for every topology; the Scutara E2E canary
+    /// CdnErrorRegime_Canary pins it. A topology that genuinely serves a root SPA shell from
+    /// the default origin may override this to add fallbacks.
     /// </summary>
     protected virtual IEnumerable<DistributionCustomErrorResponseArgs> BuildCustomErrorResponses()
-        => new[]
-        {
-            new DistributionCustomErrorResponseArgs { ErrorCode = 403, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
-            new DistributionCustomErrorResponseArgs { ErrorCode = 404, ResponseCode = 200, ResponsePagePath = "/index.html", ErrorCachingMinTtl = 10 },
-        };
+        => System.Array.Empty<DistributionCustomErrorResponseArgs>();
 
     public ICdnOutputs Deploy(TenantConfig tenantConfig, IComputeEnvironmentOutputs compute)
     {
@@ -799,16 +811,11 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
                     },
                 },
             },
-            // Topology-overridable (BuildCustomErrorResponses). Base = the SPA fallback pair
-            // (403/404→200 /index.html) for genuine SPA/Fargate tenants. The Lambda topology
-            // (AwsCloudFrontKvsLambdaComponent) OVERRIDES this to return NONE — that distribution-wide
-            // pair is (a) redundant there (CFRequest.js already rewrites extensionless webapp paths
-            // to {appPath}index.html at REQUEST time, so SPA deep links never 404 at the origin) and
-            // (b) harmful: it also intercepted API-origin 403/404s on /*Api/*, and because the
-            // /index.html error fetch resolves against a bucket location without that object,
-            // CloudFront served S3's own 403 AccessDenied XML instead — destroying the API's real
-            // status and body (probed live on match.aiproxydev.click). The Scutara E2E canary
-            // CdnErrorRegime_Canary pins the resulting regime; the override keeps it green.
+            // Topology-overridable (BuildCustomErrorResponses). Base = NONE — see the method
+            // doc: distribution-global 403/404→/index.html rewrites destroy authentic API
+            // errors on /*Api/*, and SPA deep links are already rewritten at request time by
+            // the viewer-request function. The Scutara E2E canary CdnErrorRegime_Canary pins
+            // the no-rewrite regime.
             CustomErrorResponses = BuildCustomErrorResponses().ToArray(),
             ViewerCertificate = new DistributionViewerCertificateArgs
             {
