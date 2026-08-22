@@ -2691,7 +2691,12 @@ class Program
     {
         var cmd = new Command("repos",
             "Report git status for every repository in the workspace: branch, latest commit, " +
-            "working tree, release markers, and ahead/behind vs the tracked upstream.");
+            "working tree, release markers, and ahead/behind vs the tracked upstream. " +
+            "Reads no lz config, so it works in any multi-repo checkout. Distinct from " +
+            "'lz status', which reports DEPLOYMENT state. " +
+            "By default it fetches each repo first — a network round trip per repo, and the only " +
+            "part of this command that writes anything (it updates remote-tracking refs). " +
+            "Use --no-fetch for a fully offline snapshot.");
 
         var rootOpt = new Option<string?>("--root",
             "Workspace root (default: nearest ancestor containing a repos/ folder, else the nearest git repo).");

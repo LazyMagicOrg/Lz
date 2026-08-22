@@ -138,3 +138,26 @@ lz status
 ```
 
 Requires the `Deploy/` plugin in the current repo (discovered by convention).
+
+## Workspace commands (no plugin, no config)
+
+These read nothing from `systemconfig.*.yaml` and need no `Deploy/` plugin, so they work in any
+checkout — including one that is not a deployed system at all:
+
+```bash
+lz getenv                  # environment (dev|test|prod) inferred from the folder hierarchy
+lz gettenants              # tenants + subtenants from the local YAML configs
+lz repos                   # git status for every repository in the workspace
+```
+
+`lz repos` reports branch, latest commit, working tree, release-marker position (`prod`/`test`) and
+ahead/behind versus each branch's tracked upstream, inspecting repositories concurrently. It
+discovers the workspace root by walking up for a `repos/` folder, then for a git repo; `--root`
+overrides.
+
+> **It fetches by default**, which is a network round trip per repo *and* the one thing here that
+> writes anything — it updates remote-tracking refs. Use `--no-fetch` for a fully offline snapshot
+> (no fetch, no `ls-remote`); the Tags column then reads `(offline)` and ahead/behind is as of the
+> last fetch. `--json` emits one document for scripting.
+>
+> Note it is distinct from `lz status`, which reports **deployment** state, not git state.
