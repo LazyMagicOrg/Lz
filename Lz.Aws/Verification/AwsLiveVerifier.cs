@@ -239,6 +239,8 @@ public static class AwsLiveVerifier
         checks.Add(() => ctx.CheckDynamoTable($"{sk}_{tk}_bff", "table (bff sessions)"));
         if (tc.BffConsumerAuthEnabled == true)
             checks.Add(() => ctx.CheckDynamoTable($"{sk}_{tk}_cbff", "table (cbff sessions)"));
+        if (tc.BffSystemAuthEnabled == true)
+            checks.Add(() => ctx.CheckDynamoTable($"{sk}_{tk}_abff", "table (abff sessions)"));
 
         foreach (var stk in tc.Subtenants?.Keys ?? Enumerable.Empty<string>())
         {

@@ -131,6 +131,20 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
                 : $"    {cbffSessionTable} — exists");
         }
 
+        // THIRD BFF pool (systemauth) session table: {SystemKey}_{TenantKey}_abff.
+        // Only when the tenant wires the systemauth /abff instance. (IAM is already covered by
+        // the {sk}_{tk}_* tenant-service role policy.)
+        if (_tenantConfig?.BffSystemAuthEnabled == true)
+        {
+            var abffSessionTable = $"{sk}_{tk}_abff";
+            var abffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
+                profile, region, abffSessionTable,
+                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-systemauth" } });
+            Console.WriteLine(abffCreated
+                ? $"    {abffSessionTable} — created"
+                : $"    {abffSessionTable} — exists");
+        }
+
         // Per-subtenant infrastructure (S3 bucket + DynamoDB table) is
         // handled by the shared provisioner so the same logic runs here and
         // from `lz deploysubtenants`.

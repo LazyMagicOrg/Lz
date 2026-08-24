@@ -873,6 +873,35 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
         // SECOND BFF pool — routes /cbff/* (consumerauth) to the API origin, mirroring /bff/*.
         // ADDED ONLY when the tenant wires the consumerauth instance (BffConsumerAuthEnabled), so
         // tenants without it keep a byte-for-byte identical behaviors list.
+        // THIRD BFF pool — routes /abff/* (systemauth) to the API origin, mirroring /bff/* and
+        // /cbff/*. ADDED ONLY when the tenant wires the systemauth instance
+        // (BffSystemAuthEnabled), so tenants without it keep a byte-for-byte identical list.
+        if (tenantConfig.BffSystemAuthEnabled == true)
+        {
+            distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
+            {
+                PathPattern = "/abff/*",
+                TargetOriginId = apiOrigin.OriginId,
+                ViewerProtocolPolicy = "https-only",
+                AllowedMethods = { "GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE" },
+                CachedMethods = { "GET", "HEAD" },
+                Compress = cdn.ApiCompress,
+                CachePolicyId = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+                OriginRequestPolicyId = "b689b0a8-53d0-40ab-baf2-68738e2966ac", // AllViewerExceptHostHeader
+                FunctionAssociations =
+                {
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-request", FunctionArn = requestFn.Arn,
+                    },
+                    new DistributionOrderedCacheBehaviorFunctionAssociationArgs
+                    {
+                        EventType = "viewer-response", FunctionArn = responseFn.Arn,
+                    },
+                },
+            });
+        }
+
         if (tenantConfig.BffConsumerAuthEnabled == true)
         {
             distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs

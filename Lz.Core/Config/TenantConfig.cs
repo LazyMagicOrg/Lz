@@ -111,6 +111,23 @@ public class TenantConfig
     public bool? BffConsumerAuthEnabled { get; set; }
 
     /// <summary>
+    /// When <c>true</c>, ALSO wire a THIRD BFF instance for the <c>systemauth</c> pool
+    /// (the <c>LZ_ABFF_*</c> env set: route <c>/abff</c>, cookie <c>__abff</c>, session table
+    /// <c>{sk}_{tk}_abff</c>, <c>lz-authname=systemauth</c>) alongside the default tenantauth
+    /// <c>/bff</c> and the optional consumerauth <c>/cbff</c>. Requires the <c>systemauth</c> pool
+    /// to set <c>ProvisionBffClient: true</c> (+ <c>BffRoutePrefix: /abff</c>) so the confidential
+    /// client and its <c>auth_systemauth_bff*</c> foundation outputs exist. Default <c>false</c> ⇒
+    /// the container is byte-for-byte identical to a deploy without it.
+    ///
+    /// <para>WHY A THIRD INSTANCE EXISTS: a platform-staff console signs in against a pool that is
+    /// NOT the merchants' pool, so its browser session cannot share the tenantauth
+    /// <c>/bff</c> — that instance is bound to one pool's confidential client. Repointing
+    /// <c>BffAuthPool</c> instead would move the single <c>/bff</c> WHOLESALE and break every
+    /// tenantauth app sharing it. See Scutara's Docs/specs/PlatformStaffPool.md.</para>
+    /// </summary>
+    public bool? BffSystemAuthEnabled { get; set; }
+
+    /// <summary>
     /// M0-8: when <c>true</c>, add the CloudFront ordered behaviors that route the bare <c>/mcp</c>
     /// (Streamable HTTP) and the RFC 9728 PRM (<c>/.well-known/oauth-protected-resource</c>) to the API
     /// origin (AipHost), unstripped (same passthrough model as <c>/bff</c>). Default <c>false</c>/null ⇒

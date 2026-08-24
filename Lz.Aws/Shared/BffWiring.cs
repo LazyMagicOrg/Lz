@@ -167,6 +167,48 @@ internal static class BffWiring
             });
         }
 
+        // THIRD pool instance — systemauth at /abff (LZ_ABFF_*). Appended ONLY when the tenant opts
+        // in (BffSystemAuthEnabled). Same shape and same rationale as the /cbff block above:
+        // requires the systemauth pool to set ProvisionBffClient + BffRoutePrefix:/abff so the
+        // foundation exports auth_systemauth_bff* outputs. Default off ⇒ byte-for-byte unchanged.
+        //
+        // WHY NOT JUST REPOINT BffAuthPool: that moves the SINGLE /bff instance wholesale, taking
+        // every tenantauth app with it. A platform-staff console signs in against a different pool
+        // than the merchants do, so it needs its own instance, not a redirected one.
+        //
+        // Session TTL is deliberately the SHORTEST of the three. A staff session carries
+        // cross-party authority, so it should outlive a working session and little else — contrast
+        // the consumer's ~30 days, which optimises for not re-authenticating a shopper.
+        if (tenantConfig.BffSystemAuthEnabled == true)
+        {
+            const string systemPool = "systemauth";
+            var systemMeta = foundation.MetadataUrl(systemPool);
+            var systemIssuer = systemMeta.Apply(url =>
+                url.EndsWith(DiscoverySuffix, StringComparison.OrdinalIgnoreCase)
+                    ? url[..^DiscoverySuffix.Length]
+                    : url);
+            const string systemTtlHours = "8"; // one working day; staff authority is cross-party
+
+            list.AddRange(new List<(string, Output<string>)>
+            {
+                ("LZ_ABFF_ENABLED", lit("true")),
+                ("LZ_ABFF_PROVIDER", lit("cognito")),
+                ("LZ_ABFF_AUTHORITY", systemIssuer),
+                ("LZ_ABFF_METADATA_URL", systemMeta),
+                ("LZ_ABFF_CLIENT_ID", foundation.ClientId(systemPool)),
+                ("LZ_ABFF_CLIENT_SECRET", foundation.ClientSecret(systemPool)),
+                ("LZ_ABFF_SCOPES", lit("openid profile email")),
+                ("LZ_ABFF_ROUTE_PREFIX", lit("/abff")),
+                ("LZ_ABFF_COOKIE_DOMAIN", lit(cookieDomain)),
+                ("LZ_ABFF_COOKIE_NAME", lit("__abff")),
+                ("LZ_ABFF_SESSION_TABLE", lit($"{sk}_{tk}_abff")),
+                ("LZ_ABFF_SESSION_TTL_HOURS", lit(systemTtlHours)),
+                ("LZ_ABFF_AUTHNAME", lit(systemPool)),
+                ("LZ_ABFF_AWS_REGION", lit(region)),
+                ("LZ_ABFF_ACCESS_TOKEN_SKEW_SECONDS", lit("60")),
+            });
+        }
+
         return list;
     }
 
