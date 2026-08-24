@@ -125,8 +125,17 @@ class Program
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
-        // Plugin-specific commands (e.g., seed)
+        // Plugin-specific commands (e.g., seed). Snapshot the command set around the call so the
+        // help renderer can tell PLUGIN-CONTRIBUTED commands from built-in ones WITHOUT this file
+        // knowing any plugin's command names — they land under "System Specific" automatically.
+        // Before this, three Scutara commands (deployassets/updatekvs/deletetestusers) were listed
+        // by name in PrintGroupedHelp's sections, which made the generic CLI carry knowledge of one
+        // system's plugin and left every other plugin command in "Other".
+        var builtInCommands = rootCommand.Subcommands.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
         plugin?.RegisterCommands(rootCommand);
+        var pluginCommands = rootCommand.Subcommands.Select(c => c.Name)
+            .Where(n => !builtInCommands.Contains(n))
+            .ToHashSet(StringComparer.Ordinal);
 
         // Top-level help: render the command list grouped into sections for
         // readability (Shared / System / Tenant / Subtenant / Misc). Subcommand
@@ -135,7 +144,7 @@ class Program
         if (args.Length == 0 ||
             (args.Length == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "-?")))
         {
-            PrintGroupedHelp(rootCommand);
+            PrintGroupedHelp(rootCommand, pluginCommands);
             return 0;
         }
 
@@ -168,7 +177,7 @@ class Program
     /// commands (the source of truth, including plugin-contributed ones); any
     /// command not assigned to a section below still appears under "Other".
     /// </summary>
-    private static void PrintGroupedHelp(RootCommand root)
+    private static void PrintGroupedHelp(RootCommand root, IReadOnlySet<string> pluginCommands)
     {
         var sections = new[]
         {
@@ -178,12 +187,12 @@ class Program
                 new[] { "previewsystem", "deploysystem", "destroysystem" }),
             ("Tenant",    "per-tenant stack + per-tenant operations",
                 new[] { "previewtenant", "deploytenant", "deploycontainer", "updatecontainer",
-                        "updateconfig", "updateedge", "updatekvs", "deploywebapp", "deployassets",
+                        "updateconfig", "updateedge", "deploywebapp",
                         "park", "unpark", "destroytenant" }),
             ("Subtenant", "per-subtenant resources",
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
             ("Misc",      "discovery, codegen, utilities",
-                new[] { "status", "getenv", "gettenants", "gen", "util", "deletetestusers", "unlock" }),
+                new[] { "status", "getenv", "gettenants", "gen", "util", "repos", "verify", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
@@ -227,9 +236,21 @@ class Program
             foreach (var name in cmds) Row(name);
         }
 
+        // Plugin-contributed commands: everything the system's own Deploy plugin registered. Grouped
+        // on PROVENANCE, not on a name list, so this stays correct for every system without edits
+        // here — and so a new plugin command is categorized the moment it is registered.
+        var pluginRows = byName.Keys.Where(pluginCommands.Contains)
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+        if (pluginRows.Count > 0)
+        {
+            Header("System Specific", "contributed by this system's Deploy plugin");
+            foreach (var name in pluginRows) Row(name);
+        }
+
         // Safety net: any registered command not assigned above still shows up,
-        // so newly-added (or plugin) commands are never silently dropped.
-        var leftovers = byName.Keys.Where(n => !categorized.Contains(n))
+        // so newly-added commands are never silently dropped.
+        var leftovers = byName.Keys
+            .Where(n => !categorized.Contains(n) && !pluginCommands.Contains(n))
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
         if (leftovers.Count > 0)
         {
