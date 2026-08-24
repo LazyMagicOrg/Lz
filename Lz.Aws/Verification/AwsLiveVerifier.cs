@@ -53,9 +53,15 @@ namespace Lz.Aws.Verification;
 /// SubtenantBucketManager/Provisioner, EcrDeployer call sites, BffWiring).
 /// If a component's naming changes, this catalog must change with it.
 ///
-/// Currently modeled: topology `lambda-cognito-dynamodb` only, and only
-/// Host-layer tenant services (MagicPets: apphost). Systems that also deploy
-/// ServiceLayer tenant services need those added to the catalog.
+/// Currently modeled: topologies `lambda-cognito-dynamodb` and
+/// `ecs-fargate-cognito-dynamodb`, and only Host-layer tenant services
+/// (MagicPets: apphost). Systems that also deploy ServiceLayer tenant services
+/// need those added to the catalog.
+///
+/// The two topologies share everything except the compute layer: Cognito,
+/// DynamoDB, S3, Route53, ACM, CloudFront/KVS/OAC, ECR, SSM and Secrets Manager
+/// are identical. Only the compute block, the host log-group name, and the
+/// function-URL smoke differ -- see AddTenantStackChecks.
 /// Read-only guarantee: no call here mutates AWS or Pulumi state.
 /// </summary>
 public static class AwsLiveVerifier
@@ -68,8 +74,17 @@ public static class AwsLiveVerifier
         ["systemauth"] = "auth-system",
     };
 
+    /// <summary>
+    /// Topologies this catalog models. Everything OUTSIDE the compute layer — Cognito, DynamoDB,
+    /// S3, Route53, ACM, CloudFront/KVS/OAC, ECR, SSM, Secrets Manager — is identical between them;
+    /// only the compute block and one smoke check differ, which is why adding Fargate touched so
+    /// little of this file.
+    /// </summary>
     public static bool SupportsTopology(string topology)
-        => topology == "lambda-cognito-dynamodb";
+        => topology is "lambda-cognito-dynamodb" or "ecs-fargate-cognito-dynamodb";
+
+    /// <summary>True when the configured topology runs the host services on ECS Fargate.</summary>
+    private static bool IsFargate(string topology) => topology == "ecs-fargate-cognito-dynamodb";
 
     /// <summary>
     /// Run every check for the system + the given tenants. Results are
@@ -84,9 +99,9 @@ public static class AwsLiveVerifier
     {
         if (!SupportsTopology(config.Topology))
             throw new NotSupportedException(
-                $"lz verify models topology 'lambda-cognito-dynamodb' only; " +
-                $"'{config.Topology}' is not yet cataloged. Add its resource " +
-                "conventions to AwsLiveVerifier before verifying it.");
+                $"lz verify models topologies 'lambda-cognito-dynamodb' and " +
+                $"'ecs-fargate-cognito-dynamodb'; '{config.Topology}' is not yet cataloged. " +
+                "Add its resource conventions to AwsLiveVerifier before verifying it.");
 
         var ctx = new VerifyContext(config, system);
         var checks = new List<Func<Task<ResourceCheckResult>>>();
@@ -165,14 +180,50 @@ public static class AwsLiveVerifier
         var rootDomain = tc.RootDomain;
         var prefix = $"{sk}-{tk}";
 
-        foreach (var svc in ctx.System.HostLayerServices)
+        // COMPUTE — the only layer that differs between the two topologies.
+        //
+        // EXACT vs PREFIX MATCHING IS NOT A STYLE CHOICE. Pulumi appends a random suffix to any
+        // resource whose name it auto-generates, and omits it where the component sets the AWS name
+        // explicitly. Verified against the live scu-dev account: the ECS cluster is `scu-dev-cluster`
+        // and the service `scu-mp-aiphost` (exact — both set explicitly), while the ALB is
+        // `scu-dev-alb-fccd87d`, the target group `scu-mp-aiphost-tg-034d492` and the security groups
+        // `scu-dev-ecs-sg-1f6d5bd` / `scu-dev-alb-sg-e11d557` (auto-named). A catalog written from
+        // the Pulumi logical names alone would never match the auto-named half.
+        if (IsFargate(ctx.Config.Topology))
         {
-            // AwsLambdaTenantServiceComponent: function {sk}-{tk}-{svc}
-            checks.Add(() => ctx.CheckLambdaFunction($"{prefix}-{svc.Name}"));
-            checks.Add(() => ctx.CheckLambdaFunctionUrl($"{prefix}-{svc.Name}"));
-            // Exec role: Pulumi logical name {sk}-{tk}-{svc}-exec with NO explicit
-            // RoleName, so AWS auto-names it {sk}-{tk}-{svc}-exec-{suffix} — prefix match.
-            checks.Add(() => ctx.CheckIamRoleByPrefix($"{prefix}-{svc.Name}-exec"));
+            // AwsFargateComputeComponent: cluster name set explicitly.
+            checks.Add(() => ctx.CheckEcsCluster($"{sk}-{env}-cluster"));
+            foreach (var svc in ctx.System.HostLayerServices)
+            {
+                // AwsFargateTenantServiceComponent: service name set explicitly.
+                // The RUNNING-vs-DESIRED count is the single most valuable check in this file —
+                // every other check answers "does it exist", this one answers "is it up".
+                checks.Add(() => ctx.CheckEcsService($"{sk}-{env}-cluster", $"{prefix}-{svc.Name}"));
+                checks.Add(() => ctx.CheckTargetGroupByPrefix($"{prefix}-{svc.Name}-tg"));
+                checks.Add(() => ctx.CheckIamRoleByPrefix($"{prefix}-{svc.Name}-task"));
+            }
+            // The ALB MUST be internal. That is the Fargate analogue of the Lambda topology's
+            // function-url-lockout smoke: the origin is reachable only through CloudFront, never
+            // directly. An internet-facing ALB here is a hole, not a cosmetic drift.
+            checks.Add(() => ctx.CheckLoadBalancerByPrefix($"{sk}-{env}-alb", mustBeInternal: true));
+            checks.Add(() => ctx.CheckSecurityGroupByPrefix($"{sk}-{env}-ecs-sg"));
+            checks.Add(() => ctx.CheckSecurityGroupByPrefix($"{sk}-{env}-alb-sg"));
+            // Gateway endpoints keep S3/DynamoDB traffic off the NAT. Their absence is a silent
+            // COST and egress-path regression that nothing else in this catalog would notice.
+            checks.Add(() => ctx.CheckVpcEndpoint($"com.amazonaws.{ctx.Config.Region}.s3"));
+            checks.Add(() => ctx.CheckVpcEndpoint($"com.amazonaws.{ctx.Config.Region}.dynamodb"));
+        }
+        else
+        {
+            foreach (var svc in ctx.System.HostLayerServices)
+            {
+                // AwsLambdaTenantServiceComponent: function {sk}-{tk}-{svc}
+                checks.Add(() => ctx.CheckLambdaFunction($"{prefix}-{svc.Name}"));
+                checks.Add(() => ctx.CheckLambdaFunctionUrl($"{prefix}-{svc.Name}"));
+                // Exec role: Pulumi logical name {sk}-{tk}-{svc}-exec with NO explicit
+                // RoleName, so AWS auto-names it {sk}-{tk}-{svc}-exec-{suffix} — prefix match.
+                checks.Add(() => ctx.CheckIamRoleByPrefix($"{prefix}-{svc.Name}-exec"));
+            }
         }
 
         // AwsCloudFrontKvsComponent (Lambda CDN subclasses it):
@@ -230,8 +281,17 @@ public static class AwsLiveVerifier
             checks.Add(() => ctx.CheckEcrRepoAndLatest($"{sk}-{ts}-{env}-{tk}-{svc.Name}"));
 
             // Runtime-created Lambda log group (never in Pulumi state).
+            // Topology-aware, and this one bit. The Fargate service writes to /ecs/{svc}; the
+            // /aws/lambda/{svc} group still EXISTS from the Lambda era because log groups survive
+            // the function being deleted. Checking the lambda name on the Fargate topology therefore
+            // reported PRESENT for a group nothing writes to any more, while never looking at the
+            // one holding the live logs -- a check passing for the wrong reason, which is worse than
+            // a failing one because nobody investigates a plus sign.
             checks.Add(() => ctx.CheckLogGroup(
-                $"/aws/lambda/{prefix}-{svc.Name}", ResourceCategory.Persistent));
+                IsFargate(ctx.Config.Topology)
+                    ? $"/ecs/{prefix}-{svc.Name}"
+                    : $"/aws/lambda/{prefix}-{svc.Name}",
+                ResourceCategory.Persistent));
         }
 
         // DynamoDB (DynamoDbTableCreator: "Tables are persistent — not deleted on destroy.")
@@ -490,8 +550,15 @@ public static class AwsLiveVerifier
         //    is not engaged — e.g. the hosting-startup assembly missing from the image
         //    fails NON-fatally and boots the app open. A 2xx/404 is a SECURITY
         //    finding (publicly invokable function), not mere absence.
+        //    ON FARGATE THERE IS NO FUNCTION URL, so this probe is skipped rather than left to
+        //    report "function or function URL not found" -- a permanent red that trains readers to
+        //    ignore the smoke section. The equivalent invariant on that topology (the origin is
+        //    reachable only via CloudFront) is asserted structurally instead, by the internal-scheme
+        //    assertion on the ALB in AddTenantStackChecks.
         foreach (var svc in ctx.System.HostLayerServices)
         {
+            if (IsFargate(ctx.Config.Topology))
+                break;
             var fnName = $"{sk}-{tk}-{svc.Name}";
             checks.Add(() => RunSmoke("lambda", "function-url-lockout", fnName, async () =>
             {
@@ -705,6 +772,137 @@ public static class AwsLiveVerifier
         /// Roles created without an explicit RoleName get Pulumi's auto-name
         /// (logical name + random suffix) — match by prefix.
         /// </summary>
+        // ---- Fargate compute (ecs-fargate-cognito-dynamodb) --------------------------------------
+
+        public Task<ResourceCheckResult> CheckEcsCluster(string name) =>
+            Run(ResourceCategory.Stack, "ecs", "cluster", name, async () =>
+            {
+                using var ecs = Client(
+                    (c, r) => new Amazon.ECS.AmazonECSClient(c, r), r => new Amazon.ECS.AmazonECSClient(r));
+                var resp = await ecs.DescribeClustersAsync(new Amazon.ECS.Model.DescribeClustersRequest
+                {
+                    Clusters = new List<string> { name },
+                });
+                var cluster = resp.Clusters?.FirstOrDefault();
+                if (cluster == null)
+                    return (ResourceState.Absent, null);
+                return (ResourceState.Present,
+                    $"status={cluster.Status} services={cluster.ActiveServicesCount} running={cluster.RunningTasksCount}");
+            });
+
+        /// <summary>
+        /// The service exists AND is actually serving. Every other check in this file answers
+        /// "does it exist"; this one answers "is it up" — a service sitting at 0/2 running is a down
+        /// site that a pure existence check reports as healthy.
+        /// </summary>
+        public Task<ResourceCheckResult> CheckEcsService(string cluster, string service) =>
+            Run(ResourceCategory.Stack, "ecs", "service", service, async () =>
+            {
+                using var ecs = Client(
+                    (c, r) => new Amazon.ECS.AmazonECSClient(c, r), r => new Amazon.ECS.AmazonECSClient(r));
+                var resp = await ecs.DescribeServicesAsync(new Amazon.ECS.Model.DescribeServicesRequest
+                {
+                    Cluster = cluster,
+                    Services = new List<string> { service },
+                });
+                var svc = resp.Services?.FirstOrDefault(x =>
+                    !string.Equals(x.Status, "INACTIVE", StringComparison.OrdinalIgnoreCase));
+                if (svc == null)
+                    return (ResourceState.Absent, null);
+
+                var taskDef = svc.TaskDefinition?.Split('/').LastOrDefault() ?? "(none)";
+                // Degraded is reported as Present-with-detail, not Absent: the resource IS deployed,
+                // and calling it absent would send a reader hunting for a missing stack.
+                return (ResourceState.Present,
+                    $"status={svc.Status} running={svc.RunningCount}/{svc.DesiredCount} taskdef={taskDef}");
+            });
+
+        public Task<ResourceCheckResult> CheckLoadBalancerByPrefix(string prefix, bool mustBeInternal) =>
+            Run(ResourceCategory.Stack, "elbv2", "load-balancer", $"{prefix}*", async () =>
+            {
+                using var elb = Client(
+                    (c, r) => new Amazon.ElasticLoadBalancingV2.AmazonElasticLoadBalancingV2Client(c, r),
+                    r => new Amazon.ElasticLoadBalancingV2.AmazonElasticLoadBalancingV2Client(r));
+                var found = new List<Amazon.ElasticLoadBalancingV2.Model.LoadBalancer>();
+                string? marker = null;
+                do
+                {
+                    var resp = await elb.DescribeLoadBalancersAsync(
+                        new Amazon.ElasticLoadBalancingV2.Model.DescribeLoadBalancersRequest { Marker = marker });
+                    found.AddRange((resp.LoadBalancers ?? new List<Amazon.ElasticLoadBalancingV2.Model.LoadBalancer>())
+                        .Where(l => l.LoadBalancerName?.StartsWith(prefix, StringComparison.Ordinal) == true));
+                    marker = string.IsNullOrEmpty(resp.NextMarker) ? null : resp.NextMarker;
+                } while (marker != null);
+
+                if (found.Count == 0)
+                    return (ResourceState.Absent, null);
+
+                var lb = found[0];
+                var scheme = lb.Scheme?.Value ?? "(unknown)";
+                var detail = $"{lb.LoadBalancerName} scheme={scheme} state={lb.State?.Code?.Value}";
+                // An internet-facing ALB defeats the private topology: CloudFront's VPC origin stops
+                // being the only way in. Surface it in the detail so it cannot pass unread.
+                if (mustBeInternal && !string.Equals(scheme, "internal", StringComparison.OrdinalIgnoreCase))
+                    detail += "  ** EXPECTED internal — the origin is directly reachable **";
+                return (ResourceState.Present, detail);
+            });
+
+        public Task<ResourceCheckResult> CheckTargetGroupByPrefix(string prefix) =>
+            Run(ResourceCategory.Stack, "elbv2", "target-group", $"{prefix}*", async () =>
+            {
+                using var elb = Client(
+                    (c, r) => new Amazon.ElasticLoadBalancingV2.AmazonElasticLoadBalancingV2Client(c, r),
+                    r => new Amazon.ElasticLoadBalancingV2.AmazonElasticLoadBalancingV2Client(r));
+                var resp = await elb.DescribeTargetGroupsAsync(
+                    new Amazon.ElasticLoadBalancingV2.Model.DescribeTargetGroupsRequest());
+                var tg = (resp.TargetGroups ?? new List<Amazon.ElasticLoadBalancingV2.Model.TargetGroup>())
+                    .FirstOrDefault(t => t.TargetGroupName?.StartsWith(prefix, StringComparison.Ordinal) == true);
+                if (tg == null)
+                    return (ResourceState.Absent, null);
+
+                var health = await elb.DescribeTargetHealthAsync(
+                    new Amazon.ElasticLoadBalancingV2.Model.DescribeTargetHealthRequest
+                    {
+                        TargetGroupArn = tg.TargetGroupArn,
+                    });
+                var states = (health.TargetHealthDescriptions
+                        ?? new List<Amazon.ElasticLoadBalancingV2.Model.TargetHealthDescription>())
+                    .Select(h => h.TargetHealth?.State?.Value ?? "unknown")
+                    .ToList();
+                var healthy = states.Count(x => string.Equals(x, "healthy", StringComparison.OrdinalIgnoreCase));
+                return (ResourceState.Present, $"{tg.TargetGroupName} healthy={healthy}/{states.Count}");
+            });
+
+        public Task<ResourceCheckResult> CheckSecurityGroupByPrefix(string prefix) =>
+            Run(ResourceCategory.Stack, "ec2", "security-group", $"{prefix}*", async () =>
+            {
+                using var ec2 = Client(
+                    (c, r) => new Amazon.EC2.AmazonEC2Client(c, r), r => new Amazon.EC2.AmazonEC2Client(r));
+                var resp = await ec2.DescribeSecurityGroupsAsync(
+                    new Amazon.EC2.Model.DescribeSecurityGroupsRequest());
+                var found = (resp.SecurityGroups ?? new List<Amazon.EC2.Model.SecurityGroup>())
+                    .Where(g => g.GroupName?.StartsWith(prefix, StringComparison.Ordinal) == true)
+                    .Select(g => g.GroupName)
+                    .ToList();
+                return found.Count > 0
+                    ? (ResourceState.Present, string.Join(", ", found))
+                    : (ResourceState.Absent, null);
+            });
+
+        public Task<ResourceCheckResult> CheckVpcEndpoint(string serviceName) =>
+            Run(ResourceCategory.Stack, "ec2", "vpc-endpoint", serviceName, async () =>
+            {
+                using var ec2 = Client(
+                    (c, r) => new Amazon.EC2.AmazonEC2Client(c, r), r => new Amazon.EC2.AmazonEC2Client(r));
+                var resp = await ec2.DescribeVpcEndpointsAsync(
+                    new Amazon.EC2.Model.DescribeVpcEndpointsRequest());
+                var ep = (resp.VpcEndpoints ?? new List<Amazon.EC2.Model.VpcEndpoint>())
+                    .FirstOrDefault(e => string.Equals(e.ServiceName, serviceName, StringComparison.Ordinal));
+                return ep == null
+                    ? (ResourceState.Absent, null)
+                    : (ResourceState.Present, $"state={ep.State} type={ep.VpcEndpointType}");
+            });
+
         public Task<ResourceCheckResult> CheckIamRoleByPrefix(string prefix) =>
             Run(ResourceCategory.Stack, "iam", "role", $"{prefix}*", async () =>
             {

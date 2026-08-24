@@ -103,6 +103,7 @@
     <PackageReference Include="AWSSDK.ECR" Version="4.*" />
     <PackageReference Include="AWSSDK.IdentityManagement" Version="4.*" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
+    <PackageReference Include="AWSSDK.ElasticLoadBalancingV2" Version="4.*" />
     <PackageReference Include="AWSSDK.KeyManagementService" Version="4.*" />
     <PackageReference Include="AWSSDK.Lambda" Version="4.*" />
     <PackageReference Include="AWSSDK.RDS" Version="4.*" />
