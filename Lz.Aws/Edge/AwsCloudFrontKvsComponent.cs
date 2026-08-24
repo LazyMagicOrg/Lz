@@ -870,12 +870,14 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
             });
         }
 
-        // SECOND BFF pool — routes /cbff/* (consumerauth) to the API origin, mirroring /bff/*.
-        // ADDED ONLY when the tenant wires the consumerauth instance (BffConsumerAuthEnabled), so
-        // tenants without it keep a byte-for-byte identical behaviors list.
-        // THIRD BFF pool — routes /abff/* (systemauth) to the API origin, mirroring /bff/* and
-        // /cbff/*. ADDED ONLY when the tenant wires the systemauth instance
+        // THIRD BFF pool — routes /abff/* (systemauth, the PLATFORM-STAFF pool) to the API origin,
+        // mirroring /bff/* and /cbff/*. ADDED ONLY when the tenant wires the systemauth instance
         // (BffSystemAuthEnabled), so tenants without it keep a byte-for-byte identical list.
+        //
+        // Both function associations are required and are NOT symmetric in purpose: viewer-request
+        // is the router (CFRequest.js must also list this prefix in BFF_PREFIXES or it 302s the
+        // path into a webapp login instead of passing it through), viewer-response is the CORS echo.
+        // Verified live: /bff/* and /abff/* each carry 2 associations.
         if (tenantConfig.BffSystemAuthEnabled == true)
         {
             distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
@@ -902,6 +904,9 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
             });
         }
 
+        // SECOND BFF pool — routes /cbff/* (consumerauth) to the API origin, mirroring /bff/*.
+        // ADDED ONLY when the tenant wires the consumerauth instance (BffConsumerAuthEnabled), so
+        // tenants without it keep a byte-for-byte identical behaviors list.
         if (tenantConfig.BffConsumerAuthEnabled == true)
         {
             distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
