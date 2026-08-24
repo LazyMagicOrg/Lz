@@ -861,8 +861,18 @@ class Program
 
                 if (!string.IsNullOrEmpty(webapp))
                 {
-                    // --webapp specified: resolve relative to cwd
+                    // --webapp specified: resolve relative to cwd, then fall back to repos/<name>.
+                    // Workspaces that vendor their app repos under repos/ (Scutara does) would
+                    // otherwise have to pass --webapp repos/SellerApp, and passing the bare name --
+                    // the obvious thing, and what every runbook says -- silently found nothing.
+                    // Mirrors the same probe the tenancies lookup already does.
                     webappFolder = Path.GetFullPath(Path.Combine(cwd, webapp));
+                    if (!Directory.Exists(webappFolder))
+                    {
+                        var undreRepos = Path.GetFullPath(Path.Combine(cwd, "repos", webapp));
+                        if (Directory.Exists(undreRepos))
+                            webappFolder = undreRepos;
+                    }
                 }
                 else if (Directory.Exists(Path.Combine(cwd, project)))
                 {
@@ -876,14 +886,22 @@ class Program
                         $"Cannot find project folder '{project}/' in current directory.\n" +
                         $"  Either run from the webapp solution folder, or use --webapp <folder>.");
                     Console.ResetColor();
+                    Environment.ExitCode = 1;
                     return;
                 }
 
                 if (!Directory.Exists(webappFolder))
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Error.WriteLine($"Webapp folder not found: {webappFolder}");
+                    // EXIT NON-ZERO. This used to `return` with exit 0, so a deploy that located
+                    // nothing and shipped nothing reported SUCCESS -- observed 2026-08-24 deploying
+                    // SellerApp after it moved under repos/. A silent no-op deploy is worse than a
+                    // failed one: the operator believes the new bundle is live.
+                    Console.Error.WriteLine(
+                        $"Webapp folder not found: {webappFolder}\n" +
+                        $"  Nothing was deployed. Check --webapp, or run from the webapp solution folder.");
                     Console.ResetColor();
+                    Environment.ExitCode = 1;
                     return;
                 }
 
