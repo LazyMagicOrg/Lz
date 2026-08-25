@@ -86,10 +86,22 @@ namespace Lz.Gen
                     Directory.CreateDirectory(destination);
                     foreach (string filePath in Directory.GetFiles(source))
                     {
-                        if (globs.Any(glob => glob.IsMatch(Path.GetFileName(filePath))))
+                        string fileName = Path.GetFileName(filePath);
+                        if (globs.Any(glob => glob.IsMatch(fileName)))
                             continue;
 
-                        string fileName = Path.GetFileName(filePath);
+                        // A LICENSE belongs to the CONSUMING project, not to the template. Templates ship
+                        // one so a NEW project starts with something, but copying it over an existing file
+                        // silently replaces a real licence with the template's placeholder -- changing both
+                        // the licence terms and the copyright holder, inside a diff otherwise full of
+                        // expected generation output. Copy a licence only when the destination has none.
+                        //
+                        // Note GenerateLicenseFile already guards with File.Exists, but that guard runs
+                        // AFTER this copy and so never fired: by then the file existed with the template's
+                        // content. Fixing it here covers every CopyProject caller at once.
+                        if (IsLicenseFileName(fileName) && DirectoryHasLicense(destination))
+                            continue;
+
                         string destFile = Path.Combine(destination, fileName);
                         File.Copy(filePath, destFile, overwrite: true);
                     }
@@ -347,6 +359,30 @@ namespace Lz.Gen
             if (File.Exists(filePath)) return;
             File.WriteAllText(filePath, licenseText);
         }   
+
+        /// <summary>
+        /// True for the conventional licence file names, in any case: LICENSE, LICENCE and COPYING, with
+        /// or without an extension (LICENSE.txt, LICENSE.TXT, LICENSE.md, ...).
+        /// </summary>
+        public static bool IsLicenseFileName(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return false;
+            var stem = Path.GetFileNameWithoutExtension(fileName);
+            return stem.Equals("LICENSE", StringComparison.OrdinalIgnoreCase)
+                || stem.Equals("LICENCE", StringComparison.OrdinalIgnoreCase)
+                || stem.Equals("COPYING", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// True when the directory already holds ANY licence file.
+        ///
+        /// <para>Deliberately a directory scan rather than a File.Exists on the template's exact name: a
+        /// destination LICENSE.txt and a template LICENSE.TXT are the SAME file on Windows but two
+        /// different files on Linux, so only the scan gives the same answer on both.</para>
+        /// </summary>
+        public static bool DirectoryHasLicense(string directory)
+            => Directory.Exists(directory)
+               && Directory.EnumerateFiles(directory).Any(f => IsLicenseFileName(Path.GetFileName(f)));
         public static void GenerateUserPropsFile(string userPropsText, string filePath)
         {
             if (File.Exists(filePath)) return;
