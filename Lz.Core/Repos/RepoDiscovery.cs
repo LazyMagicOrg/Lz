@@ -13,28 +13,53 @@ public static class RepoDiscovery
     public const string ReposFolder = "repos";
 
     /// <summary>
-    /// Walk up from <paramref name="startDirectory"/> and return the first ancestor that looks like
-    /// a workspace root: it contains a <c>repos/</c> child, or is itself a git repository. The
-    /// <c>repos/</c> test comes first so a workspace whose root is also a git repo still resolves
-    /// to the root rather than to a nested repo the caller happens to be standing in.
-    /// Falls back to the start directory when nothing matches.
+    /// Walk up from <paramref name="startDirectory"/> and return the NEAREST ancestor that looks
+    /// like a multi-repo workspace root. At each level (nearest first) two signals are tested:
+    /// <list type="number">
+    ///   <item>a git repository whose immediate children include other git repositories — a
+    ///     self-contained multi-repo workspace (a monorepo whose sub-projects are their own
+    ///     repos, e.g. an NTS-style checkout). Tested FIRST so the walk stops at the workspace
+    ///     you are standing in rather than overshooting to a generic <c>repos/</c> folder higher
+    ///     up the tree (e.g. <c>~/repos</c>, which would otherwise capture unrelated sibling
+    ///     checkouts);</item>
+    ///   <item>a directory with a <c>repos/</c> child that holds at least one git repository — the
+    ///     sibling-repos layout.</item>
+    /// </list>
+    /// Because both are evaluated in one nearest-first pass, a distant <c>repos/</c> can no longer
+    /// shadow the workspace you are in. Standing in a bare nested repo (one with no nested repos of
+    /// its own) matches neither signal at that level, so the walk continues up to the enclosing
+    /// workspace root — a nested repo never shadows the workspace it belongs to. Falls back to the
+    /// nearest enclosing git repo, then to the start directory, when nothing looks like a workspace.
     /// </summary>
     public static string FindWorkspaceRoot(string? startDirectory = null)
     {
         var start = startDirectory ?? Directory.GetCurrentDirectory();
 
+        string? nearestRepo = null;
         for (var dir = new DirectoryInfo(start); dir != null; dir = dir.Parent)
         {
-            if (Directory.Exists(Path.Combine(dir.FullName, ReposFolder)))
-                return dir.FullName;
+            var path = dir.FullName;
+            var isRepo = IsRepo(path);
+
+            // (1) Self-contained multi-repo workspace: a repo whose immediate children are repos.
+            if (isRepo && SafeChildren(path).Any(IsRepo))
+                return path;
+
+            // (2) Sibling-repos layout: a dir with a repos/ folder that actually holds repos.
+            if (HasReposFolderWithRepo(path))
+                return path;
+
+            nearestRepo ??= isRepo ? path : null;
         }
 
-        for (var dir = new DirectoryInfo(start); dir != null; dir = dir.Parent)
-        {
-            if (IsRepo(dir.FullName)) return dir.FullName;
-        }
+        return nearestRepo ?? start;
+    }
 
-        return start;
+    /// <summary>True when <paramref name="dir"/> has a <c>repos/</c> child containing ≥1 git repo.</summary>
+    private static bool HasReposFolderWithRepo(string dir)
+    {
+        var reposDir = Path.Combine(dir, ReposFolder);
+        return Directory.Exists(reposDir) && SafeChildren(reposDir).Any(IsRepo);
     }
 
     /// <summary>
