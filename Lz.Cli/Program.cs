@@ -1023,7 +1023,18 @@ class Program
                 var cwd = Directory.GetCurrentDirectory();
                 string webappFolder;
                 if (!string.IsNullOrEmpty(webapp))
+                {
+                    // Resolve relative to cwd, then fall back to repos/<name> for workspaces that
+                    // vendor their repos under repos/ — mirrors deploywebapp, whose fallback this
+                    // branch lacked despite the "same logic as deploywebapp" note above.
                     webappFolder = Path.GetFullPath(Path.Combine(cwd, webapp));
+                    if (!Directory.Exists(webappFolder))
+                    {
+                        var underRepos = Path.GetFullPath(Path.Combine(cwd, "repos", webapp));
+                        if (Directory.Exists(underRepos))
+                            webappFolder = underRepos;
+                    }
+                }
                 else if (File.Exists(Path.Combine(cwd, "index.html")))
                     webappFolder = cwd;
                 else
