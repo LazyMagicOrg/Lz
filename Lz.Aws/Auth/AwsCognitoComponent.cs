@@ -643,7 +643,19 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                     AllowedOauthFlowsUserPoolClient = true,
                     CallbackUrls = { ssCallbackUrls.ToArray() },
                     LogoutUrls = { ssLogoutUrls.ToArray() },
-                }, new CustomResourceOptions { Parent = this });
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    // generateSecret is create-only AND unreadable: the Cognito API never
+                    // returns it, so `pulumi import` cannot capture it and leaves state at the
+                    // schema default (false). Because generateSecret is ForceNew, the next plan
+                    // would see false→true and REPLACE the client — rotating the client id the
+                    // Smartstore OIDC module depends on. This client is explicitly designed to
+                    // be adopted (import an already-provisioned confidential client), so ignore
+                    // the drift. No effect on a fresh create: IgnoreChanges only gates updates,
+                    // and the secret is still generated at create time.
+                    IgnoreChanges = { "generateSecret" },
+                });
 
                 smartstoreClientId = smartstoreClient.Id;
                 smartstoreClientSecret = smartstoreClient.ClientSecret;
