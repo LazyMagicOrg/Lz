@@ -24,6 +24,29 @@ public class SystemConfig
     public string? SystemDomain { get; set; }
     public string? DefaultTenant { get; set; }
 
+    /// <summary>
+    /// Which tenancy the system's AWS-backed test and dev tooling may address.
+    /// NOT used by any deploy path — nothing lz provisions reads these — but lz owns
+    /// the naming rule they are combined under, so the keys live with the rest of the
+    /// tenancy config rather than in a parallel file that can drift from it.
+    ///
+    /// Combined with <see cref="SystemKey"/> under the rule lz itself builds tables to
+    /// (see the DynamoDB grants in Lz.Aws/Compute/*/Aws*TenantServiceComponent.cs):
+    ///     tenant table     {SystemKey}_{TestTenant}                 e.g. scu_mp
+    ///     subtenant table  {SystemKey}_{TestTenant}_{TestSubtenant} e.g. scu_mp_match
+    ///     CallerInfo.TenantId is the SAME keys joined with '-'      e.g. scu-mp-match
+    ///
+    /// Deliberately explicit and un-defaulted: with several tenancies deployed, which one
+    /// a test may WRITE to is a choice. Guessing it would let a suite mutate the wrong
+    /// tenant's data. Consumers read them through <c>lz gettesttenant</c> rather than
+    /// re-parsing this file. <see cref="TestSubtenant"/> may be omitted, in which case
+    /// the tenant-level table is the target.
+    /// </summary>
+    public string? TestTenant { get; set; }
+
+    /// <inheritdoc cref="TestTenant"/>
+    public string? TestSubtenant { get; set; }
+
     // Network
     public string VpcCidr { get; set; } = string.Empty;
 

@@ -121,6 +121,7 @@ class Program
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
         RegisterGetTenantsCommand(rootCommand);
+        RegisterGetTestTenantCommand(rootCommand);
         RegisterReposCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
@@ -192,7 +193,8 @@ class Program
             ("Subtenant", "per-subtenant resources",
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
             ("Misc",      "discovery, codegen, utilities",
-                new[] { "status", "getenv", "gettenants", "gen", "util", "repos", "verify", "unlock" }),
+                new[] { "status", "getenv", "gettenants", "gettesttenant", "gen", "util", "repos",
+                        "verify", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
@@ -2827,6 +2829,151 @@ class Program
     }
 
     // ---------------------------------------------------------------
+    /// <summary>
+    /// lz gettesttenant [--env dev] [--json] [--field &lt;name&gt;]
+    /// Prints the tenancy a system's AWS-backed test and dev tooling addresses, derived from
+    /// systemconfig's TestTenant/TestSubtenant — so callers ASK for it rather than each re-deriving
+    /// it. Sibling of <c>gettenants</c>: config-only, no AWS call, no Pulumi stack, no credentials.
+    ///
+    /// WHY THIS IS A COMMAND AND NOT A CONVENTION. The tenancy is two DIFFERENT renderings of the
+    /// same three keys, and lz is what builds the resources both name (see the DynamoDB grants in
+    /// Lz.Aws/Compute/*/Aws*TenantServiceComponent.cs, which authorize {sk}_{tk} and {sk}_{tk}_*):
+    ///     table / CallerInfo.DefaultDB   {sk}_{tk}_{stk}
+    ///     CallerInfo.TenantId            {sk}-{tk}-{stk}
+    /// Every copy of that derivation is a copy that can drift from what lz provisions. On the system
+    /// this was written for, a SystemKey rename left five test suites holding a literal table name
+    /// that no longer existed; the DynamoDB error surfaced as "caller identity could not be
+    /// resolved", naming nothing close to the cause. One authority, asked at run time, removes the
+    /// whole class.
+    ///
+    /// TestTenant is deliberately un-defaulted. With several tenancies deployed, which one a test
+    /// may WRITE to is a choice — guessing it lets a suite mutate the wrong tenant's data. When it
+    /// is unset this command EXITS 1 with an actionable message, which is how a caller distinguishes
+    /// "not configured" from a real answer without parsing prose. TestSubtenant may be omitted; the
+    /// tenant-level table is then the target and SubtenantKey comes back null.
+    ///
+    /// Output modes:
+    ///   (default)         aligned key/value lines, for humans
+    ///   --json            one JSON object, for programmatic callers
+    ///   --field &lt;name&gt;    one bare value + newline, for shell capture:
+    ///                     systemkey | tenantkey | subtenantkey | tenantid | table | tenanttable
+    /// </summary>
+    private static void RegisterGetTestTenantCommand(RootCommand root)
+    {
+        var cmd = new Command("gettesttenant",
+            "Print the tenancy this system's AWS-backed test/dev tooling addresses (table, TenantId, " +
+            "keys), from systemconfig TestTenant/TestSubtenant. Read-only; no AWS calls.");
+        var envOpt = new Option<string?>("--env", "Environment override (otherwise auto-detected from cwd).");
+        var jsonOpt = new Option<bool>("--json", () => false,
+            "Emit a single JSON object instead of human-readable lines.");
+        var fieldOpt = new Option<string?>("--field",
+            "Emit one bare value: systemkey, tenantkey, subtenantkey, tenantid, table, tenanttable.");
+        cmd.AddOption(envOpt);
+        cmd.AddOption(jsonOpt);
+        cmd.AddOption(fieldOpt);
+
+        cmd.SetHandler((string? envOverride, bool json, string? field) =>
+        {
+            SystemConfig config;
+            string env;
+            try
+            {
+                env = ConfigResolver.ResolveEnvironment(envOverride);
+                var systems = ConfigResolver.ResolveSystemConfigs(env);
+                if (systems.Count != 1)
+                {
+                    Fail($"expected exactly one systemconfig.*.{env}.yaml searching upward from " +
+                         $"'{Directory.GetCurrentDirectory()}', found {systems.Count}. " +
+                         "Pass --env, or run from the system root.");
+                    return;
+                }
+                config = systems[0];
+            }
+            catch (Exception ex)
+            {
+                Fail($"could not load systemconfig: {ex.Message}");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(config.TestTenant))
+            {
+                Fail($"'TestTenant' is not set in systemconfig.{config.SystemKey}.{env}.yaml. " +
+                     "Tooling that reads this writes to a REAL table, so the tenancy is named " +
+                     "explicitly rather than guessed - add e.g. 'TestTenant: mp' " +
+                     "(and optionally 'TestSubtenant: match').");
+                return;
+            }
+
+            var systemKey = config.SystemKey;
+            var tenantKey = config.TestTenant.Trim();
+            var subtenantKey = string.IsNullOrWhiteSpace(config.TestSubtenant)
+                ? null : config.TestSubtenant.Trim();
+
+            var tenantTable = $"{systemKey}_{tenantKey}";
+            var table = subtenantKey is null ? tenantTable : $"{tenantTable}_{subtenantKey}";
+            var tenantId = subtenantKey is null
+                ? $"{systemKey}-{tenantKey}"
+                : $"{systemKey}-{tenantKey}-{subtenantKey}";
+
+            if (!string.IsNullOrWhiteSpace(field))
+            {
+                var value = field.Trim().ToLowerInvariant() switch
+                {
+                    "systemkey" => systemKey,
+                    "tenantkey" => tenantKey,
+                    "subtenantkey" => subtenantKey ?? "",
+                    "tenantid" => tenantId,
+                    "table" => table,
+                    "tenanttable" => tenantTable,
+                    _ => null
+                };
+                if (value is null)
+                {
+                    Fail($"unknown --field '{field}'. Valid: systemkey, tenantkey, subtenantkey, " +
+                         "tenantid, table, tenanttable.");
+                    return;
+                }
+                Console.WriteLine(value);
+                return;
+            }
+
+            if (json)
+            {
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    SystemKey = systemKey,
+                    TenantKey = tenantKey,
+                    SubtenantKey = subtenantKey,
+                    TenantId = tenantId,
+                    Table = table,
+                    TenantTable = tenantTable,
+                    Environment = env,
+                    ConfigFile = $"systemconfig.{systemKey}.{env}.yaml"
+                }));
+                return;
+            }
+
+            Console.WriteLine($"SystemKey     {systemKey}");
+            Console.WriteLine($"TenantKey     {tenantKey}");
+            Console.WriteLine($"SubtenantKey  {subtenantKey ?? "(none - tenant-level table)"}");
+            Console.WriteLine($"TenantId      {tenantId}   (CallerInfo.TenantId)");
+            Console.WriteLine($"Table         {table}   (CallerInfo.DefaultDB)");
+            Console.WriteLine($"TenantTable   {tenantTable}");
+            Console.WriteLine($"Environment   {env}");
+            Console.WriteLine($"Source        systemconfig.{systemKey}.{env}.yaml");
+        }, envOpt, jsonOpt, fieldOpt);
+
+        root.AddCommand(cmd);
+
+        static void Fail(string message)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"gettesttenant: {message}");
+            Console.ResetColor();
+            Environment.ExitCode = 1;
+        }
+    }
+
     private static void RegisterGetTenantsCommand(RootCommand root)
     {
         var cmd = new Command("gettenants",
