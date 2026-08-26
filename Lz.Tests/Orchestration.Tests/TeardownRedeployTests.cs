@@ -31,8 +31,34 @@ public class TeardownRedeployTests
     private static readonly TimeSpan DeployTimeout = TimeSpan.FromMinutes(60);
     private static readonly TimeSpan DestroyTimeout = TimeSpan.FromMinutes(90);
 
-    private static string TenantKey =>
-        Environment.GetEnvironmentVariable("LZ_LIFECYCLE_TENANT") ?? "mp";
+    /// <summary>
+    /// The tenant to drill. LZ_LIFECYCLE_TENANT wins (verbatim — the caller validates
+    /// its shape and that a config exists). Otherwise the tenant is DISCOVERED from the
+    /// repo's single <c>tenantconfig.{sk}.{tenant}.dev.yaml</c>: the origin-repo default
+    /// was "mp", which is meaningless in a consuming repo whose tenant differs (NTS is
+    /// "sha"), so discover rather than assume. Returns "" when it cannot resolve a unique
+    /// tenant (no override and not exactly one tenantconfig) — the caller then skips.
+    /// </summary>
+    private static string TenantKey
+    {
+        get
+        {
+            var overrideKey = Environment.GetEnvironmentVariable("LZ_LIFECYCLE_TENANT");
+            if (!string.IsNullOrWhiteSpace(overrideKey))
+                return overrideKey;
+
+            var root = LifecycleHarness.FindRepoRoot();
+            var sysConfigs = Directory.GetFiles(root, "systemconfig.*.dev.yaml");
+            if (sysConfigs.Length != 1)
+                return "";
+            var sk = Path.GetFileName(sysConfigs[0]).Split('.')[1];
+            var tenants = Directory.GetFiles(root, $"tenantconfig.{sk}.*.dev.yaml")
+                .Select(f => Path.GetFileName(f).Split('.')[2])
+                .Distinct()
+                .ToList();
+            return tenants.Count == 1 ? tenants[0] : "";
+        }
+    }
     private static bool DrillEnabled =>
         Environment.GetEnvironmentVariable("LZ_LIFECYCLE_ENABLE") == "1";
 
@@ -62,20 +88,28 @@ public class TeardownRedeployTests
                 "DEV-ONLY GUARD: refusing to run the teardown drill.\n  " +
                 string.Join("\n  ", violations));
 
-        // LZ_LIFECYCLE_TENANT is interpolated into destructive lz command
-        // lines — validate it BEFORE anything runs: strict key shape (no
-        // argument injection) and a matching tenantconfig on disk (no
+        // The tenant is interpolated into destructive lz command lines — resolve and
+        // validate it BEFORE anything runs. An unresolved tenant is "not runnable here"
+        // (skip, per this test's convention), not a failure. A resolved tenant must pass
+        // strict key shape (no argument injection) and have a tenantconfig on disk (no
         // 60-minute deploy before discovering a typo).
-        var tenantKey = TenantKey;
-        Assert.True(System.Text.RegularExpressions.Regex.IsMatch(tenantKey, "^[a-z0-9-]{1,32}$"),
-            $"LZ_LIFECYCLE_TENANT '{tenantKey}' is not a valid tenant key " +
-            "(expected ^[a-z0-9-]{1,32}$).");
         var sk = systemConfigFile != null
             ? Path.GetFileName(systemConfigFile).Split('.')[1] : "?";
+        var tenantKey = TenantKey;
+        if (string.IsNullOrEmpty(tenantKey))
+        {
+            Skip(harness,
+                $"no LZ_LIFECYCLE_TENANT set and not exactly one tenantconfig.{sk}.*.dev.yaml " +
+                "in the repo root — cannot resolve a unique tenant to drill.");
+            return;
+        }
+        Assert.True(System.Text.RegularExpressions.Regex.IsMatch(tenantKey, "^[a-z0-9-]{1,32}$"),
+            $"tenant key '{tenantKey}' is not a valid tenant key " +
+            "(expected ^[a-z0-9-]{1,32}$).");
         var tenantConfigPath = Path.Combine(
             harness.RepoRoot, $"tenantconfig.{sk}.{tenantKey}.dev.yaml");
         Assert.True(File.Exists(tenantConfigPath),
-            $"LZ_LIFECYCLE_TENANT '{tenantKey}' has no {Path.GetFileName(tenantConfigPath)} " +
+            $"tenant '{tenantKey}' has no {Path.GetFileName(tenantConfigPath)} " +
             "in the repo root — refusing to drill an unknown tenant.");
 
         // ------------------------------------------------------------------
