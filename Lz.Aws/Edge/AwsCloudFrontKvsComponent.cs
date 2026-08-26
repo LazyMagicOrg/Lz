@@ -558,7 +558,10 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
             PriceClass = cdn.PriceClass ?? "PriceClass_100",
             Aliases = aliases,
             // Opt-in WAF association (see the WebACL above); null when not configured — the baseline.
-            WebAclId = webAcl?.Arn!,
+            // Guard the conversion: webAcl is null on the no-WAF baseline, and
+            // `webAcl?.Arn!` would force Input<string>.op_Implicit(null) -> ArgumentNullException.
+            // Assign a plain null instead so no WebACL is associated.
+            WebAclId = webAcl is null ? null : (Input<string>)webAcl.Arn,
             Origins =
             {
                 new DistributionOriginArgs
