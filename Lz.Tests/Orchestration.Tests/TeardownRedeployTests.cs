@@ -32,32 +32,49 @@ public class TeardownRedeployTests
     private static readonly TimeSpan DestroyTimeout = TimeSpan.FromMinutes(90);
 
     /// <summary>
-    /// The tenant to drill. LZ_LIFECYCLE_TENANT wins (verbatim — the caller validates
-    /// its shape and that a config exists). Otherwise the tenant is DISCOVERED from the
-    /// repo's single <c>tenantconfig.{sk}.{tenant}.dev.yaml</c>: the origin-repo default
-    /// was "mp", which is meaningless in a consuming repo whose tenant differs (NTS is
-    /// "sha"), so discover rather than assume. Returns "" when it cannot resolve a unique
-    /// tenant (no override and not exactly one tenantconfig) — the caller then skips.
+    /// The tenant to drill. LZ_LIFECYCLE_TENANT wins (verbatim — the caller validates its shape
+    /// and that a config exists). Otherwise it is systemconfig's <c>TestTenant</c>, resolved
+    /// through <see cref="TestTenancy"/> — the same authority <c>lz gettesttenant</c> renders and
+    /// consuming systems' test tiers read, so the drill and those tiers cannot disagree about
+    /// which tenant is the expendable one.
+    ///
+    /// <para>NOT INFERRED. This used to default to "mp" (the origin repo's tenant), which was
+    /// meaningless in a consuming repo whose tenant differs and made the suite red by default.
+    /// The first fix discovered the tenant from the repo's single
+    /// <c>tenantconfig.{sk}.*.dev.yaml</c> — better, but still a guess, and this key is
+    /// interpolated into <c>lz destroytenant</c>. A repo that grows a second tenantconfig would
+    /// have silently changed which tenant "the only one" meant. An explicit key cannot drift that
+    /// way, so a system that has not named one is told to, and skips.</para>
+    ///
+    /// <para>Returns "" when it cannot resolve — the caller then skips with <see cref="TenantKeyReason"/>.</para>
     /// </summary>
-    private static string TenantKey
-    {
-        get
-        {
-            var overrideKey = Environment.GetEnvironmentVariable("LZ_LIFECYCLE_TENANT");
-            if (!string.IsNullOrWhiteSpace(overrideKey))
-                return overrideKey;
+    private static string TenantKey => ResolveTenant().Key;
 
-            var root = LifecycleHarness.FindRepoRoot();
-            var sysConfigs = Directory.GetFiles(root, "systemconfig.*.dev.yaml");
-            if (sysConfigs.Length != 1)
-                return "";
-            var sk = Path.GetFileName(sysConfigs[0]).Split('.')[1];
-            var tenants = Directory.GetFiles(root, $"tenantconfig.{sk}.*.dev.yaml")
-                .Select(f => Path.GetFileName(f).Split('.')[2])
-                .Distinct()
-                .ToList();
-            return tenants.Count == 1 ? tenants[0] : "";
+    /// <summary>Why <see cref="TenantKey"/> is empty; surfaced verbatim in the skip.</summary>
+    private static string TenantKeyReason => ResolveTenant().Reason;
+
+    private static (string Key, string Reason) ResolveTenant()
+    {
+        var overrideKey = Environment.GetEnvironmentVariable("LZ_LIFECYCLE_TENANT");
+        if (!string.IsNullOrWhiteSpace(overrideKey))
+            return (overrideKey, "");
+
+        var root = LifecycleHarness.FindRepoRoot();
+        var sysConfigs = Directory.GetFiles(root, "systemconfig.*.dev.yaml");
+        if (sysConfigs.Length != 1)
+            return ("", $"expected exactly one systemconfig.*.dev.yaml in {root}, " +
+                        $"found {sysConfigs.Length} — cannot tell which system to drill.");
+
+        SystemConfig config;
+        try { config = ConfigLoader.LoadSystemConfig(sysConfigs[0]); }
+        catch (Exception ex)
+        {
+            return ("", $"could not load {Path.GetFileName(sysConfigs[0])}: {ex.Message}");
         }
+
+        return TestTenancy.TryResolve(config, out var tenancy, out var why)
+            ? (tenancy!.TenantKey, "")
+            : ("", why);
     }
     private static bool DrillEnabled =>
         Environment.GetEnvironmentVariable("LZ_LIFECYCLE_ENABLE") == "1";
@@ -95,12 +112,10 @@ public class TeardownRedeployTests
         // 60-minute deploy before discovering a typo).
         var sk = systemConfigFile != null
             ? Path.GetFileName(systemConfigFile).Split('.')[1] : "?";
-        var tenantKey = TenantKey;
+        var (tenantKey, tenantReason) = ResolveTenant();
         if (string.IsNullOrEmpty(tenantKey))
         {
-            Skip(harness,
-                $"no LZ_LIFECYCLE_TENANT set and not exactly one tenantconfig.{sk}.*.dev.yaml " +
-                "in the repo root — cannot resolve a unique tenant to drill.");
+            Skip(harness, $"cannot resolve a tenant to drill: {tenantReason}");
             return;
         }
         Assert.True(System.Text.RegularExpressions.Regex.IsMatch(tenantKey, "^[a-z0-9-]{1,32}$"),

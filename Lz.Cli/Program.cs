@@ -2895,25 +2895,20 @@ class Program
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(config.TestTenant))
+            // The derivation itself lives in Lz.Core.Config.TestTenancy — this command RENDERS
+            // it, it does not define it. TeardownRedeployTests resolves the same way in-process.
+            if (!TestTenancy.TryResolve(config, out var tenancy, out var why))
             {
-                Fail($"'TestTenant' is not set in systemconfig.{config.SystemKey}.{env}.yaml. " +
-                     "Tooling that reads this writes to a REAL table, so the tenancy is named " +
-                     "explicitly rather than guessed - add e.g. 'TestTenant: mp' " +
-                     "(and optionally 'TestSubtenant: match').");
+                Fail(why);
                 return;
             }
 
-            var systemKey = config.SystemKey;
-            var tenantKey = config.TestTenant.Trim();
-            var subtenantKey = string.IsNullOrWhiteSpace(config.TestSubtenant)
-                ? null : config.TestSubtenant.Trim();
-
-            var tenantTable = $"{systemKey}_{tenantKey}";
-            var table = subtenantKey is null ? tenantTable : $"{tenantTable}_{subtenantKey}";
-            var tenantId = subtenantKey is null
-                ? $"{systemKey}-{tenantKey}"
-                : $"{systemKey}-{tenantKey}-{subtenantKey}";
+            var systemKey = tenancy!.SystemKey;
+            var tenantKey = tenancy.TenantKey;
+            var subtenantKey = tenancy.SubtenantKey;
+            var tenantTable = tenancy.TenantTable;
+            var table = tenancy.Table;
+            var tenantId = tenancy.TenantId;
 
             if (!string.IsNullOrWhiteSpace(field))
             {
