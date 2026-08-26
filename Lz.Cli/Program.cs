@@ -123,6 +123,7 @@ class Program
         RegisterGetTenantsCommand(rootCommand);
         RegisterGetTestTenantCommand(rootCommand);
         RegisterReposCommand(rootCommand);
+        RegisterCloneReposCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
@@ -194,7 +195,7 @@ class Program
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
             ("Misc",      "discovery, codegen, utilities",
                 new[] { "status", "getenv", "gettenants", "gettesttenant", "gen", "util", "repos",
-                        "verify", "unlock" }),
+                        "clonerepos", "verify", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
@@ -2824,6 +2825,172 @@ class Program
                 Environment.ExitCode = 1;
             }
         }, rootOpt, noFetchOpt, jsonOpt, tagsOpt, concurrencyOpt);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // lz clonerepos — populate a workspace from its repos.yaml manifest.
+    //
+    // Sibling of `lz repos`: same workspace-root discovery, same GitRunner, same read-only-until-it-
+    // isn't posture. Where `repos` REPORTS on what is checked out, this puts it there in the first
+    // place — the two ends of the same problem, which is why both live in core rather than in a
+    // system's Deploy plugin. Nothing here knows what Scutara is; the manifest supplies every name,
+    // URL and branch, so any multi-repo workspace that writes a repos.yaml gets the command.
+    //
+    // CHICKEN AND EGG, worth stating: repos.yaml lives IN the root repo, so the root repo must
+    // already be cloned for this command to have anything to read. The manifest still lists it —
+    // the file describes the whole system — and the "already present" skip handles it for free.
+    // ---------------------------------------------------------------
+    private static void RegisterCloneReposCommand(RootCommand root)
+    {
+        var cmd = new Command("clonerepos",
+            "Clone every repository named in the workspace's repos.yaml into its target folder, " +
+            "checking out the branch that file declares for the chosen environment. Repositories " +
+            "already present are SKIPPED, so the command is safe to re-run and is the normal way " +
+            "to fill in a partially-populated workspace. Reads no lz deployment config — only " +
+            "repos.yaml — so it works before anything is configured.");
+
+        var rootOpt = new Option<string?>("--root",
+            "Workspace root holding repos.yaml (default: nearest ancestor containing a repos/ folder, " +
+            "else the nearest git repo).");
+        var envOpt = new Option<string?>("--env",
+            "Which branch column to use: dev, test or prod (default: auto-detected from the " +
+            "_Dev/_Test/_Prod folder the command is run under).");
+        var repoOpt = new Option<string?>("--repo",
+            "Clone only the entry with this Name.");
+        var dryRunOpt = new Option<bool>("--dry-run", () => false,
+            "Print the plan and clone nothing.");
+        var shallowOpt = new Option<bool>("--shallow", () => false,
+            "Clone with --depth 1. Fast, but the history is not there afterwards — do not use for a " +
+            "workspace you intend to commit from.");
+        var jsonOpt = new Option<bool>("--json", () => false,
+            "Machine-readable output (one JSON document on stdout).");
+
+        cmd.AddOption(rootOpt);
+        cmd.AddOption(envOpt);
+        cmd.AddOption(repoOpt);
+        cmd.AddOption(dryRunOpt);
+        cmd.AddOption(shallowOpt);
+        cmd.AddOption(jsonOpt);
+
+        cmd.SetHandler(async (string? rootPath, string? envOverride, string? onlyRepo,
+                              bool dryRun, bool shallow, bool json) =>
+        {
+            try
+            {
+                var workspaceRoot = rootPath is null
+                    ? RepoDiscovery.FindWorkspaceRoot()
+                    : Path.GetFullPath(rootPath);
+
+                if (!Directory.Exists(workspaceRoot))
+                {
+                    Console.Error.WriteLine($"clonerepos: workspace root not found: {workspaceRoot}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var manifestPath = RepoManifest.Locate(workspaceRoot);
+                if (manifestPath is null)
+                {
+                    Console.Error.WriteLine(
+                        $"clonerepos: no {RepoManifest.FileName} at {workspaceRoot}. " +
+                        "Create one there, or point at the right workspace with --root.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                // Environment resolution is shared with the rest of lz (_Dev/_Test/_Prod, or --env),
+                // then narrowed to the three columns a manifest actually has. An env lz accepts but
+                // repos.yaml has no column for is told so, never silently served the dev branch.
+                string envName;
+                try
+                {
+                    envName = ConfigResolver.ResolveEnvironment(envOverride);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"clonerepos: {ex.Message}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                if (!CloneReposLogic.TryParseEnvironment(envName, out var env))
+                {
+                    Console.Error.WriteLine(
+                        $"clonerepos: environment '{envName}' is not one of dev, test, prod — " +
+                        $"{RepoManifest.FileName} declares a branch for those three only.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                RepoManifest manifest;
+                try
+                {
+                    manifest = RepoManifest.Load(manifestPath);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"clonerepos: {ex.Message}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                if (manifest.Repos.Count == 0)
+                {
+                    Console.Error.WriteLine($"clonerepos: {manifestPath} lists no repositories.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var options = new CloneReposOptions
+                {
+                    Root = workspaceRoot,
+                    Environment = env,
+                    DryRun = dryRun,
+                    OnlyRepo = onlyRepo,
+                    Shallow = shallow,
+                };
+
+                if (!json)
+                {
+                    Console.Out.WriteLine($"workspace:   {workspaceRoot}");
+                    Console.Out.WriteLine($"manifest:    {manifestPath}");
+                    Console.Out.WriteLine($"environment: {envName}{(dryRun ? "   (dry run — nothing will be cloned)" : "")}");
+                    Console.Out.WriteLine();
+                }
+
+                var outcomes = await CloneReposRunner.RunAsync(
+                    manifest, workspaceRoot, options, json ? null : Console.Out.WriteLine);
+
+                if (onlyRepo is not null && outcomes.Count == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"clonerepos: no entry named '{onlyRepo}' in {RepoManifest.FileName}.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                if (json)
+                {
+                    Console.Out.WriteLine(CloneReposRunner.ToJson(outcomes, workspaceRoot, env));
+                }
+                else
+                {
+                    Console.Out.WriteLine();
+                    Console.Out.WriteLine(CloneReposRunner.Summarize(outcomes));
+                }
+
+                // A failed or unusable entry is a non-zero exit even when others succeeded — a
+                // script that clones a workspace must not read a partial result as success.
+                Environment.ExitCode = outcomes.Any(o => o.IsError) ? 1 : 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"clonerepos: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, rootOpt, envOpt, repoOpt, dryRunOpt, shallowOpt, jsonOpt);
 
         root.AddCommand(cmd);
     }
