@@ -324,30 +324,38 @@ public static class ConfigLoader
     }
 
     /// <summary>
-    /// Discover and load ContainerServiceConfig by convention: containersbuild.{systemKey}.{env}.yaml.
+    /// Discover and load ContainerServiceConfig by convention. The canonical name is
+    /// <c>servicesconfig.{systemKey}.{env}.yaml</c>; <c>containersbuild.{systemKey}.{env}.yaml</c>
+    /// is the pre-rename name kept as a fallback so systems that never migrated
+    /// (and existing deploys) keep working. The canonical name wins when both exist.
     /// </summary>
     public static ContainerServiceConfig DiscoverAndLoadContainerServiceConfig(
         string systemKey, string environment, string? startDirectory = null)
     {
         var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var pattern = $"containersbuild.{systemKey}.{environment}.yaml";
-        var filePath = DiscoverConfigFile(dir, pattern)
+        var canonical = $"servicesconfig.{systemKey}.{environment}.yaml";
+        var legacy = $"containersbuild.{systemKey}.{environment}.yaml";
+        var filePath = DiscoverConfigFile(dir, canonical)
+            ?? DiscoverConfigFile(dir, legacy)
             ?? throw new FileNotFoundException(
-                $"Container service config not found: {pattern}. " +
-                $"Create {pattern} in the monorepo root.");
+                $"Container service config not found: {canonical} (or legacy {legacy}). " +
+                $"Create {canonical} in the monorepo root.");
         return LoadContainerServiceConfig(filePath);
     }
 
     /// <summary>
-    /// Discover and load foundation ContainerServiceConfig by convention: containersbuild.foundation.{env}.yaml.
-    /// Foundation containers are system-scoped (shared across all tenants).
+    /// Discover and load foundation ContainerServiceConfig by convention:
+    /// <c>servicesconfig.foundation.{env}.yaml</c> (canonical) or the legacy
+    /// <c>containersbuild.foundation.{env}.yaml</c>. Foundation containers are
+    /// system-scoped (shared across all tenants); the config is optional.
     /// </summary>
     public static ContainerServiceConfig DiscoverAndLoadFoundationContainerConfig(
         string systemKey, string environment, string? startDirectory = null)
     {
         var dir = startDirectory ?? Directory.GetCurrentDirectory();
-        var pattern = $"containersbuild.foundation.{environment}.yaml";
-        var filePath = DiscoverConfigFile(dir, pattern);
+        var canonical = $"servicesconfig.foundation.{environment}.yaml";
+        var legacy = $"containersbuild.foundation.{environment}.yaml";
+        var filePath = DiscoverConfigFile(dir, canonical) ?? DiscoverConfigFile(dir, legacy);
         if (filePath == null)
         {
             // Foundation config is optional — return empty if not found

@@ -201,4 +201,66 @@ public class ConfigLoaderTests : IDisposable
         Assert.Equal("monro-devnew", config.Profile);
         Assert.Equal("monroadmin.click", config.CentralAuthDomain);
     }
+
+    // --- Container-service config discovery: canonical servicesconfig.* preferred,
+    //     legacy containersbuild.* as a backward-compatible fallback. ---
+
+    private static void RunInTempDir(Action<string> test)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "lztest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try { test(dir); }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ } }
+    }
+
+    private static string ContainerYaml(string context) =>
+        $"Containers:\n  smartstore:\n    Context: \"{context}\"\n    Dockerfile: \"Dockerfile\"\n";
+
+    [Fact]
+    public void DiscoverContainerConfig_LoadsServicesConfig_WhenOnlyServicesConfigPresent()
+    {
+        RunInTempDir(dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "servicesconfig.testapp.dev.yaml"),
+                ContainerYaml("repos/Smartstore"));
+            var config = ConfigLoader.DiscoverAndLoadContainerServiceConfig("testapp", "dev", dir);
+            Assert.True(config.Containers.ContainsKey("smartstore"));
+            Assert.Equal("repos/Smartstore", config.Containers["smartstore"].Context);
+        });
+    }
+
+    [Fact]
+    public void DiscoverContainerConfig_FallsBackToContainersBuild_WhenServicesConfigAbsent()
+    {
+        RunInTempDir(dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "containersbuild.testapp.dev.yaml"),
+                ContainerYaml("legacy/Smartstore"));
+            var config = ConfigLoader.DiscoverAndLoadContainerServiceConfig("testapp", "dev", dir);
+            Assert.True(config.Containers.ContainsKey("smartstore"));
+            Assert.Equal("legacy/Smartstore", config.Containers["smartstore"].Context);
+        });
+    }
+
+    [Fact]
+    public void DiscoverContainerConfig_PrefersServicesConfig_WhenBothPresent()
+    {
+        RunInTempDir(dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "servicesconfig.testapp.dev.yaml"),
+                ContainerYaml("from-servicesconfig"));
+            File.WriteAllText(Path.Combine(dir, "containersbuild.testapp.dev.yaml"),
+                ContainerYaml("from-containersbuild"));
+            var config = ConfigLoader.DiscoverAndLoadContainerServiceConfig("testapp", "dev", dir);
+            Assert.Equal("from-servicesconfig", config.Containers["smartstore"].Context);
+        });
+    }
+
+    [Fact]
+    public void DiscoverContainerConfig_Throws_WhenNeitherPresent()
+    {
+        RunInTempDir(dir =>
+            Assert.Throws<FileNotFoundException>(() =>
+                ConfigLoader.DiscoverAndLoadContainerServiceConfig("testapp", "dev", dir)));
+    }
 }

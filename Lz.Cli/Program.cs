@@ -779,7 +779,7 @@ class Program
                 if (container != null && containersToProcess.Count == 0)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"Warning: Container '{container}' not found in containersbuild.");
+                    Console.WriteLine($"Warning: Container '{container}' not found in servicesconfig.");
                     Console.ResetColor();
                     continue;
                 }
