@@ -294,6 +294,32 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
             Special = false, // header-safe alphanumerics
         }, new CustomResourceOptions { Parent = this });
 
+        // SES cross-account send — mirrors the Fargate component. Kept in step
+        // deliberately: this topology is switchable in place, and a capability
+        // added to only one side is one the other silently lacks.
+        var sesConfig = (_systemConfig as AwsSystemConfig)?.Ses;
+        if (!string.IsNullOrWhiteSpace(sesConfig?.SenderRoleArn))
+        {
+            new RolePolicy($"{prefix}-ses-assume", new RolePolicyArgs
+            {
+                Role = execRole.Id,
+                Policy = $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": ""sts:AssumeRole"",
+                        ""Resource"": ""{sesConfig!.SenderRoleArn}""
+                    }}]
+                }}",
+            }, new CustomResourceOptions { Parent = this });
+
+            baseVars["Ses__SenderRoleArn"] = sesConfig.SenderRoleArn!;
+            if (!string.IsNullOrWhiteSpace(sesConfig.FromAddress))
+                baseVars["Ses__FromAddress"] = sesConfig.FromAddress!;
+            if (!string.IsNullOrWhiteSpace(sesConfig.Region))
+                baseVars["Ses__Region"] = sesConfig.Region!;
+        }
+
         var fnEnv = new FunctionEnvironmentArgs
         {
             Variables = Output.Tuple(authUserPoolIdsJson, bffValueOutputs, originVerify.Result, vectorStoreEndpoint).Apply(t =>

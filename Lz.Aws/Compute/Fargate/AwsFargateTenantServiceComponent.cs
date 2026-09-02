@@ -411,6 +411,49 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
                 }, new CustomResourceOptions { Parent = this });
         }
 
+        // =====================================================================
+        // SES CROSS-ACCOUNT SEND — additive, opt-in via systemconfig Ses.
+        //
+        // The SES identity lives in a DIFFERENT account, so this grant is the
+        // IDENTITY-side half of the two-key model: the sender role's own trust
+        // policy is necessary but not sufficient, and without this the task role
+        // gets AccessDenied on sts:AssumeRole. Absent the Ses block NOTHING here
+        // is emitted and the plan is byte-identical.
+        //
+        // Resource is the explicit target ARN, never "*". This role already holds
+        // bedrock, cognito-idp Admin*, s3 and dynamodb grants; an unscoped
+        // sts:AssumeRole on top of those would be a general cross-account
+        // escalation path and the widest privilege in this component.
+        //
+        // `as` rather than the Aws() extension: AwsConfigCast.Aws() is a hard
+        // cast and would throw if a caller ever passes a plain SystemConfig.
+        // =====================================================================
+        var sesConfig = (_systemConfig as AwsSystemConfig)?.Ses;
+        if (!string.IsNullOrWhiteSpace(sesConfig?.SenderRoleArn))
+        {
+            new RolePolicy($"{prefix}-ses-assume", new RolePolicyArgs
+            {
+                Role = taskRole.Id,
+                Policy = $@"{{
+                    ""Version"": ""2012-10-17"",
+                    ""Statement"": [{{
+                        ""Effect"": ""Allow"",
+                        ""Action"": ""sts:AssumeRole"",
+                        ""Resource"": ""{sesConfig!.SenderRoleArn}""
+                    }}]
+                }}",
+            }, new CustomResourceOptions { Parent = this });
+
+            // Ses:* config keys via the ASP.NET double-underscore convention.
+            // Added outside the Apply because these are plain config strings
+            // rather than Outputs.
+            baseEnv.Add(new("Ses__SenderRoleArn", sesConfig.SenderRoleArn!));
+            if (!string.IsNullOrWhiteSpace(sesConfig.FromAddress))
+                baseEnv.Add(new("Ses__FromAddress", sesConfig.FromAddress!));
+            if (!string.IsNullOrWhiteSpace(sesConfig.Region))
+                baseEnv.Add(new("Ses__Region", sesConfig.Region!));
+        }
+
         var containerDefs = Output.Tuple(imageUri, bffValueOutputs, authUserPoolIdsJson, vectorStoreEndpoint).Apply(t =>
         {
             var image = t.Item1;

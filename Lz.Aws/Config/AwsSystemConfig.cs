@@ -25,6 +25,11 @@ public class AwsSystemConfig : SystemConfig
     // where SystemConfig is in scope via config.Aws().PrivateNetwork.
     public PrivateNetworkConfig? PrivateNetwork { get; set; }
 
+    // Ses — OPT-IN cross-account SES sending. Absent ⇒ no IAM policy and no
+    // env vars are emitted, so the plan is byte-identical (the same
+    // opt-in-null contract as PrivateNetwork above). Read via config.Aws().Ses.
+    public SesConfig? Ses { get; set; }
+
     // Cross-account shared services. SharedProfile is from YAML
     // (e.g. "monro-shared"); the rest are resolved by the CLI at startup.
     public string? SharedProfile { get; set; }
