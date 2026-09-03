@@ -6,6 +6,12 @@
 		<Authors>Tim May, Thomas May</Authors>
 		<Company>Insight Sciences Corporation</Company>
 		<Copyright>Copyright (c) 2021 - 2026 Insight Sciences Corporation. All rights reserved.</Copyright>
+		<!-- MIT, matching the sibling LazyMagic and LzRunner repos. The full text is
+		     LICENSE.txt at the repo root, which is what GitHub reads; the SPDX
+		     expression here is what puts a license on each Lz.* package. Use the
+		     expression rather than PackageLicenseFile: the two are mutually exclusive,
+		     and for a stock license the identifier is what NuGet recommends. -->
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageProjectUrl>https://LazyMagic.org</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/LazyMagicOrg/Lz</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
