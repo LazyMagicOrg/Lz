@@ -38,6 +38,16 @@ public class AwsSystemConfig : SystemConfig
     public string? SharedRegion { get; set; }
 
     /// <summary>
+    /// The 12-digit AWS account this system deploys into. Declarative, not resolved:
+    /// the CLI already knows its account from the profile, so this exists for the
+    /// consumers that must know it BEFORE they have credentials — a GitHub Actions
+    /// workflow composing a role-to-assume ARN from the checked-out config, for one.
+    /// Commands that do hold credentials (bootstrapwebsiteci) compare it to the
+    /// caller's account and refuse to run against the wrong one.
+    /// </summary>
+    public string? AccountId { get; set; }
+
+    /// <summary>
     /// AWS account IDs allowed to read the shared system secret cross-account.
     /// Used to author a resource policy on the shared/system secret.
     /// </summary>
