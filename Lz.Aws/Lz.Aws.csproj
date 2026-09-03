@@ -30,7 +30,8 @@
        fires (deps.json based resolution to the cache).
          lib/$(TargetFramework)/Lambda/gate-checker.zip in the nupkg
          -> mirrored to
-            ~/.nuget/packages/lz.aws/{ver}/lib/net10.0/Lambda/gate-checker.zip
+            <global-packages folder>/lz.aws/{ver}/lib/net10.0/Lambda/gate-checker.zip
+            (~/.nuget/packages by default, or the workspace globalPackagesFolder)
 
        Path B: Consumer's local bin, when .NET's default ALC LoadFrom
        probing finds the locally-copied Lz.Aws.dll alongside the
