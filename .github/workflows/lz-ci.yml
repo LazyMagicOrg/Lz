@@ -34,11 +34,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: Lz
-      # Public repo: no token needed. Pinned to the default branch deliberately — Lz consumes
-      # LazyMagic, so a LazyMagic break SHOULD red this gate rather than be discovered later.
+      # Public repo: no token needed.
+      #
+      # ref: dev is REQUIRED, not a preference. LazyMagic's default branch is badly stale — main
+      # declares Version 3.0.1 and test declares 3.0.10, while dev declares the 3.0.17 that
+      # ProjectTemplates/Directory.Packages.props pins and that every workspace consumes. Checking
+      # out the default branch produces a feed holding 3.0.1 and restore fails NU1102 ("Found 1
+      # version(s) in LazyMagicLocal [ Nearest version: 3.0.1 ]"), which is exactly how this was
+      # found: it passed against a local clone that happened to sit on dev, and failed on the runner.
+      #
+      # THE COUPLING THIS CREATES, so a future red run is diagnosable: the pins are EXACT, so the
+      # moment LazyMagic dev bumps to 3.0.18 this gate goes red until those pins are updated. That
+      # is a true signal rather than flakiness — the templates would genuinely no longer compile
+      # against the framework the systems consume — but it will look like an unrelated failure to
+      # whoever is changing Lz at the time.
       - uses: actions/checkout@v4
         with:
           repository: LazyMagicOrg/LazyMagic
+          ref: dev
           path: LazyMagic
 
       - uses: actions/setup-dotnet@v4
