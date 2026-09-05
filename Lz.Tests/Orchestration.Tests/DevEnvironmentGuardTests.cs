@@ -97,4 +97,38 @@ public class DevEnvironmentGuardTests
     {
         Assert.Equal(expected, DevEnvironmentGuard.EnvironmentTokenFromFileName(fileName));
     }
+
+    [Theory]
+    // Both separators, on any host. The Windows-shaped case is the one that regressed: on Linux
+    // Path.GetFileName does not cut at '\', so the whole string was parsed and the token came back
+    // null (found on an ubuntu runner, 2026-09-05).
+    [InlineData(@"C:\some\dir\systemconfig.med.test.yaml", "test")]
+    [InlineData("/home/runner/work/systemconfig.med.test.yaml", "test")]
+    [InlineData(@"relative\dir\systemconfig.scu.dev.yaml", "dev")]
+    [InlineData("relative/dir/systemconfig.scu.dev.yaml", "dev")]
+    [InlineData(@"C:/mixed\separators/systemconfig.scu.prod.yaml", "prod")]
+    [InlineData("  systemconfig.scu.dev.yaml  ", "dev")]   // survives the Trim
+    public void EnvironmentToken_ParsesTheSame_WhicheverSeparatorIsUsed(string fileName, string expected)
+    {
+        // These separator cases alone would NOT catch a revert to Path.GetFileName on a Windows
+        // runner — that API cuts at '\' there too. What catches it on Windows is the padded case
+        // here (Path.GetFileName does not trim) and the fail-closed cases below. Verified by
+        // mutation; see the remarks on EnvironmentTokenFromFileName.
+        Assert.Equal(expected, DevEnvironmentGuard.EnvironmentTokenFromFileName(fileName));
+    }
+
+    [Theory]
+    [InlineData("C:systemconfig.scu.dev.yaml")]        // drive-RELATIVE — not cut at the colon
+    [InlineData("weird:systemconfig.scu.dev.yaml")]    // and neither is this
+    public void NamesThisDoesNotUnderstand_FailCLOSED(string fileName)
+    {
+        // The volume separator is deliberately not handled, and this is the reason. Cutting at ':'
+        // would make "weird:systemconfig.scu.dev.yaml" resolve to "dev" and PASS signal 2 — a gate
+        // whose entire purpose is refusing a non-dev run must never admit on a name it cannot read.
+        Assert.Null(DevEnvironmentGuard.EnvironmentTokenFromFileName(fileName));
+
+        // And the refusal is what the guard actually reports, not just what the parser returns.
+        var violations = DevEnvironmentGuard.Violations("dev", fileName, DevPath);
+        Assert.Contains(violations, v => v.StartsWith("signal 2", StringComparison.Ordinal));
+    }
 }

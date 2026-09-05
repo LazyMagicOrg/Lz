@@ -62,11 +62,38 @@ public static class DevEnvironmentGuard
     /// Extract the environment token from a systemconfig file name:
     /// "systemconfig.{sk}.{env}.yaml" → "{env}". Returns null for anything
     /// that doesn't match that exact shape.
+    ///
+    /// <para><b>Deliberately does not use <c>Path.GetFileName</c>.</b> Its separator set is
+    /// platform-dependent — on Windows it cuts at <c>\</c>, <c>/</c> and the volume <c>:</c>; on
+    /// Linux only at <c>/</c> — which made this guard's verdict depend on the host. A Windows-shaped
+    /// path handed to it on Linux returned the whole string, so
+    /// <c>C:\dir\systemconfig.med.test.yaml</c> parsed to null instead of "test" (found by running
+    /// this suite on an ubuntu runner, 2026-09-05). Normalising the separator first, exactly as
+    /// <c>CloneReposLogic.IsSafeRelativePath</c> does, makes the answer identical everywhere.</para>
+    ///
+    /// <para><b>Failure stays CLOSED, and the volume separator is deliberately not handled.</b>
+    /// Anything this does not recognise returns null, which signal 2 treats as a violation. That is
+    /// why a drive-RELATIVE name like <c>C:systemconfig.scu.dev.yaml</c> is left to parse as null
+    /// rather than being cut at the colon: cutting there would let an odd name such as
+    /// <c>weird:systemconfig.x.dev.yaml</c> resolve to "dev" and PASS the gate. For a guard whose
+    /// whole job is refusing a non-dev run, an unparseable name must refuse, never admit.</para>
+    ///
+    /// <para><b>Both decisions are pinned, including on a Windows runner.</b> Verified by mutation
+    /// on 2026-09-05, after an earlier draft of this remark claimed the opposite and was wrong.
+    /// Reverting to <c>Path.GetFileName</c> fails two tests on Windows: it cuts at the volume
+    /// separator, so <c>C:systemconfig.scu.dev.yaml</c> resolves to "dev" and PASSES the gate —
+    /// precisely the fail-open this refuses — and it does not trim, so a padded name parses to null.
+    /// Widening the cut to include <c>:</c> fails the two fail-closed cases. So the Windows gate
+    /// does catch a regression here, by a different route than the Linux bug that prompted it.</para>
     /// </summary>
     internal static string? EnvironmentTokenFromFileName(string? fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName)) return null;
-        var name = Path.GetFileName(fileName);
+
+        var name = fileName.Trim().Replace('\\', '/');
+        var lastSlash = name.LastIndexOf('/');
+        if (lastSlash >= 0) name = name[(lastSlash + 1)..];
+
         var parts = name.Split('.');
         if (parts.Length != 4) return null;
         if (!string.Equals(parts[0], "systemconfig", StringComparison.OrdinalIgnoreCase)) return null;
