@@ -45,6 +45,25 @@ public class TenantConfig
     public string? CentralAuthDomain { get; set; }
 
     /// <summary>
+    /// Container image digests resolved from ECR just before the Pulumi program is built,
+    /// keyed by service name (value is the full <c>sha256:…</c>). Runtime-only — never
+    /// serialized, never read from YAML.
+    ///
+    /// <para>Carried here rather than passed as a parameter because
+    /// <c>ITenantServiceComponent.Deploy</c> is implemented directly by a sibling
+    /// workspace's own plugin, so changing that signature is a compile break outside this
+    /// repo. <c>CentralAuthDomain</c> above is the same pattern: set imperatively before
+    /// the program is built.</para>
+    ///
+    /// <para>A MISSING entry is normal, not an error — it means no digest could be
+    /// resolved (empty repository, absent tag, no AWS access) and the image reference falls
+    /// back to the tag. Empty when digest pinning is not opted into, in which case nothing
+    /// ever populates it and no AWS call is made.</para>
+    /// </summary>
+    [YamlDotNet.Serialization.YamlIgnore]
+    public Dictionary<string, string> ResolvedImageDigests { get; } = new();
+
+    /// <summary>
     /// Optional override for the per-tenant media S3 bucket name. When unset,
     /// the name is derived by convention: {sk}-{tk}-{stk}-media--{suffix}.
     /// Backs the Smartstore.AmazonS3 media storage provider.

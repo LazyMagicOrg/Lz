@@ -9,6 +9,8 @@ using Lz.Core.Orchestration;
 using Pulumi;
 using Pulumi.Automation;
 using Pulumi.Automation.Events;
+using Lz.Aws.Compute;
+using Lz.Aws.Docker;
 
 namespace Lz.Aws.Orchestration;
 
@@ -500,6 +502,10 @@ public class SystemDeployment
         TenantConfig tenantConfig,
         bool refresh = false)
     {
+        // Before the program closure is built — see PreviewTenantAsync, which must do the
+        // same thing so plan and apply agree.
+        await ResolveImageDigestsAsync(tenantKey, tenantConfig);
+
         var stack = await CreateOrSelectStack(stackName, BuildTenantProgram(tenantKey, tenantConfig));
 
         // Refresh: sync Pulumi state with actual AWS resource state.
@@ -1062,12 +1068,66 @@ public class SystemDeployment
     /// Preview a tenant stack. Returns true if the plan is destructive
     /// (contains any replace/delete). No changes are applied.
     /// </summary>
-    public Task<bool> PreviewTenantAsync(string tenantKey, TenantConfig tenantConfig, bool refresh = false)
+    public async Task<bool> PreviewTenantAsync(string tenantKey, TenantConfig tenantConfig, bool refresh = false)
     {
         var stackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
         Console.WriteLine($"=== Tenant preview: {tenantKey} ({stackName}) (no changes will be applied) ===");
         Console.WriteLine();
-        return PulumiPreviewAsync(stackName, BuildTenantProgram(tenantKey, tenantConfig), refresh);
+        // MUST run here too, not only on the deploy path. The preview and the deploy build
+        // the SAME program closure, so resolving on one side only would have the preview
+        // plan a different image than the deploy applies — a preview that lies in exactly
+        // the direction that matters.
+        await ResolveImageDigestsAsync(tenantKey, tenantConfig);
+        return await PulumiPreviewAsync(stackName, BuildTenantProgram(tenantKey, tenantConfig), refresh);
+    }
+
+    /// <summary>
+    /// Resolve each tenant service's container-image digest from ECR into
+    /// <see cref="TenantConfig.ResolvedImageDigests"/>, before the Pulumi program is built.
+    ///
+    /// <para><b>Imperative on purpose.</b> The obvious alternative — a plan-time
+    /// <c>aws.ecr.getImage</c> invoke — is disqualified by the bootstrap case:
+    /// <c>lz previewtenant</c> is documented to work before <c>deploycontainer</c> ("the
+    /// image need not exist yet"), and that data source raises a provider ERROR when the
+    /// repository or tag is absent, which would turn the first preview on every new system
+    /// into a failure.</para>
+    ///
+    /// <para>A null digest is NOT an error: it falls back to the tag, which is the same
+    /// branch a non-opted-in system takes. Reachable on the deploy path too, not just on
+    /// preview — the deploytenant pre-flight accepts a repository holding ONLY untagged or
+    /// <c>b-</c>-tagged images, which passes the gate while yielding no <c>:latest</c>
+    /// digest.</para>
+    /// </summary>
+    private async Task ResolveImageDigestsAsync(string tenantKey, TenantConfig tenantConfig)
+    {
+        // Not opted in => zero AWS calls, nothing populated, byte-identical behaviour.
+        if (!ImagePinPolicy.ForTenantService(_config.Rollback).PinDigest) return;
+
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+
+        foreach (var svc in _system.ServiceLayerServices.Concat(_system.HostLayerServices))
+        {
+            if (svc.Docker == null) continue;
+
+            // Same formula as the component (AwsFargateTenantServiceComponent) and the
+            // deploytenant pre-flight, so all three agree on which repository is meant.
+            var ecrName = $"{_config.SystemKey}-{tenantConfig.TenantSuffix}-{_config.Environment}-{tenantKey}-{svc.Name}";
+            var digest = await EcrDeployer.GetImageDigestAsync(profile, region, ecrName, "latest");
+
+            if (digest is null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine(
+                    $"  No :latest digest for {ecrName} — image reference falls back to the tag " +
+                    $"(this is normal before the first deploycontainer).");
+                Console.ResetColor();
+                continue;
+            }
+
+            tenantConfig.ResolvedImageDigests[svc.Name] = digest;
+            Console.WriteLine($"  {svc.Name}: pinning image digest {digest}");
+        }
     }
 
     /// <summary>

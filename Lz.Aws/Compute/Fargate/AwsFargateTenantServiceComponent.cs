@@ -90,8 +90,17 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         var ecrName = $"{sk}-{suffix}-{env}-{tk}-{serviceName}";
         var ecsRegion = tenantConfig.Region ?? "us-west-2";
         var ecsIdentity = Pulumi.Aws.GetCallerIdentity.Invoke();
+
+        // Image reference — by DIGEST when opted in and a digest was resolved before this
+        // program was built (SystemDeployment.ResolveImageDigestsAsync), otherwise by the
+        // moving tag exactly as before. The fallback is the ordinary first-deploy case, not
+        // an error path: nothing has been pushed yet on a new system.
+        var imagePin = ImagePinPolicy.ForTenantService(_systemConfig?.Rollback);
+        var resolvedDigest = tenantConfig.ResolvedImageDigests.GetValueOrDefault(serviceName);
         var imageUri = ecsIdentity.Apply(id =>
-            $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{ecrName}:latest");
+            ImagePinPolicy.ImageRef(
+                $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{ecrName}",
+                "latest", resolvedDigest, imagePin));
 
         // Resolve effective Fargate sizing — prefers Fargate: block on tenant,
         // then system; then FargateConfig defaults (the legacy pre-Fargate YAML
@@ -511,7 +520,7 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
             });
         });
 
-        var taskDef = new TaskDefinition($"{prefix}-task-def", new TaskDefinitionArgs
+        var taskDefArgs = new TaskDefinitionArgs
         {
             Family = prefix,
             Cpu = cpu.ToString(),
@@ -522,7 +531,20 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
             TaskRoleArn = taskRole.Arn,
             ContainerDefinitions = containerDefs,
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
-        }, new CustomResourceOptions { Parent = this });
+        };
+
+        // Retain superseded revisions instead of letting Pulumi deregister them. This is the
+        // BINDING constraint on rollback and it is independent of pinning: AWS refuses to
+        // update a service to reference an INACTIVE revision, so without this the revision
+        // history is not a runway no matter how the image is named. Assigned ONLY when opted
+        // in — an explicit false is not the same plan as an omitted property, which is what
+        // keeps the sibling workspaces byte-identical. Not a replace trigger, so turning it
+        // on does not itself churn the task definition.
+        if (imagePin.RetainRevisions)
+            taskDefArgs.SkipDestroy = true;
+
+        var taskDef = new TaskDefinition($"{prefix}-task-def", taskDefArgs,
+            new CustomResourceOptions { Parent = this });
 
         // =====================================================================
         // ALB TARGET GROUP + LISTENER RULE

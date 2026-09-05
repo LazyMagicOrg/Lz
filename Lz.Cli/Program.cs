@@ -1302,7 +1302,14 @@ class Program
             "Report what would be redeployed without making any changes");
         var tagOption = new Option<string>("--tag",
             () => "latest", "ECR image tag to compare and deploy");
+        // THE ROLLBACK LEVER. Names an exact digest instead of resolving one from a tag,
+        // which is the whole point of a digest-pinned task definition: `--tag` can only
+        // ever reach whatever that tag currently points at, so it cannot go backwards.
+        var digestOption = new Option<string?>("--digest",
+            "Deploy this exact image digest (sha256:...) instead of resolving --tag. " +
+            "This is how you roll back to a previous image.");
 
+        cmd.AddOption(digestOption);
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(tenantKeyOption);
@@ -1434,7 +1441,8 @@ class Program
                         try
                         {
                             var result = await updater.UpdateIfNewerAsync(
-                                cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token);
+                                cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token,
+                                ctx.ParseResult.GetValueForOption(digestOption));
                             PrintUpdateResult(result);
                             if (result.Outcome == UpdateOutcome.Failed)
                                 anyFailure = true;

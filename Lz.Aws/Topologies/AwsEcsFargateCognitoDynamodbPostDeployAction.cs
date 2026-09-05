@@ -52,6 +52,18 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
         }
 
         // --- Step 2: Trigger ECS force-new-deployment for each service ---
+        //
+        // CONDITIONAL since 2026-09-05, and the condition is the point. This loop used to
+        // force unconditionally, which meant a TENANT CONFIG deploy could ship an image
+        // nobody asked for: `lz previewtenant` correctly reports "no changes" (this runs
+        // AFTER Pulumi, so no plan can show it) and `lz deploytenant` rolled the service
+        // anyway — observed live on 2026-09-05, harmless only because :latest happened to
+        // resolve to the digest already running. Skipping when the registry and the running
+        // tasks already agree closes that outright and makes the preview honest again.
+        //
+        // Note this is NOT gated on the Rollback opt-in: it removes an unrequested action,
+        // so every workspace should have it. The skip is also what stops a digest-pinned
+        // service being rolled pointlessly on every unrelated deploy.
         foreach (var svc in _services)
         {
             if (svc.Docker == null) continue;
@@ -61,6 +73,26 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
             var env = _config.Environment;
             var prefix = _tenantKey != null ? $"{sk}-{_tenantKey}-{serviceName}" : $"{sk}-{env}-{serviceName}";
             var clusterName = $"{sk}-{env}-cluster";
+            var ecrName = _tenantKey != null && _tenantConfig != null
+                ? $"{sk}-{_tenantConfig.TenantSuffix}-{env}-{_tenantKey}-{serviceName}"
+                : null;
+
+            var profile = _tenantConfig?.Profile ?? _config.Profile;
+            var region = _tenantConfig?.Region ?? _config.Region;
+
+            // Fail OPEN, deliberately: if we cannot establish that they agree — no ECR
+            // access, an unresolvable tag, a service we cannot describe — force as before.
+            // The old behaviour is the safe default here; a skipped deploy that was needed
+            // is worse than a redundant one.
+            var alreadyCurrent = ecrName != null &&
+                await AwsContainerUpdater.RunningMatchesRegistryAsync(
+                    profile, region, clusterName, prefix, ecrName, "latest");
+
+            if (alreadyCurrent)
+            {
+                Console.WriteLine($"  {prefix} already runs the current :latest — skipping force-new-deployment.");
+                continue;
+            }
 
             Console.WriteLine($"  Triggering ECS force-new-deployment for {prefix}...");
             await ForceNewDeploymentAsync(clusterName, prefix);

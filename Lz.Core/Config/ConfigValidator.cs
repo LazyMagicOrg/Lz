@@ -47,6 +47,31 @@ public static class ConfigValidator
 
         if (config.CDN != null) ValidateCdn(config.CDN, errors);
 
+        // Digest pinning + untagged expiry, with no durable build tag, is the one
+        // combination that deletes the very digest a pinned task definition names. The
+        // untagged rule expires by push age, and once :latest moves on, yesterday's pinned
+        // digest is untagged and on that clock — so the revision you would roll back to
+        // becomes unpullable, and ECS reports CannotPullContainerError rather than anything
+        // naming the cause.
+        //
+        // THREE-way on purpose. Absent Hygiene is fine: EcrDeployer only writes a lifecycle
+        // policy when one of its fields is set, so a system with no Hygiene block expires
+        // nothing and pinned digests persist. Erroring on absence would block the opt-in for
+        // every workspace that has not adopted Hygiene.
+        if (config.Rollback?.PinImageDigest == true
+            && config.Hygiene?.EcrUntaggedImageRetentionDays != null
+            && config.Hygiene?.EcrBuildTagRetentionCount == null)
+        {
+            errors.Add(
+                "Rollback.PinImageDigest is on and Hygiene.EcrUntaggedImageRetentionDays is set, " +
+                "but Hygiene.EcrBuildTagRetentionCount is not. That combination expires the " +
+                "digests pinned task definitions name: once :latest moves, the previously-pinned " +
+                "digest is untagged and the untagged rule deletes it on its push-age clock, so a " +
+                "rollback target becomes unpullable. Set EcrBuildTagRetentionCount so every push " +
+                "also carries a durable b- tag (a tagged image is never selected by the untagged " +
+                "rule), or remove EcrUntaggedImageRetentionDays.");
+        }
+
         // Topology-specific prerequisites (e.g., VpcCidr for topologies with a
         // private network) live in the platform library's topology descriptor
         // and are invoked by the CLI via ValidateTopologyConfig before factory

@@ -89,6 +89,12 @@ public class SystemConfig
     // NOTHING is applied — byte-identical baseline (see HygieneConfig).
     public HygieneConfig? Hygiene { get; set; }
 
+    // Rollback — opt-in controls that make a container rollback real: name the
+    // image by DIGEST rather than the moving tag, and retain task-definition
+    // revisions so a service can actually be pointed back at one. When omitted,
+    // NOTHING changes and the emitted plan is byte-identical (see RollbackConfig).
+    public RollbackConfig? Rollback { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 
