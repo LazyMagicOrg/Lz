@@ -130,6 +130,68 @@ public class CloneReposLogicTests
         Assert.False(CloneReposLogic.IsSafeRelativePath(path));
     }
 
+    [Theory]
+    [InlineData(@"C:\Windows")]      // backslash form — normalised, then caught as a drive
+    [InlineData("C:/Windows")]
+    [InlineData("c:/windows")]       // lower case
+    [InlineData("Z:/anything")]      // any letter, not just C
+    [InlineData("C:Windows")]        // drive-RELATIVE: resolves against that drive's cwd
+    [InlineData("C:")]               // bare designator
+    [InlineData("  C:/Windows  ")]   // survives the Trim
+    public void DriveDesignators_AreRejected_OnEveryPlatform(string path)
+    {
+        // Path.IsPathRooted answers TRUE for these on Windows and FALSE on Linux, so before the
+        // explicit check these were accepted off-Windows — found by running this suite on an ubuntu
+        // runner, 2026-09-05. The guard reads untrusted manifest input and the deployer is expected
+        // to run off-Windows, so the verdict must not depend on where the test happens to execute.
+        //
+        // NOTE this assertion alone does NOT pin the fix: on Windows IsPathRooted rejects every one
+        // of these anyway, so deleting the drive check leaves this test green (verified by
+        // mutation). It asserts the end-to-end contract; HasDriveDesignator_* below is what pins
+        // the rule.
+        Assert.False(CloneReposLogic.IsSafeRelativePath(path));
+
+        // Platform-independent: pure string logic, no Path API.
+        Assert.True(CloneReposLogic.HasDriveDesignator(path.Trim().Replace('\\', '/')));
+    }
+
+    [Theory]
+    [InlineData("C:/Windows", true)]
+    [InlineData(@"C:\Windows", true)]
+    [InlineData("c:/windows", true)]
+    [InlineData("Z:/anything", true)]
+    [InlineData("C:Windows", true)]   // drive-relative
+    [InlineData("C:", true)]          // bare designator
+    [InlineData("a:b", true)]         // ONE letter then a colon — drive A:, relative
+    [InlineData("ab:cd", false)]      // two letters — not a designator
+    [InlineData("repos/my:repo", false)]
+    [InlineData("repos/Service", false)]
+    [InlineData("../outside", false)] // an escape, but not THIS kind
+    [InlineData("/etc/passwd", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void HasDriveDesignator_IsPureStringLogic_AndPinsTheRule(string? path, bool expected)
+    {
+        // THIS is the regression test. It touches no Path API, so it reaches the same verdict on
+        // Windows and Linux, and it fails on either if the rule is removed or widened — which the
+        // end-to-end assertion above cannot do on a Windows runner.
+        Assert.Equal(expected, CloneReposLogic.HasDriveDesignator(path));
+    }
+
+    [Theory]
+    [InlineData("ab:cd")]            // TWO chars before the colon — not a drive designator.
+                                     // Note "a:b" would be one, i.e. drive A: relative, and IS
+                                     // rejected — the single-letter rule is the whole distinction.
+    [InlineData("repos/my:repo")]    // colon deeper in the path
+    public void AColonThatIsNotADriveDesignator_IsStillAccepted(string path)
+    {
+        // Pins the NARROWNESS of the fix deliberately. A colon is a legal POSIX filename character
+        // and is not an escape, so the check targets the drive designator only. Widening this to
+        // "reject any colon" may well be right, but it is a separate decision and this test is what
+        // makes it a decision rather than a drift.
+        Assert.True(CloneReposLogic.IsSafeRelativePath(path));
+    }
+
     [Fact]
     public void AnEscapingPath_IsInvalid_AndIsNeverProbed()
     {
