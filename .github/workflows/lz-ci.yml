@@ -37,8 +37,8 @@ jobs:
     # choice would be the wrong way round. Free minutes on a public repo make the cost argument moot.
     #
     # The ubuntu run also surfaced a real off-Windows hole in CloneReposLogic.IsSafeRelativePath,
-    # which FIXED it: a drive designator is now rejected explicitly rather than via Path.IsPathRooted
-    # (aa732ce). Note the regression test for that deliberately asserts the extracted
+    # since fixed in aa732ce: a drive designator is now rejected explicitly rather than relying on
+    # Path.IsPathRooted. Note the regression test for that deliberately asserts the extracted
     # HasDriveDesignator predicate, NOT the end-to-end guard — on this Windows runner IsPathRooted
     # rejects every drive form anyway, so an end-to-end assertion passes with or without the check
     # and would never catch its removal here.
