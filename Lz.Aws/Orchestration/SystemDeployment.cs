@@ -11,6 +11,7 @@ using Pulumi.Automation;
 using Pulumi.Automation.Events;
 using Lz.Aws.Compute;
 using Lz.Aws.Docker;
+using Lz.Aws.Ops;
 
 namespace Lz.Aws.Orchestration;
 
@@ -1113,20 +1114,34 @@ public class SystemDeployment
             // Same formula as the component (AwsFargateTenantServiceComponent) and the
             // deploytenant pre-flight, so all three agree on which repository is meant.
             var ecrName = $"{_config.SystemKey}-{tenantConfig.TenantSuffix}-{_config.Environment}-{tenantKey}-{svc.Name}";
-            var digest = await EcrDeployer.GetImageDigestAsync(profile, region, ecrName, "latest");
+
+            // WHAT THE SERVICE RUNS wins over what :latest points at — see
+            // ImagePinPolicy.ChooseDigest. Without this, Pulumi's revision would be built
+            // from :latest and every deploytenant would silently roll a rolled-back service
+            // forward again. Service and cluster names follow the post-deploy action's formula.
+            var ecsService = $"{_config.SystemKey}-{tenantKey}-{svc.Name}";
+            var clusters = new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" };
+            var serviceDigest = await AwsContainerUpdater.GetServiceImageDigestAsync(
+                profile, region, clusters, ecsService, ecrName);
+            var registryDigest = serviceDigest is null
+                ? await EcrDeployer.GetImageDigestAsync(profile, region, ecrName, "latest")
+                : null;
+            var digest = ImagePinPolicy.ChooseDigest(serviceDigest, registryDigest);
 
             if (digest is null)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine(
-                    $"  No :latest digest for {ecrName} — image reference falls back to the tag " +
-                    $"(this is normal before the first deploycontainer).");
+                    $"  No image digest for {ecrName} (no pinned service, no :latest) — image reference " +
+                    $"falls back to the tag (this is normal before the first deploycontainer).");
                 Console.ResetColor();
                 continue;
             }
 
             tenantConfig.ResolvedImageDigests[svc.Name] = digest;
-            Console.WriteLine($"  {svc.Name}: pinning image digest {digest}");
+            Console.WriteLine(serviceDigest is not null
+                ? $"  {svc.Name}: pinning the digest the service currently runs, {digest}"
+                : $"  {svc.Name}: no pinned service yet — pinning ECR :latest, {digest}");
         }
     }
 

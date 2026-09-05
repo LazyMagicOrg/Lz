@@ -339,6 +339,39 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
+    /// The image DIGEST the service's current task definition names for the container that
+    /// pulls from <paramref name="ecrRepo"/>, or null when there is no such service, the
+    /// definition cannot be read, or the definition names a TAG rather than a digest (a
+    /// pre-pinning revision — in which case the caller should fall back to the registry).
+    ///
+    /// <para>Used by <c>SystemDeployment.ResolveImageDigestsAsync</c> so that Pulumi declares
+    /// what the service already runs rather than what <c>:latest</c> points at; see
+    /// <see cref="ImagePinPolicy.ChooseDigest"/> for why that precedence matters.</para>
+    /// </summary>
+    public static async Task<string?> GetServiceImageDigestAsync(
+        string profile, string region, IReadOnlyList<string> clusterCandidates,
+        string ecsService, string ecrRepo)
+    {
+        try
+        {
+            var updater = new AwsContainerUpdater(profile, region);
+            var cluster = await updater.ResolveClusterAsync(clusterCandidates, CancellationToken.None);
+            if (cluster is null) return null;
+
+            var image = await updater.GetServiceTaskDefinitionImageAsync(
+                cluster, ecsService, ecrRepo, CancellationToken.None);
+            if (image is null) return null;
+
+            var at = image.LastIndexOf('@');
+            return at >= 0 ? image[(at + 1)..] : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// True when the service's RUNNING tasks already carry the digest ECR serves for
     /// <paramref name="tag"/>. Used by the post-deploy action to skip an unnecessary
     /// force-new-deployment.

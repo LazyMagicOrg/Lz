@@ -73,6 +73,32 @@ public class ImagePinPolicyTests
             ImagePinPolicy.ImageRef(Repo, "latest", Digest, ImagePinDecision.None));
     }
 
+    // ---- ChooseDigest: the precedence that makes a rollback survive deploytenant ----
+
+    [Fact]
+    public void ChooseDigest_TheServiceWins_OverTheRegistry()
+    {
+        // Observed live 2026-09-05: with the registry winning, a deploytenant re-pointed the
+        // service from an imperative revision 7 back to Pulumi's revision 5. Had the service
+        // been rolled back, that deploy would have silently rolled it forward. The service's
+        // digest must win so Pulumi's revision always matches what is running.
+        const string rolledBackTo = "sha256:f65abb74";
+        const string latest = "sha256:ba9773aa";
+
+        Assert.Equal(rolledBackTo, ImagePinPolicy.ChooseDigest(rolledBackTo, latest));
+    }
+
+    [Fact]
+    public void ChooseDigest_FallsBackToTheRegistry_OnlyWhenThereIsNoService()
+    {
+        // The first deploy: no service exists to read, so :latest is the only answer.
+        Assert.Equal("sha256:ba9773aa", ImagePinPolicy.ChooseDigest(null, "sha256:ba9773aa"));
+    }
+
+    [Fact]
+    public void ChooseDigest_NullWhenNeitherExists_SoTheTagFallbackEngages()
+        => Assert.Null(ImagePinPolicy.ChooseDigest(null, null));
+
     // ---- IsDigestPinned ----
 
     [Theory]

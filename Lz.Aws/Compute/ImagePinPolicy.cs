@@ -52,6 +52,28 @@ public static class ImagePinPolicy
             : $"{repoUri}:{tag}";
 
     /// <summary>
+    /// Which digest the task definition should declare, given what the SERVICE currently runs
+    /// and what the REGISTRY's <c>:latest</c> points at. The service wins.
+    ///
+    /// <para><b>This precedence is what makes a rollback survive a tenant deploy.</b> Pulumi
+    /// owns <c>service.taskDefinition</c> and re-points the service at its own revision on
+    /// every <c>deploytenant</c>. If that revision were built from <c>:latest</c>, a
+    /// <c>deploytenant</c> after an <c>updatecontainer --digest</c> rollback would silently roll
+    /// the service forward again — observed live on 2026-09-05 (the service went from an
+    /// imperative revision 7 back to Pulumi's revision 5 during an unrelated deploy). Declaring
+    /// the digest the service already runs means Pulumi's revision always matches it, so
+    /// re-pointing changes nothing about the image.</para>
+    ///
+    /// <para>The consequence, stated plainly because it is a change in what <c>deploytenant</c>
+    /// means on a pinned system: <b>a tenant deploy never advances the image</b>. Pushing a new
+    /// <c>:latest</c> and running <c>deploytenant</c> leaves the old image running;
+    /// <c>lz updatecontainer</c> is the only thing that moves it. The registry digest is used
+    /// only when there is no service to read yet — a first deploy.</para>
+    /// </summary>
+    public static string? ChooseDigest(string? serviceDigest, string? registryDigest)
+        => serviceDigest ?? registryDigest;
+
+    /// <summary>
     /// True when an image reference names a digest rather than a tag. Used by the container
     /// updater to choose between registering a new task-definition revision (a pinned
     /// definition cannot change what runs by being force-deployed) and today's plain

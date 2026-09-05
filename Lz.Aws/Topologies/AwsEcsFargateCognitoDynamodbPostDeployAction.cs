@@ -16,6 +16,7 @@ using Lz.Aws.Tailscale;
 using Lz.Aws.Config;
 using Lz.Aws.Interfaces;
 using Lz.Aws.Interfaces.Outputs;
+using Lz.Aws.Compute;
 
 namespace Lz.Aws.Topologies;
 
@@ -79,6 +80,18 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
 
             var profile = _tenantConfig?.Profile ?? _config.Profile;
             var region = _tenantConfig?.Region ?? _config.Region;
+
+            // On a digest-pinned system a forced deployment cannot change the image at all —
+            // it re-pulls the same immutable digest — so it can only ever be a pointless roll.
+            // Pulumi already re-points the service at its (running-digest) revision during the
+            // up; the image is moved by lz updatecontainer and nothing else. Skip outright.
+            if (ImagePinPolicy.ForTenantService(_config.Rollback).PinDigest)
+            {
+                Console.WriteLine(
+                    $"  {prefix}: task definition is digest-pinned — a tenant deploy never changes the " +
+                    $"image; use 'lz updatecontainer' to ship one.");
+                continue;
+            }
 
             // Fail OPEN, deliberately: if we cannot establish that they agree — no ECR
             // access, an unresolvable tag, a service we cannot describe — force as before.
