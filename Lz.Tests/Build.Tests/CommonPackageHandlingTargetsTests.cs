@@ -267,3 +267,131 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
         Assert.True(Directory.Exists(Path.Combine(root, LowerId, "4.4.4")), "the locked folder should have survived");
     }
 }
+
+
+/// <summary>
+/// The same targets, exercised through a CROSS-TARGETING project — a <c>&lt;TargetFrameworks&gt;</c>
+/// (plural) project, which the SDK builds in two passes: an outer pass that dispatches to the inner
+/// builds, then one inner build per framework. A single-entry list still takes that outer pass, and
+/// that is exactly the shape of the nine such projects in LazyMagic.
+///
+/// <para><b>Why this fixture exists.</b> A version tool sets the version inside a target, and the
+/// outer pass runs none of those targets — so there <c>$(Version)</c> is the SDK default
+/// <c>1.0.0</c>. Before the guard, the outer pass evicted <c>&lt;id&gt;/1.0.0</c>: a package the
+/// build never produced, possibly a real published one. The 2026-09-05 NBGV spike logged seven such
+/// lines per build; this is the same defect the child <c>&lt;MSBuild&gt;</c> re-entry used to cause,
+/// reached by a different route.</para>
+///
+/// <para>The stand-in version tool below is deliberately crude: it models only the property
+/// asymmetry between the two passes. It hooks <c>GenerateNuspec</c> as well as <c>BeforeBuild</c> so
+/// that pack — which runs in the outer pass — still sees the real version, which is what the spike
+/// observed of Nerdbank.GitVersioning (correct package file names, wrong eviction).</para>
+/// </summary>
+public sealed class CrossTargetingScratchBuild : IDisposable
+{
+    public const string Id = "Lz.Scratch.Multi";
+    /// <summary>What the outer pass sees: the SDK's default, since no <c>&lt;Version&gt;</c> is set.</summary>
+    public const string SdkDefaultVersion = "1.0.0";
+    /// <summary>What the stand-in version tool sets inside a target, so only the inner build sees it.</summary>
+    public const string DynamicVersion = "8.8.8-alpha.2";
+
+    public string Root { get; }
+    public string Feed { get; }
+    public string FakeGlobalRoot { get; }
+    public string ProjectDir { get; }
+    public string ProjectPath { get; }
+    public string Output { get; }
+    public int ExitCode { get; }
+
+    public CrossTargetingScratchBuild()
+    {
+        var lzRepoRoot = PackageHandlingScratchBuild.FindLzRepoRoot();
+        Root = Path.Combine(Path.GetTempPath(), "lz-xtarget-" + Guid.NewGuid().ToString("N")[..8]);
+        Feed = Path.Combine(Root, "feed");
+        FakeGlobalRoot = Path.Combine(Root, "gpf");
+        ProjectDir = Path.Combine(Root, "proj");
+        foreach (var d in new[] { Feed, FakeGlobalRoot, ProjectDir }) Directory.CreateDirectory(d);
+
+        ProjectPath = Path.Combine(ProjectDir, "Scratch.csproj");
+        File.WriteAllText(Path.Combine(ProjectDir, "Class1.cs"), "namespace Scratch; public class Class1 { }");
+        File.WriteAllText(ProjectPath, $@"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <AssemblyName>{Id}</AssemblyName>
+    <SolutionDir>{lzRepoRoot}{Path.DirectorySeparatorChar}</SolutionDir>
+  </PropertyGroup>
+  <Import Project=""$(SolutionDir)CommonPackageHandling.targets"" />
+  <PropertyGroup>
+    <!-- The post-migration state, which is what makes the defect reachable: MigrationPlan P0b
+         deletes the static <Version> lines from the packaging targets, and an empty Version is
+         filled in by the SDK from VersionPrefix - {SdkDefaultVersion}. Blanking it here reproduces
+         that without touching the real targets file (which still supplies $(LzVersion) today, and
+         is why the single-framework fixture above never sees 1.0.0). -->
+    <Version></Version>
+    <PackageVersion></PackageVersion>
+  </PropertyGroup>
+  <Target Name=""FakeVersionTool"" BeforeTargets=""BeforeBuild;GenerateNuspec"">
+    <PropertyGroup>
+      <Version>{DynamicVersion}</Version>
+      <PackageVersion>{DynamicVersion}</PackageVersion>
+    </PropertyGroup>
+  </Target>
+</Project>
+");
+
+        SeedCacheFolder(SdkDefaultVersion);
+        SeedCacheFolder(DynamicVersion);
+
+        (ExitCode, Output) = PackageHandlingScratchBuild.RunDotnet(ProjectDir,
+            "build", ProjectPath, "-nologo", "-v:m",
+            $"-p:NuGetPackageRoot={FakeGlobalRoot}",
+            $"-p:PackageRepoFolder={Feed}");
+    }
+
+    private void SeedCacheFolder(string version)
+    {
+        var dir = Path.Combine(FakeGlobalRoot, Id.ToLowerInvariant(), version);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, ".nupkg.metadata"), "{}");
+    }
+
+    public string Cached(string version) => Path.Combine(FakeGlobalRoot, Id.ToLowerInvariant(), version);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(Root, recursive: true); } catch { /* best effort */ }
+    }
+}
+
+public class CrossTargetingEvictionTests : IClassFixture<CrossTargetingScratchBuild>
+{
+    private readonly CrossTargetingScratchBuild _b;
+    public CrossTargetingEvictionTests(CrossTargetingScratchBuild b) => _b = b;
+
+    [Fact]
+    public void TheCrossTargetingBuildSucceeds()
+        => Assert.True(_b.ExitCode == 0, "dotnet build failed:" + Environment.NewLine + _b.Output);
+
+    [Fact]
+    public void TheOuterPassEvictsNothing_SoTheSdkDefaultSurvives()
+    {
+        // THE GUARD. Without `Condition="'$(IsCrossTargetingBuild)' != 'true'"` on DeletePackage the
+        // outer pass evicts <id>/1.0.0 — a version this build never produced. Deleting the condition
+        // fails exactly this assertion.
+        Assert.True(Directory.Exists(_b.Cached(CrossTargetingScratchBuild.SdkDefaultVersion)),
+            "the SDK default 1.0.0 must not be evicted by the cross-targeting outer pass"
+            + Environment.NewLine + _b.Output);
+        Assert.DoesNotContain($"1.0.0; the next restore", _b.Output);
+    }
+
+    [Fact]
+    public void TheInnerBuildStillEvictsTheVersionActuallyBuilt()
+    {
+        // Skipping the outer pass must not cost the eviction: the inner build does it, with the
+        // version the version tool set.
+        Assert.False(Directory.Exists(_b.Cached(CrossTargetingScratchBuild.DynamicVersion)),
+            "the inner build should have evicted the version it actually built"
+            + Environment.NewLine + _b.Output);
+        Assert.Contains(CrossTargetingScratchBuild.DynamicVersion, _b.Output);
+    }
+}
