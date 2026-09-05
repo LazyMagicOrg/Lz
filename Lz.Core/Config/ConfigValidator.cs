@@ -58,6 +58,21 @@ public static class ConfigValidator
         // policy when one of its fields is set, so a system with no Hygiene block expires
         // nothing and pinned digests persist. Erroring on absence would block the opt-in for
         // every workspace that has not adopted Hygiene.
+        // Versioning without a noncurrent-expiry window is unbounded growth: the console
+        // bundles (hundreds of objects) are republished in full on every deploy, and each
+        // deploy would leave a whole superseded bundle behind, forever. Same shape as the
+        // ECR rule below — a protection that costs without bound unless paired with its cap.
+        if (config.Durability?.BucketVersioning == true
+            && config.Hygiene?.S3NoncurrentVersionExpirationDays == null)
+        {
+            errors.Add(
+                "Durability.BucketVersioning is on but Hygiene.S3NoncurrentVersionExpirationDays is not " +
+                "set. Versioned content buckets are republished in full on every deploy, so without an " +
+                "expiry window every deploy leaves a whole superseded bundle behind, forever. Set " +
+                "S3NoncurrentVersionExpirationDays (that number is the rollback window), or turn " +
+                "BucketVersioning off.");
+        }
+
         if (config.Rollback?.PinImageDigest == true
             && config.Hygiene?.EcrUntaggedImageRetentionDays != null
             && config.Hygiene?.EcrBuildTagRetentionCount == null)

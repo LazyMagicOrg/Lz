@@ -31,12 +31,19 @@ namespace Lz.Aws.Edge;
 /// </summary>
 public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
 {
-    public AwsCloudFrontKvsComponent()
+    // Optional: only the Durability/Hygiene opt-ins are read from it. Null (the parameterless
+    // ctor every existing factory used) means no opt-in, byte-identical plan.
+    private readonly SystemConfig? _systemConfig;
+
+    public AwsCloudFrontKvsComponent() : this(null) { }
+
+    public AwsCloudFrontKvsComponent(SystemConfig? systemConfig)
         // FROZEN Pulumi type token: deployed-state URN identity — deliberately NOT
         // renamed in the 0.11.0 axis restructure (renaming would replace deployed
         // resources). See Lz/Migrations/AxisRestructure.md.
         : base("lz:aws:EcsExpressCloudFront", "cdn", ResourceArgs.Empty, null)
     {
+        _systemConfig = systemConfig;
     }
 
     /// <summary>
@@ -370,6 +377,48 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
             Bucket = assetsBucket.Id, BlockPublicAcls = true, BlockPublicPolicy = true,
             IgnorePublicAcls = true, RestrictPublicBuckets = true,
         }, new CustomResourceOptions { Parent = this });
+
+        // Durability opt-in: versioning + noncurrent expiry on the CDN assets bucket — the
+        // live distribution's S3 origin, and one of the nine a 2026-09-04 audit found
+        // unversioned while every publish path syncs into it with --delete. Created ONLY
+        // when opted in; an absent Durability section adds nothing to the plan.
+        var bucketDurability = BucketDurabilityPolicy.ForContentBucket(
+            _systemConfig?.Durability, _systemConfig?.Hygiene);
+        if (bucketDurability.Any)
+        {
+            var versioning = new Pulumi.Aws.S3.BucketVersioningV2($"{prefix}-assets-versioning",
+                new Pulumi.Aws.S3.BucketVersioningV2Args
+                {
+                    Bucket = assetsBucket.Id,
+                    VersioningConfiguration = new Pulumi.Aws.S3.Inputs.BucketVersioningV2VersioningConfigurationArgs
+                    {
+                        Status = "Enabled",
+                    },
+                }, new CustomResourceOptions { Parent = this });
+
+            if (bucketDurability.NoncurrentExpirationDays is int days)
+            {
+                new Pulumi.Aws.S3.BucketLifecycleConfigurationV2($"{prefix}-assets-lifecycle",
+                    new Pulumi.Aws.S3.BucketLifecycleConfigurationV2Args
+                    {
+                        Bucket = assetsBucket.Id,
+                        Rules =
+                        {
+                            new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleArgs
+                            {
+                                Id = BucketDurabilityEnsurer.LifecycleRuleId,
+                                Status = "Enabled",
+                                Filter = new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleFilterArgs(),
+                                NoncurrentVersionExpiration =
+                                    new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleNoncurrentVersionExpirationArgs
+                                    {
+                                        NoncurrentDays = days,
+                                    },
+                            },
+                        },
+                    }, new CustomResourceOptions { Parent = this, DependsOn = { versioning } });
+            }
+        }
 
         // S3-level CORS configuration. The CFResponse CloudFront Function
         // adds Access-Control-Allow-Origin to *successful* origin responses

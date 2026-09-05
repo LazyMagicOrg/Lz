@@ -46,10 +46,16 @@ public class HygieneConfig
     public int? EcrBuildTagRetentionCount { get; set; }
 
     /// <summary>
-    /// When set, versioned buckets managed by lz (the per-subtenant assets
-    /// bucket and the Pulumi state bucket) get a lifecycle rule expiring
+    /// When set, versioned buckets managed by lz get a lifecycle rule expiring
     /// NONCURRENT object versions after this many days. Current versions are
     /// never touched. Null = no lifecycle configuration is written.
+    ///
+    /// <para>Scope: the per-subtenant assets bucket and the Pulumi state bucket
+    /// (always versioned), and — when <see cref="DurabilityConfig.BucketVersioning"/>
+    /// is on — the system/tenant assets, CDN assets, web-app and static-site
+    /// buckets too. For those this number is the ROLLBACK WINDOW: how long a
+    /// version that a <c>--delete</c> sync overwrote or removed stays restorable.
+    /// The validator requires it whenever <c>BucketVersioning</c> is set.</para>
     /// </summary>
     public int? S3NoncurrentVersionExpirationDays { get; set; }
 

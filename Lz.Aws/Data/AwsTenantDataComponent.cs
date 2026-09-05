@@ -29,12 +29,19 @@ namespace Lz.Aws.Data;
 /// </summary>
 public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
 {
-    public AwsTenantDataComponent()
+    // Optional: only the Durability/Hygiene opt-ins are read from it. Null (the parameterless
+    // ctor every existing factory used) means no opt-in, byte-identical plan.
+    private readonly SystemConfig? _systemConfig;
+
+    public AwsTenantDataComponent() : this(null) { }
+
+    public AwsTenantDataComponent(SystemConfig? systemConfig)
         // FROZEN Pulumi type token: deployed-state URN identity — deliberately NOT
         // renamed in the 0.11.0 axis restructure (renaming would replace deployed
         // resources). See Lz/Migrations/AxisRestructure.md.
         : base("lz:aws:AppRunnerTenantData", "tenant-data", ResourceArgs.Empty, null)
     {
+        _systemConfig = systemConfig;
     }
 
     public ITenantDataOutputs Deploy(
@@ -125,6 +132,15 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
         }, new CustomResourceOptions { Parent = this });
         BlockPublicAccess($"{prefix}-tenant-assets-block", tenantBucket);
 
+        // Durability opt-in: versioning + noncurrent expiry on both asset buckets. Every
+        // publish path syncs into them with --delete, so without versioning a bad publish is
+        // permanent. Resources are created ONLY when opted in — an absent Durability section
+        // adds nothing to the plan, which is what keeps sibling workspaces byte-identical.
+        var bucketDurability = BucketDurabilityPolicy.ForContentBucket(
+            _systemConfig?.Durability, _systemConfig?.Hygiene);
+        ApplyDurability($"{prefix}-system-assets", systemBucket, bucketDurability);
+        ApplyDurability($"{prefix}-tenant-assets", tenantBucket, bucketDurability);
+
         // Subtenant asset buckets are NOT provisioned via Pulumi. They are
         // created imperatively by SubtenantBucketManager — invoked by
         // `lz deploytenant` post-deploy and by `lz deploysubtenants`. This
@@ -150,6 +166,47 @@ public class AwsTenantDataComponent : ComponentResource, ITenantDataComponent
             TenantAssetsBucketName = Output.Create(tenantBucketName),
             SystemAssetsBucketName = Output.Create(systemBucketName),
         };
+    }
+
+    /// <summary>
+    /// Versioning and, when a window is configured, a noncurrent-version expiry rule. Emits
+    /// nothing for <see cref="BucketDurabilityDecision.None"/>. The lifecycle depends on the
+    /// versioning resource so it is never applied to a still-unversioned bucket.
+    /// </summary>
+    private void ApplyDurability(string name, BucketV2 bucket, BucketDurabilityDecision decision)
+    {
+        if (!decision.Any) return;
+
+        var versioning = new BucketVersioningV2($"{name}-versioning", new BucketVersioningV2Args
+        {
+            Bucket = bucket.Id,
+            VersioningConfiguration = new Pulumi.Aws.S3.Inputs.BucketVersioningV2VersioningConfigurationArgs
+            {
+                Status = "Enabled",
+            },
+        }, new CustomResourceOptions { Parent = this });
+
+        if (decision.NoncurrentExpirationDays is int days)
+        {
+            new BucketLifecycleConfigurationV2($"{name}-lifecycle", new BucketLifecycleConfigurationV2Args
+            {
+                Bucket = bucket.Id,
+                Rules =
+                {
+                    new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleArgs
+                    {
+                        Id = BucketDurabilityEnsurer.LifecycleRuleId,
+                        Status = "Enabled",
+                        Filter = new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleFilterArgs(),
+                        NoncurrentVersionExpiration =
+                            new Pulumi.Aws.S3.Inputs.BucketLifecycleConfigurationV2RuleNoncurrentVersionExpirationArgs
+                            {
+                                NoncurrentDays = days,
+                            },
+                    },
+                },
+            }, new CustomResourceOptions { Parent = this, DependsOn = { versioning } });
+        }
     }
 
     private void BlockPublicAccess(string name, BucketV2 bucket)

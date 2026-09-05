@@ -36,7 +36,7 @@ public class AwsEcsFargateCognitoDynamodbPlatformFactory : IAwsPlatformFactory
     public virtual ISystemNetworkComponent CreateNetwork() => new AwsFargateNetworkComponent();
     public virtual IComputeEnvironmentComponent CreateComputeEnvironment() => new AwsFargateComputeComponent();
     public virtual ITenantServiceComponent CreateTenantService() => new AwsFargateTenantServiceComponent(_config);
-    public virtual ITenantCdnComponent CreateTenantCdn() => new AwsCloudFrontKvsComponent();
+    public virtual ITenantCdnComponent CreateTenantCdn() => new AwsCloudFrontKvsComponent(_config);
     public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }
 
     /// <summary>
@@ -100,7 +100,7 @@ public class AwsEcsFargateCognitoDynamodbPlatformFactory : IAwsPlatformFactory
     public virtual IDatabaseComponent CreateDatabase() => new AwsDynamoDbComponent();
     public virtual IFileStorageComponent CreateFileStorage() => new AwsS3FileStorageComponent();
     public virtual IAuthServiceComponent CreateAuthService() => new AwsCognitoComponent();
-    public virtual ITenantDataComponent CreateTenantData() => new AwsTenantDataComponent();
+    public virtual ITenantDataComponent CreateTenantData() => new AwsTenantDataComponent(_config);
     public virtual IEmailComponent CreateEmail() => new AwsSesComponent();
     public virtual IServiceComponent CreateService() => new AwsFargateServiceComponent(_config);
 

@@ -1,3 +1,4 @@
+using Lz.Aws.Storage;
 using System.Diagnostics;
 
 namespace Lz.Aws.Webapp;
@@ -27,7 +28,8 @@ public class WebappDeployer
         string distributionId,
         string profile,
         string region,
-        string environment)
+        string environment,
+        BucketDurabilityDecision bucketDurability = default)
     {
         // 1. Locate the .csproj file
         var csprojPath = Path.Combine(webappFolder, projectFolder, $"{projectName}.csproj");
@@ -108,6 +110,11 @@ public class WebappDeployer
         // Ensure CloudFront OAC bucket policy exists (allow any CF distribution in account)
         await EnsureBucketPolicyAsync(bucketName, region, profile);
 
+        // Durability opt-in, applied on every deploy so an already-existing bucket is
+        // brought under protection too. The sync below runs --delete; without versioning
+        // a bad publish is permanent. None => no call at all.
+        await BucketDurabilityEnsurer.EnsureAsync(profile, region, bucketName, bucketDurability);
+
         // 5. S3 sync with cache-control headers (prevents stale-cache issues
         // for returning users — see SyncWithCacheControlAsync for details).
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -166,7 +173,8 @@ public class WebappDeployer
         string profile,
         string region,
         string environment,
-        string? targetPrefix = null)
+        string? targetPrefix = null,
+        BucketDurabilityDecision bucketDurability = default)
     {
         if (!Directory.Exists(sourceFolder))
             throw new DirectoryNotFoundException($"Static site folder not found: {sourceFolder}");
@@ -194,6 +202,9 @@ public class WebappDeployer
 
         // Ensure CloudFront OAC bucket policy
         await EnsureBucketPolicyAsync(bucketName, region, profile);
+
+        // Durability opt-in — see DeployAsync.
+        await BucketDurabilityEnsurer.EnsureAsync(profile, region, bucketName, bucketDurability);
 
         // S3 sync with cache-control — folder contents go to /wwwroot/{prefix?}/
         // (matching CloudFront originPath + per-behavior subpath). The optional

@@ -16,6 +16,7 @@ using Lz.Aws.Edge;
 using Lz.Aws.Ops;
 using Lz.Aws.Webapp;
 using LzGen = Lz.Gen;
+using Lz.Aws.Storage;
 
 namespace Lz.Cli;
 
@@ -962,14 +963,16 @@ class Program
                             webappFolder,
                             bucketName, distributionId,
                             profile, region, config.Environment,
-                            targetPrefix);
+                            targetPrefix,
+                            BucketDurabilityPolicy.ForContentBucket(config.Durability, config.Hygiene));
                     }
                     else
                     {
                         await deployer.DeployAsync(
                             webappFolder, project, project,
                             bucketName, distributionId,
-                            profile, region, config.Environment);
+                            profile, region, config.Environment,
+                            BucketDurabilityPolicy.ForContentBucket(config.Durability, config.Hygiene));
                     }
                 }
             }
@@ -1109,7 +1112,8 @@ class Program
                             webappFolder,
                             bucketName, distributionId,
                             profile, region, config.Environment,
-                            prefix);
+                            prefix,
+                            BucketDurabilityPolicy.ForContentBucket(config.Durability, config.Hygiene));
                     }
                 }
             }

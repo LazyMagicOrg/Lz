@@ -52,7 +52,7 @@ public class AwsLambdaCognitoDynamodbPlatformFactory : IAwsPlatformFactory
     public virtual IDatabaseComponent CreateDatabase() => new AwsDynamoDbComponent();
     public virtual IFileStorageComponent CreateFileStorage() => new AwsS3FileStorageComponent();
     public virtual IAuthServiceComponent CreateAuthService() => new AwsCognitoComponent();
-    public virtual ITenantDataComponent CreateTenantData() => new AwsTenantDataComponent();
+    public virtual ITenantDataComponent CreateTenantData() => new AwsTenantDataComponent(_config);
     public virtual IEmailComponent CreateEmail() => new AwsSesComponent();
 
     public virtual void DeployTenantDnsAndCert(TenantConfig tenantConfig, INetworkOutputs network, ICdnOutputs? cdn = null) { }

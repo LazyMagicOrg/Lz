@@ -63,4 +63,26 @@ public class DurabilityConfig
     /// and re-asserted idempotently on subsequent ensures.
     /// </summary>
     public bool PointInTimeRecovery { get; set; } = false;
+
+    /// <summary>
+    /// Enable S3 versioning on the CONTENT buckets lz creates — the system and tenant
+    /// assets buckets, the CDN assets bucket, and every web-app and static-site bucket.
+    /// Default <c>false</c>.
+    ///
+    /// <para>Every publish path mirrors a local tree into these buckets with
+    /// <c>aws s3 sync --delete</c>, so on an unversioned bucket a bad publish is PERMANENT:
+    /// no delete marker, no noncurrent version, nothing to restore, and enabling versioning
+    /// afterwards resurrects nothing. This is what makes a bundle rollback possible at all.
+    /// </para>
+    ///
+    /// <para>Requires <see cref="HygieneConfig.S3NoncurrentVersionExpirationDays"/> — the
+    /// validator refuses versioning without it, because the console bundles are republished
+    /// in full on every deploy and an unbounded version history grows by a whole bundle each
+    /// time. That number IS the rollback window.</para>
+    ///
+    /// <para>One-way: S3 versioning can be suspended but never disabled. The per-subtenant
+    /// assets bucket and the Pulumi state bucket are already versioned regardless of this
+    /// flag and are not affected by it.</para>
+    /// </summary>
+    public bool BucketVersioning { get; set; } = false;
 }
