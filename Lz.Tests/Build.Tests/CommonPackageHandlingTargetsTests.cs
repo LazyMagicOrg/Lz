@@ -9,19 +9,23 @@ namespace Lz.Tests.Build.Tests;
 ///
 /// <list type="bullet">
 ///   <item><b>DeletePackage / DeleteSpecificPackage</b> must evict the version the package was
-///   ACTUALLY built with. The scratch project sets its version inside a target, exactly as
-///   Nerdbank.GitVersioning does; the old child <c>&lt;MSBuild&gt;</c> re-entry only ever saw the
-///   static value and would have evicted the wrong folder (MigrationPlan §2).</item>
+///   ACTUALLY built with, and must report a failed eviction as a failure. The scratch project sets
+///   its version inside a target, exactly as Nerdbank.GitVersioning does; the old child
+///   <c>&lt;MSBuild&gt;</c> re-entry only ever saw the static value and would have evicted the wrong
+///   folder (MigrationPlan §2), and the first draft of the honest messages keyed on
+///   <c>rmdir</c>'s exit code, which is 0 even when a locked file stops the deletion.</item>
 ///   <item><b>CleanExistingPackages</b> must remove this id's superseded packages from the feed
-///   and NOTHING else — in particular not a neighbour whose id merely extends this one.</item>
+///   and NOTHING else — not a neighbour whose id merely extends this one, and not the version it
+///   has just produced.</item>
 /// </list>
 ///
 /// The same targets text is replicated into LazyMagic, Service and BaseAppLib; this harness
-/// exercises the Lz copy, which lz-ci builds and tests on every push.
+/// exercises the Lz copy. The id carries dots on purpose: every real id does, and the pattern's
+/// <c>Regex.Escape</c> is what makes <c>Lz.Scratch.Pkg</c> not match <c>Lz.ScratchXPkg</c>.
 /// </summary>
 public sealed class PackageHandlingScratchBuild : IDisposable
 {
-    public const string Id = "LzScratchPkg";
+    public const string Id = "Lz.Scratch.Pkg";
     /// <summary>What static evaluation sees — set in the project body, after the targets import.</summary>
     public const string StaticVersion = "5.5.5";
     /// <summary>What the stand-in version tool sets INSIDE a target, before Build.</summary>
@@ -74,20 +78,23 @@ public sealed class PackageHandlingScratchBuild : IDisposable
         SeedCacheFolder(FakeGlobalRoot, DynamicVersion);
         SeedCacheFolder(FakeGlobalRoot, "1.0.0");   // the SDK default — the plan's exact failure case
 
-        // The feed: this id's superseded packages, a neighbour whose id EXTENDS this one, an
-        // unrelated id sharing the prefix, and a sibling package.
+        // The feed: this id's superseded packages; a neighbour whose id EXTENDS this one; an id
+        // that shares the prefix but not the dot; the id's own PREFIX; and a sibling package.
         foreach (var f in new[]
         {
             $"{Id}.{StaticVersion}.nupkg", $"{Id}.{StaticVersion}.snupkg", $"{Id}.2.0.0-beta.3.nupkg",
-            $"{Id}.Extra.1.0.0.nupkg", $"{Id}Other.1.0.0.nupkg", "Lz.Core.0.11.1.nupkg",
+            $"{Id}.Extra.1.0.0.nupkg", $"{Id}X.1.0.0.nupkg", "Lz.Scratch.1.0.0.nupkg", "Lz.Core.0.11.1.nupkg",
         })
             File.WriteAllText(Path.Combine(Feed, f), "not a real package");
 
-        (ExitCode, Output) = RunDotnet(ProjectDir,
-            "build", ProjectPath, "-nologo", "-v:m",
-            $"-p:NuGetPackageRoot={FakeGlobalRoot}",
-            $"-p:PackageRepoFolder={Feed}");
+        (ExitCode, Output) = Build();
     }
+
+    /// <summary>The fixture's build, repeatable: a second call is the same-version rebuild case.</summary>
+    public (int ExitCode, string Output) Build() => RunDotnet(ProjectDir,
+        "build", ProjectPath, "-nologo", "-v:m",
+        $"-p:NuGetPackageRoot={FakeGlobalRoot}",
+        $"-p:PackageRepoFolder={Feed}");
 
     public static void SeedCacheFolder(string globalRoot, string version)
     {
@@ -144,7 +151,9 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
     private readonly PackageHandlingScratchBuild _b;
     public CommonPackageHandlingTargetsTests(PackageHandlingScratchBuild b) => _b = b;
 
-    private string Cached(string version) => Path.Combine(_b.FakeGlobalRoot, PackageHandlingScratchBuild.Id.ToLowerInvariant(), version);
+    private const string Id = PackageHandlingScratchBuild.Id;
+    private static string LowerId => Id.ToLowerInvariant();
+    private string Cached(string version) => Path.Combine(_b.FakeGlobalRoot, LowerId, version);
     private string InFeed(string file) => Path.Combine(_b.Feed, file);
 
     [Fact]
@@ -168,26 +177,43 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
     [Fact]
     public void TheFeedHoldsOneVersionOfThisId_AndTheNeighboursSurvive()
     {
-        Assert.True(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}.{PackageHandlingScratchBuild.DynamicVersion}.nupkg")),
+        Assert.True(File.Exists(InFeed($"{Id}.{PackageHandlingScratchBuild.DynamicVersion}.nupkg")),
             "the new package should have been copied into the feed" + Environment.NewLine + _b.Output);
 
         // Superseded packages of THIS id are gone, nupkg and snupkg alike.
-        Assert.False(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}.{PackageHandlingScratchBuild.StaticVersion}.nupkg")));
-        Assert.False(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}.{PackageHandlingScratchBuild.StaticVersion}.snupkg")));
-        Assert.False(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}.2.0.0-beta.3.nupkg")));
+        Assert.False(File.Exists(InFeed($"{Id}.{PackageHandlingScratchBuild.StaticVersion}.nupkg")));
+        Assert.False(File.Exists(InFeed($"{Id}.{PackageHandlingScratchBuild.StaticVersion}.snupkg")));
+        Assert.False(File.Exists(InFeed($"{Id}.2.0.0-beta.3.nupkg")));
 
-        // The neighbour whose id merely EXTENDS ours is exactly what the bare glob used to sweep.
-        Assert.True(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}.Extra.1.0.0.nupkg")),
+        // The neighbour whose id merely EXTENDS ours is exactly what a bare glob would sweep; the
+        // other three never matched the glob and prove the candidates are what we think they are.
+        Assert.True(File.Exists(InFeed($"{Id}.Extra.1.0.0.nupkg")),
             "a package whose id extends this one must survive the clean");
-        Assert.True(File.Exists(InFeed($"{PackageHandlingScratchBuild.Id}Other.1.0.0.nupkg")));
+        Assert.True(File.Exists(InFeed($"{Id}X.1.0.0.nupkg")));
+        Assert.True(File.Exists(InFeed("Lz.Scratch.1.0.0.nupkg")));
         Assert.True(File.Exists(InFeed("Lz.Core.0.11.1.nupkg")));
     }
 
     [Fact]
     public void ReportsTheEviction_AndNeverTheOldFalseFailure()
     {
-        Assert.Contains("Evicted", _b.Output);
+        Assert.Contains("Evicted ", _b.Output);
+        Assert.DoesNotContain("Could not evict", _b.Output);
         Assert.DoesNotContain("Failed to delete package", _b.Output);
+    }
+
+    [Fact]
+    public void ASameVersionRebuildRemovesNothingFromTheFeed()
+    {
+        // The ordinary edit-and-build loop: the version does not change, pack rewrites the same
+        // file name, and the clean must not delete it (the version just produced is excluded), so
+        // there is no window in which the feed lacks the id.
+        var (exit, output) = _b.Build();
+
+        Assert.True(exit == 0, output);
+        Assert.DoesNotContain("Removing superseded", output);
+        Assert.True(File.Exists(InFeed($"{Id}.{PackageHandlingScratchBuild.DynamicVersion}.nupkg")));
+        Assert.True(File.Exists(InFeed($"{Id}.Extra.1.0.0.nupkg")));
     }
 
     [Theory]
@@ -207,7 +233,37 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
             $"-p:NuGetPackageRoot={root}");
 
         Assert.True(exit == 0, output);
-        Assert.False(Directory.Exists(Path.Combine(root, PackageHandlingScratchBuild.Id.ToLowerInvariant(), folder)),
+        Assert.False(Directory.Exists(Path.Combine(root, LowerId, folder)),
             $"expected {folder} to be evicted for PackageVersion={packageVersion}" + Environment.NewLine + output);
+        // The lower-casing is pinned in the TEXT the target computed, not on the filesystem — NTFS
+        // would resolve either case to the same folder and prove nothing.
+        Assert.Contains(Path.Combine(LowerId, folder), output);
+    }
+
+    [Fact]
+    public void AFailedEvictionIsReportedAsAFailure_NotAsEvicted()
+    {
+        // Windows only: `rmdir /s /q` exits 0 when a file inside is in use and it deleted only what
+        // it could, so the outcome has to be decided by whether the folder still exists, not by
+        // the exit code — keyed on the exit code, this scenario printed "Evicted". On Unix `rm -rf`
+        // removes an open file outright, so there is nothing to observe.
+        if (!OperatingSystem.IsWindows()) return;
+
+        var root = Path.Combine(_b.Root, "gpf-locked");
+        PackageHandlingScratchBuild.SeedCacheFolder(root, "4.4.4");
+        var lib = Path.Combine(root, LowerId, "4.4.4", "lib");
+        Directory.CreateDirectory(lib);
+        using var locked = new FileStream(Path.Combine(lib, "locked.dll"), FileMode.Create, FileAccess.ReadWrite, FileShare.None);
+        locked.WriteByte(1); locked.Flush();
+
+        var (exit, output) = PackageHandlingScratchBuild.RunDotnet(_b.ProjectDir,
+            "msbuild", _b.ProjectPath, "-t:DeleteSpecificPackage", "-nologo", "-v:m",
+            "-p:PackageVersion=4.4.4",
+            $"-p:NuGetPackageRoot={root}");
+
+        Assert.True(exit == 0, "a warning must not fail the build:" + Environment.NewLine + output);
+        Assert.Contains("Could not evict", output);
+        Assert.DoesNotContain("Evicted ", output);
+        Assert.True(Directory.Exists(Path.Combine(root, LowerId, "4.4.4")), "the locked folder should have survived");
     }
 }
