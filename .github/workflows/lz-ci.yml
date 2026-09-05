@@ -27,7 +27,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # windows-latest, not ubuntu, and deliberately: `lz` is a Windows developer CLI here (every
+    # working copy is Windows, the build skill is PowerShell), and parts of the suite encode that on
+    # purpose — DevEnvironmentGuardTests asserts on `C:\repos\_MagicPets\_Test_MagicPets`-shaped
+    # paths because that is the shape the guard actually sees. An ubuntu run fails two of those
+    # cases: `Path.GetFileName` does not treat `\` as a separator there, and `C:/Windows` is not
+    # rooted, so an env token parses to null and a drive-letter path is not seen as escaping. Neither
+    # is a production bug today, and rewriting a security guard's test data to satisfy a runner
+    # choice would be the wrong way round. Free minutes on a public repo make the cost argument moot.
+    #
+    # WORTH KNOWING ANYWAY, since ubuntu surfaced it: CloneReposLogic.IsSafeRelativePath accepts
+    # `C:/Windows` on a non-Windows host, because the check rests on Path.IsPathRooted. Harmless now
+    # (on Linux that would make a directory literally named `C:` INSIDE the workspace, so it does not
+    # actually escape) and harmless while lz is Windows-only — but it is untrusted manifest input,
+    # and the DecoupledCd tooling image is Linux. Reject a drive-letter prefix explicitly before
+    # anything runs `clonerepos` off-Windows.
+    runs-on: windows-latest
     steps:
       # Lz and LazyMagic as SIBLINGS — the layout the NuGet.Config written below assumes, and the
       # same shape they have in a product workspace (repos/Lz + repos/LazyMagic).
@@ -72,15 +87,17 @@ jobs:
       # Two reasons, and the second is not optional. (a) The whole solution also contains the
       # client-side projects (LazyMagic.OIDC.Base, LazyMagic.Client.ViewModels, BlazorTest.*), which
       # nothing here consumes. (b) Those projects pull ReactiveUI/Splat 19.3.1, whose author signing
-      # certificate has been REVOKED — on a Linux runner that is a hard NU3012 restore failure
-      # ("The author primary signature found a chain building issue: Revoked: certificate revoked").
-      # Building the solution therefore cannot succeed here at all, for a reason that has nothing to
-      # do with Lz. Building the five instead sidesteps it without weakening signature verification
-      # (the alternative, NUGET_CERT_REVOCATION_MODE=offline, would turn the check off globally).
+      # certificate has been REVOKED. That was observed here as a hard NU3012 restore failure on a
+      # Linux runner ("The author primary signature found a chain building issue: Revoked:
+      # certificate revoked") before this job moved to windows-latest, where revocation checking
+      # behaves differently. Building the five keeps that whole class of failure out of the gate
+      # regardless of runner, and without weakening signature verification — the alternative,
+      # NUGET_CERT_REVOCATION_MODE=offline, turns the check off globally.
       #
       # Per-project builds work because LazyMagic has a Directory.Build.props; Lz itself does not,
       # which is why IT must be built through the .slnx (MSB4019).
       - name: build LazyMagic service packages (the feed the templates restore from)
+        shell: bash
         run: |
           for p in LazyMagic.Shared \
                    LazyMagic.Service.Shared \
@@ -98,6 +115,7 @@ jobs:
       # CI needs. <clear/> drops the runner's inherited sources so resolution is deterministic.
       - name: write the CI NuGet.Config
         working-directory: Lz
+        shell: bash
         run: |
           cat > NuGet.Config <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
