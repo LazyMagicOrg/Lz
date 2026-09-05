@@ -19,6 +19,33 @@ public class HygieneConfig
     public int? EcrUntaggedImageRetentionDays { get; set; }
 
     /// <summary>
+    /// When set, every <c>deploycontainer</c> push ALSO applies an immutable
+    /// second tag <c>b-{yyyyMMdd-HHmmss}[-g{sha}]</c> alongside the moving
+    /// <c>:latest</c>, and a lifecycle rule retains the newest this-many
+    /// <c>b-</c>-prefixed images (older ones expire).
+    /// <para>
+    /// The two halves are ONE knob on purpose. Without the tag, every push
+    /// orphans its predecessor as untagged and
+    /// <see cref="EcrUntaggedImageRetentionDays"/> deletes it on a
+    /// <c>sinceImagePushed</c> clock — so after one quiet week a repository holds
+    /// <c>:latest</c> alone and there is nothing to roll back to. Without the
+    /// retention count, nothing is ever untagged and the repository grows without
+    /// bound. Setting one and not the other is a footgun either way, so this
+    /// single value turns both on.
+    /// </para>
+    /// <para>
+    /// The tag doubles as the only provenance an image carries: <c>:latest</c>
+    /// says nothing about which commit is running, and the <c>-g{sha}</c> suffix
+    /// is appended whenever the build context resolves to a git commit.
+    /// </para>
+    /// <para>
+    /// Null = today's baseline: only <c>:latest</c> is pushed and only the
+    /// untagged rule (if any) is written.
+    /// </para>
+    /// </summary>
+    public int? EcrBuildTagRetentionCount { get; set; }
+
+    /// <summary>
     /// When set, versioned buckets managed by lz (the per-subtenant assets
     /// bucket and the Pulumi state bucket) get a lifecycle rule expiring
     /// NONCURRENT object versions after this many days. Current versions are

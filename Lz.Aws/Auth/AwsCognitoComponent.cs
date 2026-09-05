@@ -11,6 +11,7 @@ using Pulumi.Aws.Cognito.Inputs;
 using Pulumi.Aws.CloudWatch;
 using Pulumi.Aws.DynamoDB;
 using Pulumi.Aws.DynamoDB.Inputs;
+using LzDynamoDb = Lz.Aws.DynamoDB;
 using Pulumi.Aws.Iam;
 using Pulumi.Aws.Lambda;
 using Pulumi.Aws.Lambda.Inputs;
@@ -244,12 +245,26 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             Function? customAuthFn = null;
             if (poolConfig.CustomAuth is { } customAuth)
             {
+                // Durability (Hygiene/Durability opt-in). This table holds vendor API-key
+                // HASHES seeded by `lz provisionvendor` and held nowhere else — a rotation
+                // overwrites the row and nothing retains the prior value. It is also the one
+                // DynamoDB table in this topology that Pulumi owns, so an ordinary replace
+                // would delete it. DeletionProtection turns that into a loud failure instead
+                // of silent data loss; PITR makes a forced delete recoverable. Absent the
+                // Durability section this is TableDurabilityDecision.None and the emitted
+                // plan is byte-identical to a pre-durability deploy.
+                var vendorCredDurability = LzDynamoDb.TableDurabilityPolicy.ForVendorCredTable(config.Durability);
                 var vendorCredTable = new Table($"{poolPrefix}-vendor-creds", new TableArgs
                 {
                     Name = $"{poolPrefix}-vendor-creds",
                     BillingMode = "PAY_PER_REQUEST",
                     HashKey = vendorCredKeyAttr,
                     Attributes = { new TableAttributeArgs { Name = vendorCredKeyAttr, Type = "S" } },
+                    DeletionProtectionEnabled = vendorCredDurability.DeletionProtection,
+                    PointInTimeRecovery = new TablePointInTimeRecoveryArgs
+                    {
+                        Enabled = vendorCredDurability.PointInTimeRecovery,
+                    },
                     Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
                 }, new CustomResourceOptions { Parent = this });
 

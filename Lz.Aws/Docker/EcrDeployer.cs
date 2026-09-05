@@ -18,6 +18,13 @@ public class EcrDeployer
     /// days is ensured on the repository; null = no policy is written — the
     /// pre-existing baseline (every push of a reused tag orphans the prior
     /// digest, which then accrues storage forever).
+    /// <paramref name="buildTagRetentionCount"/> (Hygiene opt-in): when set, an
+    /// immutable <c>b-…</c> tag is pushed alongside <paramref name="tag"/> and the
+    /// newest N such images are retained by a second lifecycle rule. This is what
+    /// keeps a rollback target alive: with only a moving <c>:latest</c>, each push
+    /// orphans its predecessor and the untagged rule deletes it, so after one
+    /// quiet retention window the repository holds one image and nothing to roll
+    /// back to.
     /// </summary>
     public async Task DeployAsync(
         string serviceName,
@@ -27,7 +34,8 @@ public class EcrDeployer
         string profile,
         string region,
         string tag,
-        int? untaggedImageRetentionDays = null)
+        int? untaggedImageRetentionDays = null,
+        int? buildTagRetentionCount = null)
     {
         // Resolve paths
         var contextPath = Path.GetFullPath(Path.Combine(configDirectory, container.Context));
@@ -60,9 +68,12 @@ public class EcrDeployer
         // 3. Ensure ECR repo exists
         await EnsureEcrRepoAsync(profile, region, ecrRepoName);
 
-        // 3b. Hygiene opt-in: cap untagged-image growth with a lifecycle policy.
-        if (untaggedImageRetentionDays is int retentionDays)
-            await EnsureUntaggedLifecyclePolicyAsync(profile, region, ecrRepoName, retentionDays);
+        // 3b. Hygiene opt-in: cap image growth with a lifecycle policy. Both rules are
+        // written together so the policy is always internally consistent — see
+        // EnsureLifecyclePolicyAsync for why they are one decision and not two.
+        if (untaggedImageRetentionDays is int || buildTagRetentionCount is int)
+            await EnsureLifecyclePolicyAsync(
+                profile, region, ecrRepoName, untaggedImageRetentionDays, buildTagRetentionCount);
 
         // 4. Sync local NuGet packages into build context (if configured)
         if (container.SyncPackages)
@@ -89,6 +100,24 @@ public class EcrDeployer
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Successfully pushed {serviceName} → {imageUri}");
         Console.ResetColor();
+
+        // 6b. Hygiene opt-in: a second, IMMUTABLE tag on the same digest. `tag` above is
+        // a moving pointer (`:latest` by convention), so the digest it named a moment ago
+        // is now untagged and on the untagged-expiry clock. This tag is what keeps that
+        // digest addressable as a rollback target, and it carries the only provenance the
+        // image has. Pushing an already-pushed digest under a second tag uploads no
+        // layers — it registers a manifest, so the cost is one API round trip.
+        if (buildTagRetentionCount is int)
+        {
+            var buildTag = BuildTag(contextPath);
+            var buildUri = $"{registryUri}/{ecrRepoName}:{buildTag}";
+            Console.WriteLine($"Applying immutable build tag {buildTag}...");
+            await RunAsync("docker", $"tag {localImage} {buildUri}");
+            await RunAsync("docker", $"push {buildUri}");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  Rollback target: {buildUri}");
+            Console.ResetColor();
+        }
 
         // Prune dangling images and build cache to prevent VHDX bloat
         Console.WriteLine("Pruning unused Docker images and build cache...");
@@ -162,26 +191,116 @@ public class EcrDeployer
             $"-f \"{dockerfilePath}\"{buildArgStr} -t {imageName} --load \"{contextPath}\"");
     }
 
+    /// <summary>The prefix every immutable build tag carries; also the lifecycle rule's filter.</summary>
+    private const string BuildTagPrefix = "b-";
+
     /// <summary>
-    /// Idempotently apply a lifecycle policy expiring UNTAGGED images older than
-    /// <paramref name="retentionDays"/>. Tagged images are never selected by the
-    /// rule, so `:latest` (and any pinned tags) are untouched.
+    /// The immutable per-push tag: <c>b-{yyyyMMdd-HHmmss}</c> in UTC, plus
+    /// <c>-g{sha}</c> when <paramref name="contextPath"/> resolves to a git commit
+    /// and <c>-dirty</c> when that tree has uncommitted changes.
+    /// <para>
+    /// The timestamp — not the sha — is what makes the tag unique: two pushes of
+    /// the same commit are two different images (the Dockerfile uses floating base
+    /// tags and copies the operator's package cache), so a sha-only tag would
+    /// collide and silently re-point. The <c>-dirty</c> marker matters for the same
+    /// reason a version tool emits one: a sha on a modified tree names a commit that
+    /// does not describe the bytes, and an unqualified sha would assert provenance
+    /// the image does not have.
+    /// </para>
     /// </summary>
-    private async Task EnsureUntaggedLifecyclePolicyAsync(
-        string profile, string region, string repoName, int retentionDays)
+    private static string BuildTag(string contextPath)
     {
-        var policy =
-            "{\"rules\":[{" +
-                "\"rulePriority\":1," +
-                "\"description\":\"lz hygiene: expire untagged images\"," +
-                "\"selection\":{" +
-                    "\"tagStatus\":\"untagged\"," +
-                    "\"countType\":\"sinceImagePushed\"," +
-                    "\"countUnit\":\"days\"," +
-                    $"\"countNumber\":{retentionDays}" +
-                "}," +
-                "\"action\":{\"type\":\"expire\"}" +
-            "}]}";
+        var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+        var sha = TryGitDescribe(contextPath);
+        return sha is null ? $"{BuildTagPrefix}{stamp}" : $"{BuildTagPrefix}{stamp}-{sha}";
+    }
+
+    /// <summary>
+    /// <c>g{shortSha}</c> for the commit at <paramref name="contextPath"/>, suffixed
+    /// <c>-dirty</c> when the tree has uncommitted changes; null when the path is not
+    /// a git working tree or git is unavailable. Best-effort by design — provenance is
+    /// a bonus here, and a build must never fail because git is missing.
+    /// </summary>
+    private static string? TryGitDescribe(string contextPath)
+    {
+        try
+        {
+            var sha = RunCaptureAsync("git", $"-C \"{contextPath}\" rev-parse --short=8 HEAD")
+                .GetAwaiter().GetResult().Trim();
+
+            // Guard the shape rather than trusting the exit code: a non-repo path can
+            // still print a message, and an ECR tag admits only [a-zA-Z0-9._-].
+            if (sha.Length is < 4 or > 40 || !sha.All(char.IsAsciiLetterOrDigit))
+                return null;
+
+            var status = RunCaptureAsync("git", $"-C \"{contextPath}\" status --porcelain")
+                .GetAwaiter().GetResult();
+            return string.IsNullOrWhiteSpace(status) ? $"g{sha}" : $"g{sha}-dirty";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Idempotently apply the repository's lifecycle policy. Both rules are written in
+    /// one call because a lifecycle policy is replaced wholesale, never merged — writing
+    /// one rule would silently drop the other.
+    /// <list type="bullet">
+    ///   <item>Priority 1 — expire UNTAGGED images older than
+    ///     <paramref name="untaggedRetentionDays"/>.</item>
+    ///   <item>Priority 2 — of the images tagged <c>b-*</c>, retain the newest
+    ///     <paramref name="buildTagRetentionCount"/> and expire the rest.</item>
+    /// </list>
+    /// The two rules select disjoint sets, so their relative priority does not affect
+    /// the outcome; AWS documents that "an image is expired or archived by exactly one
+    /// or zero rules" and that only one rule may select untagged images, which this
+    /// policy satisfies. Rule 2 is what bounds growth once every push carries a durable
+    /// tag and nothing becomes untagged any more.
+    /// </summary>
+    private async Task EnsureLifecyclePolicyAsync(
+        string profile, string region, string repoName,
+        int? untaggedRetentionDays, int? buildTagRetentionCount)
+    {
+        var rules = new List<string>();
+        var described = new List<string>();
+
+        if (untaggedRetentionDays is int days)
+        {
+            rules.Add(
+                "{" +
+                    "\"rulePriority\":1," +
+                    "\"description\":\"lz hygiene: expire untagged images\"," +
+                    "\"selection\":{" +
+                        "\"tagStatus\":\"untagged\"," +
+                        "\"countType\":\"sinceImagePushed\"," +
+                        "\"countUnit\":\"days\"," +
+                        $"\"countNumber\":{days}" +
+                    "}," +
+                    "\"action\":{\"type\":\"expire\"}" +
+                "}");
+            described.Add($"untagged > {days}d expire");
+        }
+
+        if (buildTagRetentionCount is int keep)
+        {
+            rules.Add(
+                "{" +
+                    "\"rulePriority\":2," +
+                    "\"description\":\"lz hygiene: retain the newest build-tagged images\"," +
+                    "\"selection\":{" +
+                        "\"tagStatus\":\"tagged\"," +
+                        $"\"tagPrefixList\":[\"{BuildTagPrefix}\"]," +
+                        "\"countType\":\"imageCountMoreThan\"," +
+                        $"\"countNumber\":{keep}" +
+                    "}," +
+                    "\"action\":{\"type\":\"expire\"}" +
+                "}");
+            described.Add($"keep newest {keep} {BuildTagPrefix}* images");
+        }
+
+        var policy = "{\"rules\":[" + string.Join(",", rules) + "]}";
 
         // JSON as a CLI arg survives quoting differently per OS shell; write to a
         // temp file and pass file:// which is quoting-proof on both.
@@ -189,7 +308,7 @@ public class EcrDeployer
         await File.WriteAllTextAsync(tmp, policy);
         try
         {
-            Console.WriteLine($"  Ensuring ECR lifecycle policy (untagged > {retentionDays}d expire)...");
+            Console.WriteLine($"  Ensuring ECR lifecycle policy ({string.Join("; ", described)})...");
             await RunAsync("aws",
                 $"ecr put-lifecycle-policy --profile {profile} --region {region} " +
                 $"--repository-name {repoName} --lifecycle-policy-text file://{tmp}");

@@ -50,6 +50,29 @@ public static class TableDurabilityPolicy
             : new TableDurabilityDecision(durability.DeletionProtection, durability.PointInTimeRecovery);
 
     /// <summary>
+    /// Create-time decision for the Cognito custom-auth VENDOR CREDENTIAL table
+    /// (<c>{poolPrefix}-vendor-creds</c>), which holds vendor API-key hashes.
+    /// <para>
+    /// Same opt-in as <see cref="ForVaultTable"/> and for the same reason, but the
+    /// stakes are higher and less obvious. That table's rows are HAND-SEEDED by
+    /// <c>provisionvendor</c>, are stored nowhere else (a rotation overwrites the
+    /// hash in place and nothing retains the prior one), and — unlike the vault
+    /// table, which is created imperatively — it is a PULUMI resource, so an
+    /// ordinary replace of the Cognito component destroys it. Deletion protection
+    /// is what turns that silent destruction into a loud failure; PITR is what
+    /// makes it recoverable.
+    /// </para>
+    /// <para>
+    /// A null config (section omitted) yields <see cref="TableDurabilityDecision.None"/>,
+    /// so a system that has not opted in gets a byte-identical plan.
+    /// </para>
+    /// </summary>
+    public static TableDurabilityDecision ForVendorCredTable(DurabilityConfig? durability)
+        => durability is null
+            ? TableDurabilityDecision.None
+            : new TableDurabilityDecision(durability.DeletionProtection, durability.PointInTimeRecovery);
+
+    /// <summary>
     /// Teardown decision for the subtenant vault table.
     /// <list type="bullet">
     ///   <item>Unprotected → <see cref="TableTeardownAction.Delete"/> (force flag is irrelevant).</item>

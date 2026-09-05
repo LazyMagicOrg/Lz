@@ -13,6 +13,62 @@ namespace Lz.Tests.DynamoDB.Tests;
 /// </summary>
 public class TableDurabilityPolicyTests
 {
+    // ---- ForVendorCredTable: the Pulumi-managed vendor API-key table ----
+
+    [Fact]
+    public void ForVendorCredTable_NullConfig_IsNone_SoAnUnopedInSystemsPlanIsByteIdentical()
+    {
+        // Same guarantee as the vault table: six workspaces share this component, and a
+        // system with no Durability section must emit the plan it emitted yesterday.
+        var decision = TableDurabilityPolicy.ForVendorCredTable(null);
+
+        Assert.Equal(TableDurabilityDecision.None, decision);
+        Assert.False(decision.Any);
+    }
+
+    [Fact]
+    public void ForVendorCredTable_TracksTheSameConfigAsTheVaultTable()
+    {
+        // One knob, both tables. If these ever diverge it must be a deliberate change
+        // with its own test, not an accident of two copies of the same expression.
+        var config = new DurabilityConfig { DeletionProtection = true, PointInTimeRecovery = true };
+
+        Assert.Equal(
+            TableDurabilityPolicy.ForVaultTable(config),
+            TableDurabilityPolicy.ForVendorCredTable(config));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void ForVendorCredTable_CarriesEachFlagThrough(bool deletionProtection, bool pitr)
+    {
+        var decision = TableDurabilityPolicy.ForVendorCredTable(new DurabilityConfig
+        {
+            DeletionProtection = deletionProtection,
+            PointInTimeRecovery = pitr,
+        });
+
+        Assert.Equal(deletionProtection, decision.DeletionProtection);
+        Assert.Equal(pitr, decision.PointInTimeRecovery);
+        Assert.True(decision.Any);
+    }
+
+    [Fact]
+    public void ForVendorCredTable_ScutarasLiveConfig_ProtectsTheTable()
+    {
+        // Pins the outcome the 2026-09-04 live audit demanded: scu-dev's systemconfig
+        // already sets both flags, so the next deploy must protect the vendor-credential
+        // table rather than leaving it deletable by an ordinary Pulumi replace.
+        var scutaraDev = new DurabilityConfig { DeletionProtection = true, PointInTimeRecovery = true };
+
+        var decision = TableDurabilityPolicy.ForVendorCredTable(scutaraDev);
+
+        Assert.True(decision.DeletionProtection);
+        Assert.True(decision.PointInTimeRecovery);
+    }
+
     // ---- ForVaultTable: config -> create/ensure-time decision ----
 
     [Fact]

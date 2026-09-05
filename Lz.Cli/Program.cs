@@ -760,7 +760,8 @@ class Program
                             config.Profile,
                             config.Region,
                             tag,
-                            config.Hygiene?.EcrUntaggedImageRetentionDays);
+                            config.Hygiene?.EcrUntaggedImageRetentionDays,
+                            config.Hygiene?.EcrBuildTagRetentionCount);
                     }
 
                     // If a specific foundation container was requested, we're done
@@ -812,7 +813,8 @@ class Program
                             profile,
                             region,
                             tag,
-                            config.Hygiene?.EcrUntaggedImageRetentionDays);
+                            config.Hygiene?.EcrUntaggedImageRetentionDays,
+                            config.Hygiene?.EcrBuildTagRetentionCount);
                     }
                 }
             }
