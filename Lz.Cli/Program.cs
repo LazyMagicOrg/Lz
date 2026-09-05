@@ -1270,13 +1270,15 @@ class Program
     // ---------------------------------------------------------------
     // updatecontainer
     //
-    // Zero-downtime alternative to deploytenant for the common case of "just
-    // ship the new container image". deploytenant scales the ECS service to 0
-    // during the Pulumi 'up' (AwsFargateAlbTenantServiceComponent starts at
-    // DesiredCount=0) and the post-deploy action scales it back — that gap is
-    // the outage. updatecontainer instead issues a rolling UpdateService
-    // (ForceNewDeployment=true) with DesiredCount untouched, so ECS replaces
-    // the task with no downtime. It only forces a deploy when the running
+    // The way to ship a container image. On the ecs-fargate-cognito-dynamodb
+    // topology the service keeps DesiredCount=1 through a deploytenant, but a
+    // tenant deploy is the wrong tool for an image: without the Rollback opt-in
+    // it re-rolls the tag-form definition as a side effect of an unrelated
+    // deploy, and WITH it (digest-pinned) it never advances the image at all —
+    // Pulumi declares whatever digest the service already runs. updatecontainer
+    // issues a rolling UpdateService with DesiredCount untouched, so ECS
+    // replaces the task with no downtime. (The older FargateAlb lineage did
+    // scale to 0 during the up; the cognito component does not.) It only forces a deploy when the running
     // image digest differs from the latest in ECR (unless --force), and by
     // default it waits until the new task is healthy (or reports a rollback);
     // pass --no-wait for fire-and-forget.

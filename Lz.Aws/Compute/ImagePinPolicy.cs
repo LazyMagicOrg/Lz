@@ -52,6 +52,20 @@ public static class ImagePinPolicy
             : $"{repoUri}:{tag}";
 
     /// <summary>
+    /// Classify what a successful read of the service's current task definition found. Pure
+    /// — the SDK caller supplies the two facts and this names them, so the classification
+    /// (and the <c>@</c> parsing) is unit-tested without ECS.
+    /// </summary>
+    /// <param name="serviceActive">An ACTIVE service of that name exists in an ACTIVE cluster.</param>
+    /// <param name="image">The image string its definition names for our repository, or null when none does.</param>
+    public static ServiceImageRead ClassifyServiceImage(bool serviceActive, string? image)
+    {
+        if (!serviceActive) return ServiceImageRead.NoService;
+        if (!IsDigestPinned(image)) return ServiceImageRead.NotDigestPinned;
+        return ServiceImageRead.Pinned(image![(image.LastIndexOf('@') + 1)..]);
+    }
+
+    /// <summary>
     /// Which digest the task definition should declare, given what the SERVICE currently runs
     /// and what the REGISTRY's <c>:latest</c> points at. The service wins.
     ///
@@ -62,16 +76,36 @@ public static class ImagePinPolicy
     /// the service forward again — observed live on 2026-09-05 (the service went from an
     /// imperative revision 7 back to Pulumi's revision 5 during an unrelated deploy). Declaring
     /// the digest the service already runs means Pulumi's revision always matches it, so
-    /// re-pointing changes nothing about the image.</para>
+    /// re-pointing changes nothing about the image. It is still one ECS rolling deployment on
+    /// the same digest — the first <c>deploytenant</c> after any <c>updatecontainer</c> re-points
+    /// the service from the imperative revision to Pulumi's, and later ones are quiet.</para>
+    ///
+    /// <para><b>An unreadable service is refused, not treated as absent.</b> The registry is
+    /// the right answer only when there is genuinely no pinned service (a first deploy, or a
+    /// pre-pinning tag-form revision). A read that FAILED tells us nothing, and falling
+    /// through to <c>:latest</c> there is exactly the bug above wearing a different log line —
+    /// so this throws, and the caller aborts before Pulumi runs. Nothing has been mutated at
+    /// that point; the operator fixes the read (SSO session, permissions, throttling) and
+    /// retries. See <see cref="ServiceImageRead"/> for why absent and unreadable are
+    /// distinguishable at all.</para>
     ///
     /// <para>The consequence, stated plainly because it is a change in what <c>deploytenant</c>
     /// means on a pinned system: <b>a tenant deploy never advances the image</b>. Pushing a new
     /// <c>:latest</c> and running <c>deploytenant</c> leaves the old image running;
-    /// <c>lz updatecontainer</c> is the only thing that moves it. The registry digest is used
-    /// only when there is no service to read yet — a first deploy.</para>
+    /// <c>lz updatecontainer</c> is the only thing that moves it.</para>
     /// </summary>
-    public static string? ChooseDigest(string? serviceDigest, string? registryDigest)
-        => serviceDigest ?? registryDigest;
+    /// <exception cref="InvalidOperationException">The service read failed (<see cref="ServiceImageState.Unreadable"/>).</exception>
+    public static string? ChooseDigest(ServiceImageRead service, string? registryDigest)
+        => service.State switch
+        {
+            ServiceImageState.DigestPinned => service.Digest,
+            ServiceImageState.Unreadable => throw new InvalidOperationException(
+                $"Cannot read the ECS service's current task definition ({service.Error}). " +
+                "Refusing to build the task definition from ECR :latest — on a rolled-back service " +
+                "that would silently roll it forward. Nothing has been changed; fix the read " +
+                "(SSO session, permissions, throttling) and retry."),
+            _ => registryDigest,
+        };
 
     /// <summary>
     /// True when an image reference names a digest rather than a tag. Used by the container

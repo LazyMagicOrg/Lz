@@ -1083,8 +1083,10 @@ public class SystemDeployment
     }
 
     /// <summary>
-    /// Resolve each tenant service's container-image digest from ECR into
-    /// <see cref="TenantConfig.ResolvedImageDigests"/>, before the Pulumi program is built.
+    /// Resolve each tenant service's container-image digest into
+    /// <see cref="TenantConfig.ResolvedImageDigests"/> before the Pulumi program is built —
+    /// from the service's CURRENT task definition first, from ECR <c>:latest</c> only when no
+    /// pinned service exists yet, and by the tag when neither yields a digest.
     ///
     /// <para><b>Imperative on purpose.</b> The obvious alternative — a plan-time
     /// <c>aws.ecr.getImage</c> invoke — is disqualified by the bootstrap case:
@@ -1098,6 +1100,12 @@ public class SystemDeployment
     /// preview — the deploytenant pre-flight accepts a repository holding ONLY untagged or
     /// <c>b-</c>-tagged images, which passes the gate while yielding no <c>:latest</c>
     /// digest.</para>
+    ///
+    /// <para>An UNREADABLE service IS an error, and aborts the command before Pulumi runs.
+    /// Absence and failure arrive as different answers (<see cref="ServiceImageRead"/>), and
+    /// only genuine absence may fall through to the registry — a failed read that did would
+    /// rebuild the task definition from <c>:latest</c> and undo a rollback. Nothing has been
+    /// mutated at this point on either the preview or the deploy path.</para>
     /// </summary>
     private async Task ResolveImageDigestsAsync(string tenantKey, TenantConfig tenantConfig)
     {
@@ -1118,15 +1126,33 @@ public class SystemDeployment
             // WHAT THE SERVICE RUNS wins over what :latest points at — see
             // ImagePinPolicy.ChooseDigest. Without this, Pulumi's revision would be built
             // from :latest and every deploytenant would silently roll a rolled-back service
-            // forward again. Service and cluster names follow the post-deploy action's formula.
+            // forward again. The service name follows the post-deploy action's formula; the
+            // two cluster candidates mirror updatecontainer (Lz.Cli), which is what registered
+            // the revision we are reading.
             var ecsService = $"{_config.SystemKey}-{tenantKey}-{svc.Name}";
             var clusters = new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" };
-            var serviceDigest = await AwsContainerUpdater.GetServiceImageDigestAsync(
+            var service = await AwsContainerUpdater.ReadServiceImageAsync(
                 profile, region, clusters, ecsService, ecrName);
-            var registryDigest = serviceDigest is null
+
+            if (service.State == ServiceImageState.Unreadable)
+            {
+                // Fail CLOSED. ChooseDigest throws for this state; the message here is the
+                // operator-facing half, printed before the exception aborts the command.
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  {svc.Name}: cannot read ECS service {ecsService} ({service.Error}).");
+                Console.WriteLine(
+                    "  Refusing to fall back to ECR :latest — on a rolled-back service that would silently " +
+                    "roll it forward. Nothing has been changed; fix the read (SSO session, permissions, " +
+                    "throttling) and retry.");
+                Console.ResetColor();
+            }
+
+            // The registry is consulted ONLY when there is genuinely no pinned digest to
+            // preserve — never on a failed read.
+            var registryDigest = service.NeedsRegistry
                 ? await EcrDeployer.GetImageDigestAsync(profile, region, ecrName, "latest")
                 : null;
-            var digest = ImagePinPolicy.ChooseDigest(serviceDigest, registryDigest);
+            var digest = ImagePinPolicy.ChooseDigest(service, registryDigest);
 
             if (digest is null)
             {
@@ -1139,7 +1165,7 @@ public class SystemDeployment
             }
 
             tenantConfig.ResolvedImageDigests[svc.Name] = digest;
-            Console.WriteLine(serviceDigest is not null
+            Console.WriteLine(service.State == ServiceImageState.DigestPinned
                 ? $"  {svc.Name}: pinning the digest the service currently runs, {digest}"
                 : $"  {svc.Name}: no pinned service yet — pinning ECR :latest, {digest}");
         }

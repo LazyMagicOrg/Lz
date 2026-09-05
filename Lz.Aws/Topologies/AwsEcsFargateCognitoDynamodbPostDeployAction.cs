@@ -23,7 +23,9 @@ namespace Lz.Aws.Topologies;
 /// <summary>
 /// Tenant post-deploy action for ECSExpress:
 /// 1. Creates tenant + subtenant DynamoDB tables (idempotent)
-/// 2. Triggers ECS service force-new-deployment
+/// 2. Triggers ECS service force-new-deployment — skipped outright when the task definition
+///    is digest-pinned (the image is moved by <c>lz updatecontainer</c> and nothing else),
+///    otherwise conditional on the running tasks differing from ECR <c>:latest</c>
 /// </summary>
 public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
 {
@@ -54,17 +56,23 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
 
         // --- Step 2: Trigger ECS force-new-deployment for each service ---
         //
-        // CONDITIONAL since 2026-09-05, and the condition is the point. This loop used to
-        // force unconditionally, which meant a TENANT CONFIG deploy could ship an image
-        // nobody asked for: `lz previewtenant` correctly reports "no changes" (this runs
-        // AFTER Pulumi, so no plan can show it) and `lz deploytenant` rolled the service
-        // anyway — observed live on 2026-09-05, harmless only because :latest happened to
-        // resolve to the digest already running. Skipping when the registry and the running
-        // tasks already agree closes that outright and makes the preview honest again.
+        // Two tiers since 2026-09-05. This loop used to force unconditionally, which meant a
+        // TENANT CONFIG deploy could ship an image nobody asked for: `lz previewtenant`
+        // correctly reports "no changes" (this runs AFTER Pulumi, so no plan can show it) and
+        // `lz deploytenant` rolled the service anyway — observed live on 2026-09-05, harmless
+        // only because :latest happened to resolve to the digest already running.
         //
-        // Note this is NOT gated on the Rollback opt-in: it removes an unrequested action,
-        // so every workspace should have it. The skip is also what stops a digest-pinned
-        // service being rolled pointlessly on every unrelated deploy.
+        //   Digest-pinned (Rollback opt-in, and a digest was actually resolved): SKIP
+        //   OUTRIGHT. A forced deployment re-pulls the same immutable digest, so it can only
+        //   ever be a pointless roll; Pulumi already re-pointed the service at its
+        //   (running-digest) revision during the up.
+        //
+        //   Not pinned (every other workspace, byte-identical opt-out): CONDITIONAL, fail
+        //   open. Skip when the registry and the running tasks already agree, force as
+        //   before when they differ or when that cannot be established.
+        //
+        // The conditional tier is NOT gated on the Rollback opt-in: it removes an unrequested
+        // action, so every workspace should have it.
         foreach (var svc in _services)
         {
             if (svc.Docker == null) continue;
@@ -81,11 +89,13 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
             var profile = _tenantConfig?.Profile ?? _config.Profile;
             var region = _tenantConfig?.Region ?? _config.Region;
 
-            // On a digest-pinned system a forced deployment cannot change the image at all —
-            // it re-pulls the same immutable digest — so it can only ever be a pointless roll.
-            // Pulumi already re-points the service at its (running-digest) revision during the
-            // up; the image is moved by lz updatecontainer and nothing else. Skip outright.
-            if (ImagePinPolicy.ForTenantService(_config.Rollback).PinDigest)
+            // Gate on the digest having actually been RESOLVED, not on config intent alone:
+            // when no service and no :latest existed, ResolveImageDigestsAsync fell back to the
+            // tag, the definition is not pinned, and the message below would be a lie. That
+            // case takes the conditional tier like an un-opted-in system.
+            var pinned = ImagePinPolicy.ForTenantService(_config.Rollback).PinDigest
+                         && _tenantConfig?.ResolvedImageDigests.ContainsKey(serviceName) == true;
+            if (pinned)
             {
                 Console.WriteLine(
                     $"  {prefix}: task definition is digest-pinned — a tenant deploy never changes the " +

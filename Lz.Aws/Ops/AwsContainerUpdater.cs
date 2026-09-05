@@ -230,35 +230,57 @@ public class AwsContainerUpdater
     /// container that pulls from <paramref name="ecrRepo"/>, or null if it cannot be read.
     /// This is what decides the branch — not the running task's digest, which is a digest
     /// either way and so cannot tell a pinned definition from a tag-pinned one.
+    ///
+    /// <para>Swallows read failures into null ON PURPOSE — for <c>updatecontainer</c> an unknown
+    /// answer must fall back to the historic force-deploy (see
+    /// <see cref="DecideStrategy"/>). The tenant-deploy path must NOT inherit that: it uses
+    /// <see cref="ReadServiceImageAsync"/>, which keeps failure distinct from absence.</para>
     /// </summary>
     private async Task<string?> GetServiceTaskDefinitionImageAsync(
         string cluster, string ecsService, string ecrRepo, CancellationToken ct)
     {
         try
         {
-            var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
-            {
-                Cluster = cluster,
-                Services = new List<string> { ecsService },
-            }, ct);
-
-            var taskDefArn = svc.Services?.FirstOrDefault()?.TaskDefinition;
-            if (string.IsNullOrEmpty(taskDefArn)) return null;
-
-            var td = await _ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
-            {
-                TaskDefinition = taskDefArn,
-            }, ct);
-
-            return td.TaskDefinition?.ContainerDefinitions?
-                .FirstOrDefault(c => c.Image != null && c.Image.Contains(ecrRepo, StringComparison.Ordinal))?
-                .Image;
+            return (await ReadServiceTaskDefinitionImageAsync(cluster, ecsService, ecrRepo, ct)).Image;
         }
         catch
         {
             // Unreadable service or definition: fall back to the historic behaviour.
             return null;
         }
+    }
+
+    /// <summary>
+    /// The throwing core behind both service-image reads. Genuine absence never throws —
+    /// DescribeServices reports a missing service under Failures with an empty list — so an
+    /// exception out of here is always a real read failure, never "no service".
+    ///
+    /// <para>Only an ACTIVE service counts. DescribeServices still returns a service that
+    /// <c>destroytenant</c> left DRAINING or INACTIVE, and reading ITS definition would make a
+    /// recreated service inherit whatever the torn-down one last ran.</para>
+    /// </summary>
+    private async Task<(bool ServiceActive, string? Image)> ReadServiceTaskDefinitionImageAsync(
+        string cluster, string ecsService, string ecrRepo, CancellationToken ct)
+    {
+        var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
+        {
+            Cluster = cluster,
+            Services = new List<string> { ecsService },
+        }, ct);
+
+        var service = svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE");
+        var taskDefArn = service?.TaskDefinition;
+        if (string.IsNullOrEmpty(taskDefArn)) return (false, null);
+
+        var td = await _ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
+        {
+            TaskDefinition = taskDefArn,
+        }, ct);
+
+        var image = td.TaskDefinition?.ContainerDefinitions?
+            .FirstOrDefault(c => c.Image != null && c.Image.Contains(ecrRepo, StringComparison.Ordinal))?
+            .Image;
+        return (true, image);
     }
 
     /// <summary>
@@ -339,16 +361,24 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
-    /// The image DIGEST the service's current task definition names for the container that
-    /// pulls from <paramref name="ecrRepo"/>, or null when there is no such service, the
-    /// definition cannot be read, or the definition names a TAG rather than a digest (a
-    /// pre-pinning revision — in which case the caller should fall back to the registry).
+    /// What image the service's current task definition names for the container that pulls
+    /// from <paramref name="ecrRepo"/>, as a <see cref="ServiceImageRead"/>: the digest when
+    /// the definition is pinned, <see cref="ServiceImageState.NotDigestPinned"/> for a
+    /// pre-pinning tag-form revision, <see cref="ServiceImageState.NoService"/> when no ACTIVE
+    /// cluster or service exists — and <see cref="ServiceImageState.Unreadable"/> when the read
+    /// itself failed.
+    ///
+    /// <para><b>A read failure is NOT "no service".</b> Both absence shapes are reported by the
+    /// API without an exception (a missing cluster or service comes back under Failures), so
+    /// the catch below only ever sees real errors — throttling, AccessDenied, an expired SSO
+    /// session, a missing profile. Those are returned as Unreadable, which
+    /// <see cref="ImagePinPolicy.ChooseDigest"/> refuses; collapsing them to null would send a
+    /// tenant deploy to ECR <c>:latest</c> and silently undo a rollback.</para>
     ///
     /// <para>Used by <c>SystemDeployment.ResolveImageDigestsAsync</c> so that Pulumi declares
-    /// what the service already runs rather than what <c>:latest</c> points at; see
-    /// <see cref="ImagePinPolicy.ChooseDigest"/> for why that precedence matters.</para>
+    /// what the service already runs rather than what <c>:latest</c> points at.</para>
     /// </summary>
-    public static async Task<string?> GetServiceImageDigestAsync(
+    public static async Task<ServiceImageRead> ReadServiceImageAsync(
         string profile, string region, IReadOnlyList<string> clusterCandidates,
         string ecsService, string ecrRepo)
     {
@@ -356,18 +386,15 @@ public class AwsContainerUpdater
         {
             var updater = new AwsContainerUpdater(profile, region);
             var cluster = await updater.ResolveClusterAsync(clusterCandidates, CancellationToken.None);
-            if (cluster is null) return null;
+            if (cluster is null) return ServiceImageRead.NoService;
 
-            var image = await updater.GetServiceTaskDefinitionImageAsync(
+            var (active, image) = await updater.ReadServiceTaskDefinitionImageAsync(
                 cluster, ecsService, ecrRepo, CancellationToken.None);
-            if (image is null) return null;
-
-            var at = image.LastIndexOf('@');
-            return at >= 0 ? image[(at + 1)..] : null;
+            return ImagePinPolicy.ClassifyServiceImage(active, image);
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            return ServiceImageRead.Unreadable($"{ex.GetType().Name}: {ex.Message}");
         }
     }
 

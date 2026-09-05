@@ -73,6 +73,39 @@ public class ImagePinPolicyTests
             ImagePinPolicy.ImageRef(Repo, "latest", Digest, ImagePinDecision.None));
     }
 
+    // ---- ClassifyServiceImage: the three honest answers a successful read can give ----
+
+    [Fact]
+    public void Classify_NoActiveService_IsNoService_WhateverTheImageSays()
+        => Assert.Equal(ServiceImageRead.NoService, ImagePinPolicy.ClassifyServiceImage(false, $"{Repo}@{Digest}"));
+
+    [Theory]
+    [InlineData("latest")]
+    [InlineData("b-20260905-140324-g2ff63d73")]
+    public void Classify_TagFormRevision_IsNotDigestPinned(string tag)
+    {
+        // A pre-pinning revision (Scutara's revision 4). The registry is the right next
+        // stop — there is no pinned digest to preserve.
+        var read = ImagePinPolicy.ClassifyServiceImage(true, $"{Repo}:{tag}");
+
+        Assert.Equal(ServiceImageRead.NotDigestPinned, read);
+        Assert.True(read.NeedsRegistry);
+    }
+
+    [Fact]
+    public void Classify_ServiceWithoutOurContainer_IsNotDigestPinned()
+        => Assert.Equal(ServiceImageRead.NotDigestPinned, ImagePinPolicy.ClassifyServiceImage(true, null));
+
+    [Fact]
+    public void Classify_PinnedRevision_CarriesTheDigestAfterTheAtSign()
+    {
+        var read = ImagePinPolicy.ClassifyServiceImage(true, $"{Repo}@{Digest}");
+
+        Assert.Equal(ServiceImageState.DigestPinned, read.State);
+        Assert.Equal(Digest, read.Digest);
+        Assert.False(read.NeedsRegistry);
+    }
+
     // ---- ChooseDigest: the precedence that makes a rollback survive deploytenant ----
 
     [Fact]
@@ -85,19 +118,40 @@ public class ImagePinPolicyTests
         const string rolledBackTo = "sha256:f65abb74";
         const string latest = "sha256:ba9773aa";
 
-        Assert.Equal(rolledBackTo, ImagePinPolicy.ChooseDigest(rolledBackTo, latest));
+        Assert.Equal(rolledBackTo, ImagePinPolicy.ChooseDigest(ServiceImageRead.Pinned(rolledBackTo), latest));
     }
 
     [Fact]
-    public void ChooseDigest_FallsBackToTheRegistry_OnlyWhenThereIsNoService()
+    public void ChooseDigest_FallsBackToTheRegistry_OnlyWhenThereIsNoPinnedService()
     {
-        // The first deploy: no service exists to read, so :latest is the only answer.
-        Assert.Equal("sha256:ba9773aa", ImagePinPolicy.ChooseDigest(null, "sha256:ba9773aa"));
+        // The first deploy (no service), and the first PINNED deploy over a tag-form
+        // revision: :latest is the only answer in both.
+        Assert.Equal("sha256:ba9773aa", ImagePinPolicy.ChooseDigest(ServiceImageRead.NoService, "sha256:ba9773aa"));
+        Assert.Equal("sha256:ba9773aa", ImagePinPolicy.ChooseDigest(ServiceImageRead.NotDigestPinned, "sha256:ba9773aa"));
     }
 
     [Fact]
     public void ChooseDigest_NullWhenNeitherExists_SoTheTagFallbackEngages()
-        => Assert.Null(ImagePinPolicy.ChooseDigest(null, null));
+        => Assert.Null(ImagePinPolicy.ChooseDigest(ServiceImageRead.NoService, null));
+
+    [Fact]
+    public void ChooseDigest_UnreadableIsNotAbsent_ItRefuses()
+    {
+        // THE FAIL-CLOSED GUARANTEE, and the test the adversarial review asked for. Every
+        // genuine "absent" shape arrives WITHOUT an exception (a missing cluster or service
+        // is reported under Failures; a tag is a string with no '@'), so an Unreadable can
+        // only ever be a real error — throttling, AccessDenied, an expired SSO session. If
+        // that were allowed to fall through to the registry, a deploytenant run while the
+        // read was failing would rebuild the task definition from :latest and undo a
+        // rollback, while logging "no pinned service yet". Refusing is the only safe answer.
+        var unreadable = ServiceImageRead.Unreadable("AmazonECSException: expired token");
+
+        Assert.False(unreadable.NeedsRegistry);
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ImagePinPolicy.ChooseDigest(unreadable, "sha256:ba9773aa"));
+        Assert.Contains("expired token", ex.Message);
+        Assert.Contains("Refusing", ex.Message);
+    }
 
     // ---- IsDigestPinned ----
 

@@ -24,7 +24,9 @@ namespace Lz.Core.Config;
 /// same image string but is deliberately NOT pinned — its updater re-tags the URI by
 /// string surgery that a digest reference breaks, and it runs on every deploy. The
 /// FargateAlb lineage and the seed task are likewise left on the tag. A topology switch
-/// therefore silently changes whether this guarantee applies.</para>
+/// therefore silently changes whether this guarantee applies — and what <c>deploytenant</c>
+/// does to the image: on Lambda it advances it (the post-deploy action re-points the
+/// function at <c>:latest</c>), on pinned ECS it never does.</para>
 /// </summary>
 public class RollbackConfig
 {
@@ -32,12 +34,16 @@ public class RollbackConfig
     /// Name the container image by DIGEST (<c>{repo}@sha256:…</c>) instead of by the
     /// moving <c>:latest</c> tag. Default <c>false</c>.
     ///
-    /// <para>The digest is resolved imperatively before the Pulumi program is built, and
-    /// falls back to the tag when it cannot be resolved — an empty repository, a missing
-    /// tag, or no AWS access. That fallback is what keeps a FIRST deploy working: on a new
-    /// system <c>lz previewtenant</c> and <c>lz deploysystem</c> both run before any image
-    /// has ever been pushed, and a design that failed there could not stand up a new
-    /// environment at all.</para>
+    /// <para>The digest is resolved imperatively before the Pulumi program is built, in
+    /// this order: the digest the ECS service's CURRENT task definition names (so a
+    /// <c>deploytenant</c> preserves whatever <c>updatecontainer</c> last shipped, including a
+    /// rollback — a tenant deploy never advances the image), then ECR <c>:latest</c> when no
+    /// pinned service exists yet, then the tag when neither yields a digest — an empty
+    /// repository or a missing tag. That last fallback is what keeps a FIRST deploy working:
+    /// on a new system <c>lz previewtenant</c> and <c>lz deploysystem</c> both run before any
+    /// image has ever been pushed, and a design that failed there could not stand up a new
+    /// environment at all. A service that exists but cannot be READ is not a fallback case:
+    /// the command aborts rather than guess from <c>:latest</c>.</para>
     ///
     /// <para>Costs a failure mode the tag does not have: <c>:latest</c> always resolves to
     /// something, while a pinned digest can be deleted out from under a task definition by
