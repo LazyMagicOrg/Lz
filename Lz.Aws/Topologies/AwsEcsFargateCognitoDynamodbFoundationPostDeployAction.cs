@@ -44,13 +44,18 @@ public class AwsEcsFargateCognitoDynamodbFoundationPostDeployAction : IPostDeplo
         var tableName = _config.SystemKey;
         Console.WriteLine($"  Ensuring system DynamoDB table '{tableName}'...");
 
+        // Durability (opt-in). Absent Durability section => None => the ensure is a
+        // pure no-op on protections and the plan is byte-identical to before.
+        var durability = TableDurabilityPolicy.ForSystemTable(_config.Durability);
+
         var created = await DynamoDbTableCreator.EnsureTableAsync(
             _config.Profile, _config.Region, tableName,
             new Dictionary<string, string>
             {
                 { "System", _config.SystemKey },
                 { "Level", "system" },
-            });
+            },
+            durability);
 
         if (created)
         {

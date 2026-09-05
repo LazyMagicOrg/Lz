@@ -277,8 +277,11 @@ public static class DynamoDbTableCreator
     /// </summary>
     public static async Task<bool> EnsureSessionTableAsync(
         string profile, string region, string tableName,
-        Dictionary<string, string>? tags = null)
+        Dictionary<string, string>? tags = null,
+        TableDurabilityDecision? durability = null)
     {
+        var decision = durability ?? TableDurabilityDecision.None;
+
         var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
         if (!chain.TryGetAWSCredentials(profile, out var credentials))
             throw new InvalidOperationException($"Cannot resolve credentials for profile '{profile}'");
@@ -289,7 +292,15 @@ public static class DynamoDbTableCreator
         // Already exists?
         try
         {
-            await client.DescribeTableAsync(tableName);
+            var existing = await client.DescribeTableAsync(tableName);
+            // Idempotent ensure, mirroring EnsureTableAsync: re-apply requested
+            // protections to an ALREADY-EXISTING table. Without this the create path
+            // below is dead code for every session table that predates the opt-in —
+            // the method would print "exists", return false, and protect nothing,
+            // which is a change that deploys green and does nothing at all.
+            await ApplyDurabilityAsync(
+                client, tableName, decision,
+                existing.Table.DeletionProtectionEnabled ?? false);
             return false;
         }
         catch (ResourceNotFoundException) { /* create below */ }
@@ -299,7 +310,7 @@ public static class DynamoDbTableCreator
             foreach (var (key, value) in tags)
                 tableTags.Add(new Tag { Key = key, Value = value });
 
-        await client.CreateTableAsync(new CreateTableRequest
+        var createRequest = new CreateTableRequest
         {
             TableName = tableName,
             AttributeDefinitions = new List<AttributeDefinition>
@@ -314,7 +325,13 @@ public static class DynamoDbTableCreator
             },
             BillingMode = BillingMode.PAY_PER_REQUEST,
             Tags = tableTags,
-        });
+        };
+        // Same shape as EnsureTableAsync: set ONLY when requested, so an unset
+        // decision leaves the request byte-identical to the pre-durability baseline.
+        if (decision.DeletionProtection)
+            createRequest.DeletionProtectionEnabled = true;
+
+        await client.CreateTableAsync(createRequest);
 
         // Wait for ACTIVE (same 5-minute ceiling as EnsureTableAsync).
         Console.Write($"    Waiting for {tableName}...");
@@ -332,6 +349,11 @@ public static class DynamoDbTableCreator
             if (desc.Table.TableStatus == TableStatus.ACTIVE) { Console.WriteLine(" ACTIVE"); break; }
             Console.Write(".");
         }
+
+        // Anything that is not a CreateTable field (today: PITR) is applied here, once
+        // the table is ACTIVE. Deletion protection was already set on the create request,
+        // so it is passed as the current state and ApplyDurabilityAsync skips it.
+        await ApplyDurabilityAsync(client, tableName, decision, decision.DeletionProtection);
 
         // Enable TTL on "TTL".
         try

@@ -233,6 +233,21 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             if (!string.IsNullOrEmpty(poolConfig.UserPoolTier))
                 userPoolArgs.UserPoolTier = poolConfig.UserPoolTier.ToUpperInvariant();
 
+            // Deletion protection — same Durability opt-in as the DynamoDB tables. Null
+            // (section absent) leaves the property UNSET, so an un-opted-in system emits
+            // the plan it emitted before this existed; that guarantee is what six
+            // workspaces run on, so it is honoured literally rather than approximately
+            // (INACTIVE is the service default, but assigning it is not the same as not
+            // assigning it). `deletion_protection` is NOT ForceNew in the provider — only
+            // alias_attributes, username_attributes and username_configuration.case_sensitive
+            // are — so this is an in-place UpdateUserPool on an existing pool, never a
+            // replace. Verified against the bridged schema of the pinned plugin and the
+            // upstream provider source; the preview is still the gate (see
+            // CognitoDurabilityPolicy).
+            var poolDeletionProtection = CognitoDurabilityPolicy.ForUserPool(config.Durability);
+            if (poolDeletionProtection is not null)
+                userPoolArgs.DeletionProtection = poolDeletionProtection;
+
             // =================================================================
             // M0-7 — SELLER CUSTOM-AUTH INFRA (opt-in). Provisioned ONLY when poolConfig.CustomAuth is set,
             // so absent = byte-identical baseline for the ~10 sibling pools. The Lambda + its role + the
@@ -254,19 +269,26 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 // Durability section this is TableDurabilityDecision.None and the emitted
                 // plan is byte-identical to a pre-durability deploy.
                 var vendorCredDurability = LzDynamoDb.TableDurabilityPolicy.ForVendorCredTable(config.Durability);
-                var vendorCredTable = new Table($"{poolPrefix}-vendor-creds", new TableArgs
+                var vendorCredArgs = new TableArgs
                 {
                     Name = $"{poolPrefix}-vendor-creds",
                     BillingMode = "PAY_PER_REQUEST",
                     HashKey = vendorCredKeyAttr,
                     Attributes = { new TableAttributeArgs { Name = vendorCredKeyAttr, Type = "S" } },
-                    DeletionProtectionEnabled = vendorCredDurability.DeletionProtection,
-                    PointInTimeRecovery = new TablePointInTimeRecoveryArgs
-                    {
-                        Enabled = vendorCredDurability.PointInTimeRecovery,
-                    },
                     Tags = { { "System", sk }, { "ManagedBy", "lz-pulumi" } },
-                }, new CustomResourceOptions { Parent = this });
+                };
+                // Assign ONLY when opted in. Assigning an explicit `false` is not the same
+                // as leaving the property unset: a system with no Durability section must
+                // emit the plan it emitted before this existed, and "byte-identical when
+                // absent" is a literal guarantee rather than an approximate one. (This
+                // corrects the first cut of this change, which set both unconditionally.)
+                if (vendorCredDurability.DeletionProtection)
+                    vendorCredArgs.DeletionProtectionEnabled = true;
+                if (vendorCredDurability.PointInTimeRecovery)
+                    vendorCredArgs.PointInTimeRecovery = new TablePointInTimeRecoveryArgs { Enabled = true };
+
+                var vendorCredTable = new Table($"{poolPrefix}-vendor-creds", vendorCredArgs,
+                    new CustomResourceOptions { Parent = this });
 
                 // Least-privilege role for the challenge Lambda: assumed by Lambda, writes its own logs, and
                 // GetItem ONLY on the vendor-credential table (nothing else).

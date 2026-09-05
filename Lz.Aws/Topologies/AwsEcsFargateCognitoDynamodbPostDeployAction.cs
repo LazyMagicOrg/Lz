@@ -101,7 +101,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
         var tenantTable = $"{sk}_{tk}";
         var created = await DynamoDbTableCreator.EnsureTableAsync(
             profile, region, tenantTable,
-            new Dictionary<string, string>(baseTags) { { "Level", "tenant" } });
+            new Dictionary<string, string>(baseTags) { { "Level", "tenant" } },
+            TableDurabilityPolicy.ForTenantTable(_config.Durability));
         Console.WriteLine(created
             ? $"    {tenantTable} — created"
             : $"    {tenantTable} — exists");
@@ -112,7 +113,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
         var bffSessionTable = $"{sk}_{tk}_bff";
         var bffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
             profile, region, bffSessionTable,
-            new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions" } });
+            new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions" } },
+            TableDurabilityPolicy.ForBffSessionTable(_config.Durability));
         Console.WriteLine(bffCreated
             ? $"    {bffSessionTable} — created"
             : $"    {bffSessionTable} — exists");
@@ -125,7 +127,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
             var cbffSessionTable = $"{sk}_{tk}_cbff";
             var cbffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
                 profile, region, cbffSessionTable,
-                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-consumerauth" } });
+                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-consumerauth" } },
+                TableDurabilityPolicy.ForBffSessionTable(_config.Durability));
             Console.WriteLine(cbffCreated
                 ? $"    {cbffSessionTable} — created"
                 : $"    {cbffSessionTable} — exists");
@@ -139,7 +142,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
             var abffSessionTable = $"{sk}_{tk}_abff";
             var abffCreated = await DynamoDbTableCreator.EnsureSessionTableAsync(
                 profile, region, abffSessionTable,
-                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-systemauth" } });
+                new Dictionary<string, string>(baseTags) { { "Level", "tenant" }, { "Purpose", "bff-sessions-systemauth" } },
+                TableDurabilityPolicy.ForBffSessionTable(_config.Durability));
             Console.WriteLine(abffCreated
                 ? $"    {abffSessionTable} — created"
                 : $"    {abffSessionTable} — exists");
