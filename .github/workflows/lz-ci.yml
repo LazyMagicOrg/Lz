@@ -1,7 +1,24 @@
-# CI gate for Lz. Runs the two dependency-free suites this repo owns: the Cognito Custom-Auth trigger's
-# pure decision core (node:test) and the Lz config/merge/validators + smoke-probe logic (xUnit). Both
-# restore from nuget.org — no private LazyMagic feed and no prior LazyMagic build are needed (Lz.Core/
-# Lz.Aws reference only third-party packages). See specs/TestCoverage.md in the Scutara repo.
+# CI gate for Lz. Runs the two suites this repo owns: the Cognito Custom-Auth trigger's pure
+# decision core (node:test) and the Lz config/merge/validators + policy + smoke-probe logic (xUnit).
+#
+# WHY THIS LOOKS MORE INVOLVED THAN "dotnet test". Three facts, each of which broke this workflow
+# before (it was disabled_manually on 2026-08-22 after ~10 red runs, and stayed dark for two weeks):
+#
+#  1. Lz.slnx deliberately includes ProjectTemplates/* so template contamination (dangling
+#     ProjectReferences) is caught at build time. Seven of those templates PackageReference
+#     LazyMagic.* — so "no LazyMagic build is needed", which the old header asserted, was false for
+#     the solution even though it is true for Lz.Core/Lz.Aws alone.
+#  2. LazyMagic is not on nuget.org (search API: zero hits). It is published to GitHub Packages under
+#     LazyMagicOrg, which needs a token; the repo is public, so BUILDING it needs none. We build it,
+#     which is also what service-ci.yml does for the same reason.
+#  3. TeardownRedeployTests is a live AWS lifecycle drill. It is gated behind LZ_LIFECYCLE_ENABLE=1,
+#     but its harness constructor walks up looking for a systemconfig.{sk}.{env}.yaml BEFORE that
+#     guard runs — that file exists only inside a workspace, never in a standalone clone, so the
+#     constructor throws here. It carries Category=Integration and is filtered out, matching the
+#     convention service-ci.yml already uses.
+#
+# The whole recipe was verified against a clean clone before being committed: restore, both suites,
+# 353/353.
 name: lz-ci
 
 on:
@@ -12,7 +29,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Lz and LazyMagic as SIBLINGS — the layout the NuGet.Config written below assumes, and the
+      # same shape they have in a product workspace (repos/Lz + repos/LazyMagic).
       - uses: actions/checkout@v4
+        with:
+          path: Lz
+      # Public repo: no token needed. Pinned to the default branch deliberately — Lz consumes
+      # LazyMagic, so a LazyMagic break SHOULD red this gate rather than be discovered later.
+      - uses: actions/checkout@v4
+        with:
+          repository: LazyMagicOrg/LazyMagic
+          path: LazyMagic
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -20,13 +48,36 @@ jobs:
         with:
           node-version: '22'
 
-      # Cognito Custom-Auth trigger — the fail-closed / single-shot / constant-time decision core (13 cases).
+      # Cognito Custom-Auth trigger — the fail-closed / single-shot / constant-time decision core.
       # Path note: this lives under Lz.Aws/Auth/, NOT Lz.Aws/AppRunner/ — the 0.11.0 axis restructure
       # (40c5517) retired the AppRunner topology and moved it. Because a failing step aborts the job,
       # naming the old path silently took `dotnet test` below down with it.
-      - run: node --test Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
+      - run: node --test Lz/Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
 
-      # Lz config load/merge/validators, DynamoDB/VectorStore/Secrets policy, and lz-verify smoke logic
-      # (252 cases over 174 methods). Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj
-      # build fails MSB4019.
-      - run: dotnet test Lz.slnx -c Debug
+      # Populates LazyMagic/Packages (25 nupkgs, ~20s) via GeneratePackageOnBuild + CopyPackage.
+      - name: build LazyMagic (populate the feed the templates restore from)
+        run: dotnet build LazyMagic/LazyMagic.sln -c Debug
+
+      # CI-only, deliberately NOT committed to the repo. A NuGet.Config inside a sub-repo is a
+      # documented hazard in this codebase: NuGet dedupes sources by resolved PATH and the nearest
+      # config wins the NAME, so a sub-repo config can silently rename a feed out from under a
+      # parent's packageSourceMapping. The repo therefore carries none, and CI writes exactly what
+      # CI needs. <clear/> drops the runner's inherited sources so resolution is deterministic.
+      - name: write the CI NuGet.Config
+        working-directory: Lz
+        run: |
+          cat > NuGet.Config <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+              <add key="LazyMagicLocal" value="../LazyMagic/Packages" />
+            </packageSources>
+          </configuration>
+          XML
+
+      # Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
+      - name: test
+        working-directory: Lz
+        run: dotnet test Lz.slnx -c Debug --filter "Category!=Integration"
