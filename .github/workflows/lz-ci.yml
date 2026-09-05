@@ -67,9 +67,29 @@ jobs:
       # naming the old path silently took `dotnet test` below down with it.
       - run: node --test Lz/Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
 
-      # Populates LazyMagic/Packages (25 nupkgs, ~20s) via GeneratePackageOnBuild + CopyPackage.
-      - name: build LazyMagic (populate the feed the templates restore from)
-        run: dotnet build LazyMagic/LazyMagic.sln -c Debug
+      # Build ONLY the five service-side projects the templates pin, not LazyMagic.sln.
+      #
+      # Two reasons, and the second is not optional. (a) The whole solution also contains the
+      # client-side projects (LazyMagic.OIDC.Base, LazyMagic.Client.ViewModels, BlazorTest.*), which
+      # nothing here consumes. (b) Those projects pull ReactiveUI/Splat 19.3.1, whose author signing
+      # certificate has been REVOKED — on a Linux runner that is a hard NU3012 restore failure
+      # ("The author primary signature found a chain building issue: Revoked: certificate revoked").
+      # Building the solution therefore cannot succeed here at all, for a reason that has nothing to
+      # do with Lz. Building the five instead sidesteps it without weakening signature verification
+      # (the alternative, NUGET_CERT_REVOCATION_MODE=offline, would turn the check off globally).
+      #
+      # Per-project builds work because LazyMagic has a Directory.Build.props; Lz itself does not,
+      # which is why IT must be built through the .slnx (MSB4019).
+      - name: build LazyMagic service packages (the feed the templates restore from)
+        run: |
+          for p in LazyMagic.Shared \
+                   LazyMagic.Service.Shared \
+                   LazyMagic.Service.Authorization \
+                   LazyMagic.Service.DynamoDBRepo \
+                   LazyMagic.Service.AwsLocalWebApiRoutingMiddleware; do
+            dotnet build "LazyMagic/$p/$p.csproj" -c Debug
+          done
+          ls -1 LazyMagic/Packages/*.nupkg
 
       # CI-only, deliberately NOT committed to the repo. A NuGet.Config inside a sub-repo is a
       # documented hazard in this codebase: NuGet dedupes sources by resolved PATH and the nearest
