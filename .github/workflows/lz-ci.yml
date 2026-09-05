@@ -36,12 +36,12 @@ jobs:
     # is a production bug today, and rewriting a security guard's test data to satisfy a runner
     # choice would be the wrong way round. Free minutes on a public repo make the cost argument moot.
     #
-    # WORTH KNOWING ANYWAY, since ubuntu surfaced it: CloneReposLogic.IsSafeRelativePath accepts
-    # `C:/Windows` on a non-Windows host, because the check rests on Path.IsPathRooted. Harmless now
-    # (on Linux that would make a directory literally named `C:` INSIDE the workspace, so it does not
-    # actually escape) and harmless while lz is Windows-only — but it is untrusted manifest input,
-    # and the DecoupledCd tooling image is Linux. Reject a drive-letter prefix explicitly before
-    # anything runs `clonerepos` off-Windows.
+    # The ubuntu run also surfaced a real off-Windows hole in CloneReposLogic.IsSafeRelativePath,
+    # which FIXED it: a drive designator is now rejected explicitly rather than via Path.IsPathRooted
+    # (aa732ce). Note the regression test for that deliberately asserts the extracted
+    # HasDriveDesignator predicate, NOT the end-to-end guard — on this Windows runner IsPathRooted
+    # rejects every drive form anyway, so an end-to-end assertion passes with or without the check
+    # and would never catch its removal here.
     runs-on: windows-latest
     steps:
       # Lz and LazyMagic as SIBLINGS — the layout the NuGet.Config written below assumes, and the
