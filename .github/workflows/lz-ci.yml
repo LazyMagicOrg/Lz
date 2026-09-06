@@ -124,6 +124,17 @@ jobs:
       #
       # Per-project builds work because LazyMagic has a Directory.Build.props; Lz itself does not,
       # which is why IT must be built through the .slnx (MSB4019).
+      # -p:PublicRelease=false is NOT redundant with LazyMagic's publicReleaseRefSpec, which is
+      # main-only. That spec matches the AMBIENT ref, not the branch of the repo being built:
+      # NBGV's cloud-build integration reads GITHUB_REF, and in this job GITHUB_REF is the LZ
+      # repo's push (refs/heads/main). So LazyMagic - checked out at dev - was stamped a public
+      # release of a branch it is not on. Measured on the first green run: it packed 3.0.22 with
+      # no -g<sha>; reproduced locally by setting GITHUB_REF=refs/heads/main against a dev clone.
+      #
+      # Nothing is published from here, so no wrong package can reach a registry today. What the
+      # flag prevents is a name collision waiting to happen: the version minted here is the same
+      # string a genuine main publish at the same height would mint, from different content. With
+      # the flag these throwaway packages always carry -g<sha> and can never be mistaken for one.
       - name: build LazyMagic service packages (the feed the templates restore from)
         shell: bash
         run: |
@@ -132,7 +143,7 @@ jobs:
                    LazyMagic.Service.Authorization \
                    LazyMagic.Service.DynamoDBRepo \
                    LazyMagic.Service.AwsLocalWebApiRoutingMiddleware; do
-            dotnet build "repos/LazyMagic/$p/$p.csproj" -c Debug
+            dotnet build "repos/LazyMagic/$p/$p.csproj" -c Debug -p:PublicRelease=false
           done
           ls -1 repos/LazyMagic/Packages/*.nupkg
 
