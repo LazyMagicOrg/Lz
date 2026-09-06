@@ -346,6 +346,11 @@ public sealed class CrossTargetingScratchBuild : IDisposable
     <TargetFrameworks>net10.0</TargetFrameworks>
     <AssemblyName>{Id}</AssemblyName>
     <SolutionDir>{lzRepoRoot}{Path.DirectorySeparatorChar}</SolutionDir>
+    <!-- Mirror how a real version tool integrates: Nerdbank.GitVersioning adds its target to BOTH
+         GenerateNuspecDependsOn and GetPackageVersionDependsOn (Nerdbank.GitVersioning.targets:16-23).
+         The second is the one pack consults before computing @(NuGetPackOutput); a tool that skips it
+         leaves pack predicting a file name it will not write, and the copy then fails. -->
+    <GetPackageVersionDependsOn>$(GetPackageVersionDependsOn);FakeVersionTool</GetPackageVersionDependsOn>
   </PropertyGroup>
   <Import Project=""$(SolutionDir)CommonPackageHandling.targets"" />
   <PropertyGroup>
@@ -513,5 +518,96 @@ public class PackagingTargetsReplicationTests
         var end = text.IndexOf("</Target>", text.IndexOf("Could not evict", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start, "the eviction block was not found in a copy");
         return text[start..end];
+    }
+}
+
+/// <summary>
+/// Pack names its output <c>&lt;PackageId&gt;.&lt;normalized PackageVersion&gt;</c>, which is NOT
+/// <c>$(AssemblyName).$(Version)</c>. This fixture drives both ways they diverge at once: a
+/// <c>PackageId</c> that differs from the assembly name, and a version carrying build metadata,
+/// which pack drops from the file name. Before CopyPackage read pack's own output list this build
+/// failed with MSB3030 and left the feed with no package for the id.
+/// </summary>
+public sealed class PackNamingScratchBuild : IDisposable
+{
+    public const string AssemblyName = "Lz.Scratch.Named";
+    public const string PackageId = "Lz.Scratch.Renamed";
+    public const string PackageVersion = "7.7.7-beta.1+gdeadbee";
+    /// <summary>What pack puts in the file name: metadata dropped.</summary>
+    public const string FileVersion = "7.7.7-beta.1";
+
+    public string Root { get; }
+    public string Feed { get; }
+    public string Output { get; }
+    public int ExitCode { get; }
+
+    public PackNamingScratchBuild()
+    {
+        var lzRepoRoot = PackageHandlingScratchBuild.FindLzRepoRoot();
+        Root = Path.Combine(Path.GetTempPath(), "lz-naming-" + Guid.NewGuid().ToString("N")[..8]);
+        Feed = Path.Combine(Root, "feed");
+        var gpf = Path.Combine(Root, "gpf");
+        var proj = Path.Combine(Root, "proj");
+        foreach (var d in new[] { Feed, gpf, proj }) Directory.CreateDirectory(d);
+
+        // A stale package of the same id, to prove the feed clean still spares what was just written.
+        File.WriteAllText(Path.Combine(Feed, $"{PackageId}.1.0.0.nupkg"), "old");
+
+        File.WriteAllText(Path.Combine(proj, "Class1.cs"), "namespace Scratch; public class Class1 { }");
+        var projPath = Path.Combine(proj, "Scratch.csproj");
+        File.WriteAllText(projPath, $@"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>{AssemblyName}</AssemblyName>
+    <PackageId>{PackageId}</PackageId>
+    <SolutionDir>{lzRepoRoot}{Path.DirectorySeparatorChar}</SolutionDir>
+  </PropertyGroup>
+  <Import Project=""$(SolutionDir)CommonPackageHandling.targets"" />
+  <PropertyGroup>
+    <Version>{PackageVersion}</Version>
+    <PackageVersion>{PackageVersion}</PackageVersion>
+  </PropertyGroup>
+</Project>
+");
+        (ExitCode, Output) = PackageHandlingScratchBuild.RunDotnet(proj,
+            "build", projPath, "-nologo", "-v:m",
+            $"-p:NuGetPackageRoot={gpf}", $"-p:PackageRepoFolder={Feed}");
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(Root, recursive: true); } catch { /* best effort */ }
+    }
+}
+
+public class PackNamingTests : IClassFixture<PackNamingScratchBuild>
+{
+    private readonly PackNamingScratchBuild _b;
+    public PackNamingTests(PackNamingScratchBuild b) => _b = b;
+
+    [Fact]
+    public void TheBuildSucceeds_EvenThoughTheFileNameIsNotAssemblyNameDotVersion()
+        => Assert.True(_b.ExitCode == 0,
+            "the copy rebuilt a file name pack never wrote:" + Environment.NewLine + _b.Output);
+
+    [Fact]
+    public void TheFeedGetsTheFilePackActuallyWrote()
+    {
+        // <PackageId>, not <AssemblyName>; and without the +metadata that $(Version) still carries.
+        var expected = Path.Combine(_b.Feed, $"{PackNamingScratchBuild.PackageId}.{PackNamingScratchBuild.FileVersion}.nupkg");
+
+        Assert.True(File.Exists(expected),
+            $"expected {Path.GetFileName(expected)} in the feed, found: "
+            + string.Join(", ", Directory.GetFiles(_b.Feed).Select(Path.GetFileName))
+            + Environment.NewLine + _b.Output);
+        Assert.False(File.Exists(Path.Combine(_b.Feed, $"{PackNamingScratchBuild.AssemblyName}.{PackNamingScratchBuild.PackageVersion}.nupkg")));
+    }
+
+    [Fact]
+    public void TheFeedCleanStillSweepsTheOldVersionAndSparesTheNewOne()
+    {
+        Assert.False(File.Exists(Path.Combine(_b.Feed, $"{PackNamingScratchBuild.PackageId}.1.0.0.nupkg")),
+            "the superseded package should have been swept" + Environment.NewLine + _b.Output);
+        Assert.True(File.Exists(Path.Combine(_b.Feed, $"{PackNamingScratchBuild.PackageId}.{PackNamingScratchBuild.FileVersion}.nupkg")));
     }
 }
