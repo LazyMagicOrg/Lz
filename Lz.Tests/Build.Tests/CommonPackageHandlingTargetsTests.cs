@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Diagnostics;
 
 namespace Lz.Tests.Build.Tests;
@@ -241,6 +242,32 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
     }
 
     [Fact]
+    public void AnEmptyVersionRefusesToDelete_RatherThanWipingEveryCachedVersion()
+    {
+        // With no version the cache path collapses to the id root and rmdir takes EVERY cached
+        // version of the package — verified 2026-09-05 on an unguarded copy, where four seeded
+        // versions and the id folder itself went in one "Evicted …\lz.scratch.multi\". Global
+        // properties cannot be overridden from inside the project, so -p:Version= holds it empty
+        // through the whole evaluation, including the SDK's own defaulting.
+        var root = Path.Combine(_b.Root, "gpf-empty");
+        foreach (var v in new[] { "1.0.0", "2.2.2", "3.3.3" })
+            PackageHandlingScratchBuild.SeedCacheFolder(root, v);
+
+        var (exit, output) = PackageHandlingScratchBuild.RunDotnet(_b.ProjectDir,
+            "msbuild", _b.ProjectPath, "-t:DeleteSpecificPackage", "-nologo", "-v:m",
+            "-p:Version=", "-p:PackageVersion=",
+            $"-p:NuGetPackageRoot={root}");
+
+        Assert.True(exit == 0, "a warning must not fail the build:" + Environment.NewLine + output);
+        Assert.Contains("No version could be determined", output);
+        Assert.DoesNotContain("Evicted ", output);
+        foreach (var v in new[] { "1.0.0", "2.2.2", "3.3.3" })
+            Assert.True(Directory.Exists(Path.Combine(root, LowerId, v)),
+                $"{v} must survive an eviction with no version" + Environment.NewLine + output);
+        Assert.True(Directory.Exists(Path.Combine(root, LowerId)), "the id folder itself must survive");
+    }
+
+    [Fact]
     public void AFailedEvictionIsReportedAsAFailure_NotAsEvicted()
     {
         // Windows only: `rmdir /s /q` exits 0 when a file inside is in use and it deleted only what
@@ -326,7 +353,9 @@ public sealed class CrossTargetingScratchBuild : IDisposable
          deletes the static <Version> lines from the packaging targets, and an empty Version is
          filled in by the SDK from VersionPrefix - {SdkDefaultVersion}. Blanking it here reproduces
          that without touching the real targets file (which still supplies $(LzVersion) today, and
-         is why the single-framework fixture above never sees 1.0.0). -->
+         is why the single-framework fixture above never sees 1.0.0). <Version> is the line that
+         carries the signal; <PackageVersion> is inert here (pack defaults it from Version) and is
+         kept only because P0b leaves neither behind. -->
     <Version></Version>
     <PackageVersion></PackageVersion>
   </PropertyGroup>
@@ -335,6 +364,12 @@ public sealed class CrossTargetingScratchBuild : IDisposable
       <Version>{DynamicVersion}</Version>
       <PackageVersion>{DynamicVersion}</PackageVersion>
     </PropertyGroup>
+  </Target>
+  <!-- The canary. Everything this fixture asserts is conditional on an outer pass having happened;
+       nothing else here observes one, so without this a one-character edit ({{TargetFrameworks}} to
+       {{TargetFramework}}) would retire the guard with all the tests still green. -->
+  <Target Name=""ProveOuterPass"" AfterTargets=""Build"" Condition=""'$(IsCrossTargetingBuild)' == 'true'"">
+    <Message Importance=""high"" Text=""OUTER PASS RAN"" />
   </Target>
 </Project>
 ");
@@ -373,6 +408,15 @@ public class CrossTargetingEvictionTests : IClassFixture<CrossTargetingScratchBu
         => Assert.True(_b.ExitCode == 0, "dotnet build failed:" + Environment.NewLine + _b.Output);
 
     [Fact]
+    public void TheBuildReallyTookTheOuterPass()
+        // The precondition every other assertion here rests on. A single-entry <TargetFrameworks>
+        // list still takes the outer pass — that is the shape of all nine cross-targeting LazyMagic
+        // projects — but nothing else in this fixture would notice if it stopped.
+        => Assert.True(_b.Output.Contains("OUTER PASS RAN"),
+            "the fixture did not take a cross-targeting outer pass, so it proves nothing about the guard:"
+            + Environment.NewLine + _b.Output);
+
+    [Fact]
     public void TheOuterPassEvictsNothing_SoTheSdkDefaultSurvives()
     {
         // THE GUARD. Without `Condition="'$(IsCrossTargetingBuild)' != 'true'"` on DeletePackage the
@@ -381,7 +425,10 @@ public class CrossTargetingEvictionTests : IClassFixture<CrossTargetingScratchBu
         Assert.True(Directory.Exists(_b.Cached(CrossTargetingScratchBuild.SdkDefaultVersion)),
             "the SDK default 1.0.0 must not be evicted by the cross-targeting outer pass"
             + Environment.NewLine + _b.Output);
-        Assert.DoesNotContain($"1.0.0; the next restore", _b.Output);
+        // Both eviction messages name "<id> <version>", so this catches the destructive line and the
+        // "nothing to evict" one alike — the signature the NBGV spike actually logged.
+        Assert.DoesNotContain(
+            $"{CrossTargetingScratchBuild.Id} {CrossTargetingScratchBuild.SdkDefaultVersion}", _b.Output);
     }
 
     [Fact]
@@ -393,5 +440,78 @@ public class CrossTargetingEvictionTests : IClassFixture<CrossTargetingScratchBu
             "the inner build should have evicted the version it actually built"
             + Environment.NewLine + _b.Output);
         Assert.Contains(CrossTargetingScratchBuild.DynamicVersion, _b.Output);
+    }
+}
+
+/// <summary>
+/// The four producers keep byte-identical copies of these targets, replicated by hand, and only the
+/// Lz copy is exercised by a build test — no workflow runs Lz.Tests against LazyMagic, Service or
+/// BaseAppLib. That is how a sentence claiming "every project in this repo is single-framework"
+/// reached LazyMagic, the one repo where it is false. These are text assertions, so they need no
+/// scaffold and no SDK: they only require the load-bearing lines to be present in whichever sibling
+/// working copies exist beside this one.
+/// </summary>
+public class PackagingTargetsReplicationTests
+{
+    /// <summary>The sibling copies, skipped when the working copy is not beside this one.</summary>
+    public static IEnumerable<string> Paths()
+    {
+        var repos = Directory.GetParent(PackageHandlingScratchBuild.FindLzRepoRoot())!.FullName;
+        foreach (var rel in new[]
+        {
+            @"Lz\CommonPackageHandling.targets",
+            @"LazyMagic\CommonPackageHandling.targets",
+            @"Service\CommonPackageHandling.targets",
+            @"BaseAppLib\MakePackage.targets",
+        })
+        {
+            var path = Path.Combine(repos, rel);
+            if (File.Exists(path)) yield return path;
+        }
+    }
+
+    public static TheoryData<string> Copies()
+    {
+        var data = new TheoryData<string>();
+        foreach (var p in Paths()) data.Add(p);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(Copies))]
+    public void EveryCopyGuardsTheCrossTargetingOuterPass(string path)
+    {
+        var text = File.ReadAllText(path);
+
+        Assert.Contains("<Target Name=\"DeletePackage\"", text);
+        Assert.Contains("Condition=\"'$(IsCrossTargetingBuild)' != 'true'\"", text);
+    }
+
+    [Theory]
+    [MemberData(nameof(Copies))]
+    public void EveryCopyRefusesToEvictWithNoVersion(string path)
+    {
+        var text = File.ReadAllText(path);
+
+        // Both delete branches, and the warning that replaces them.
+        Assert.Equal(2, Regex.Matches(text, @"'\$\(_EvictVersion\)' != ''\s+AND\s+Exists\('\$\(PackageCacheFolder\)'\)").Count);
+        Assert.Contains("No version could be determined", text);
+    }
+
+    [Fact]
+    public void TheCopiesHaveNotDrifted()
+    {
+        // The blocks these tests care about, compared verbatim across whichever copies are present.
+        var blocks = Paths().Select(p => Block(File.ReadAllText(p))).ToList();
+
+        Assert.All(blocks, b => Assert.Equal(blocks[0], b));
+    }
+
+    private static string Block(string text)
+    {
+        var start = text.IndexOf("SKIPPED IN THE CROSS-TARGETING OUTER BUILD", StringComparison.Ordinal);
+        var end = text.IndexOf("</Target>", text.IndexOf("Could not evict", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "the eviction block was not found in a copy");
+        return text[start..end];
     }
 }
