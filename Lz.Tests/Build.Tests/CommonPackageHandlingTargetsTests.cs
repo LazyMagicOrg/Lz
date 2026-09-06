@@ -204,6 +204,28 @@ public class CommonPackageHandlingTargetsTests : IClassFixture<PackageHandlingSc
     }
 
     [Fact]
+    public void SupersededPackagesAreSweptFromTheBuildOutputToo_NotJustTheFeed()
+    {
+        // $(PackageOutputPath) had never been swept: pack leaves a nupkg/snupkg pair per version and
+        // nothing removed the old ones, so under a derived version bin/ grows without bound (the
+        // 2026-09-05 spike watched one project reach four pairs in an hour).
+        var bin = Path.Combine(_b.ProjectDir, "bin", "Debug");
+        var stale = Path.Combine(bin, $"{Id}.4.4.4.nupkg");
+        var staleSymbols = Path.Combine(bin, $"{Id}.4.4.4.snupkg");
+        var neighbour = Path.Combine(bin, $"{Id}.Extra.1.0.0.nupkg");
+        File.WriteAllText(stale, "old"); File.WriteAllText(staleSymbols, "old"); File.WriteAllText(neighbour, "not ours");
+
+        var (exit, output) = _b.Build();
+
+        Assert.True(exit == 0, output);
+        Assert.False(File.Exists(stale), "a superseded package should be swept from the build output" + Environment.NewLine + output);
+        Assert.False(File.Exists(staleSymbols));
+        Assert.True(File.Exists(neighbour), "an id that merely extends this one must survive in bin too");
+        Assert.True(File.Exists(Path.Combine(bin, $"{Id}.{PackageHandlingScratchBuild.DynamicVersion}.nupkg")),
+            "the version just built must NOT be swept from the build output");
+    }
+
+    [Fact]
     public void ASameVersionRebuildRemovesNothingFromTheFeed()
     {
         // The ordinary edit-and-build loop: the version does not change, pack rewrites the same
