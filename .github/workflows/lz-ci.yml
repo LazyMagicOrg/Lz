@@ -44,30 +44,58 @@ jobs:
     # and would never catch its removal here.
     runs-on: windows-latest
     steps:
-      # Lz and LazyMagic as SIBLINGS — the layout the NuGet.Config written below assumes, and the
-      # same shape they have in a product workspace (repos/Lz + repos/LazyMagic).
+      # repos/Lz + repos/LazyMagic under a workspace root — the EXACT shape a product workspace
+      # has, and that is load-bearing rather than cosmetic. The local lane (below) writes its
+      # override at the workspace root, and ProjectTemplates/Directory.Packages.props imports it
+      # three levels up. Checked out flat as Lz/ and LazyMagic/, that import resolves ABOVE the
+      # runner root and silently finds nothing - restore still succeeds, on the stale committed
+      # defaults. Keeping CI's layout identical to a developer's is what makes the same override
+      # path correct in both.
       - uses: actions/checkout@v4
         with:
-          path: Lz
+          path: repos/Lz
       # Public repo: no token needed.
       #
-      # ref: dev is REQUIRED, not a preference. LazyMagic's default branch is badly stale — main
-      # declares Version 3.0.1 and test declares 3.0.10, while dev declares the 3.0.17 that
-      # ProjectTemplates/Directory.Packages.props pins and that every workspace consumes. Checking
-      # out the default branch produces a feed holding 3.0.1 and restore fails NU1102 ("Found 1
-      # version(s) in LazyMagicLocal [ Nearest version: 3.0.1 ]"), which is exactly how this was
-      # found: it passed against a local clone that happened to sit on dev, and failed on the runner.
+      # ref: dev is REQUIRED, not a preference — it is the branch every workspace consumes, and
+      # the one the templates are validated against. main and test lag it.
       #
-      # THE COUPLING THIS CREATES, so a future red run is diagnosable: the pins are EXACT, so the
-      # moment LazyMagic dev bumps to 3.0.18 this gate goes red until those pins are updated. That
-      # is a true signal rather than flakiness — the templates would genuinely no longer compile
-      # against the framework the systems consume — but it will look like an unrelated failure to
-      # whoever is changing Lz at the time.
+      # fetch-depth: 0 is equally REQUIRED. Since 2026-09-06 LazyMagic derives its version from
+      # version.json plus COMMIT HEIGHT (Nerdbank.GitVersioning), and a depth-1 checkout has no
+      # history to count. That case is at least LOUD — measured on a real depth-1 clone against the
+      # pinned 3.10.94, NBGV throws "Shallow clone lacks the objects required to calculate version
+      # height" and fails the build with MSB4018, so it can never quietly ship a wrong number.
+      # The genuinely silent case is the one guarded below: no version.json at all.
+      #
+      # WHAT USED TO BE COUPLED HERE, and no longer is: the templates pinned LazyMagic at an exact
+      # literal, so any bump reddened this gate until someone edited the pins. Under a derived
+      # version that is unfixable rather than tedious — every LazyMagic commit changes the version,
+      # so no committed literal can ever track it. The lane step below pins the templates at
+      # whatever was actually built instead.
       - uses: actions/checkout@v4
         with:
           repository: LazyMagicOrg/LazyMagic
           ref: dev
-          path: LazyMagic
+          fetch-depth: 0
+          path: repos/LazyMagic
+
+      # THE FAILURE THIS CATCHES IS SILENT, WHICH IS WHY IT IS A STEP AND NOT A COMMENT.
+      # We check out LazyMagic's REMOTE dev. If that branch does not carry version.json — it was
+      # reverted, the derived-versioning work landed on main while dev stayed static, or this
+      # workflow was pushed BEFORE the LazyMagic commit — then NBGV is not in the build at all.
+      # There is no error: the old static <Version> is used, the lane writes exactly the versions
+      # the templates already have committed, restore is satisfied, and this gate goes GREEN
+      # having exercised none of the thing it exists to exercise. A green run cannot discriminate,
+      # because the lane pins whatever was built and the outcome is byte-identical either way.
+      #
+      # Deliberately asserts PRESENCE, not a version number. Naming the expected version here
+      # would reintroduce the committed literal this whole change exists to remove, and would need
+      # editing every time ProjectTemplates/Directory.Packages.props moves.
+      - name: the LazyMagic checkout must be the derived-version one
+        shell: pwsh
+        run: |
+          if (-not (Test-Path repos/LazyMagic/version.json)) {
+            throw "LazyMagic dev carries no version.json, so this run would build the old static version and prove nothing about the package lane. Push the LazyMagic derived-versioning commit first."
+          }
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -80,7 +108,7 @@ jobs:
       # Path note: this lives under Lz.Aws/Auth/, NOT Lz.Aws/AppRunner/ — the 0.11.0 axis restructure
       # (40c5517) retired the AppRunner topology and moved it. Because a failing step aborts the job,
       # naming the old path silently took `dotnet test` below down with it.
-      - run: node --test Lz/Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
+      - run: node --test repos/Lz/Lz.Aws/Auth/CognitoCustomAuth/custom-auth.test.mjs
 
       # Build ONLY the five service-side projects the templates pin, not LazyMagic.sln.
       #
@@ -104,17 +132,18 @@ jobs:
                    LazyMagic.Service.Authorization \
                    LazyMagic.Service.DynamoDBRepo \
                    LazyMagic.Service.AwsLocalWebApiRoutingMiddleware; do
-            dotnet build "LazyMagic/$p/$p.csproj" -c Debug
+            dotnet build "repos/LazyMagic/$p/$p.csproj" -c Debug
           done
-          ls -1 LazyMagic/Packages/*.nupkg
+          ls -1 repos/LazyMagic/Packages/*.nupkg
 
-      # CI-only, deliberately NOT committed to the repo. A NuGet.Config inside a sub-repo is a
-      # documented hazard in this codebase: NuGet dedupes sources by resolved PATH and the nearest
-      # config wins the NAME, so a sub-repo config can silently rename a feed out from under a
-      # parent's packageSourceMapping. The repo therefore carries none, and CI writes exactly what
-      # CI needs. <clear/> drops the runner's inherited sources so resolution is deterministic.
+      # CI-only, deliberately NOT committed, and at the WORKSPACE ROOT rather than inside Lz.
+      # A NuGet.Config inside a sub-repo is a documented hazard in this codebase: NuGet dedupes
+      # sources by resolved PATH and the nearest config wins the NAME, so a sub-repo config can
+      # silently rename a feed out from under a parent's packageSourceMapping. Writing it at the
+      # root is both the safe side of that hazard and where a real workspace keeps it — and the
+      # lane tool below reads the feed list from this same file, so the tool and restore cannot
+      # disagree about which feeds exist. <clear/> drops the runner's inherited sources.
       - name: write the CI NuGet.Config
-        working-directory: Lz
         shell: bash
         run: |
           cat > NuGet.Config <<'XML'
@@ -123,12 +152,37 @@ jobs:
             <packageSources>
               <clear />
               <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
-              <add key="LazyMagicLocal" value="../LazyMagic/Packages" />
+              <add key="LazyMagicLocal" value="repos/LazyMagic/Packages" />
             </packageSources>
           </configuration>
           XML
 
+      # Pin the templates at the LazyMagic just built, instead of at a literal that cannot track a
+      # derived version. This is the same local lane a developer's build.ps1 uses, driven the same
+      # way: the tool scans the feeds named in the NuGet.Config above and writes one property per
+      # package id into Packages.Local.props at the workspace root, which
+      # ProjectTemplates/Directory.Packages.props imports beneath its committed defaults.
+      #
+      # Run from SOURCE rather than as the `lz` CLI: `lz` resolves Lz.Cli out of repos/Lz/Packages,
+      # which does not exist on a fresh runner. Lz.Cli can be run from source precisely because it
+      # takes nothing from a first-party feed — only sibling ProjectReferences and System.CommandLine.
+      #
+      # -p:SolutionDir is mandatory, not tidiness: Lz's projects import
+      # $(SolutionDir)CommonPackageHandling.targets and this repo has no Directory.Build.props to
+      # supply it, so a per-project build fails MSB4019. The .slnx sets it, a bare csproj does not.
+      #
+      # The tool REFUSES to write an empty override, so a LazyMagic build that silently produced
+      # nothing fails here, loudly, instead of falling through to the stale defaults and testing
+      # the wrong framework.
+      - name: pin the templates at the LazyMagic just built (local lane)
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root\repos\Lz\" -- packages mode local --root "$root"
+          if ($LASTEXITCODE -ne 0) { throw "lane refresh failed - templates would restore stale pins" }
+          Get-Content Packages.Local.props
+
       # Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
       - name: test
-        working-directory: Lz
+        working-directory: repos/Lz
         run: dotnet test Lz.slnx -c Debug --filter "Category!=Integration"
