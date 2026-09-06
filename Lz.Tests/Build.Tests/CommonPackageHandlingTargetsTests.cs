@@ -611,3 +611,81 @@ public class PackNamingTests : IClassFixture<PackNamingScratchBuild>
         Assert.True(File.Exists(Path.Combine(_b.Feed, $"{PackNamingScratchBuild.PackageId}.{PackNamingScratchBuild.FileVersion}.nupkg")));
     }
 }
+
+/// <summary>
+/// The copy reconstructs pack's file name, so it models NuGet's normalization and can be incomplete.
+/// These pin both halves of that bargain: the rules that ARE modelled must produce the name pack
+/// writes, and anything that is not must fail the build loudly rather than silently leaving the feed
+/// on stale bytes. Measured 2026-09-05 against the real targets: 1.2 -&gt; pack writes 1.2.0,
+/// 1.0.010 -&gt; pack writes 1.0.10.
+/// </summary>
+public class PackVersionNormalizationTests
+{
+    private const string Id = "Lz.Scratch.Norm";
+
+    private static (int ExitCode, string Output, string[] Feed, string[] Bin) Build(string version)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "lz-norm-" + Guid.NewGuid().ToString("N")[..8]);
+        var proj = Path.Combine(root, "proj");
+        var feed = Path.Combine(root, "feed");
+        Directory.CreateDirectory(proj);
+        Directory.CreateDirectory(feed);
+        try
+        {
+            File.WriteAllText(Path.Combine(proj, "Class1.cs"), "namespace Scratch; public class Class1 { }");
+            var projPath = Path.Combine(proj, "Scratch.csproj");
+            File.WriteAllText(projPath, $@"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>{Id}</AssemblyName>
+    <SolutionDir>{PackageHandlingScratchBuild.FindLzRepoRoot()}{Path.DirectorySeparatorChar}</SolutionDir>
+  </PropertyGroup>
+  <Import Project=""$(SolutionDir)CommonPackageHandling.targets"" />
+  <PropertyGroup>
+    <Version>{version}</Version>
+    <PackageVersion>{version}</PackageVersion>
+  </PropertyGroup>
+</Project>
+");
+            var (exit, output) = PackageHandlingScratchBuild.RunDotnet(proj,
+                "build", projPath, "-nologo", "-v:m", $"-p:PackageRepoFolder={feed}");
+            var bin = Path.Combine(proj, "bin", "Debug");
+            return (exit, output,
+                Directory.GetFiles(feed, "*.nupkg").Select(Path.GetFileName).ToArray()!,
+                Directory.Exists(bin) ? Directory.GetFiles(bin, "*.nupkg").Select(Path.GetFileName).ToArray()! : Array.Empty<string>());
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Theory]
+    [InlineData("1.2.3", "1.2.3")]
+    [InlineData("1.2", "1.2.0")]                              // padded to three parts
+    [InlineData("3.2.1.0", "3.2.1")]                          // a fourth part of .0 dropped
+    [InlineData("7.7.7-beta.1+gdeadbee", "7.7.7-beta.1")]     // build metadata dropped
+    [InlineData("2.0.0-Rc.1", "2.0.0-Rc.1")]                  // prerelease case preserved
+    public void TheModelledRulesProduceTheNamePackWrites(string version, string expected)
+    {
+        var r = Build(version);
+
+        Assert.True(r.ExitCode == 0, r.Output);
+        Assert.Equal(new[] { $"{Id}.{expected}.nupkg" }, r.Bin.Where(f => !f.EndsWith(".snupkg")).ToArray());
+        Assert.Contains($"{Id}.{expected}.nupkg", r.Feed);
+    }
+
+    [Fact]
+    public void AnUnmodelledVersionFailsTheBuild_RatherThanSilentlyLeavingTheFeedStale()
+    {
+        // NuGet strips leading zeros; this reconstruction does not. The point is not that it should
+        // — it is that the miss must be loud. As a Warning this build was green, exit 0, with the
+        // feed still serving whatever it held before.
+        var r = Build("1.0.010");
+
+        Assert.False(r.ExitCode == 0, "an unmodelled version must fail the build:" + Environment.NewLine + r.Output);
+        Assert.Contains("Pack produced no", r.Output);
+        Assert.Contains($"{Id}.1.0.10.nupkg", r.Bin);   // what pack actually wrote
+        Assert.Empty(r.Feed);
+    }
+}
