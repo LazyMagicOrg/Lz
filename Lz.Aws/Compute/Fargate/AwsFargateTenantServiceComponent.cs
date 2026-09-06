@@ -67,6 +67,7 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
     public IServiceOutputs Deploy(
         string serviceName,
         ServiceDefinition definition,
+        SystemConfig systemConfig,
         TenantConfig tenantConfig,
         INetworkOutputs network,
         IComputeEnvironmentOutputs compute,
@@ -102,14 +103,16 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
                 $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{ecrName}",
                 "latest", resolvedDigest, imagePin));
 
-        // Resolve effective Fargate sizing — prefers Fargate: block on tenant,
-        // then system; then FargateConfig defaults (the legacy pre-Fargate YAML
-        // fallback was removed in 0.11.0)
-        // that predate the Fargate alias.
-        // SystemConfig isn't available here, so construct a merger call with
-        // an empty system and let the tenant-side override-or-fallback run.
-        var fargate = AwsConfigMerger.GetEffectiveFargateConfig(
-            new AwsSystemConfig(), tenantConfig);
+        // Resolve effective Fargate settings — tenant's Fargate: block, then the system's, then
+        // FargateConfig defaults (the legacy pre-Fargate YAML fallback was removed in 0.11.0).
+        //
+        // This passed `new AwsSystemConfig()` until 2026-09-06, which silently deleted the middle
+        // step: the merger is `tenant ?? system ?? default`, so an empty system half collapses it to
+        // `tenant ?? default` and every system-level Fargate value was read by nothing. It went
+        // unnoticed because on every workspace on this machine the system block's values happen to
+        // equal the class defaults, making it indistinguishable from its own absence — with three
+        // exceptions, all `LogRetentionDays: 7`, which were quietly getting 3.
+        var fargate = AwsConfigMerger.GetEffectiveFargateConfig(systemConfig, tenantConfig);
 
         var cpu = container.Cpu > 0 ? container.Cpu : fargate.Cpu;
         var memory = container.Memory > 0 ? container.Memory : fargate.Memory;
@@ -591,12 +594,51 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         //             ECS Exec enabled for SSM break-glass.
         // =====================================================================
 
-        var ecsService = new Service($"{prefix}-service", new ServiceArgs
+        // Alarm-backed rollback. The circuit breaker configured below fires only when a task
+        // fails to START or fails its health check; a container that boots, answers the health path
+        // and then 5xx-es on every real request is, to the breaker, a successful deployment. When
+        // the knob is set, ECS watches this alarm for the duration of a deployment and rolls back on
+        // it as well. Absent, no alarm is created and no Alarms input is set at all.
+        var alarmDecision = DeploymentAlarmPolicy.ForTenantService(fargate);
+        MetricAlarm? deploymentAlarm = null;
+        if (alarmDecision.Enabled)
+        {
+            deploymentAlarm = new MetricAlarm($"{prefix}-deploy-5xx", new MetricAlarmArgs
+            {
+                Name = $"{prefix}-deploy-5xx",
+                AlarmDescription =
+                    "ECS deployment gate on target-group 5xx. This is an ACTUATOR: it rolls a "
+                    + "deployment back and is deliberately not subscribed to any topic.",
+                Namespace = "AWS/ApplicationELB",
+                MetricName = "HTTPCode_Target_5XX_Count",
+                Statistic = "Sum",
+                Period = 60,
+                EvaluationPeriods = 1,
+                Threshold = alarmDecision.Target5xxPerMinute,
+                ComparisonOperator = "GreaterThanThreshold",
+                // No traffic must never read as failure, or every quiet deployment would roll back.
+                TreatMissingData = "notBreaching",
+                Dimensions =
+                {
+                    { "TargetGroup", targetGroup.ArnSuffix },
+                    // Throws rather than yielding an empty dimension: an alarm whose dimensions
+                    // match no metric sits in INSUFFICIENT_DATA and, under notBreaching, can never
+                    // fire - a guard that exists and does nothing.
+                    { "LoadBalancer", networkOutputs.AlbArn.Apply(DeploymentAlarmPolicy.LoadBalancerDimension) },
+                },
+                Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
+            }, new CustomResourceOptions { Parent = this });
+        }
+
+        var ecsServiceArgs = new ServiceArgs
         {
             Name = prefix,
             Cluster = computeOutputs.ClusterArn,
             TaskDefinition = taskDef.Arn,
-            DesiredCount = 1,
+            // Was the literal 1 until 2026-09-06, so FargateConfig.DesiredCount was a knob nothing
+            // read. Every config on this machine sets 1, so this is a no-op today — it makes the
+            // documented setting real rather than changing any current deployment.
+            DesiredCount = fargate.DesiredCount,
             LaunchType = "FARGATE",
             // SSM Session Manager / ECS Exec break-glass. false == the provider
             // default, so when the flag is OFF this is byte-identical to omitting
@@ -630,7 +672,21 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
                 Rollback = true,
             },
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
-        }, new CustomResourceOptions { Parent = this });
+        };
+
+        // Assigned rather than initialised so that the un-opted-in path never touches the property.
+        if (alarmDecision.Enabled)
+        {
+            ecsServiceArgs.Alarms = new ServiceAlarmsArgs
+            {
+                AlarmNames = { deploymentAlarm!.Name },
+                Enable = true,
+                Rollback = true,
+            };
+        }
+
+        var ecsService = new Service($"{prefix}-service", ecsServiceArgs,
+            new CustomResourceOptions { Parent = this });
 
         return new AwsFargateTenantServiceOutputs
         {

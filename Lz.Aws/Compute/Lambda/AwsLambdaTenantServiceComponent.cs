@@ -49,7 +49,7 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
     }
 
     public IServiceOutputs Deploy(
-        string serviceName, ServiceDefinition definition, TenantConfig tenantConfig,
+        string serviceName, ServiceDefinition definition, SystemConfig systemConfig, TenantConfig tenantConfig,
         INetworkOutputs network, IComputeEnvironmentOutputs compute,
         IDatabaseOutputs database, ITenantDataOutputs tenantData)
     {

@@ -1015,7 +1015,7 @@ public class SystemDeployment
             foreach (var svc in _system.ServiceLayerServices)
             {
                 var svcOutputs = tenantServiceComponent.Deploy(
-                    svc.Name, svc, tenantConfig,
+                    svc.Name, svc, _config, tenantConfig,
                     foundation.Network, foundation.Compute,
                     foundation.Database, tenantDataOutputs);
                 exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;
@@ -1026,7 +1026,7 @@ public class SystemDeployment
             foreach (var svc in _system.HostLayerServices)
             {
                 var svcOutputs = tenantServiceComponent.Deploy(
-                    svc.Name, svc, tenantConfig,
+                    svc.Name, svc, _config, tenantConfig,
                     foundation.Network, foundation.Compute,
                     foundation.Database, tenantDataOutputs);
                 exports[$"{tenantKey}_{svc.Name}_serviceId"] = svcOutputs.ServiceId;

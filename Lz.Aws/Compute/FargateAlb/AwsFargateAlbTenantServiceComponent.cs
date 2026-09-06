@@ -53,6 +53,7 @@ public class AwsFargateAlbTenantServiceComponent : ComponentResource, ITenantSer
     public IServiceOutputs Deploy(
         string serviceName,
         ServiceDefinition definition,
+        SystemConfig systemConfig,
         TenantConfig tenantConfig,
         INetworkOutputs network,
         IComputeEnvironmentOutputs compute,
