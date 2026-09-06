@@ -11,13 +11,30 @@
     <NoWarn>$(NoWarn);NU1507</NoWarn>
   </PropertyGroup>
 
+  <!--
+    LOCAL LANE. Each first-party pin below reads a property whose DEFAULT is the version this
+    repo is committed against - the published lane, and what a fresh clone or CI restores with.
+    `lz packages mode local` writes the override imported underneath, redirecting those
+    properties at whatever the workspace feeds hold; deleting it returns to the published lane.
+
+    THE IMPORT MUST STAY BELOW THESE DEFAULTS. Moved above them the defaults win, restore still
+    succeeds, and the wrong version is used with no diagnostic anywhere - measured, not assumed.
+  -->
+  <PropertyGroup>
+    <PkgVer_LazyMagic_Service_Authorization>3.0.18</PkgVer_LazyMagic_Service_Authorization>
+    <PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>3.0.18</PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>
+    <PkgVer_LazyMagic_Service_DynamoDBRepo>3.0.18</PkgVer_LazyMagic_Service_DynamoDBRepo>
+    <PkgVer_LazyMagic_Service_Shared>3.0.18</PkgVer_LazyMagic_Service_Shared>
+    <PkgVer_LazyMagic_Shared>3.0.18</PkgVer_LazyMagic_Shared>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)../../../Packages.Local.props" Condition="Exists('$(MSBuildThisFileDirectory)../../../Packages.Local.props')" />
   <ItemGroup>
     <!-- LazyMagic packages (resolved from the local feed, see NuGet.Config) -->
-    <PackageVersion Include="LazyMagic.Shared" Version="3.0.18" />
-    <PackageVersion Include="LazyMagic.Service.Shared" Version="3.0.18" />
-    <PackageVersion Include="LazyMagic.Service.Authorization" Version="3.0.18" />
-    <PackageVersion Include="LazyMagic.Service.DynamoDBRepo" Version="3.0.18" />
-    <PackageVersion Include="LazyMagic.Service.AwsLocalWebApiRoutingMiddleware" Version="3.0.18" />
+    <PackageVersion Include="LazyMagic.Shared" Version="$(PkgVer_LazyMagic_Shared)" />
+    <PackageVersion Include="LazyMagic.Service.Shared" Version="$(PkgVer_LazyMagic_Service_Shared)" />
+    <PackageVersion Include="LazyMagic.Service.Authorization" Version="$(PkgVer_LazyMagic_Service_Authorization)" />
+    <PackageVersion Include="LazyMagic.Service.DynamoDBRepo" Version="$(PkgVer_LazyMagic_Service_DynamoDBRepo)" />
+    <PackageVersion Include="LazyMagic.Service.AwsLocalWebApiRoutingMiddleware" Version="$(PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware)" />
   </ItemGroup>
 
   <ItemGroup>
