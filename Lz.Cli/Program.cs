@@ -125,6 +125,7 @@ class Program
         RegisterGetTestTenantCommand(rootCommand);
         RegisterReposCommand(rootCommand);
         RegisterCloneReposCommand(rootCommand);
+        RegisterPackagesCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
 
@@ -3304,6 +3305,107 @@ class Program
         }, envOpt, prettyOpt, htmlCardsOpt);
 
         root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // packages — the lane switch (MigrationPlan M3).
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// <c>lz packages mode local|published</c>. Local mode writes the gitignored override file that
+    /// redirects every consumer pin at what the workspace feeds actually hold; published mode
+    /// deletes it, so restore falls back to the committed pins.
+    ///
+    /// <para>The override file is mandatory rather than an optimisation: under derived versioning a
+    /// producer's version changes with every commit, so a committed pin cannot name it, and a float
+    /// cannot be fenced into a prerelease series.</para>
+    /// </summary>
+    private static void RegisterPackagesCommand(RootCommand root)
+    {
+        var packages = new Command("packages", "Switch the workspace between the local and published package lanes.");
+
+        var modeArg = new Argument<string>("mode", "local or published");
+        var rootOption = new Option<string?>("--root", "Workspace root (auto-detected if omitted).");
+
+        var mode = new Command("mode", "Write or remove the local-lane package override file.");
+        mode.AddArgument(modeArg);
+        mode.AddOption(rootOption);
+        mode.SetHandler((modeValue, rootValue) =>
+        {
+            try
+            {
+                var workspace = rootValue ?? Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot();
+                var overridePath = Path.Combine(workspace, LocalOverrideFileName);
+
+                switch (modeValue.ToLowerInvariant())
+                {
+                    case "published":
+                        if (File.Exists(overridePath))
+                        {
+                            File.Delete(overridePath);
+                            Console.WriteLine($"packages: removed {LocalOverrideFileName} - restore now uses the committed pins.");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"packages: no {LocalOverrideFileName} to remove; already on the published lane.");
+                        }
+                        Environment.ExitCode = 0;
+                        return;
+
+                    case "local":
+                        WriteLocalOverrides(workspace, overridePath);
+                        Environment.ExitCode = 0;
+                        return;
+
+                    default:
+                        Console.Error.WriteLine($"packages mode: expected 'local' or 'published', got '{modeValue}'.");
+                        Environment.ExitCode = 1;
+                        return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"lz packages mode: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, modeArg, rootOption);
+
+        packages.AddCommand(mode);
+        root.AddCommand(packages);
+    }
+
+    private const string LocalOverrideFileName = "Packages.Local.props";
+
+    private static void WriteLocalOverrides(string workspace, string overridePath)
+    {
+        var configPath = Directory.EnumerateFiles(workspace, "*uget.[Cc]onfig").FirstOrDefault()
+                         ?? Path.Combine(workspace, "NuGet.Config");
+        if (!File.Exists(configPath))
+            throw new FileNotFoundException($"No NuGet.Config at the workspace root ({workspace}); cannot discover the feeds.");
+
+        var feeds = Lz.Core.PackageLane.LocalFeeds.FromNuGetConfig(File.ReadAllText(configPath));
+        var found = Lz.Core.PackageLane.LocalFeeds.Scan(workspace, feeds);
+        var (chosen, ambiguous) = Lz.Core.PackageLane.LocalPackageOverrides.Resolve(found);
+
+        // Refuse to write an empty override. An empty file silently means "published lane" while
+        // looking like the local one was set up, and the usual cause is that nothing has been built
+        // yet - which is worth saying rather than papering over.
+        if (chosen.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"the workspace feeds hold no packages ({string.Join(", ", feeds)}). " +
+                "Build the producers first - an empty override file would look like the local lane " +
+                "while behaving as the published one.");
+        }
+
+        var text = Lz.Core.PackageLane.LocalPackageOverrides.Render(chosen, "lz packages mode local");
+        var unchanged = File.Exists(overridePath) && File.ReadAllText(overridePath) == text;
+        if (!unchanged) File.WriteAllText(overridePath, text);
+
+        Console.WriteLine($"packages: {LocalOverrideFileName} {(unchanged ? "unchanged" : "written")} - " +
+                          $"{chosen.Count} package(s) from {feeds.Count} feed(s).");
+        foreach (var note in ambiguous)
+            Console.WriteLine($"  several versions present, {note}");
     }
 
     // ---------------------------------------------------------------

@@ -549,7 +549,12 @@ public class PackagingTargetsReplicationTests
     {
         var m = Regex.Match(text, $@"<Target Name=""{Regex.Escape(name)}"".*?</Target>", RegexOptions.Singleline);
         Assert.True(m.Success, $"target {name} was not found in a copy");
-        return m.Value;
+        // Normalise line endings. They are a git checkout artefact on Windows, not drift: with
+        // core.autocrlf on, whichever of the four files git most recently materialised comes back
+        // CRLF while the others stay LF, so a raw comparison fails for a reason that has nothing to
+        // do with the targets. Observed 2026-09-06 - committing a version bump to LazyMagic turned
+        // its copy CRLF and reddened all three cases at once.
+        return m.Value.Replace("\r\n", "\n");
     }
 
 
