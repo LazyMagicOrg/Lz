@@ -346,11 +346,13 @@ public sealed class CrossTargetingScratchBuild : IDisposable
     <TargetFrameworks>net10.0</TargetFrameworks>
     <AssemblyName>{Id}</AssemblyName>
     <SolutionDir>{lzRepoRoot}{Path.DirectorySeparatorChar}</SolutionDir>
-    <!-- Mirror how a real version tool integrates: Nerdbank.GitVersioning adds its target to BOTH
-         GenerateNuspecDependsOn and GetPackageVersionDependsOn (Nerdbank.GitVersioning.targets:16-23).
-         The second is the one pack consults before computing @(NuGetPackOutput); a tool that skips it
-         leaves pack predicting a file name it will not write, and the copy then fails. -->
-    <GetPackageVersionDependsOn>$(GetPackageVersionDependsOn);FakeVersionTool</GetPackageVersionDependsOn>
+    <!-- Mirror how a real version tool integrates: Nerdbank.GitVersioning registers its target in
+         BOTH GenerateNuspecDependsOn and GetPackageVersionDependsOn
+         (Nerdbank.GitVersioning.targets:16-23). GenerateNuspecDependsOn is the one that runs before
+         _CalculateInputsOutputsForPack, which is why @(NuGetPackOutput) is correct under NBGV and
+         wrong for a tool that only uses BeforeTargets=""GenerateNuspec"". -->
+    <GenerateNuspecDependsOn>FakeVersionTool;$(GenerateNuspecDependsOn)</GenerateNuspecDependsOn>
+    <GetPackageVersionDependsOn>FakeVersionTool;$(GetPackageVersionDependsOn)</GetPackageVersionDependsOn>
   </PropertyGroup>
   <Import Project=""$(SolutionDir)CommonPackageHandling.targets"" />
   <PropertyGroup>
@@ -503,22 +505,32 @@ public class PackagingTargetsReplicationTests
         Assert.Contains("No version could be determined", text);
     }
 
-    [Fact]
-    public void TheCopiesHaveNotDrifted()
+    /// <summary>
+    /// Every target the four copies share, compared verbatim. Not one contiguous span: the repos
+    /// legitimately differ BETWEEN these targets (LazyMagic carries a Newtonsoft.Json reference,
+    /// Service a project-reference packing target), so widening the slice to cover the copy and the
+    /// clean would fail on differences that are not drift.
+    /// </summary>
+    [Theory]
+    [InlineData("CopyPackage")]
+    [InlineData("CleanExistingPackages")]
+    [InlineData("DeleteSpecificPackage")]
+    public void TheSharedTargetsHaveNotDrifted(string target)
     {
-        // The blocks these tests care about, compared verbatim across whichever copies are present.
-        var blocks = Paths().Select(p => Block(File.ReadAllText(p))).ToList();
+        var blocks = Paths().Select(p => Target(File.ReadAllText(p), target)).ToList();
 
+        Assert.NotEmpty(blocks);
         Assert.All(blocks, b => Assert.Equal(blocks[0], b));
     }
 
-    private static string Block(string text)
+    private static string Target(string text, string name)
     {
-        var start = text.IndexOf("SKIPPED IN THE CROSS-TARGETING OUTER BUILD", StringComparison.Ordinal);
-        var end = text.IndexOf("</Target>", text.IndexOf("Could not evict", StringComparison.Ordinal), StringComparison.Ordinal);
-        Assert.True(start >= 0 && end > start, "the eviction block was not found in a copy");
-        return text[start..end];
+        var m = Regex.Match(text, $@"<Target Name=""{Regex.Escape(name)}"".*?</Target>", RegexOptions.Singleline);
+        Assert.True(m.Success, $"target {name} was not found in a copy");
+        return m.Value;
     }
+
+
 }
 
 /// <summary>
@@ -584,6 +596,16 @@ public class PackNamingTests : IClassFixture<PackNamingScratchBuild>
 {
     private readonly PackNamingScratchBuild _b;
     public PackNamingTests(PackNamingScratchBuild b) => _b = b;
+
+    [Fact]
+    public void TheFixtureReallyExercisesBothDivergences()
+    {
+        // The force of every assertion below lives in two consts. If someone "simplifies" them the
+        // suite would keep passing while testing nothing.
+        Assert.NotEqual(PackNamingScratchBuild.AssemblyName, PackNamingScratchBuild.PackageId);
+        Assert.Contains("+", PackNamingScratchBuild.PackageVersion);
+        Assert.DoesNotContain("+", PackNamingScratchBuild.FileVersion);
+    }
 
     [Fact]
     public void TheBuildSucceeds_EvenThoughTheFileNameIsNotAssemblyNameDotVersion()
@@ -661,6 +683,7 @@ public class PackVersionNormalizationTests
     }
 
     [Theory]
+    [InlineData("7.7.7.0+gdeadbee", "7.7.7")]                 // both rules at once, at copy level
     [InlineData("1.2.3", "1.2.3")]
     [InlineData("1.2", "1.2.0")]                              // padded to three parts
     [InlineData("3.2.1.0", "3.2.1")]                          // a fourth part of .0 dropped
