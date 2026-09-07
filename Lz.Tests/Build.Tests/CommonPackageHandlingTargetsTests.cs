@@ -479,40 +479,200 @@ public class CrossTargetingEvictionTests : IClassFixture<CrossTargetingScratchBu
 /// Lz copy is exercised by a build test — no workflow runs Lz.Tests against LazyMagic, Service or
 /// BaseAppLib. That is how a sentence claiming "every project in this repo is single-framework"
 /// reached LazyMagic, the one repo where it is false. These are text assertions, so they need no
-/// scaffold and no SDK: they only require the load-bearing lines to be present in whichever sibling
-/// working copies exist beside this one.
+/// scaffold and no SDK: they only need the load-bearing lines present in the working copies.
+///
+/// <para><b>WHAT CI ACTUALLY COVERS.</b> <c>lz-ci.yml</c> checks out exactly two repos — this one at
+/// <c>repos/Lz</c>, and the public <c>LazyMagicOrg/LazyMagic</c> at <c>repos/LazyMagic</c>. So on CI
+/// these theories cover the <b>Lz and LazyMagic copies and nothing else</b>; Service's and
+/// BaseAppLib's copies are verified only by a local run in a full workspace.</para>
+///
+/// <para><b>WHY CI CANNOT SIMPLY CHECK OUT THE OTHER TWO.</b> Service and BaseAppLib are PRIVATE
+/// <c>Scutara</c> repos, and this workflow runs in <c>LazyMagicOrg</c>, which holds no credential for
+/// them. The <c>scutara-ci</c> App is registered "Only on this account" precisely because every
+/// cross-org checkout it performs today is public (GitHubApp.md §1). Widening CI to four would mean
+/// re-registering that App as "Any account", installing it on LazyMagicOrg, and storing its private
+/// key as a secret on a PUBLIC repo — a permanent read path into eleven private repos, bought to
+/// widen a text assertion from two files to four. Deliberately not done, so the reduced coverage is
+/// permanent and has to be MANAGED rather than fixed.</para>
+///
+/// <para><b>HOW THAT IS MANAGED, AND WHAT IT REPLACES.</b> Until 2026-09-07 the data source yielded
+/// only files that happened to exist, so CI ran 2 cases per theory where a local run ran 4 — no
+/// skips, no warning, a green tick. That is the whole 4-test gap between a local run (570) and CI
+/// (566) on db7d249. It is an inert guard in its data-driven form: absent input produces no test
+/// case, and no test case is indistinguishable from a passing one. It also could not tell "Service
+/// is not checked out here" from "Service's copy was renamed and nobody noticed" — the second is
+/// exactly the drift these assertions exist to catch, and it read green too.
+///
+/// <see cref="Roster"/> is now a constant four, so the case count cannot shrink, and an absent copy
+/// must be <b>declared</b> rather than inferred:
+/// <list type="bullet">
+///   <item>copy present → checked, as before.</item>
+///   <item>copy absent, its repo checked out → <b>FAIL</b>. Renamed, moved or deleted.</item>
+///   <item>copy absent, its repo absent, and NOT named in <c>LZ_TARGETS_COPIES_ABSENT</c> →
+///   <b>FAIL</b>. This is the case that used to vanish.</item>
+///   <item>copy absent and named in <c>LZ_TARGETS_COPIES_ABSENT</c> → allowed. lz-ci.yml sets that
+///   variable to <c>Service,BaseAppLib</c>, in plain sight beside the checkout steps that cause it.</item>
+///   <item>copy named in <c>LZ_TARGETS_COPIES_ABSENT</c> but actually PRESENT → <b>FAIL</b>. A stale
+///   declaration is caught from the other side, so the variable cannot outlive its reason.</item>
+/// </list>
+/// The declaration is the point: reduced coverage becomes a reviewed line in a workflow file that
+/// someone had to write, instead of an accident of the filesystem that nothing records.
+///
+/// A useful side effect, and the cheapest way to check this stayed true: the case count no longer
+/// depends on what is on disk, so CI and a full local workspace report the SAME suite total —
+/// measured 2026-09-07, both 577, where they were 566 and 570 before. If they diverge again, some
+/// suite has started varying with the checkout.</para>
+///
+/// <para><b>WHY NOT A SKIP.</b> A dynamically-skipped case would be the natural fit — the run summary
+/// would go from <c>Passed: 12</c> to <c>Passed: 8, Skipped: 4</c> and say so in one line. It does not
+/// work on the pinned toolchain. Both halves of that were measured on the assemblies actually
+/// restored here, not assumed: the shipped <c>xunit.assert.dll</c> (2.9.2) exposes no
+/// <c>Assert.Skip</c> at all — reflection over <c>Xunit.Assert</c> returns no such member, and the
+/// call does not compile — while <c>Xunit.Sdk.SkipException.ForSkip</c> IS public; and throwing that
+/// exception is reported by xunit.runner.visualstudio 2.8.2 under <c>dotnet test</c> as a plain
+/// FAILURE, not a skip (measured 2026-09-07 with the two repos hidden: <c>Failed: 7, Skipped: 0</c>).
+/// So there is no third outcome available here — a case either passes or fails — which is what forces
+/// the declaration below rather than a softer report. Worth re-testing if Lz.Tests ever moves off
+/// xunit 2.9.2; until then this is the loudest option the runner allows.</para>
 /// </summary>
 public class PackagingTargetsReplicationTests
 {
-    /// <summary>The sibling copies, skipped when the working copy is not beside this one.</summary>
-    public static IEnumerable<string> Paths()
+    /// <summary>
+    /// Comma-separated repo names whose copy this environment is KNOWN not to have. Set by lz-ci.yml.
+    /// Anything absent and not named here fails.
+    /// </summary>
+    public const string AbsenceDeclarationVariable = "LZ_TARGETS_COPIES_ABSENT";
+
+    /// <summary>One replicated copy: the repo that owns it, and the file inside it.</summary>
+    public readonly record struct Copy(string Repo, string File)
     {
-        var repos = Directory.GetParent(PackageHandlingScratchBuild.FindLzRepoRoot())!.FullName;
-        foreach (var rel in new[]
-        {
-            @"Lz\CommonPackageHandling.targets",
-            @"LazyMagic\CommonPackageHandling.targets",
-            @"Service\CommonPackageHandling.targets",
-            @"BaseAppLib\MakePackage.targets",
-        })
-        {
-            var path = Path.Combine(repos, rel);
-            if (File.Exists(path)) yield return path;
-        }
+        public override string ToString() => Path.Combine(Repo, File);
     }
 
-    public static TheoryData<string> Copies()
+    /// <summary>
+    /// THE FULL EXPECTED ROSTER — a constant, deliberately. Adding a fifth producer means adding a
+    /// line here, and until then that producer's copy is uncovered everywhere and nothing says so.
+    /// </summary>
+    public static readonly Copy[] Roster =
+    [
+        new("Lz",         "CommonPackageHandling.targets"),
+        new("LazyMagic",  "CommonPackageHandling.targets"),
+        new("Service",    "CommonPackageHandling.targets"),
+        new("BaseAppLib", "MakePackage.targets"),
+    ];
+
+    /// <summary>Every roster entry, always — present or not. Four cases, locally and on CI alike.</summary>
+    public static TheoryData<Copy> Copies()
     {
-        var data = new TheoryData<string>();
-        foreach (var p in Paths()) data.Add(p);
+        var data = new TheoryData<Copy>();
+        foreach (var c in Roster) data.Add(c);
         return data;
+    }
+
+    private static string LzRoot => PackageHandlingScratchBuild.FindLzRepoRoot();
+
+    /// <summary>Where the repo owning this copy would live, checked out or not.</summary>
+    public static string RepoDir(Copy c)
+        // Lz's own root is KNOWN rather than guessed from a folder name: a clone that is not
+        // literally named "Lz" — a worktree, a second clone, `git clone <url> lz-fix` — still
+        // resolves here, where the sibling-name form silently found nothing and dropped the one
+        // copy this suite is certain of.
+        => c.Repo == "Lz" ? LzRoot : Path.Combine(Directory.GetParent(LzRoot)!.FullName, c.Repo);
+
+    public static string CopyPath(Copy c) => Path.Combine(RepoDir(c), c.File);
+
+    /// <summary>The repos this environment declares it does not have.</summary>
+    public static IReadOnlySet<string> DeclaredAbsent()
+        => DeclaredAbsent(Environment.GetEnvironmentVariable(AbsenceDeclarationVariable));
+
+    /// <summary>Parsing split out from the environment read, so it can be tested directly.</summary>
+    public static IReadOnlySet<string> DeclaredAbsent(string? value)
+        => new HashSet<string>(
+            (value ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The text of one copy, or a failure naming which of the three absences this is. Returns null
+    /// only for a copy this environment has DECLARED absent — the one case a caller may pass over.
+    /// See the class remarks for why absence is declared rather than inferred.
+    /// </summary>
+    private static string? ReadDeclaredCopy(Copy c)
+    {
+        var repo = RepoDir(c);
+        var path = CopyPath(c);
+        if (File.Exists(path)) return File.ReadAllText(path);
+
+        Assert.False(Directory.Exists(repo),
+            $"{repo} IS checked out, but {c} is missing from it. The replicated targets file was "
+            + "renamed, moved or deleted — that is the drift this suite exists to catch. Restore the "
+            + $"file, or update {nameof(Roster)} in this file.");
+
+        Assert.True(DeclaredAbsent().Contains(c.Repo),
+            $"{c} is not covered by this run: {repo} is not checked out, and {c.Repo} is not named in "
+            + $"{AbsenceDeclarationVariable}. Either check the repo out beside this one, or declare "
+            + $"the gap by setting {AbsenceDeclarationVariable} (lz-ci.yml sets it to "
+            + "\"Service,BaseAppLib\", which is exactly the coverage that workflow can have). "
+            + "Silently running fewer cases is what this assertion replaced.");
+
+        return null;
+    }
+
+    /// <summary>
+    /// The roster, checked against what this environment declares — in BOTH directions, so neither
+    /// the coverage nor the declaration can drift without a red test. This is the one place the
+    /// count is asserted rather than implied by a case total nobody reads.
+    /// </summary>
+    [Fact]
+    public void TheCoverageRosterMatchesWhatThisEnvironmentDeclares()
+    {
+        var declared = DeclaredAbsent();
+        var covered = Roster.Where(c => File.Exists(CopyPath(c))).ToList();
+        var report = Environment.NewLine
+            + $"covered: {string.Join(", ", covered)}" + Environment.NewLine
+            + $"{AbsenceDeclarationVariable}: "
+            + (declared.Count == 0 ? "(unset)" : string.Join(", ", declared));
+
+        // A copy missing from a repo that IS here is drift, never a coverage gap.
+        var drifted = Roster
+            .Where(c => !File.Exists(CopyPath(c)) && Directory.Exists(RepoDir(c)))
+            .ToList();
+        Assert.True(drifted.Count == 0,
+            "a checked-out repo has lost its replicated copy: " + string.Join(", ", drifted) + report);
+
+        // Absent and undeclared: the case that used to disappear without trace.
+        var undeclared = Roster
+            .Where(c => !File.Exists(CopyPath(c)) && !declared.Contains(c.Repo))
+            .ToList();
+        Assert.True(undeclared.Count == 0,
+            "these copies are not covered and the gap is not declared: "
+            + string.Join(", ", undeclared) + report);
+
+        // Declared absent but actually present: a stale declaration would let a REAL gap hide behind
+        // it later, so the variable is not allowed to outlive its reason.
+        var stale = declared.Where(r => Roster.Any(c => c.Repo == r && File.Exists(CopyPath(c)))).ToList();
+        Assert.True(stale.Count == 0,
+            $"{AbsenceDeclarationVariable} names repos that ARE checked out here: "
+            + string.Join(", ", stale) + ". Remove them from the declaration." + report);
+
+        // Every declared name must be a roster repo — a typo would otherwise excuse nothing while
+        // looking like it excused something.
+        var unknown = declared.Where(r => !Roster.Any(c => c.Repo == r)).ToList();
+        Assert.True(unknown.Count == 0,
+            $"{AbsenceDeclarationVariable} names repos that are not on the roster: "
+            + string.Join(", ", unknown) + report);
+
+        // The floor: two copies is what lz-ci has and the least a run may compare. One copy compares
+        // nothing against anything, which is how TheSharedTargetsHaveNotDrifted below would pass
+        // while checking a single file against itself.
+        Assert.True(covered.Count >= 2, "fewer than two copies are visible." + report);
     }
 
     [Theory]
     [MemberData(nameof(Copies))]
-    public void EveryCopyGuardsTheCrossTargetingOuterPass(string path)
+    public void EveryCopyGuardsTheCrossTargetingOuterPass(Copy copy)
     {
-        var text = File.ReadAllText(path);
+        var text = ReadDeclaredCopy(copy);
+        if (text is null) return;   // declared absent; the roster test above pins the declaration
 
         Assert.Contains("<Target Name=\"DeletePackage\"", text);
         Assert.Contains("Condition=\"'$(IsCrossTargetingBuild)' != 'true'\"", text);
@@ -520,9 +680,10 @@ public class PackagingTargetsReplicationTests
 
     [Theory]
     [MemberData(nameof(Copies))]
-    public void EveryCopyRefusesToEvictWithNoVersion(string path)
+    public void EveryCopyRefusesToEvictWithNoVersion(Copy copy)
     {
-        var text = File.ReadAllText(path);
+        var text = ReadDeclaredCopy(copy);
+        if (text is null) return;   // declared absent; the roster test above pins the declaration
 
         // Both delete branches, and the warning that replaces them.
         Assert.Equal(2, Regex.Matches(text, @"'\$\(_EvictVersion\)' != ''\s+AND\s+Exists\('\$\(PackageCacheFolder\)'\)").Count);
@@ -534,6 +695,11 @@ public class PackagingTargetsReplicationTests
     /// legitimately differ BETWEEN these targets (LazyMagic carries a Newtonsoft.Json reference,
     /// Service a project-reference packing target), so widening the slice to cover the copy and the
     /// clean would fail on differences that are not drift.
+    ///
+    /// This one compares copies AGAINST EACH OTHER, so it works on the present set rather than one
+    /// entry at a time — but it runs the same per-entry rules over the whole roster first, so an
+    /// undeclared absence reddens it here exactly as it does above, and it names the copies it
+    /// actually compared so a green tick on two is never mistaken for a green tick on four.
     /// </summary>
     [Theory]
     [InlineData("CopyPackage")]
@@ -541,10 +707,16 @@ public class PackagingTargetsReplicationTests
     [InlineData("DeleteSpecificPackage")]
     public void TheSharedTargetsHaveNotDrifted(string target)
     {
-        var blocks = Paths().Select(p => Target(File.ReadAllText(p), target)).ToList();
+        var blocks = Roster
+            .Select(c => (Copy: c, Text: ReadDeclaredCopy(c)))
+            .Where(t => t.Text is not null)
+            .Select(t => (t.Copy, Block: Target(t.Text!, target)))
+            .ToList();
 
-        Assert.NotEmpty(blocks);
-        Assert.All(blocks, b => Assert.Equal(blocks[0], b));
+        var compared = string.Join(", ", blocks.Select(b => b.Copy));
+        Assert.True(blocks.Count >= 2, $"nothing to compare {target} against; copies seen: {compared}");
+        Assert.All(blocks, b => Assert.True(b.Block == blocks[0].Block,
+            $"{target} has drifted in {b.Copy} away from {blocks[0].Copy}. Copies compared: {compared}"));
     }
 
     private static string Target(string text, string name)
@@ -558,8 +730,47 @@ public class PackagingTargetsReplicationTests
         // its copy CRLF and reddened all three cases at once.
         return m.Value.Replace("\r\n", "\n");
     }
+}
 
+/// <summary>
+/// The declaration parser itself, which is load-bearing: every "this gap is allowed" verdict above
+/// runs through it, and a parser that quietly matched nothing would turn the whole roster check back
+/// into the permissive thing it replaced.
+/// </summary>
+public class AbsenceDeclarationTests
+{
+    private static IReadOnlySet<string> Parse(string? v)
+        => PackagingTargetsReplicationTests.DeclaredAbsent(v);
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(",, ,")]
+    public void NothingDeclaredExcusesNothing(string? value)
+        => Assert.Empty(Parse(value));
+
+    [Fact]
+    public void TheCiDeclarationNamesExactlyTheTwoPrivateRepos()
+    {
+        // The literal lz-ci.yml sets. If that workflow's checkout list changes, this is the line that
+        // has to change with it.
+        var declared = Parse("Service,BaseAppLib");
+        Assert.Equal(2, declared.Count);
+        Assert.Contains("Service", declared);
+        Assert.Contains("BaseAppLib", declared);
+        Assert.DoesNotContain("LazyMagic", declared);
+    }
+
+    [Fact]
+    public void SurroundingWhitespaceAndCaseDoNotDefeatTheDeclaration()
+    {
+        // A YAML author writing "Service, BaseAppLib" must not get a red gate for the space, and a
+        // case mismatch must not silently fail to excuse a gap it was meant to excuse.
+        var declared = Parse(" service ,  BASEAPPLIB ");
+        Assert.Contains("Service", declared);
+        Assert.Contains("BaseAppLib", declared);
+    }
 }
 
 /// <summary>

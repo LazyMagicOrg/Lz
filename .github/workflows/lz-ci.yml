@@ -258,6 +258,32 @@ jobs:
           exit 0
 
       # Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
+      #
+      # LZ_TARGETS_COPIES_ABSENT DECLARES THIS RUN'S REDUCED COVERAGE, and is required rather than
+      # decorative. PackagingTargetsReplicationTests checks the four hand-replicated copies of the
+      # packaging targets — Lz, LazyMagic, Service, BaseAppLib — and this job checks out only the
+      # first two: Service and BaseAppLib are PRIVATE Scutara repos and this workflow runs in
+      # LazyMagicOrg, which holds no credential for them (the scutara-ci App is registered "Only on
+      # this account"; every cross-org checkout above is public and needs no token). Getting them
+      # here would mean putting that App's private key on a public repo, which is not worth widening
+      # a text assertion from two files to four.
+      #
+      # Until 2026-09-07 that gap was INVISIBLE: the theory's data source yielded only files that
+      # existed, so this job ran 2 cases where a local run ran 4, with no skips and a green tick —
+      # the whole 4-test difference between 570 locally and 566 here. Naming the gap makes it a
+      # reviewed line instead of an accident, and the check runs in both directions: an absence that
+      # is NOT named here fails the suite, and a name listed here whose repo IS present fails it too,
+      # so this variable cannot outlive its reason.
+      #
+      # The offset is gone as a result, which is the cheap way to check this stayed true: the case
+      # count no longer depends on what is on disk, so this job and a full local workspace now report
+      # the SAME total. Measured 2026-09-07, both 577. A future divergence means some other suite has
+      # started varying with the checkout.
+      #
+      # If this job ever checks out Service or BaseAppLib, drop that name from here — the suite will
+      # tell you to.
       - name: test
         working-directory: repos/Lz
+        env:
+          LZ_TARGETS_COPIES_ABSENT: Service,BaseAppLib
         run: dotnet test Lz.slnx -c Debug --filter "Category!=Integration"
