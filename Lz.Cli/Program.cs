@@ -3399,6 +3399,34 @@ class Program
         }, rootOption);
         packages.AddCommand(status);
 
+        // ---------------------------------------------------------------
+        // packages sync - the counterpart to `mode`, and the riskier one: `mode`
+        // writes a gitignored override, this edits TRACKED files. A committed
+        // default is only read in PUBLISHED mode, i.e. by a fresh clone or CI, so
+        // getting it wrong is invisible here and visible to everyone else.
+        // ---------------------------------------------------------------
+        var sync = new Command("sync",
+            "Re-baseline each consumer's committed defaults onto what the producers currently mint.");
+        sync.AddOption(rootOption);
+        var dryRunOption = new Option<bool>("--dry-run", () => false,
+            "Report what would change and write nothing.");
+        sync.AddOption(dryRunOption);
+        sync.SetHandler((string? rootValue, bool dryRun) =>
+        {
+            try
+            {
+                var workspace = rootValue ?? Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot();
+                SyncPackageLane(workspace, dryRun);
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"lz packages sync: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, rootOption, dryRunOption);
+        packages.AddCommand(sync);
+
         root.AddCommand(packages);
     }
 
@@ -3481,14 +3509,8 @@ class Program
         // exactly the thing worth noticing, and a hardcoded roster could not see it.
         Console.WriteLine();
         Console.WriteLine("consumers");
-        var candidates = Directory.EnumerateFiles(workspace, "Directory.Packages.props", SearchOption.AllDirectories)
-            .Concat(Directory.EnumerateFiles(workspace, "*.csproj", SearchOption.AllDirectories))
-            .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                     && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
-
         var seen = 0;
-        foreach (var path in candidates)
+        foreach (var path in DiscoverConsumers(workspace))
         {
             string text;
             try { text = File.ReadAllText(path); } catch { continue; }
@@ -3536,6 +3558,92 @@ class Program
             }
         }
         if (seen == 0) Console.WriteLine("  (none found)");
+    }
+
+    /// <summary>
+    /// Every file that carries lane defaults. Discovered rather than listed: a consumer that lost
+    /// its wiring is exactly the thing worth noticing, and a hardcoded roster could not see it.
+    /// </summary>
+    private static IEnumerable<string> DiscoverConsumers(string workspace) =>
+        Directory.EnumerateFiles(workspace, "Directory.Packages.props", SearchOption.AllDirectories)
+            .Concat(Directory.EnumerateFiles(workspace, "*.csproj", SearchOption.AllDirectories))
+            .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Re-baselines every consumer's COMMITTED defaults onto what the producers currently mint.
+    /// Unlike `packages mode`, this edits TRACKED files, so it says exactly what it changed and
+    /// offers a dry run.
+    /// </summary>
+    private static void SyncPackageLane(string workspace, bool dryRun)
+    {
+        var configPath = Directory.EnumerateFiles(workspace, "*uget.[Cc]onfig").FirstOrDefault()
+                         ?? Path.Combine(workspace, "NuGet.Config");
+        if (!File.Exists(configPath))
+            throw new FileNotFoundException($"No NuGet.Config at the workspace root ({workspace}).");
+
+        var feeds = Lz.Core.PackageLane.LocalFeeds.FromNuGetConfig(File.ReadAllText(configPath));
+        var (chosen, _) = Lz.Core.PackageLane.LocalPackageOverrides.Resolve(
+            Lz.Core.PackageLane.LocalFeeds.Scan(workspace, feeds));
+
+        // Same refusal as the override writer, for the same reason: syncing every default to
+        // nothing is not a no-op, it is a silent downgrade of the whole workspace.
+        if (chosen.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"the workspace feeds hold no packages ({string.Join(", ", feeds)}). " +
+                "Build the producers first - syncing against an empty feed would rewrite nothing " +
+                "useful and hide that the feeds are empty.");
+        }
+
+        var byProperty = Lz.Core.PackageLane.PackageLaneStatus.ByProperty(chosen);
+        var touched = 0;
+        var moved = 0;
+        var blocked = 0;
+
+        foreach (var path in DiscoverConsumers(workspace))
+        {
+            string text;
+            try { text = File.ReadAllText(path); } catch { continue; }
+            if (!text.Contains("<PkgVer_", StringComparison.Ordinal)) continue;
+
+            var consumer = Lz.Core.PackageLane.PackageLaneStatus.ParseConsumer(path, text);
+            var (updated, changes, refused) = Lz.Core.PackageLane.PackageLaneSync.Apply(text, consumer, byProperty);
+            if (changes.Count == 0 && refused.Count == 0) continue;
+
+            if (changes.Count > 0) touched++;
+            moved += changes.Count;
+            blocked += refused.Count;
+            Console.WriteLine($"  {Path.GetRelativePath(workspace, path)}");
+            foreach (var c in changes)
+            {
+                var flag = c.IsDowngrade ? "  DOWNGRADE" : "";
+                Console.WriteLine($"      line {c.Line,4}  {c.PropertyName}: {c.From} -> {c.To}{flag}");
+            }
+            foreach (var r in refused)
+                Console.WriteLine($"      line {r.Line,4}  {r.PropertyName}: REFUSED {r.From} -> {r.To} (built off the public-release branch; that version is in no registry)");
+            if (!dryRun && changes.Count > 0) File.WriteAllText(path, updated);
+        }
+
+        Console.WriteLine();
+        if (moved == 0)
+        {
+            Console.WriteLine(blocked == 0
+                ? "packages sync: every committed default already names what the producers mint."
+                : $"packages sync: nothing to move. {blocked} default(s) REFUSED - their producer builds off the public-release branch, so the only version available locally could never be restored from a registry.");
+            return;
+        }
+
+        Console.WriteLine(dryRun
+            ? $"packages sync: {moved} default(s) in {touched} file(s) WOULD move. Nothing written (--dry-run)."
+            : $"packages sync: {moved} default(s) in {touched} file(s) updated. These are TRACKED files - review the diff.");
+
+        // Said every time, because it is the thing most likely to be misremembered: this is a
+        // re-baseline, not a cure. The next producer commit moves the version again.
+        Console.WriteLine("  Note: under derived versioning a producer's version moves on every commit, so these");
+        Console.WriteLine("  defaults are stale again after the next one. Sync immediately before publishing, when");
+        Console.WriteLine("  the version written is the one about to exist in a registry.");
     }
 
     /// <summary>One line of a version.json, without pulling in a JSON dependency for four fields.</summary>
