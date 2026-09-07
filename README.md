@@ -26,14 +26,17 @@ architecture doc at [`Design/TargetIsolation.md`](Design/TargetIsolation.md).
 
 ## Version Management
 
-All packages share a single version defined in `LzVersion.props`.
+All packages share a single version, DERIVED rather than written down: `version.json` plus the
+number of commits since it last changed (Nerdbank.GitVersioning, since 2026-09-06). There is no
+file to edit to bump it, and adding a `<Version>` back would be overridden at target time without
+warning. To move the version, edit `version.json`.
 **All packages must be at the same version** — a mismatch causes
 `TypeLoadException` at runtime.
 
 ## Building, Packing, and Installing
 
 Build through **`Lz.slnx`**, which sets `SolutionDir` for you — the `Lz.*` projects need it to
-resolve `LzVersion.props` / `CommonPackageHandling.targets`, and there is no `Directory.Build.props`
+resolve `LzVersioning.props` / `CommonPackageHandling.targets`, and there is no `Directory.Build.props`
 to supply it, so a per-project build fails with `MSB4019`.
 
 ### Prerequisite: a LazyMagic package source
@@ -66,7 +69,8 @@ Note also that a fresh clone has no `Packages/` folder while `NuGet.Config` decl
 ```powershell
 cd C:\Users\TimothyMay\repos\_lz
 
-# 1. Bump version in LzVersion.props
+# 1. Nothing to bump - the version is derived from version.json + commit height.
+#    Committing your work IS the version bump; see Version Management above.
 
 # 2. Build all projects (Release configuration)
 dotnet build /p:SolutionDir='C:\Users\TimothyMay\repos\_lz\' -c Release

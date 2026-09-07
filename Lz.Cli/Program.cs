@@ -2880,7 +2880,9 @@ class Program
             "Print the plan and clone nothing.");
         var shallowOpt = new Option<bool>("--shallow", () => false,
             "Clone with --depth 1. Fast, but the history is not there afterwards — do not use for a " +
-            "workspace you intend to commit from.");
+            "workspace you intend to commit from, OR TO BUILD Lz or LazyMagic: both derive their " +
+            "package version from commit height, and Nerdbank.GitVersioning fails MSB4018 on a " +
+            "shallow clone rather than guessing.");
         var jsonOpt = new Option<bool>("--json", () => false,
             "Machine-readable output (one JSON document on stdout).");
 
