@@ -23,12 +23,36 @@ public class PackageLaneSyncTests
         </Project>
         """;
 
+    /// <summary>
+    /// Syncs with the registry reporting every offered version as published. That is what these
+    /// cases were written against, and it keeps them testing the rewrite rather than the new
+    /// registry gate - which has its own tests at the bottom.
+    /// </summary>
     private static (string Text, IReadOnlyList<PinChange> Changes, IReadOnlyList<PinChange> Refused) Sync(
         string text, params (string Id, string Version)[] feed)
     {
         var byId = feed.ToDictionary(f => f.Id, f => f.Version, StringComparer.Ordinal);
+        var published = byId.ToDictionary(
+            kv => LocalPackageOverrides.PropertyName(kv.Key),
+            kv => (IReadOnlySet<string>?)new HashSet<string>(new[] { kv.Value }, StringComparer.OrdinalIgnoreCase),
+            StringComparer.Ordinal);
         return PackageLaneSync.Apply(text, PackageLaneStatus.ParseConsumer("x", text),
-                                     PackageLaneStatus.ByProperty(byId));
+                                     PackageLaneStatus.ByProperty(byId), published);
+    }
+
+    /// <summary>Syncs with an explicit registry answer, for the gate's own cases.</summary>
+    private static (string Text, IReadOnlyList<PinChange> Changes, IReadOnlyList<PinChange> Refused) SyncAgainst(
+        string text, (string Id, string Version) feed, string[]? registryHas)
+    {
+        var byId = new Dictionary<string, string>(StringComparer.Ordinal) { [feed.Id] = feed.Version };
+        var published = registryHas is null ? null : new Dictionary<string, IReadOnlySet<string>?>(StringComparer.Ordinal)
+        {
+            [LocalPackageOverrides.PropertyName(feed.Id)] =
+                registryHas.Length == 0 ? null : new HashSet<string>(registryHas, StringComparer.OrdinalIgnoreCase),
+        };
+        return PackageLaneSync.Apply(text, PackageLaneStatus.ParseConsumer("x", text),
+                                     PackageLaneStatus.ByProperty(byId),
+                                     published);
     }
 
     [Fact]
@@ -193,5 +217,78 @@ public class PackageLaneSyncTests
 
         Assert.Contains("1.0.2", line);
         Assert.Contains("PkgVer_AipApi", line);
+    }
+
+    // ---- the registry gate: the hole the -g<hex> proxy left open -----------------------------------
+
+    [Fact]
+    public void RefusesACleanVersionTheRegistryDoesNotServe()
+    {
+        // THE HOLE, in one case. Until 2026-09-07 the only bar was NBGV's commit-id discriminator,
+        // which proves local-only but whose ABSENCE proves nothing. When LazyMagic's
+        // publicReleaseRefSpec moved to `dev` - the branch developers build on - an ordinary
+        // workstation build began minting a bare `3.0.24-alpha`, and sync would have written it into
+        // a committed default while the registry held `3.0.26-alpha`.
+        var (text, changes, refused) = SyncAgainst(Consumer, ("AipApi", "3.0.24-alpha"),
+                                                   registryHas: new[] { "3.0.26-alpha" });
+
+        Assert.Empty(changes);
+        Assert.Single(refused);
+        Assert.Equal(Consumer, text);
+    }
+
+    [Fact]
+    public void WritesACleanVersionTheRegistryDoesServe()
+    {
+        // Both directions: a gate that only ever refuses is indistinguishable from a broken one.
+        var (text, changes, refused) = SyncAgainst(Consumer, ("AipApi", "1.0.3"),
+                                                   registryHas: new[] { "1.0.2", "1.0.3" });
+
+        Assert.Single(changes);
+        Assert.Empty(refused);
+        Assert.Contains("<PkgVer_AipApi>1.0.3</PkgVer_AipApi>", text);
+    }
+
+    [Fact]
+    public void WritesNothingAtAllWhenTheRegistryWasNotAsked()
+    {
+        // Fail-closed. The failure this prevents is invisible here - published mode is what a fresh
+        // clone and CI restore, and neither is this machine - so "could not check" must not pass.
+        var (text, changes, refused) = SyncAgainst(Consumer, ("AipApi", "1.0.3"), registryHas: null);
+
+        Assert.Empty(changes);
+        Assert.Single(refused);
+        Assert.Equal(Consumer, text);
+    }
+
+    [Fact]
+    public void AnIdTheRegistryHasNeverHeardOfIsRefused()
+    {
+        var (_, changes, refused) = SyncAgainst(Consumer, ("AipApi", "1.0.3"), registryHas: new string[0]);
+
+        Assert.Empty(changes);
+        Assert.Single(refused);
+    }
+
+    [Fact]
+    public void TheCommitIdProxyStillRunsFirstAndKeepsItsBetterMessage()
+    {
+        // Even with the registry answering, a -g<hex> version is refused by the cheaper check, so the
+        // operator is told it is a local build rather than "not in the registry" - which is true but
+        // less actionable.
+        var (_, changes, refused) = SyncAgainst(Consumer, ("AipApi", "3.0.23-g6fc0b7081e"),
+                                                registryHas: new[] { "3.0.23-g6fc0b7081e" });
+
+        Assert.Empty(changes);
+        Assert.Single(refused);
+        Assert.True(PackageLaneSync.CarriesACommitId(refused[0].To));
+    }
+
+    [Fact]
+    public void TheRegistryComparisonIgnoresCase()
+    {
+        var (_, changes, _) = SyncAgainst(Consumer, ("AipApi", "1.0.3-Alpha"),
+                                          registryHas: new[] { "1.0.3-alpha" });
+        Assert.Single(changes);
     }
 }

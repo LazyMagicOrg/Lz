@@ -3411,12 +3411,15 @@ class Program
         var dryRunOption = new Option<bool>("--dry-run", () => false,
             "Report what would change and write nothing.");
         sync.AddOption(dryRunOption);
-        sync.SetHandler((string? rootValue, bool dryRun) =>
+        var syncSourceOption = new Option<string?>("--source",
+            "NuGet source NAME (or service index URL) to verify against. Without it nothing is written.");
+        sync.AddOption(syncSourceOption);
+        sync.SetHandler(async (string? rootValue, bool dryRun, string? source) =>
         {
             try
             {
                 var workspace = rootValue ?? Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot();
-                SyncPackageLane(workspace, dryRun);
+                await SyncPackageLane(workspace, dryRun, source);
                 Environment.ExitCode = 0;
             }
             catch (Exception ex)
@@ -3424,7 +3427,7 @@ class Program
                 Console.Error.WriteLine($"lz packages sync: {ex.Message}");
                 Environment.ExitCode = 1;
             }
-        }, rootOption, dryRunOption);
+        }, rootOption, dryRunOption, syncSourceOption);
         packages.AddCommand(sync);
 
         // ---------------------------------------------------------------
@@ -3700,7 +3703,7 @@ class Program
     /// Unlike `packages mode`, this edits TRACKED files, so it says exactly what it changed and
     /// offers a dry run.
     /// </summary>
-    private static void SyncPackageLane(string workspace, bool dryRun)
+    private static async Task SyncPackageLane(string workspace, bool dryRun, string? source)
     {
         var configPath = Directory.EnumerateFiles(workspace, "*uget.[Cc]onfig").FirstOrDefault()
                          ?? Path.Combine(workspace, "NuGet.Config");
@@ -3722,6 +3725,49 @@ class Program
         }
 
         var byProperty = Lz.Core.PackageLane.PackageLaneStatus.ByProperty(chosen);
+
+        // ASK THE REGISTRY, because a committed default IS the published lane. Without this the
+        // only bar was NBGV's -g<hex> discriminator, which proves a version is local-only but whose
+        // ABSENCE proves nothing - and since LazyMagic began publishing from `dev` on 2026-09-07,
+        // an ordinary workstation build there mints a bare 3.0.N-alpha that sailed through.
+        //
+        // dotnet package search rather than a hand-rolled V3 call: it resolves the source, its
+        // credentials and the whole config chain exactly as restore does, so the tool and the build
+        // cannot disagree - and it is the only method measured to work against GitHub Packages,
+        // whose flat container answers 403 to the same credential.
+        IReadOnlyDictionary<string, IReadOnlySet<string>?>? published = null;
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            // Refuse a LOCAL source. The workspace config names its own feeds, so `--source LazyMagic`
+            // here is the folder the version was just built into and every answer would be yes - a
+            // check that cannot fail, reported as one.
+            if (Lz.Core.PackageLane.LocalFeeds.IsLocalSourceName(File.ReadAllText(configPath), source!))
+                throw new InvalidOperationException(
+                    $"--source {source} names a LOCAL feed in {Path.GetFileName(configPath)}, not a registry. " +
+                    "Verifying a version against the feed it was just built into would confirm every " +
+                    "version and prove nothing. Pass the registry source instead.");
+
+            var registry = new Lz.Core.PackageLane.DotnetPackageSearchVersions(source!, workspace);
+            var byId = new Dictionary<string, IReadOnlySet<string>?>(StringComparer.Ordinal);
+            Console.WriteLine($"packages sync: asking {source} about {chosen.Count} package id(s)...");
+            foreach (var (id, _) in chosen)
+            {
+                try { byId[Lz.Core.PackageLane.LocalPackageOverrides.PropertyName(id)] = await registry.VersionsAsync(id); }
+                catch (Exception ex)
+                {
+                    // Could not ask about THIS id. Leave it absent, which refuses it, and say so -
+                    // rather than failing the whole run and tempting a --no-verify habit.
+                    Console.WriteLine($"  ? {id}: {ex.Message}");
+                }
+            }
+            published = byId;
+        }
+        else
+        {
+            Console.WriteLine("packages sync: no --source, so NOTHING will be written.");
+            Console.WriteLine($"  {Lz.Core.PackageLane.PackageLaneSync.RegistryNotAsked}");
+        }
+
         var touched = 0;
         var moved = 0;
         var blocked = 0;
@@ -3733,7 +3779,7 @@ class Program
             if (!text.Contains("<PkgVer_", StringComparison.Ordinal)) continue;
 
             var consumer = Lz.Core.PackageLane.PackageLaneStatus.ParseConsumer(path, text);
-            var (updated, changes, refused) = Lz.Core.PackageLane.PackageLaneSync.Apply(text, consumer, byProperty);
+            var (updated, changes, refused) = Lz.Core.PackageLane.PackageLaneSync.Apply(text, consumer, byProperty, published);
             if (changes.Count == 0 && refused.Count == 0) continue;
 
             if (changes.Count > 0) touched++;
@@ -3746,7 +3792,13 @@ class Program
                 Console.WriteLine($"      line {c.Line,4}  {c.PropertyName}: {c.From} -> {c.To}{flag}");
             }
             foreach (var r in refused)
-                Console.WriteLine($"      line {r.Line,4}  {r.PropertyName}: REFUSED {r.From} -> {r.To} (built off the public-release branch; that version is in no registry)");
+            {
+                var why = Lz.Core.PackageLane.PackageLaneSync.CarriesACommitId(r.To)
+                    ? "a local-only build - NBGV's commit-id discriminator"
+                    : published is null ? "no --source, so no registry was consulted"
+                    : "the registry does not serve that version";
+                Console.WriteLine($"      line {r.Line,4}  {r.PropertyName}: REFUSED {r.From} -> {r.To} ({why})");
+            }
             if (!dryRun && changes.Count > 0) File.WriteAllText(path, updated);
         }
 
@@ -3755,7 +3807,8 @@ class Program
         {
             Console.WriteLine(blocked == 0
                 ? "packages sync: every committed default already names what the producers mint."
-                : $"packages sync: nothing to move. {blocked} default(s) REFUSED - their producer builds off the public-release branch, so the only version available locally could never be restored from a registry.");
+                : $"packages sync: nothing to move. {blocked} default(s) REFUSED - see the reason on each line. " +
+                  "A committed default is the PUBLISHED lane, so only a version the registry actually serves may be written here.");
             return;
         }
 

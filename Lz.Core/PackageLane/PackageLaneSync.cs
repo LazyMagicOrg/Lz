@@ -38,10 +38,16 @@ public static class PackageLaneSync
     /// Because that parser masks comments, a commented-out default is not in <c>Pins</c> and is
     /// therefore never resurrected here.
     /// </param>
+    /// <param name="publishedByProperty">
+    /// Per property, the versions the registry actually serves — the authority on whether a version
+    /// may be written into a committed default. <c>null</c> means the registry was not asked, in
+    /// which case <b>nothing is written</b>: see <see cref="RegistryNotAsked"/>.
+    /// </param>
     public static (string Text, IReadOnlyList<PinChange> Changes, IReadOnlyList<PinChange> Refused) Apply(
         string text,
         ConsumerLane consumer,
-        IReadOnlyDictionary<string, string> feedByProperty)
+        IReadOnlyDictionary<string, string> feedByProperty,
+        IReadOnlyDictionary<string, IReadOnlySet<string>?>? publishedByProperty = null)
     {
         var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
         var lines = text.Replace("\r\n", "\n").Split('\n');
@@ -53,13 +59,34 @@ public static class PackageLaneSync
             if (!feedByProperty.TryGetValue(pin.PropertyName, out var wanted)) continue;
             if (string.Equals(wanted, pin.CommittedDefault, StringComparison.Ordinal)) continue;
 
-            // REFUSE a version that was not built as a public release. A committed default IS the
-            // published lane - read by a fresh clone or CI, out of a registry - and a version
-            // carrying NBGV's commit-id discriminator exists only in the local feed that produced
-            // it. Writing one here would swap a stale-but-plausible version for an unrestorable
-            // one, which is strictly worse than leaving it alone. Refused per pin rather than per
-            // file, because the other producers in the same file are usually fine to sync.
+            // A committed default IS the published lane - read by a fresh clone or CI, out of a
+            // registry - so the only version that may be written here is one the registry serves.
+            // Refused per pin rather than per file, because the other producers in the same file are
+            // usually fine to sync.
+            //
+            // The commit-id check runs first because it is free and gives the better message, but it
+            // is only a PROXY and the converse never held: `-g<hex>` proves local-only, while its
+            // absence proves nothing. That gap became acute on 2026-09-07, when LazyMagic's
+            // publicReleaseRefSpec moved to `dev` - the branch developers build on - so an ordinary
+            // workstation build now mints a bare `3.0.N-alpha` and this check waves it straight
+            // through. The registry answer below is what actually decides.
             if (CarriesACommitId(wanted))
+            {
+                refused.Add(new PinChange(pin.PropertyName, pin.CommittedDefault, wanted, pin.Line));
+                continue;
+            }
+
+            // Not asked, or asked and the version is not there: refuse. Fail-closed, because the
+            // failure this prevents is invisible locally - published mode is what a fresh clone and
+            // CI restore, and neither is this machine.
+            if (publishedByProperty is null)
+            {
+                refused.Add(new PinChange(pin.PropertyName, pin.CommittedDefault, wanted, pin.Line));
+                continue;
+            }
+
+            publishedByProperty.TryGetValue(pin.PropertyName, out var published);
+            if (published is null || !published.Contains(wanted))
             {
                 refused.Add(new PinChange(pin.PropertyName, pin.CommittedDefault, wanted, pin.Line));
                 continue;
@@ -94,6 +121,16 @@ public static class PackageLaneSync
     /// would be correct. It is the commit-id discriminator, not the prerelease-ness, that makes a
     /// version local-only.</para>
     /// </summary>
+    /// <summary>
+    /// The message for a pin refused because no registry was consulted. Distinguished from a pin the
+    /// registry actively denied, because the operator's next step differs: pass a source, versus
+    /// publish the version.
+    /// </summary>
+    public const string RegistryNotAsked =
+        "no registry was consulted, so nothing can be written. A committed default is the PUBLISHED " +
+        "lane; writing a version without confirming a registry serves it is how an unrestorable " +
+        "default gets committed. Pass --source.";
+
     public static bool CarriesACommitId(string version)
     {
         var at = version.IndexOf("-g", StringComparison.Ordinal);

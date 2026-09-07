@@ -87,4 +87,43 @@ public class LocalFeedsTests
 
         Assert.Empty(packages);
     }
+
+    [Fact]
+    public void ARegistrySourceNameIsNotLocal()
+    {
+        const string xml = """
+            <configuration><packageSources>
+              <add key="LazyMagic" value="repos/LazyMagic/Packages" />
+              <add key="LazyMagicRegistry" value="https://nuget.pkg.github.com/LazyMagicOrg/index.json" />
+            </packageSources></configuration>
+            """;
+
+        Assert.False(LocalFeeds.IsLocalSourceName(xml, "LazyMagicRegistry"));
+    }
+
+    [Fact]
+    public void ALocalFeedNameIsRecognisedSoItCannotBeUsedToVerify()
+    {
+        // The footgun this exists for: this workspace declares a LOCAL feed named `LazyMagic` AND a
+        // registry named `LazyMagicRegistry`. Passing the first to `sync --source` would confirm a
+        // version against the folder it was just built into - every answer yes, a check that cannot
+        // fail while reporting as one.
+        const string xml = """
+            <configuration><packageSources>
+              <add key="LazyMagic" value="repos/LazyMagic/Packages" />
+              <add key="LazyMagicRegistry" value="https://nuget.pkg.github.com/LazyMagicOrg/index.json" />
+            </packageSources></configuration>
+            """;
+
+        Assert.True(LocalFeeds.IsLocalSourceName(xml, "LazyMagic"));
+        Assert.True(LocalFeeds.IsLocalSourceName(xml, "lazymagic"));   // source names are case-insensitive
+    }
+
+    [Fact]
+    public void ANameThisConfigDoesNotDeclareIsNotAssumedLocal()
+    {
+        Assert.False(LocalFeeds.IsLocalSourceName(
+            """<configuration><packageSources><add key="a" value="./x" /></packageSources></configuration>""",
+            "SomethingElse"));
+    }
 }
