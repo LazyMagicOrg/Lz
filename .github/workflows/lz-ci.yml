@@ -53,6 +53,11 @@ jobs:
       # path correct in both.
       - uses: actions/checkout@v4
         with:
+          # fetch-depth: 0 for the same reason the LazyMagic checkout below carries it - since
+          # 2026-09-06 Lz derives its OWN version from version.json plus commit height, and a
+          # depth-1 clone has no history to count. NBGV fails MSB4018 on a shallow clone rather
+          # than guessing, so this is a hard stop, not a silent wrong number.
+          fetch-depth: 0
           path: repos/Lz
       # Public repo: no token needed.
       #

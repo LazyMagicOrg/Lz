@@ -1,5 +1,4 @@
 <Project>
-	<Import Project="$(SolutionDir)LzVersion.props" />
 	<!-- Common properties for package handling -->
 	<PropertyGroup>
 		<PackageRepoFolder>$(SolutionDir)Packages</PackageRepoFolder>
@@ -15,7 +14,12 @@
 		<PackageProjectUrl>https://LazyMagic.org</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/LazyMagicOrg/Lz</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
-		<Version>$(LzVersion)</Version>
+		<!-- No <Version> here. The Lz.* producers import LzVersioning.props, and
+		     Nerdbank.GitVersioning computes their version from version.json plus commit height.
+		     A literal would be overridden at target time with no warning at any verbosity, so it
+		     would be a lie the build never reports rather than a harmless default. Note the four
+		     ProjectTemplates projects also import this file and are deliberately NOT versioned -
+		     they produce no packages (verified: no .nupkg is written under ProjectTemplates). -->
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 		<IncludeSymbols>true</IncludeSymbols>
 		<SymbolPackageFormat>snupkg</SymbolPackageFormat>

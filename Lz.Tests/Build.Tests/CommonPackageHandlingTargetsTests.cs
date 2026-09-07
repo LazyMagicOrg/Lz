@@ -381,8 +381,10 @@ public sealed class CrossTargetingScratchBuild : IDisposable
     <!-- The post-migration state, which is what makes the defect reachable: MigrationPlan P0b
          deletes the static <Version> lines from the packaging targets, and an empty Version is
          filled in by the SDK from VersionPrefix - {SdkDefaultVersion}. Blanking it here reproduces
-         that without touching the real targets file (which still supplies $(LzVersion) today, and
-         is why the single-framework fixture above never sees 1.0.0). <Version> is the line that
+         that without touching the real targets file. The real targets stopped supplying a version on
+         2026-09-06, when Lz moved to Nerdbank.GitVersioning; the single-framework fixture above still
+         never sees 1.0.0 because it sets its own <Version> AFTER the import, not because the targets
+         supply one. <Version> is the line that
          carries the signal; <PackageVersion> is inert here (pack defaults it from Version) and is
          kept only because P0b leaves neither behind. -->
     <Version></Version>

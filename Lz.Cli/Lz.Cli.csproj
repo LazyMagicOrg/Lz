@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <Import Project="$(SolutionDir)CommonPackageHandling.targets" />
+  <Import Project="$(SolutionDir)LzVersioning.props" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -13,7 +14,6 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>lz</ToolCommandName>
     <PackageId>Lz.Cli</PackageId>
-    <Version>$(LzVersion)</Version>
     <Description>Lz infrastructure deployment tool</Description>
   </PropertyGroup>
 

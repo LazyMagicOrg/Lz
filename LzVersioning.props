@@ -1,0 +1,32 @@
+<Project>
+
+  <!--
+    Derived versioning for the Lz.* packages. Replaces LzVersion.props, which held the literal
+    <LzVersion>0.12.0</LzVersion>; the version now comes from version.json plus the number of
+    commits since that file last changed.
+
+    WHY THIS IS A SEPARATE FILE, imported by the five producers, rather than a line in
+    CommonPackageHandling.targets. That file is imported by NINE projects - these five AND four
+    ProjectTemplates - and also by the packaging test fixture, which writes a scratch project whose
+    SolutionDir points at this repo. Putting the tool there would version the shipped templates out
+    of Lz's git history (and, under their own CPM, fail NU1010 for a PackageReference with no
+    PackageVersion entry), and would override the fixture's static version from inside a target -
+    which is precisely the silent-override the eviction tests exist to catch.
+
+    GitVersionBaseDirectory pins the height to the repo root so all five compute ONE version. Do not
+    reach for per-project pathFilters: pack asks each referenced project for its own PackageVersion,
+    so a commit touching only Lz.Core would move Lz.Cli's nuspec DEPENDENCY while leaving Lz.Cli's
+    own version alone, and one version would then name two different packages (NbgvSpike.md 4).
+
+    Version is pinned exactly rather than floated: it is an input to every package this repo
+    publishes, and to the lz runner that resolves Lz.Cli.
+  -->
+  <PropertyGroup>
+    <GitVersionBaseDirectory>$(SolutionDir)</GitVersionBaseDirectory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nerdbank.GitVersioning" Version="3.10.94" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
