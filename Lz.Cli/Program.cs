@@ -3691,12 +3691,33 @@ class Program
     /// Every file that carries lane defaults. Discovered rather than listed: a consumer that lost
     /// its wiring is exactly the thing worth noticing, and a hardcoded roster could not see it.
     /// </summary>
-    private static IEnumerable<string> DiscoverConsumers(string workspace) =>
-        Directory.EnumerateFiles(workspace, "Directory.Packages.props", SearchOption.AllDirectories)
+    /// <summary>
+    /// Every consumer file whose committed defaults this workspace owns.
+    ///
+    /// <para><b>`.claude` is excluded, and that is not cosmetic.</b> Background tasks get their own
+    /// git WORKTREE under <c>.claude/worktrees/</c> — a second checkout of a sibling branch, living
+    /// inside this directory tree. A recursive scan finds its <c>Deploy.csproj</c> and, since sync
+    /// edits TRACKED files, would write into another session's working tree on a branch this
+    /// workspace is not on. Caught on the first real run, when the file list showed
+    /// <c>.claude\worktreesusy-hermann-987d37\Deploy\Deploy.csproj</c> next to the six real
+    /// ones.</para>
+    ///
+    /// <para>Excluded by path rather than by asking git, because the rule wanted here is "files this
+    /// workspace owns", and anything under <c>.claude</c> is tooling state by construction — the
+    /// same is true of a nested clone someone drops in, which is why <c>bin</c> and <c>obj</c> were
+    /// already filtered the same way.</para>
+    /// </summary>
+    private static IEnumerable<string> DiscoverConsumers(string workspace)
+    {
+        var sep = Path.DirectorySeparatorChar;
+        return Directory.EnumerateFiles(workspace, "Directory.Packages.props", SearchOption.AllDirectories)
             .Concat(Directory.EnumerateFiles(workspace, "*.csproj", SearchOption.AllDirectories))
-            .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                     && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(p => !p.Contains($"{sep}bin{sep}", StringComparison.Ordinal)
+                     && !p.Contains($"{sep}obj{sep}", StringComparison.Ordinal)
+                     && !p.Contains($"{sep}.claude{sep}", StringComparison.Ordinal)
+                     && !p.Contains($"{sep}.git{sep}", StringComparison.Ordinal))
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Re-baselines every consumer's COMMITTED defaults onto what the producers currently mint.
