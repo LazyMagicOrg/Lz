@@ -104,7 +104,11 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          # global-json-file, not a floating dotnet-version. This repo pins an exact SDK with
+          # rollForward: disable, so "10.0.x" would install whatever is newest and then be
+          # REJECTED by that pin. Reading the same file the build reads is the only way the two
+          # cannot disagree.
+          global-json-file: repos/Lz/global.json
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
