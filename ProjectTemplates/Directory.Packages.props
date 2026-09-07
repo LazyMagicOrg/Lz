@@ -21,11 +21,11 @@
     succeeds, and the wrong version is used with no diagnostic anywhere - measured, not assumed.
   -->
   <PropertyGroup>
-    <PkgVer_LazyMagic_Service_Authorization>3.0.18</PkgVer_LazyMagic_Service_Authorization>
-    <PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>3.0.18</PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>
-    <PkgVer_LazyMagic_Service_DynamoDBRepo>3.0.18</PkgVer_LazyMagic_Service_DynamoDBRepo>
-    <PkgVer_LazyMagic_Service_Shared>3.0.18</PkgVer_LazyMagic_Service_Shared>
-    <PkgVer_LazyMagic_Shared>3.0.18</PkgVer_LazyMagic_Shared>
+    <PkgVer_LazyMagic_Service_Authorization>3.0.26-alpha</PkgVer_LazyMagic_Service_Authorization>
+    <PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>3.0.26-alpha</PkgVer_LazyMagic_Service_AwsLocalWebApiRoutingMiddleware>
+    <PkgVer_LazyMagic_Service_DynamoDBRepo>3.0.26-alpha</PkgVer_LazyMagic_Service_DynamoDBRepo>
+    <PkgVer_LazyMagic_Service_Shared>3.0.26-alpha</PkgVer_LazyMagic_Service_Shared>
+    <PkgVer_LazyMagic_Shared>3.0.26-alpha</PkgVer_LazyMagic_Shared>
   </PropertyGroup>
   <Import Project="$(MSBuildThisFileDirectory)../../../Packages.Local.props" Condition="Exists('$(MSBuildThisFileDirectory)../../../Packages.Local.props')" />
   <ItemGroup>
