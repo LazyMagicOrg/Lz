@@ -17,8 +17,9 @@
 #     constructor throws here. It carries Category=Integration and is filtered out, matching the
 #     convention service-ci.yml already uses.
 #
-# The whole recipe was verified against a clean clone before being committed: restore, both suites,
-# 353/353.
+# The whole recipe was verified against a clean clone before being committed. The count has moved
+# with the suite: 353/353 then, 577/577 now, the latter measured on Linux in
+# mcr.microsoft.com/dotnet/sdk:10.0.301 before this job moved off windows-latest.
 name: lz-ci
 
 on:
@@ -27,22 +28,33 @@ on:
 
 jobs:
   test:
-    # windows-latest, not ubuntu, and deliberately: `lz` is a Windows developer CLI here (every
-    # working copy is Windows, the build skill is PowerShell), and parts of the suite encode that on
-    # purpose — DevEnvironmentGuardTests asserts on `C:\repos\_MagicPets\_Test_MagicPets`-shaped
-    # paths because that is the shape the guard actually sees. An ubuntu run fails two of those
-    # cases: `Path.GetFileName` does not treat `\` as a separator there, and `C:/Windows` is not
-    # rooted, so an env token parses to null and a drive-letter path is not seen as escaping. Neither
-    # is a production bug today, and rewriting a security guard's test data to satisfy a runner
-    # choice would be the wrong way round. Free minutes on a public repo make the cost argument moot.
+    # ubuntu-latest since 2026-09-07. This job ran on windows-latest for two stated reasons and
+    # NEITHER survived measurement; both were true when written and had quietly stopped being true.
     #
-    # The ubuntu run also surfaced a real off-Windows hole in CloneReposLogic.IsSafeRelativePath,
-    # since fixed in aa732ce: a drive designator is now rejected explicitly rather than relying on
-    # Path.IsPathRooted. Note the regression test for that deliberately asserts the extracted
-    # HasDriveDesignator predicate, NOT the end-to-end guard — on this Windows runner IsPathRooted
-    # rejects every drive form anyway, so an end-to-end assertion passes with or without the check
-    # and would never catch its removal here.
-    runs-on: windows-latest
+    #  1. "An ubuntu run fails two DevEnvironmentGuardTests cases." It does not, at HEAD. Every case
+    #     replayed on Linux passes. Both mechanisms were fixed in code the same morning that comment
+    #     was committed, so it was stale on arrival — and only ONE of the two ever lived in that
+    #     suite. The other was in CloneReposLogicTests, and it was not a test-data artefact at all
+    #     but a real off-Windows security hole: on Linux a manifest path of `C:/Windows` was
+    #     accepted and clonerepos would create a directory literally named `C:`. Fixed in aa732ce.
+    #  2. "Those projects pull ReactiveUI/Splat, whose signing certificate is REVOKED — NU3012 on a
+    #     Linux runner." The revocation was real (and Windows silently does not fail on it), but two
+    #     things settle it: the five service projects this job builds restore clean on Linux
+    #     unbumped, so the NARROWING below was doing all the work and the runner none of it; and
+    #     ReactiveUI moved 23.2.19 -> 23.2.28 on 2026-09-07, off the revoked certificate entirely.
+    #
+    # MOVING HERE MAKES ONE TEST STRONGER, which is the part worth keeping. aa732ce's regression
+    # test deliberately asserts the extracted HasDriveDesignator predicate rather than the
+    # end-to-end guard, because on Windows `Path.IsPathRooted` rejects every drive form anyway, so
+    # an end-to-end assertion passed with or without the check. On Linux it does NOT reject them —
+    # only the explicit check does. So the end-to-end path is now genuinely load-bearing here.
+    #
+    # `lz` remains a Windows developer CLI and the suite still encodes Windows-shaped path data on
+    # purpose; that is a fact about the DATA, not about the host, which is exactly what the pin
+    # confused. Verified before flipping: the whole job replayed in
+    # mcr.microsoft.com/dotnet/sdk:10.0.301 against a CI-shaped assembled root, 577 passed / 0
+    # failed — not just the two suites named above. macOS is inferred from Linux, not measured.
+    runs-on: ubuntu-latest
     steps:
       # repos/Lz + repos/LazyMagic under a workspace root — the EXACT shape a product workspace
       # has, and that is load-bearing rather than cosmetic. The local lane (below) writes its
@@ -170,6 +182,13 @@ jobs:
       # file it used the runner's preinstalled 10.0.400 while the test step used the pinned 10.0.301
       # - two SDKs in one job, which is exactly what pinning exists to prevent. The real workspace
       # root carries this file for the same reason; CI assembles the same shape.
+      # THIS STEP MUST STAY AFTER THE LAZYMAGIC BUILD ABOVE. The config below declares
+      # repos/LazyMagic/Packages as a source, and that directory is gitignored - it does not exist
+      # in a fresh checkout, it is CREATED by the build. NuGet does not treat a declared-but-absent
+      # local source as an empty feed; it fails restore outright with NU1301 "The local source ...
+      # doesn't exist". Reordering these two steps for tidiness breaks every subsequent restore, on
+      # any platform. Hit twice while replaying this job locally, which is the only reason it is
+      # written down.
       - name: write the CI global.json and NuGet.Config
         shell: bash
         run: |
@@ -213,7 +232,7 @@ jobs:
         shell: pwsh
         run: |
           $root = (Get-Location).Path
-          dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root\repos\Lz\" -- packages mode local --root "$root"
+          dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root/repos/Lz/" -- packages mode local --root "$root"
           if ($LASTEXITCODE -ne 0) { throw "lane refresh failed - templates would restore stale pins" }
           Get-Content Packages.Local.props
 
@@ -248,7 +267,7 @@ jobs:
         shell: pwsh
         run: |
           $root = (Get-Location).Path
-          $out = dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root\repos\Lz\" -- packages check --packages "$root\repos\LazyMagic\Packages" 2>&1 | Out-String
+          $out = dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root/repos/Lz/" -- packages check --packages "$root/repos/LazyMagic/Packages" 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
           if ($code -eq 0) { throw "The publish guard CLEARED packages built with -p:PublicRelease=false. Either the guard no longer recognises NBGV's commit-id discriminator, or the LazyMagic build above stopped passing that flag." }
