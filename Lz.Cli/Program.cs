@@ -3736,18 +3736,26 @@ class Program
         // cannot disagree - and it is the only method measured to work against GitHub Packages,
         // whose flat container answers 403 to the same credential.
         IReadOnlyDictionary<string, IReadOnlySet<string>?>? published = null;
+        var unasked = new HashSet<string>(StringComparer.Ordinal);
         if (!string.IsNullOrWhiteSpace(source))
         {
-            // Refuse a LOCAL source. The workspace config names its own feeds, so `--source LazyMagic`
-            // here is the folder the version was just built into and every answer would be yes - a
-            // check that cannot fail, reported as one.
-            if (Lz.Core.PackageLane.LocalFeeds.IsLocalSourceName(File.ReadAllText(configPath), source!))
-                throw new InvalidOperationException(
-                    $"--source {source} names a LOCAL feed in {Path.GetFileName(configPath)}, not a registry. " +
-                    "Verifying a version against the feed it was just built into would confirm every " +
-                    "version and prove nothing. Pass the registry source instead.");
-
-            var registry = new Lz.Core.PackageLane.DotnetPackageSearchVersions(source!, workspace);
+            // RUN THE QUERY OUTSIDE THE WORKSPACE, and this is the crux. A NuGet source NAME is not
+            // global - it resolves through the config chain of the directory the command runs in.
+            // In this system `LazyMagic` means "the LazyMagic package family" and deliberately
+            // resolves two ways: the user-level config binds it to the LazyMagicOrg registry WITH a
+            // credential, and a workspace root rebinds it to ./repos/LazyMagic/Packages behind a
+            // <clear/> that drops the inherited registry binding. That shadowing is the design -
+            // inside a system you build against locally built packages.
+            //
+            // So "what does the registry serve?" is not a workspace question, and asking it from the
+            // workspace root asks the one config that exists to hide the registry. An earlier version
+            // ran here and concluded the registry needed new credentials; it needed a different
+            // directory.
+            var probeDir = Path.GetTempPath();
+            var registry = new Lz.Core.PackageLane.DotnetPackageSearchVersions(source!, probeDir);
+            await registry.EnsureRemoteSourceAsync();
+            Console.WriteLine($"packages sync: resolving '{source}' from {probeDir} - outside the " +
+                              "workspace, so the machine's config governs rather than the local-feed bindings.");
             var byId = new Dictionary<string, IReadOnlySet<string>?>(StringComparer.Ordinal);
             Console.WriteLine($"packages sync: asking {source} about {chosen.Count} package id(s)...");
             foreach (var (id, _) in chosen)
@@ -3755,8 +3763,10 @@ class Program
                 try { byId[Lz.Core.PackageLane.LocalPackageOverrides.PropertyName(id)] = await registry.VersionsAsync(id); }
                 catch (Exception ex)
                 {
-                    // Could not ask about THIS id. Leave it absent, which refuses it, and say so -
-                    // rather than failing the whole run and tempting a --no-verify habit.
+                    // Could not ask about THIS id. It stays out of byId, which refuses it - correct -
+                    // but the REPORT must not then say "the registry does not serve that version",
+                    // which is a claim we did not establish. Record it as unasked so the line says so.
+                    unasked.Add(Lz.Core.PackageLane.LocalPackageOverrides.PropertyName(id));
                     Console.WriteLine($"  ? {id}: {ex.Message}");
                 }
             }
@@ -3796,6 +3806,7 @@ class Program
                 var why = Lz.Core.PackageLane.PackageLaneSync.CarriesACommitId(r.To)
                     ? "a local-only build - NBGV's commit-id discriminator"
                     : published is null ? "no --source, so no registry was consulted"
+                    : unasked.Contains(r.PropertyName) ? "the registry COULD NOT BE ASKED about this id (see ? above)"
                     : "the registry does not serve that version";
                 Console.WriteLine($"      line {r.Line,4}  {r.PropertyName}: REFUSED {r.From} -> {r.To} ({why})");
             }

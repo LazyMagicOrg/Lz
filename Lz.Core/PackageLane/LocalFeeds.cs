@@ -37,28 +37,6 @@ public static class LocalFeeds
     }
 
     /// <summary>
-    /// Whether a source NAME resolves to a directory on this machine rather than a registry.
-    ///
-    /// <para>Exists to stop a vacuous check. <c>lz packages sync --source</c> asks a registry whether
-    /// a version is publishable, and the workspace config names its LOCAL feeds too - so
-    /// <c>--source LazyMagic</c> at this root means the folder the version was just built into, and
-    /// every answer would be yes. A check that cannot fail is worse than no check, because it
-    /// reports as one.</para>
-    /// </summary>
-    public static bool IsLocalSourceName(string xml, string name)
-    {
-        var sources = XDocument.Parse(xml).Root?.Element("packageSources");
-        foreach (var add in sources?.Elements("add") ?? Enumerable.Empty<XElement>())
-        {
-            if (!string.Equals(add.Attribute("key")?.Value, name, StringComparison.OrdinalIgnoreCase)) continue;
-            var value = add.Attribute("value")?.Value;
-            if (string.IsNullOrWhiteSpace(value)) return false;
-            return !(Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https");
-        }
-        return false;   // not declared here at all - a URL, or a source from another config
-    }
-
-    /// <summary>
     /// Every package file in the given feed directories, parsed. Missing directories are skipped
     /// rather than refused: a feed that has never been built is empty, not broken, and the caller's
     /// own report makes an empty result visible.

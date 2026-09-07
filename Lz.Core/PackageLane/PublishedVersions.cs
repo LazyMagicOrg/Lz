@@ -41,18 +41,103 @@ public sealed class DotnetPackageSearchVersions : IPublishedVersions
     private readonly string _workingDirectory;
 
     /// <param name="source">
-    /// A source NAME from the NuGet config chain (e.g. <c>LazyMagicRegistry</c>) or a service index
-    /// URL. A name is preferable: credentials are keyed by source name, so a name picks them up and
-    /// a bare URL may not.
+    /// A source NAME from the NuGet config chain. Credentials are keyed by name, so a name picks them
+    /// up where a bare URL may not.
     /// </param>
     /// <param name="workingDirectory">
-    /// Where to run, which decides which <c>NuGet.Config</c> chain applies — and therefore which
-    /// sources and credentials exist at all.
+    /// Where to run — and this is the whole subtlety. A NuGet source name is not global: it resolves
+    /// through the config chain of the directory the command runs in.
+    ///
+    /// <para>In this system <c>LazyMagic</c> means "the LazyMagic package family" and deliberately
+    /// resolves two ways. The user-level config binds it to the LazyMagicOrg registry <i>with a
+    /// credential</i>; a product workspace's root config rebinds it to <c>./repos/LazyMagic/Packages</c>
+    /// and opens with <c>&lt;clear/&gt;</c>, which drops the inherited registry binding. That
+    /// shadowing is the design: inside a system you build against locally built packages.</para>
+    ///
+    /// <para><b>So asking "what does the registry serve?" from inside a workspace asks the wrong
+    /// config.</b> It is not a workspace question, and the answer there is either a local folder or
+    /// an unauthenticated 401. Run it from a directory the workspace config does not govern.</para>
     /// </param>
     public DotnetPackageSearchVersions(string source, string workingDirectory)
     {
         _source = source;
         _workingDirectory = workingDirectory;
+    }
+
+    /// <summary>
+    /// Confirms the named source resolves to a REGISTRY in the chain that governs the query, and
+    /// throws otherwise.
+    ///
+    /// <para>Asks NuGet rather than parsing a config file, because which file wins depends on the
+    /// working directory — an earlier version of this guard read the WORKSPACE config to judge a name
+    /// the query would resolve elsewhere, and got it exactly backwards: it waved through the registry
+    /// name that cannot authenticate from there, and blocked the name that works.</para>
+    ///
+    /// <para>The check earns its place: verifying a version against the local folder it was just
+    /// built into would confirm every version and prove nothing.</para>
+    /// </summary>
+    public async Task EnsureRemoteSourceAsync(CancellationToken ct = default)
+    {
+        var (code, stdout, stderr) = await RunAsync(new[] { "nuget", "list", "source" }, ct);
+        if (code != 0)
+            throw new InvalidOperationException($"`dotnet nuget list source` exited {code}. {stderr.Trim()}");
+
+        var value = FindSourceValue(stdout, _source)
+            ?? throw new InvalidOperationException(
+                $"no source named '{_source}' is configured in {_workingDirectory}. A source name " +
+                "resolves through the config chain of the directory the query runs in, so check that " +
+                "chain rather than the workspace's.");
+
+        if (!(Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"))
+            throw new InvalidOperationException(
+                $"'{_source}' resolves to {value} in {_workingDirectory} - a local folder, not a " +
+                "registry. Verifying a version against the feed it was just built into would confirm " +
+                "every version and prove nothing.");
+    }
+
+    /// <summary>
+    /// The value of a named source in <c>dotnet nuget list source</c> output, whose shape is a
+    /// numbered name line followed by the URL or path on the next line.
+    /// </summary>
+    public static string? FindSourceValue(string listOutput, string name)
+    {
+        var lines = listOutput.ReplaceLineEndings("\n").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i].Trim();
+            // "  1.  LazyMagic [Enabled]"  /  "  2.  Other [Disabled]"
+            var dot = line.IndexOf('.');
+            if (dot <= 0 || !int.TryParse(line[..dot], out _)) continue;
+
+            var rest = line[(dot + 1)..].Trim();
+            var bracket = rest.LastIndexOf('[');
+            if (bracket > 0) rest = rest[..bracket].Trim();
+            if (!string.Equals(rest, name, StringComparison.OrdinalIgnoreCase)) continue;
+
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                var value = lines[j].Trim();
+                if (value.Length > 0) return value;
+            }
+        }
+        return null;
+    }
+
+    private async Task<(int Code, string Stdout, string Stderr)> RunAsync(string[] args, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = _workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("could not start dotnet.");
+        var so = await p.StandardOutput.ReadToEndAsync(ct);
+        var se = await p.StandardError.ReadToEndAsync(ct);
+        await p.WaitForExitAsync(ct);
+        return (p.ExitCode, so, se);
     }
 
     public async Task<IReadOnlySet<string>?> VersionsAsync(string id, CancellationToken ct = default)
