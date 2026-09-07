@@ -3373,7 +3373,163 @@ class Program
         }, modeArg, rootOption);
 
         packages.AddCommand(mode);
+
+        // ---------------------------------------------------------------
+        // packages status - the review view. SdlcVersioning section 7 calls it
+        // "the one view that says whether the scheme is working", and section 4.8
+        // gives the reason: stale or missing inputs "all produce A version, which is
+        // the hard kind of bug". Everything below therefore reports what each input
+        // ACTUALLY is, never what it is supposed to be.
+        // ---------------------------------------------------------------
+        var status = new Command("status", "Show the package lane: what each producer derives, what the feeds hold, and what each consumer would restore.");
+        status.AddOption(rootOption);
+        status.SetHandler((string? rootValue) =>
+        {
+            try
+            {
+                var workspace = rootValue ?? Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot();
+                ReportPackageLane(workspace);
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"lz packages status: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, rootOption);
+        packages.AddCommand(status);
+
         root.AddCommand(packages);
+    }
+
+    private static void ReportPackageLane(string workspace)
+    {
+        var configPath = Directory.EnumerateFiles(workspace, "*uget.[Cc]onfig").FirstOrDefault()
+                         ?? Path.Combine(workspace, "NuGet.Config");
+        if (!File.Exists(configPath))
+            throw new FileNotFoundException($"No NuGet.Config at the workspace root ({workspace}).");
+
+        var feeds = Lz.Core.PackageLane.LocalFeeds.FromNuGetConfig(File.ReadAllText(configPath));
+        var found = Lz.Core.PackageLane.LocalFeeds.Scan(workspace, feeds);
+        var (chosen, ambiguous) = Lz.Core.PackageLane.LocalPackageOverrides.Resolve(found);
+        var byProperty = Lz.Core.PackageLane.PackageLaneStatus.ByProperty(chosen);
+
+        Console.WriteLine($"workspace: {workspace}");
+        Console.WriteLine();
+
+        // --- producers -------------------------------------------------------------
+        // A repo with a version.json derives its version; one without still names a literal.
+        // Both are reported, because "which scheme is this repo on" is the first question.
+        Console.WriteLine("producers");
+        var reposDir = Path.Combine(workspace, "repos");
+        var producerDirs = Directory.Exists(reposDir)
+            ? Directory.EnumerateDirectories(reposDir).OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+            : Enumerable.Empty<string>();
+        var anyProducer = false;
+        foreach (var dir in producerDirs)
+        {
+            var vj = Path.Combine(dir, "version.json");
+            if (!File.Exists(vj)) continue;
+            anyProducer = true;
+            var text = File.ReadAllText(vj);
+            Console.WriteLine($"  {Path.GetFileName(dir),-12} version.json {Summarise(text)}");
+            if (!Directory.Exists(Path.Combine(dir, ".git")) && !File.Exists(Path.Combine(dir, ".git")))
+                Console.WriteLine("               WARNING no .git - the version would be a height-0 prerelease BELOW the release");
+        }
+        if (!anyProducer) Console.WriteLine("  (none derive a version yet)");
+
+        // --- feeds -----------------------------------------------------------------
+        Console.WriteLine();
+        Console.WriteLine($"feeds ({feeds.Count}) hold {chosen.Count} package id(s)");
+        foreach (var group in chosen.GroupBy(p => p.Value).OrderBy(g => g.Key, StringComparer.Ordinal))
+            Console.WriteLine($"  @{group.Key,-24} {group.Count(),3} id(s)  e.g. {string.Join(", ", group.Select(g => g.Key).OrderBy(x => x, StringComparer.Ordinal).Take(3))}");
+        foreach (var note in ambiguous)
+            Console.WriteLine($"  several versions present, {note}");
+
+        // --- the override ----------------------------------------------------------
+        var overridePath = Path.Combine(workspace, LocalOverrideFileName);
+        var haveOverride = File.Exists(overridePath);
+        var laneOverride = haveOverride
+            ? Lz.Core.PackageLane.PackageLaneStatus.ParseOverride(File.ReadAllText(overridePath))
+            : new Dictionary<string, string>();
+        Console.WriteLine();
+        Console.WriteLine(haveOverride
+            ? $"override: {LocalOverrideFileName} present, {laneOverride.Count} entr(ies)"
+            : $"override: absent - every consumer is on the published lane");
+
+        // A stale override is the case that fails as NU1101 deep inside a consumer rather than
+        // as anything naming the lane, so name it here instead.
+        var stale = byProperty.Where(kv => laneOverride.TryGetValue(kv.Key, out var v) && v != kv.Value).ToList();
+        var missing = byProperty.Where(kv => !laneOverride.ContainsKey(kv.Key)).ToList();
+        if (haveOverride && (stale.Count > 0 || missing.Count > 0))
+        {
+            Console.WriteLine($"  STALE - the feeds moved since it was written. Run `lz packages mode local`.");
+            foreach (var kv in stale.Take(5))
+                Console.WriteLine($"    {kv.Key}: override {laneOverride[kv.Key]}, feed {kv.Value}");
+            foreach (var kv in missing.Take(5))
+                Console.WriteLine($"    {kv.Key}: absent from the override, feed {kv.Value}");
+        }
+
+        // --- consumers -------------------------------------------------------------
+        // Discovered by the import rather than from a list: a consumer that lost its import is
+        // exactly the thing worth noticing, and a hardcoded roster could not see it.
+        Console.WriteLine();
+        Console.WriteLine("consumers");
+        var candidates = Directory.EnumerateFiles(workspace, "Directory.Packages.props", SearchOption.AllDirectories)
+            .Concat(Directory.EnumerateFiles(workspace, "*.csproj", SearchOption.AllDirectories))
+            .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase);
+
+        var seen = 0;
+        foreach (var path in candidates)
+        {
+            string text;
+            try { text = File.ReadAllText(path); } catch { continue; }
+            if (!text.Contains("<PkgVer_", StringComparison.Ordinal)) continue;
+
+            var consumer = Lz.Core.PackageLane.PackageLaneStatus.ParseConsumer(path, text);
+            var rows = Lz.Core.PackageLane.PackageLaneStatus.Evaluate(consumer, laneOverride, byProperty);
+            var canWin = Lz.Core.PackageLane.PackageLaneStatus.ImportCanWin(consumer);
+            seen++;
+
+            var lane = canWin switch
+            {
+                null => "published (no import)",
+                false => "PUBLISHED - import is ABOVE the defaults, so they win silently",
+                _ => haveOverride ? "local" : "published (no override file)",
+            };
+            Console.WriteLine($"  {Path.GetRelativePath(workspace, path)}");
+            Console.WriteLine($"      lane: {lane}");
+
+            var overridden = rows.Count(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.Overridden);
+            var agrees = rows.Count(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.Agrees);
+            var notHere = rows.Count(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.NotBuiltHere);
+            var gaps = rows.Where(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.MissingFromLane).ToList();
+            Console.WriteLine($"      pins: {rows.Count} ({overridden} overridden, {agrees} agree, {notHere} not built here, {gaps.Count} unresolved)");
+            foreach (var g in gaps)
+                Console.WriteLine($"        {g.PropertyName}: would restore {g.CommittedDefault}, feed holds {g.FeedNewest ?? "nothing"}");
+        }
+        if (seen == 0) Console.WriteLine("  (none found)");
+    }
+
+    /// <summary>One line of a version.json, without pulling in a JSON dependency for four fields.</summary>
+    private static string Summarise(string versionJson)
+    {
+        static string? Field(string src, string name)
+        {
+            var i = src.IndexOf($"\"{name}\"", StringComparison.Ordinal);
+            if (i < 0) return null;
+            var c = src.IndexOf(':', i);
+            if (c < 0) return null;
+            var end = src.IndexOfAny(new[] { ',', '\n', '}' }, c);
+            return end < 0 ? null : src.Substring(c + 1, end - c - 1).Trim().Trim('"');
+        }
+
+        var v = Field(versionJson, "version") ?? "?";
+        var offset = Field(versionJson, "versionHeightOffset");
+        var pub = versionJson.Contains("publicReleaseRefSpec", StringComparison.Ordinal) ? "public on main" : "no publicReleaseRefSpec";
+        return offset is null ? $"{v}, {pub}" : $"{v} +{offset}, {pub}";
     }
 
     private const string LocalOverrideFileName = "Packages.Local.props";
