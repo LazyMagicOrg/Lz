@@ -223,6 +223,47 @@ public class PublishGuardsTests
     }
 
     [Fact]
+    public void ExistenceIsReadFromTheVersionList()
+    {
+        // The fail-open this replaced: the lookup asked for the nuspec and read 404 as "not
+        // published". Measured against GitHub Packages 2026-09-07, LazyMagic.Shared 3.0.1 IS there -
+        // dotnet restore and dotnet package search both return it - and the guard cleared it for
+        // push. That registry 403s the version list and 404s the nuspec route, so 404 never meant
+        // absent. Existence now comes from the list, and only a 404 on the LIST means absent.
+        const string list = """{"versions":["1.0.0","3.0.1","3.0.2"]}""";
+
+        Assert.True(NuGetV3PublishedPackages.VersionListContains(list, "3.0.1", "index.json"));
+        Assert.False(NuGetV3PublishedPackages.VersionListContains(list, "3.0.23", "index.json"));
+    }
+
+    [Fact]
+    public void TheVersionListComparisonIgnoresCase()
+    {
+        // The flat container lowercases what it stores; the artifact carries the version as authored.
+        Assert.True(NuGetV3PublishedPackages.VersionListContains(
+            """{"versions":["3.0.23-G6FC0B7081E"]}""", "3.0.23-g6fc0b7081e", "index.json"));
+    }
+
+    [Fact]
+    public void AVersionListItCannotParseRefusesRatherThanReadingAbsence()
+    {
+        Assert.Throws<InvalidDataException>(() =>
+            NuGetV3PublishedPackages.VersionListContains("""{"data":[]}""", "3.0.1", "index.json"));
+    }
+
+    [Fact]
+    public void APublishedVersionWhoseCommitTheRegistryWillNotGiveUpIsRefused()
+    {
+        // The other half of the fix: when the version list says it exists but the nuspec is not
+        // served, the lookup returns "exists, commit unknown" - and that refuses, rather than being
+        // mistaken for a clean push.
+        var verdict = PublishGuards.Registry(Package("3.0.1"), new PublishedPackage(null));
+
+        Assert.Equal(PublishVerdict.CollidesAndCannotBeCompared, verdict);
+        Assert.True(PublishGuards.Refuses(verdict));
+    }
+
+    [Fact]
     public void RefusesSilenceWhenTheIndexPublishesNoFlatContainer()
     {
         // The state that decides whether guard one can run against GitHub Packages at all - unverified

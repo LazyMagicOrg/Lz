@@ -53,6 +53,20 @@ public sealed class NuGetV3PublishedPackages : IPublishedPackages, IDisposable
         }
     }
 
+    /// <summary>
+    /// EXISTENCE COMES FROM THE VERSION LIST, NOT FROM WHETHER A NUSPEC IS SERVED.
+    ///
+    /// <para>The first version of this asked for the nuspec directly and read <c>404</c> as "this
+    /// version is not published". Measured against GitHub Packages on 2026-09-07, that is a
+    /// <b>fail-open</b>: <c>LazyMagic.Shared 3.0.1</c> IS in that registry — <c>dotnet restore</c> and
+    /// <c>dotnet package search</c> both return it with the same credential — and the guard cleared it
+    /// for push. That registry's flat container answers <c>403</c> for the version list and the
+    /// <c>.nupkg</c>, and <c>404</c> for the nuspec route, so a "no such version" reading of 404 was
+    /// wrong in exactly the case the guard exists for.</para>
+    ///
+    /// <para>So the order is: version list first, and only a <c>404</c> there — the protocol's own
+    /// "no such package id" — counts as absent. Anything else refuses.</para>
+    /// </summary>
     public async Task<PublishedPackage?> LookupAsync(string id, string version, CancellationToken ct = default)
     {
         var baseAddress = _baseAddress ??= await ResolveBaseAddressAsync(ct);
@@ -60,17 +74,48 @@ public sealed class NuGetV3PublishedPackages : IPublishedPackages, IDisposable
         // The flat container lowercases both segments and the file name.
         var lid = id.ToLowerInvariant();
         var lv = version.ToLowerInvariant();
-        var url = $"{baseAddress}{lid}/{lv}/{lid}.nuspec";
 
-        using var response = await _http.GetAsync(url, ct);
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        if (!response.IsSuccessStatusCode)
+        var listUrl = $"{baseAddress}{lid}/index.json";
+        using var list = await _http.GetAsync(listUrl, ct);
+
+        // 404 on the version LIST is the protocol saying it has never heard of this id. That is the
+        // only shape that may be read as "nothing published".
+        if (list.StatusCode == HttpStatusCode.NotFound) return null;
+
+        if (!list.IsSuccessStatusCode)
             throw new HttpRequestException(
-                $"{url} answered {(int)response.StatusCode} {response.ReasonPhrase}. " +
-                "That is not 'no such version' - it is no answer, so guard one cannot clear this push.");
+                $"{listUrl} answered {(int)list.StatusCode} {list.ReasonPhrase}. That is not 'no such " +
+                "package' - it is no answer, so guard one cannot clear this push. GitHub Packages " +
+                "answers 403 here for a token that nevertheless restores fine, so this is the expected " +
+                "outcome there today; drive the lookup through NuGet's own client to get past it.");
 
-        var xml = await response.Content.ReadAsStringAsync(ct);
-        return new PublishedPackage(PublishGuards.ParseNuspec(xml, url).RepositoryCommit);
+        if (!VersionListContains(await list.Content.ReadAsStringAsync(ct), lv, listUrl)) return null;
+
+        // Published. Now the commit, which is what separates a re-run from a collision - and if the
+        // registry will not give it up, say so rather than inventing one: PublishedPackage(null) means
+        // "exists, commit unknown", which guard one refuses.
+        var nuspecUrl = $"{baseAddress}{lid}/{lv}/{lid}.nuspec";
+        using var nuspec = await _http.GetAsync(nuspecUrl, ct);
+        if (!nuspec.IsSuccessStatusCode) return new PublishedPackage(null);
+
+        return new PublishedPackage(
+            PublishGuards.ParseNuspec(await nuspec.Content.ReadAsStringAsync(ct), nuspecUrl).RepositoryCommit);
+    }
+
+    /// <summary>
+    /// Whether a flat-container version list names this version. Compared case-insensitively, because
+    /// the protocol lowercases what it stores while the artifact carries the version as authored.
+    /// </summary>
+    public static bool VersionListContains(string versionListJson, string version, string source)
+    {
+        using var doc = JsonDocument.Parse(versionListJson);
+        if (!doc.RootElement.TryGetProperty("versions", out var versions))
+            throw new InvalidDataException($"{source}: no 'versions' array, so existence cannot be read.");
+
+        foreach (var v in versions.EnumerateArray())
+            if (string.Equals(v.GetString(), version, StringComparison.OrdinalIgnoreCase)) return true;
+
+        return false;
     }
 
     private async Task<string> ResolveBaseAddressAsync(CancellationToken ct)
