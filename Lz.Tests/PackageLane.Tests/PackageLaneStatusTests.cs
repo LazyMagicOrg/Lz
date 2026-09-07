@@ -172,4 +172,139 @@ public class PackageLaneStatusTests
         Assert.Single(c.Pins);
         Assert.Equal("1.0.0", c.Pins[0].CommittedDefault);
     }
+
+    // ---- defects found by adversarial review of the first version, each reproduced ----
+
+    [Fact]
+    public void ADeadDefaultIsFlaggedWITHOUTDisturbingTheLaneVerdict()
+    {
+        // The case that produces no diagnostic anywhere: the committed default names a version the
+        // producer can never mint again (height only increases), so published mode binds whatever
+        // stale copy is in the global-packages folder, or drifts up with an NU1603 nothing gates.
+        // It is orthogonal on purpose - here the lane is working perfectly AND the default is dead,
+        // and an earlier version folded the two together, hiding the working lane.
+        var rows = PackageLaneStatus.Evaluate(
+            PackageLaneStatus.ParseConsumer("x", Correct),
+            PackageLaneStatus.ParseOverride(Override),
+            PackageLaneStatus.ByProperty(new Dictionary<string, string>
+            {
+                ["AipApi"] = "1.0.1",
+                ["BaseApp.ViewModels"] = "1.0.2",
+            }));
+
+        Assert.All(rows, r => Assert.Equal(PinVerdict.Overridden, r.Verdict));
+        Assert.All(rows, r => Assert.True(r.CommittedIsDead));
+    }
+
+    [Fact]
+    public void ADefaultTheProducerCanStillMintIsNotDead()
+    {
+        // The discriminator. Equal is not dead - only strictly below is - so a consumer that has
+        // been kept current does not get flagged.
+        var rows = PackageLaneStatus.Evaluate(
+            PackageLaneStatus.ParseConsumer("x", Correct),
+            new Dictionary<string, string>(),
+            PackageLaneStatus.ByProperty(new Dictionary<string, string>
+            {
+                ["AipApi"] = "1.0.0",              // exactly the committed default
+                ["BaseApp.ViewModels"] = "1.0.1",
+            }));
+
+        Assert.All(rows, r => Assert.False(r.CommittedIsDead));
+    }
+
+    [Fact]
+    public void AnImportInsideAMULTILINECommentIsNotLive()
+    {
+        // The first version's guard looked only at the import's own line, so a <!-- opened earlier
+        // hid nothing: the consumer reported lane: local while MSBuild skipped the import entirely.
+        var text = string.Join("\n",
+            "<Project>",
+            "  <PropertyGroup>",
+            "    <PkgVer_AipApi>1.0.0</PkgVer_AipApi>",
+            "  </PropertyGroup>",
+            "  <!-- disabled while we debug",
+            "  <Import Project=\"$(MSBuildThisFileDirectory)../../Packages.Local.props\" Condition=\"Exists('x')\" />",
+            "  -->",
+            "</Project>");
+
+        Assert.Null(PackageLaneStatus.ImportCanWin(PackageLaneStatus.ParseConsumer("x", text)));
+    }
+
+    [Fact]
+    public void ACommentedOutDefaultBelowTheImportDoesNotFakeAMisorder()
+    {
+        // Same omission, opposite direction: a retired PkgVer_ line below the import used to raise
+        // LastDefaultLine past ImportLine and flip the consumer to the report's loudest verdict.
+        var text = string.Join("\n",
+            "<Project>",
+            "  <PropertyGroup>",
+            "    <PkgVer_AipApi>1.0.0</PkgVer_AipApi>",
+            "  </PropertyGroup>",
+            "  <Import Project=\"$(MSBuildThisFileDirectory)../../Packages.Local.props\" Condition=\"Exists('x')\" />",
+            "  <!-- <PkgVer_Retired>9.9.9</PkgVer_Retired> -->",
+            "</Project>");
+
+        var c = PackageLaneStatus.ParseConsumer("x", text);
+        Assert.True(PackageLaneStatus.ImportCanWin(c));
+        Assert.DoesNotContain(c.Pins, p => p.PropertyName == "PkgVer_Retired");
+    }
+
+    [Fact]
+    public void AnImportWhoseAttributesWrapIsStillFound()
+    {
+        // The real import lines are ~140 characters; wrapping them is routine formatting, and the
+        // first version required "<Import" and the filename on one physical line.
+        var text = string.Join("\n",
+            "<Project>",
+            "  <PropertyGroup>",
+            "    <PkgVer_AipApi>1.0.0</PkgVer_AipApi>",
+            "  </PropertyGroup>",
+            "  <Import",
+            "      Project=\"$(MSBuildThisFileDirectory)../../Packages.Local.props\"",
+            "      Condition=\"Exists('$(MSBuildThisFileDirectory)../../Packages.Local.props')\" />",
+            "</Project>");
+
+        Assert.True(PackageLaneStatus.ImportCanWin(PackageLaneStatus.ParseConsumer("x", text)));
+    }
+
+    [Fact]
+    public void AConditionedDefaultIsStillCounted()
+    {
+        // The name used to run to the first '>', swallowing the attribute, so the closing tag was
+        // never matched and the pin disappeared from the report - which reads as "no problem here".
+        var text = string.Join("\n",
+            "<Project>",
+            "  <PropertyGroup>",
+            "    <PkgVer_AipApi Condition=\"'$(X)'==''\">1.0.0</PkgVer_AipApi>",
+            "  </PropertyGroup>",
+            "</Project>");
+        var c = PackageLaneStatus.ParseConsumer("x", text);
+        Assert.Single(c.Pins);
+        Assert.Equal("PkgVer_AipApi", c.Pins[0].PropertyName);
+        Assert.Equal("1.0.0", c.Pins[0].CommittedDefault);
+    }
+
+    [Theory]
+    [InlineData("$(MSBuildThisFileDirectory)../../Packages.Local.props", true)]
+    [InlineData("$(MSBuildThisFileDirectory)../Packages.Local.props", false)]      // too shallow
+    [InlineData("$(MSBuildThisFileDirectory)../../../Packages.Local.props", false)] // too deep
+    public void TheImportPathMustActuallyResolveToTheOverride(string project, bool expected)
+    {
+        // Every consumer import is guarded by Exists(), so a wrong ../ depth is INERT: restore
+        // succeeds on the committed defaults and nothing else in the build reports it. Counting the
+        // line without resolving the path called all three of these "local".
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "lane-probe"));
+        var consumerPath = Path.Combine(root, "repos", "AdminApp", "Directory.Packages.props");
+        var overridePath = Path.Combine(root, "Packages.Local.props");
+
+        var text = string.Join("\n",
+            "<Project>",
+            "  <PropertyGroup><PkgVer_AipApi>1.0.0</PkgVer_AipApi></PropertyGroup>",
+            "  <Import Project=\"" + project + "\" Condition=\"Exists('x')\" />",
+            "</Project>");
+
+        var c = PackageLaneStatus.ParseConsumer(consumerPath, text);
+        Assert.Equal(expected, PackageLaneStatus.ImportResolvesTo(c, overridePath));
+    }
 }

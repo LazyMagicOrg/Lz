@@ -3461,13 +3461,19 @@ class Program
         // as anything naming the lane, so name it here instead.
         var stale = byProperty.Where(kv => laneOverride.TryGetValue(kv.Key, out var v) && v != kv.Value).ToList();
         var missing = byProperty.Where(kv => !laneOverride.ContainsKey(kv.Key)).ToList();
-        if (haveOverride && (stale.Count > 0 || missing.Count > 0))
+        // The reverse join matters as much as the forward one: an override entry naming an id no
+        // feed holds any more - removed, renamed, or wiped - pins a version nothing can supply, and
+        // walking only feed -> override reports that file as healthy.
+        var orphan = laneOverride.Where(kv => !byProperty.ContainsKey(kv.Key)).ToList();
+        if (haveOverride && (stale.Count > 0 || missing.Count > 0 || orphan.Count > 0))
         {
-            Console.WriteLine($"  STALE - the feeds moved since it was written. Run `lz packages mode local`.");
+            Console.WriteLine($"  STALE - it no longer matches the feeds. Run `lz packages mode local`.");
             foreach (var kv in stale.Take(5))
                 Console.WriteLine($"    {kv.Key}: override {laneOverride[kv.Key]}, feed {kv.Value}");
             foreach (var kv in missing.Take(5))
                 Console.WriteLine($"    {kv.Key}: absent from the override, feed {kv.Value}");
+            foreach (var kv in orphan.Take(5))
+                Console.WriteLine($"    {kv.Key}: pinned at {kv.Value}, but no feed holds that id");
         }
 
         // --- consumers -------------------------------------------------------------
@@ -3493,10 +3499,15 @@ class Program
             var canWin = Lz.Core.PackageLane.PackageLaneStatus.ImportCanWin(consumer);
             seen++;
 
+            // Existing and ordered is not enough: every consumer import is guarded by Exists(),
+            // so one with the wrong number of ../ segments is inert and restore quietly takes the
+            // committed defaults.
+            var resolves = Lz.Core.PackageLane.PackageLaneStatus.ImportResolvesTo(consumer, overridePath);
             var lane = canWin switch
             {
                 null => "published (no import)",
                 false => "PUBLISHED - import is ABOVE the defaults, so they win silently",
+                _ when !resolves => $"PUBLISHED - the import does not resolve to {overridePath} ({consumer.ImportProject})",
                 _ => haveOverride ? "local" : "published (no override file)",
             };
             Console.WriteLine($"  {Path.GetRelativePath(workspace, path)}");
@@ -3506,9 +3517,23 @@ class Program
             var agrees = rows.Count(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.Agrees);
             var notHere = rows.Count(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.NotBuiltHere);
             var gaps = rows.Where(r => r.Verdict == Lz.Core.PackageLane.PinVerdict.MissingFromLane).ToList();
-            Console.WriteLine($"      pins: {rows.Count} ({overridden} overridden, {agrees} agree, {notHere} not built here, {gaps.Count} unresolved)");
+            var dead = rows.Where(r => r.CommittedIsDead).ToList();
+            Console.WriteLine($"      pins: {rows.Count} ({overridden} overridden, {agrees} agree, {notHere} not built here, {gaps.Count} unresolved, {dead.Count} dead default)");
             foreach (var g in gaps)
                 Console.WriteLine($"        {g.PropertyName}: would restore {g.CommittedDefault}, feed holds {g.FeedNewest ?? "nothing"}");
+
+            // The dead ones are the quiet failure, so they get named rather than counted. On the
+            // local lane nothing here is wrong today - it is what `packages mode published` would
+            // do that matters, and neither NuGet nor the build says anything about it.
+            if (dead.Count > 0)
+            {
+                Console.WriteLine($"        DEAD DEFAULTS - the committed version is below what the producer can still mint.");
+                Console.WriteLine($"        Published mode does NOT fail on these: warm, NuGet binds the old package still in");
+                Console.WriteLine($"        the global-packages folder; cold, it drifts up and says so only in NU1603.");
+                foreach (var d in dead.Take(4))
+                    Console.WriteLine($"          {d.PropertyName}: default {d.CommittedDefault}, lowest the producer can mint {d.FeedNewest}");
+                if (dead.Count > 4) Console.WriteLine($"          ... and {dead.Count - 4} more");
+            }
         }
         if (seen == 0) Console.WriteLine("  (none found)");
     }
@@ -3528,7 +3553,22 @@ class Program
 
         var v = Field(versionJson, "version") ?? "?";
         var offset = Field(versionJson, "versionHeightOffset");
-        var pub = versionJson.Contains("publicReleaseRefSpec", StringComparison.Ordinal) ? "public on main" : "no publicReleaseRefSpec";
+
+        // Read the refspec, do not merely detect the key. Which branches it matches is what decides
+        // between a clean 1.0.N and a 1.0.N-g<sha> prerelease, so it is a version-producing input -
+        // and this section reports what an input actually is. An empty array behaves as absent.
+        var pub = "no publicReleaseRefSpec (every build is a prerelease)";
+        var at = versionJson.IndexOf("publicReleaseRefSpec", StringComparison.Ordinal);
+        if (at >= 0)
+        {
+            var open = versionJson.IndexOf('[', at);
+            var close = open < 0 ? -1 : versionJson.IndexOf(']', open);
+            var body = close < 0 ? "" : versionJson.Substring(open + 1, close - open - 1).Trim();
+            pub = body.Length == 0
+                ? "publicReleaseRefSpec [] (empty - behaves as absent)"
+                : body.Contains("heads/main", StringComparison.Ordinal) ? "public on main"
+                : $"public on {body.Replace("\"", "").Replace("\n", " ").Trim()}";
+        }
         return offset is null ? $"{v}, {pub}" : $"{v} +{offset}, {pub}";
     }
 
