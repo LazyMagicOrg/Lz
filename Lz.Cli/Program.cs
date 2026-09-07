@@ -3427,7 +3427,131 @@ class Program
         }, rootOption, dryRunOption);
         packages.AddCommand(sync);
 
+        // ---------------------------------------------------------------
+        // packages check - the two publish guards (SdlcVersioning 8.2). Unlike the
+        // three commands above it changes nothing; it is the last thing that runs
+        // before `dotnet nuget push`, and its exit code is the gate.
+        // ---------------------------------------------------------------
+        var check = new Command("check",
+            "Refuse a publish: packages not built as a public release, or already in the registry from another commit.");
+        var packagesDirOption = new Option<string>("--packages", "Directory holding the .nupkg files about to be pushed.")
+        { IsRequired = true };
+        var commitOption = new Option<string?>("--commit",
+            "The commit being published (github.sha). Omitted, the artifact-identity check does not run and says so.");
+        var sourceOption = new Option<string?>("--source",
+            "NuGet V3 service index to check against. Omitted, guard one does not run and says so.");
+        var tokenEnvOption = new Option<string?>("--token-env",
+            "Name of an environment variable holding a registry read token. The value is never printed.");
+        check.AddOption(packagesDirOption);
+        check.AddOption(commitOption);
+        check.AddOption(sourceOption);
+        check.AddOption(tokenEnvOption);
+        check.SetHandler(async (string packagesDir, string? commit, string? source, string? tokenEnv) =>
+        {
+            try
+            {
+                Environment.ExitCode = await CheckPublishCandidates(packagesDir, commit, source, tokenEnv) ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"lz packages check: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, packagesDirOption, commitOption, sourceOption, tokenEnvOption);
+        packages.AddCommand(check);
+
         root.AddCommand(packages);
+    }
+
+    /// <summary>
+    /// Runs both publish guards over a directory of packages. Returns false if any is refused.
+    ///
+    /// <para>Every skipped check is announced. A guard that quietly does not run is the exact failure
+    /// this command was written to correct - the specification's own second guard named a
+    /// <c>-local</c> label that nothing emits, so it would have been green in both states.</para>
+    /// </summary>
+    private static async Task<bool> CheckPublishCandidates(
+        string packagesDir, string? commit, string? source, string? tokenEnv)
+    {
+        var candidates = Lz.Core.PackageLane.PublishCandidates.Scan(packagesDir);
+        Console.WriteLine($"packages check: {candidates.Count} package(s) in {packagesDir}");
+
+        if (candidates.Count == 0)
+        {
+            // Not "nothing to refuse": a publish step with no packages built nothing, and pushing a
+            // glob that matches nothing succeeds silently.
+            Console.Error.WriteLine("  REFUSED - no .nupkg here. A publish with nothing to publish is a build that did not run.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(commit))
+            Console.WriteLine("  NOTE: no --commit, so the artifact-identity check is SKIPPED (stale or foreign packages would pass).");
+        if (string.IsNullOrWhiteSpace(source))
+            Console.WriteLine("  NOTE: no --source, so guard one (already-published) is SKIPPED.");
+
+        string? token = null;
+        if (!string.IsNullOrWhiteSpace(tokenEnv))
+        {
+            token = Environment.GetEnvironmentVariable(tokenEnv!);
+            if (string.IsNullOrWhiteSpace(token))
+                Console.WriteLine($"  NOTE: ${tokenEnv} is empty, so the registry is read anonymously.");
+        }
+
+        using var registry = string.IsNullOrWhiteSpace(source)
+            ? null
+            : new Lz.Core.PackageLane.NuGetV3PublishedPackages(source!, token);
+
+        var refused = 0;
+        // One line per package, and each distinct verdict explained once at the end. A feed holds
+        // twenty-five packages that fail the same way for the same reason; repeating the paragraph
+        // twenty-five times buries the one package that failed differently.
+        var seen = new Dictionary<Lz.Core.PackageLane.PublishVerdict, string>();
+        Console.WriteLine();
+        foreach (var package in candidates)
+        {
+            var verdict = Lz.Core.PackageLane.PublishGuards.Artifact(package, commit);
+
+            if (verdict == Lz.Core.PackageLane.PublishVerdict.Publishable && registry is not null)
+            {
+                try
+                {
+                    verdict = Lz.Core.PackageLane.PublishGuards.Registry(
+                        package, await registry.LookupAsync(package.Id, package.Version));
+                }
+                catch (Exception ex)
+                {
+                    verdict = Lz.Core.PackageLane.PublishVerdict.RegistryUndeterminable;
+                    Console.WriteLine($"      ({ex.Message})");
+                }
+            }
+
+            var refuses = Lz.Core.PackageLane.PublishGuards.Refuses(verdict);
+            if (refuses) refused++;
+
+            var mark = verdict == Lz.Core.PackageLane.PublishVerdict.Publishable ? "ok     "
+                     : refuses ? "REFUSED" : "note   ";
+            var label = verdict == Lz.Core.PackageLane.PublishVerdict.Publishable ? "" : $"  [{verdict}]";
+            Console.WriteLine($"  {mark}  {package.Id} {package.Version}{label}");
+
+            if (verdict != Lz.Core.PackageLane.PublishVerdict.Publishable && !seen.ContainsKey(verdict))
+                seen[verdict] = Lz.Core.PackageLane.PublishGuards.Explain(verdict, package, commit);
+        }
+
+        if (seen.Count > 0)
+        {
+            Console.WriteLine();
+            foreach (var (verdict, why) in seen) Console.WriteLine($"  {verdict}: {why}");
+        }
+
+        Console.WriteLine();
+        if (refused == 0)
+        {
+            Console.WriteLine($"packages check: all {candidates.Count} package(s) clear to push.");
+            return true;
+        }
+
+        Console.Error.WriteLine($"packages check: {refused} of {candidates.Count} package(s) REFUSED. Nothing was pushed.");
+        return false;
     }
 
     private static void ReportPackageLane(string workspace)

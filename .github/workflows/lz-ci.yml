@@ -217,6 +217,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "lane refresh failed - templates would restore stale pins" }
           Get-Content Packages.Local.props
 
+      # THE PUBLISH GUARD, EXERCISED IN ITS REFUSING DIRECTION ON EVERY PUSH.
+      #
+      # Nothing is published from this job, so this is not protecting a push — it is the liveness
+      # proof for a guard whose real call site does not exist yet (the publish workflows are blocked
+      # on the LazyMagic dev→main merge). A guard that is only unit-tested is one refactor away from
+      # being unreachable, and the LazyMagic packages sitting in the feed above are exactly the state
+      # it exists to refuse: built from `dev` with -p:PublicRelease=false, so every one carries NBGV's
+      # -g<sha> discriminator.
+      #
+      # ASSERTING THE REFUSAL, not merely calling the guard, is what makes one step catch two
+      # different regressions: a guard that stops recognising the discriminator, and a build that
+      # stops passing -p:PublicRelease=false. The second is the trap documented above — NBGV reads
+      # the AMBIENT GITHUB_REF, which here is Lz's own push, so without that flag LazyMagic gets
+      # stamped a public release of a branch it is not on, minting the same version string a genuine
+      # main publish would mint from different content. Drop the flag and these packages come out
+      # clean, the guard says "ok", and this step goes red.
+      #
+      # The exit code alone would not discriminate: `dotnet run` also exits non-zero when the BUILD
+      # fails, which would read as "the guard refused" and pass. So the output has to say so too.
+      - name: the publish guard must refuse a non-public build
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          $out = dotnet run --project repos/Lz/Lz.Cli/Lz.Cli.csproj -c Debug "-p:SolutionDir=$root\repos\Lz\" -- packages check --packages "$root\repos\LazyMagic\Packages" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -eq 0) { throw "The publish guard CLEARED packages built with -p:PublicRelease=false. Either the guard no longer recognises NBGV's commit-id discriminator, or the LazyMagic build above stopped passing that flag." }
+          if ($out -notmatch 'NotAPublicRelease') { throw "packages check exited $code without reaching a verdict - that is a build or argument failure, not a refusal." }
+          if ($out -notmatch 'packages check: (\d+) of \1 package\(s\) REFUSED') { throw "the guard refused only some of the packages; all of them were built non-public, so all of them should be refused." }
+
       # Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
       - name: test
         working-directory: repos/Lz
