@@ -1,0 +1,87 @@
+# Publishes the five Lz.* packages to GitHub Packages under LazyMagicOrg.
+#
+# SIMPLER THAN LAZYMAGIC'S EQUIVALENT, and for a reason worth stating: none of the five producers
+# references a LazyMagic package (checked, not assumed - Lz.Gen only mentions LazyMagicMDD in a
+# <Description> string). So this job needs no second checkout, no local lane, and no fence. It builds
+# the five projects and nothing else.
+#
+# WHY NOT `dotnet build Lz.slnx`: the solution deliberately includes ProjectTemplates/*, seven of
+# which PackageReference LazyMagic.*, so building it would drag in a LazyMagic build this job has no
+# other need for. The templates are not packable and nothing here should publish them.
+name: Publish NuGet
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    # ubuntu-latest. lz-ci moved off windows-latest on 2026-09-07 after both of its stated reasons
+    # failed measurement, and neither ever applied here: the ReactiveUI revoked-certificate failure
+    # is in LazyMagic's client tier, which this job does not touch.
+    runs-on: ubuntu-latest
+
+    steps:
+      # fetch-depth: 0 is REQUIRED, not tidiness. Lz derives its version from version.json plus
+      # commit height, and NBGV throws MSB4018 on a shallow clone rather than guessing - a depth-1
+      # checkout fails the build outright.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # global-json-file, not a floating dotnet-version: this repo pins an exact SDK with
+          # rollForward: disable, so "10.x" would install whatever is newest and then be REJECTED by
+          # that pin. Reading the same file the build reads is the only way they cannot disagree.
+          global-json-file: global.json
+
+      # This repo carries no NuGet.Config of its own, deliberately - a config inside a sub-repo is a
+      # documented hazard here, because NuGet dedupes sources by resolved path and the nearest config
+      # wins the NAME. Written at runtime instead, and it declares nuget.org ONLY: the five producers
+      # take nothing from a first-party feed, and declaring ./Packages would fail restore with NU1301
+      # before the build has created it.
+      - name: write the CI NuGet.Config
+        run: |
+          cat > NuGet.Config <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+            </packageSources>
+          </configuration>
+          XML
+
+      # -p:SolutionDir is mandatory: these projects import $(SolutionDir)CommonPackageHandling.targets
+      # and this repo has no Directory.Build.props to supply it, so a per-project build fails MSB4019.
+      # The .slnx would set it, but see the header for why the solution is not what we build.
+      - name: build the five producers
+        run: |
+          for p in Lz.Core Lz.Aws Lz.Azure Lz.Gen Lz.Cli; do
+            dotnet build "$p/$p.csproj" -c Release -p:SolutionDir="$GITHUB_WORKSPACE/"
+          done
+          ls -1 Packages/
+
+      # THE TWO PUBLISH GUARDS (SdlcVersioning 4.6). Refuses anything NBGV did not stamp a public
+      # release - the -g<hex> commit-id discriminator - and anything not built from the commit being
+      # published, which is what catches a stale artifact.
+      #
+      # --source is deliberately NOT passed, so guard one (already-published) does not run: GitHub
+      # Packages answers 403 for the flat container's version list even with a credential that
+      # restores fine, so it could only return "undeterminable", which refuses and would block every
+      # publish. The registry's own duplicate rejection is the backstop - which is exactly why
+      # --skip-duplicate stays off below.
+      - name: publish guards
+        run: |
+          dotnet run --project Lz.Cli/Lz.Cli.csproj -c Debug -p:SolutionDir="$GITHUB_WORKSPACE/" -- packages check --packages ./Packages --commit "$GITHUB_SHA"
+
+      - name: publish
+        run: |
+          dotnet nuget push "./Packages/*.nupkg"  --source https://nuget.pkg.github.com/LazyMagicOrg/index.json --api-key ${{ secrets.GITHUB_TOKEN }}
+          dotnet nuget push "./Packages/*.snupkg" --source https://nuget.pkg.github.com/LazyMagicOrg/index.json --api-key ${{ secrets.GITHUB_TOKEN }}
