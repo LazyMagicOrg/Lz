@@ -236,6 +236,14 @@ jobs:
       #
       # The exit code alone would not discriminate: `dotnet run` also exits non-zero when the BUILD
       # fails, which would read as "the guard refused" and pass. So the output has to say so too.
+      #
+      # THIS STEP INVERTS THE USUAL CONTRACT — the command it runs is SUPPOSED to fail — so it has
+      # to declare its own success explicitly. GitHub's pwsh shell appends `exit $LASTEXITCODE` to
+      # the script, and $LASTEXITCODE is still 1 from the `dotnet run` above, so without the final
+      # `exit 0` the step fails having proved exactly what it set out to prove. Observed on the first
+      # run (34146393012): all three assertions passed, "5 of 5 package(s) REFUSED", step red. The
+      # `exit 0` is safe because pwsh runs with $ErrorActionPreference=stop here, so any `throw`
+      # above terminates the script and never reaches it.
       - name: the publish guard must refuse a non-public build
         shell: pwsh
         run: |
@@ -246,6 +254,8 @@ jobs:
           if ($code -eq 0) { throw "The publish guard CLEARED packages built with -p:PublicRelease=false. Either the guard no longer recognises NBGV's commit-id discriminator, or the LazyMagic build above stopped passing that flag." }
           if ($out -notmatch 'NotAPublicRelease') { throw "packages check exited $code without reaching a verdict - that is a build or argument failure, not a refusal." }
           if ($out -notmatch 'packages check: (\d+) of \1 package\(s\) REFUSED') { throw "the guard refused only some of the packages; all of them were built non-public, so all of them should be refused." }
+          Write-Host "the publish guard refused every non-public package, as it must."
+          exit 0
 
       # Build via the SOLUTION — Lz.slnx sets SolutionDir; a bare-csproj build fails MSB4019.
       - name: test
