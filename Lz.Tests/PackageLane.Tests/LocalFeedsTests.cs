@@ -14,7 +14,8 @@ public class LocalFeedsTests
         <configuration>
           <packageSources>
             <clear />
-            <add key="Scutara"           value="./repos/Packages" />
+            <add key="ScutaraService"    value="./repos/Service/Packages" />
+            <add key="ScutaraBaseAppLib" value="./repos/BaseAppLib/Packages" />
             <add key="Lz"                value="./repos/Lz/Packages" />
             <add key="LazyMagic"         value="./repos/LazyMagic/Packages" />
             <add key="LazyMagicRegistry" value="https://nuget.pkg.github.com/LazyMagicOrg/index.json" />
@@ -28,7 +29,8 @@ public class LocalFeedsTests
     {
         var feeds = LocalFeeds.FromNuGetConfig(RealShape);
 
-        Assert.Equal(new[] { "./repos/Packages", "./repos/Lz/Packages", "./repos/LazyMagic/Packages" }, feeds);
+        Assert.Equal(new[] { "./repos/Service/Packages", "./repos/BaseAppLib/Packages",
+                             "./repos/Lz/Packages", "./repos/LazyMagic/Packages" }, feeds);
     }
 
     [Fact]
@@ -38,7 +40,7 @@ public class LocalFeedsTests
         // collision, so the scan must see them in the order the config declares.
         var feeds = LocalFeeds.FromNuGetConfig(RealShape);
 
-        Assert.Equal("./repos/Packages", feeds[0]);
+        Assert.Equal("./repos/Service/Packages", feeds[0]);
         Assert.Equal("./repos/LazyMagic/Packages", feeds[^1]);
     }
 

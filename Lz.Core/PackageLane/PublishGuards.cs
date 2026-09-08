@@ -94,9 +94,11 @@ public static class PublishGuards
     /// the caller rather than passed over silently: a check that quietly does not run is the failure
     /// mode this whole row exists to correct.
     ///
-    /// <para>It earns its place on a shared feed. <c>repos/Packages</c> holds Service's and
-    /// BaseAppLib's output in one directory, so a glob push from either repo would publish the other's
-    /// packages under its own name; every foreign package fails this check.</para>
+    /// <para>It earned its place on a shared feed: <c>repos/Packages</c> held Service's and
+    /// BaseAppLib's output in one directory, so a glob push from either repo would have published the
+    /// other's packages under its own name, and every foreign package failed this check. That feed was
+    /// split per producer on 2026-09-08, which retires the hazard by construction - but the check
+    /// stays, because it also catches the commoner case: a stale artifact from an earlier build.</para>
     /// </param>
     public static PublishVerdict Artifact(PackageFacts package, string? expectedCommit)
     {

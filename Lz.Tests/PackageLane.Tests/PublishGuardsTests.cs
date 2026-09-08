@@ -65,8 +65,9 @@ public class PublishGuardsTests
     [Fact]
     public void RefusesAPackageBuiltFromAnotherCommit()
     {
-        // The shared-feed hazard in one assertion: repos/Packages holds Service's and BaseAppLib's
-        // output together, so a glob push from either repo would publish the other's packages.
+        // Was the shared-feed hazard in one assertion: repos/Packages held Service's and BaseAppLib's
+        // output together, so a glob push from either would publish the other's packages. The feed was
+        // split per producer 2026-09-08; this now pins the surviving case, a stale artifact.
         Assert.Equal(PublishVerdict.BuiltFromAnotherCommit,
                      PublishGuards.Artifact(Package("0.12.6", OtherCommit), Commit));
     }
