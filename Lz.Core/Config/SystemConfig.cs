@@ -95,6 +95,13 @@ public class SystemConfig
     // NOTHING changes and the emitted plan is byte-identical (see RollbackConfig).
     public RollbackConfig? Rollback { get; set; }
 
+    // Pipeline — opt-in decoupled CD: GitHub adds artifacts to a store, a deployer
+    // inside this account verifies and deploys them, and a human approves in prod.
+    // When omitted, NOTHING changes and the emitted plan is byte-identical — the
+    // compatibility guarantee the sibling workspaces run on, pinned by a test
+    // (PipelineConfigTests) rather than by this comment. See PipelineConfig.
+    public PipelineConfig? Pipeline { get; set; }
+
     // Behaviors — system-level routing rules
     public BehaviorsConfig? Behaviors { get; set; }
 

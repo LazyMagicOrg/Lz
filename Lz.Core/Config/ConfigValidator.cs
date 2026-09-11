@@ -87,6 +87,8 @@ public static class ConfigValidator
                 "rule), or remove EcrUntaggedImageRetentionDays.");
         }
 
+        if (config.Pipeline != null) ValidatePipeline(config.Pipeline, config.Rollback, errors);
+
         // Topology-specific prerequisites (e.g., VpcCidr for topologies with a
         // private network) live in the platform library's topology descriptor
         // and are invoked by the CLI via ValidateTopologyConfig before factory
@@ -201,6 +203,112 @@ public static class ConfigValidator
                     "Each label must be 1-63 chars, alphanumeric or hyphens, " +
                     "starting and ending alphanumeric.");
                 break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Validate an opt-in Pipeline block. See <see cref="PipelineConfig"/> and
+    /// Docs/specs/DecoupledCd.md.
+    ///
+    /// <para>EVERY RULE BELOW IS GATED ON <c>Enabled</c>, deliberately. A present-but-false block
+    /// is a legitimate way to record "this environment has considered the pipeline and is not
+    /// using it", and validating its contents would make writing that down harder than leaving the
+    /// section out — which is the opposite of what the block is for.</para>
+    /// </summary>
+    private static void ValidatePipeline(PipelineConfig p, RollbackConfig? rollback, List<string> errors)
+    {
+        if (!p.Enabled) return;
+
+        // The pipeline deploys class 1 by digest (DecoupledCd.md section 8.1), and the mechanism
+        // already exists under Rollback. REFUSED rather than implied: having one opt-in block
+        // silently change another's emitted plan would break the legibility that "absent means
+        // byte-identical" buys, in the one design where that property is load-bearing.
+        if (rollback?.PinImageDigest != true)
+        {
+            errors.Add(
+                "Pipeline.Enabled is on but Rollback.PinImageDigest is not. The pipeline deploys the " +
+                "service image BY DIGEST, and that mechanism lives under Rollback — a pipeline over " +
+                "task definitions that name a moving tag cannot show that what it verified is what " +
+                "runs. Set Rollback.PinImageDigest: true (and read RollbackConfig: pinning without " +
+                "Rollback.RetainTaskDefinitionRevisions gives you pinned revisions a service cannot " +
+                "be pointed back at). This is not turned on implicitly because one opt-in block " +
+                "silently changing another block's plan is exactly what these blocks promise not to do.");
+        }
+
+        if (p.Classes == null || p.Classes.Count == 0)
+        {
+            errors.Add(
+                "Pipeline.Enabled is on but Pipeline.Classes is empty. It is an ALLOWLIST of the " +
+                "artifact classes this environment accepts, so an empty list accepts nothing and the " +
+                "pipeline would refuse every build record it ever saw. Name the classes: " +
+                string.Join(", ", PipelineConfig.KnownClasses) + ".");
+        }
+        else
+        {
+            foreach (var c in p.Classes.Where(c => !PipelineConfig.KnownClasses.Contains(c)))
+            {
+                errors.Add(
+                    $"Pipeline.Classes contains '{c}', which is not an artifact class. Valid: " +
+                    string.Join(", ", PipelineConfig.KnownClasses) + ". Classes 5-7 of " +
+                    "DecoupledCd.md section 3 are all one 'config' bundle, which is why there are " +
+                    "six names for eight classes. A typo here fails CLOSED - it silently removes a " +
+                    "class from what this environment accepts - so it is rejected rather than ignored.");
+            }
+        }
+
+        if (p.Registry?.RepositoryNaming is { } naming
+            && !PipelineRegistryConfig.KnownNamings.Contains(naming))
+        {
+            errors.Add(
+                $"Pipeline.Registry.RepositoryNaming is '{naming}'. Valid: " +
+                string.Join(", ", PipelineRegistryConfig.KnownNamings) + ". 'neutral' drops the " +
+                "environment from the repository name so one image can be replicated between " +
+                "accounts and remain the same artifact; 'environment' keeps today's name.");
+        }
+
+        // An approval nobody is told about is not a gate - it is a deploy that waits a day and
+        // then fails. Refused rather than defaulted, because there is no topic this library could
+        // reasonably invent.
+        if (p.Approval is { Required: true } approval && string.IsNullOrWhiteSpace(approval.NotifyTopicArn))
+        {
+            errors.Add(
+                "Pipeline.Approval.Required is on but NotifyTopicArn is not set. Nothing would " +
+                "announce that a deploy is waiting, so the execution would sit until " +
+                "HeartbeatSeconds expires and then fail - which looks like a broken pipeline rather " +
+                "than an unanswered question. Set the topic, or set Required: false for this " +
+                "environment.");
+        }
+
+        if (p.Approval?.HeartbeatSeconds is { } hb && hb <= 0)
+        {
+            errors.Add(
+                $"Pipeline.Approval.HeartbeatSeconds is {hb}. It is how long an approval request may " +
+                "sit unanswered before the execution fails, so it must be greater than zero.");
+        }
+
+        if (p.Reconciler?.IntervalMinutes is { } interval && interval <= 0)
+        {
+            errors.Add(
+                $"Pipeline.Reconciler.IntervalMinutes is {interval}. The reconciler is what makes the " +
+                "build-record store the system of record rather than best-effort events, so its " +
+                "interval must be greater than zero.");
+        }
+
+        if (p.ArtifactAccountId is { } acct && !Regex.IsMatch(acct, @"^\d{12}$"))
+        {
+            errors.Add(
+                $"Pipeline.ArtifactAccountId is '{acct}', which is not a 12-digit AWS account id.");
+        }
+
+        foreach (var s in p.Scan?.BlockOn ?? new List<string>())
+        {
+            if (!PipelineScanConfig.KnownSeverities.Contains(s))
+            {
+                errors.Add(
+                    $"Pipeline.Scan.BlockOn contains '{s}', which is not an ECR finding severity. " +
+                    "Valid: " + string.Join(", ", PipelineScanConfig.KnownSeverities) + ". Severity " +
+                    "names are case-sensitive as ECR reports them.");
             }
         }
     }
