@@ -331,8 +331,7 @@ public class AwsTenantDnsAndCertComponent : ComponentResource
     /// </summary>
     private static string LookupPublicZoneId(string domainName, string profile, string region)
     {
-        var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-        chain.TryGetAWSCredentials(profile, out var credentials);
+        var credentials = AwsCredentialsFactory.Resolve(profile);
         using var client = credentials != null
             ? new Amazon.Route53.AmazonRoute53Client(credentials, Amazon.RegionEndpoint.GetBySystemName(region))
             : new Amazon.Route53.AmazonRoute53Client(Amazon.RegionEndpoint.GetBySystemName(region));

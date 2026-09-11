@@ -49,8 +49,10 @@ public class AwsTransitionChecker : ITransitionChecker
             var profile = requirement.Profile ?? _config.Profile;
             var region = requirement.Region ?? _config.Region;
 
-            var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-            if (!chain.TryGetAWSCredentials(profile, out var credentials))
+            // A NAMED profile that will not resolve still returns false, as before; an EMPTY one
+            // is the ambient case and proceeds on the client's own chain.
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials == null && !string.IsNullOrEmpty(profile))
                 return false;
 
             using var client = new Amazon.SecretsManager.AmazonSecretsManagerClient(

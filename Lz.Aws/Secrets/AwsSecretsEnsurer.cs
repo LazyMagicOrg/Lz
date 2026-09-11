@@ -1,4 +1,3 @@
-using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Lz.Core.Config;
@@ -112,8 +111,8 @@ public static class AwsSecretsEnsurer
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonSecretsManagerClient(credentials, regionEndpoint);
         }
         return new AmazonSecretsManagerClient(regionEndpoint);

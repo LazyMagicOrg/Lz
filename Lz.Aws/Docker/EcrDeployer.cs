@@ -130,7 +130,7 @@ public class EcrDeployer
     private async Task<string> GetAccountIdAsync(string profile, string region)
     {
         var result = await RunCaptureAsync("aws",
-            $"sts get-caller-identity --profile {profile} --region {region} --query Account --output text");
+            $"sts get-caller-identity {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} --query Account --output text");
         return result.Trim();
     }
 
@@ -138,7 +138,7 @@ public class EcrDeployer
     {
         // Get ECR login password and pipe to docker login
         var password = await RunCaptureAsync("aws",
-            $"ecr get-login-password --profile {profile} --region {region}");
+            $"ecr get-login-password {AwsCredentialsFactory.CliProfileArg(profile)} --region {region}");
 
         await RunWithStdinAsync("docker",
             $"login --username AWS --password-stdin {registryUri}",
@@ -149,13 +149,13 @@ public class EcrDeployer
     {
         // Check if repo exists
         var exitCode = await RunSilentAsync("aws",
-            $"ecr describe-repositories --profile {profile} --region {region} --repository-names {repoName}");
+            $"ecr describe-repositories {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} --repository-names {repoName}");
 
         if (exitCode != 0)
         {
             Console.WriteLine($"  Creating ECR repository '{repoName}'...");
             await RunAsync("aws",
-                $"ecr create-repository --profile {profile} --region {region} " +
+                $"ecr create-repository {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} " +
                 $"--repository-name {repoName} " +
                 $"--image-scanning-configuration scanOnPush=true");
         }
@@ -310,7 +310,7 @@ public class EcrDeployer
         {
             Console.WriteLine($"  Ensuring ECR lifecycle policy ({string.Join("; ", described)})...");
             await RunAsync("aws",
-                $"ecr put-lifecycle-policy --profile {profile} --region {region} " +
+                $"ecr put-lifecycle-policy {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} " +
                 $"--repository-name {repoName} --lifecycle-policy-text file://{tmp}");
         }
         finally
@@ -330,7 +330,7 @@ public class EcrDeployer
         {
             // list-images returns imageIds array; empty if no images pushed yet
             var output = await RunCaptureAsync("aws",
-                $"ecr list-images --profile {profile} --region {region} " +
+                $"ecr list-images {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} " +
                 $"--repository-name {repoName} --max-items 1 --query \"imageIds[0]\" --output text");
 
             // If there are images, output will be something like "sha256:abc123\tlatest"
@@ -357,7 +357,7 @@ public class EcrDeployer
         try
         {
             var output = await RunCaptureAsync("aws",
-                $"ecr describe-images --profile {profile} --region {region} " +
+                $"ecr describe-images {AwsCredentialsFactory.CliProfileArg(profile)} --region {region} " +
                 $"--repository-name {repoName} --image-ids imageTag={tag} " +
                 $"--query \"imageDetails[0].imageDigest\" --output text");
 

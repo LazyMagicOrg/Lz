@@ -1,6 +1,5 @@
 using Lz.Core.Keycloak;
 using System.Text.Json;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Lz.Core.Config;
@@ -192,8 +191,8 @@ public class AwsTenantKeycloakSeeder : ITenantKeycloakSeeder
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonSecretsManagerClient(credentials, regionEndpoint);
         }
 

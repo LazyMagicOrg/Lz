@@ -32,13 +32,12 @@ public static class DynamoDbTableCreator
         Dictionary<string, string>? tags = null,
         TableDurabilityDecision? durability = null)
     {
-        var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException($"Cannot resolve credentials for profile '{profile}'");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        using var client = new AmazonDynamoDBClient(
-            credentials,
-            Amazon.RegionEndpoint.GetBySystemName(region));
+        using var client = credentials != null
+            ? new AmazonDynamoDBClient(credentials, endpoint)
+            : new AmazonDynamoDBClient(endpoint);
 
         return await EnsureTableAsync(client, tableName, tags, durability);
     }
@@ -282,12 +281,12 @@ public static class DynamoDbTableCreator
     {
         var decision = durability ?? TableDurabilityDecision.None;
 
-        var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException($"Cannot resolve credentials for profile '{profile}'");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        using var client = new AmazonDynamoDBClient(
-            credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        using var client = credentials != null
+            ? new AmazonDynamoDBClient(credentials, endpoint)
+            : new AmazonDynamoDBClient(endpoint);
 
         // Already exists?
         try

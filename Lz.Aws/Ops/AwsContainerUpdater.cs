@@ -1,6 +1,5 @@
 using Amazon.ECS;
 using Amazon.ECS.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Aws.Docker;
 using Task = System.Threading.Tasks.Task;
 using Lz.Aws.Auth;
@@ -514,10 +513,13 @@ public class AwsContainerUpdater
 
     private static AmazonECSClient CreateEcsClient(string region, string profile)
     {
-        var chain = new CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException($"AWS profile '{profile}' not found.");
+        // ResolveOrThrow keeps the old refusal for a NAMED profile that will not resolve, and
+        // returns null for an EMPTY one — the ambient case, where the client resolves its own.
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        return new AmazonECSClient(credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        return credentials != null
+            ? new AmazonECSClient(credentials, endpoint)
+            : new AmazonECSClient(endpoint);
     }
 }

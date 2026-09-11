@@ -44,23 +44,29 @@ public class ConfigValidatorTests
         ConfigValidator.Validate(config, "test.yaml"); // no throw
     }
 
+    /// <summary>
+    /// INVERTED 2026-09-11. This test used to assert that a missing Profile was a validation
+    /// error, which was right while lz only ever ran on a workstation with an SSO profile. The
+    /// decoupled-CD deployer runs inside the target account on a task role and has no profile at
+    /// all (Docs/specs/DecoupledCd.md §8 item 2), so an empty Profile is now the AMBIENT case and
+    /// an ordinary supported state. It is kept rather than deleted because the assertion it makes
+    /// is still load-bearing — just in the other direction.
+    /// </summary>
     [Fact]
-    public void Validate_SystemConfig_ThrowsOnMissingProfile()
+    public void Validate_SystemConfig_AllowsAMissingProfile()
     {
         var config = new SystemConfig
         {
             SystemKey = "med",
             Environment = "dev",
-            // Profile intentionally empty
+            // Profile intentionally empty — ambient credentials
             Region = "us-west-2",
             VpcCidr = "10.20.0.0/16",
             SystemSuffix = "496a-ffff",
             CentralAuthDomain = "auth.test.click",
         };
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => ConfigValidator.Validate(config, "test.yaml"));
-        Assert.Contains("Profile", ex.Message);
+        ConfigValidator.Validate(config, "test.yaml"); // no throw
     }
 
     [Fact]
@@ -70,13 +76,13 @@ public class ConfigValidatorTests
         {
             SystemKey = "med",
             Environment = "dev",
-            // Profile, Region all empty
+            // Region empty; Profile is deliberately NOT required any more (see above)
         };
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => ConfigValidator.Validate(config, "test.yaml"));
-        Assert.Contains("Profile", ex.Message);
         Assert.Contains("Region", ex.Message);
+        Assert.DoesNotContain("Profile", ex.Message);
     }
 
     [Fact]

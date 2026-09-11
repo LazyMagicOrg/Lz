@@ -41,7 +41,11 @@ public static class ConfigValidator
 
         RequireNonEmpty(errors, nameof(config.SystemKey), config.SystemKey);
         RequireNonEmpty(errors, nameof(config.Environment), config.Environment);
-        RequireNonEmpty(errors, nameof(config.Profile), config.Profile);
+        // Profile is NOT required. It was, because lz only ever ran on a workstation with an SSO
+        // profile; the decoupled-CD deployer runs inside the target account on a task role and has
+        // none (DecoupledCd.md §8 item 2). An empty Profile now means "use the ambient credential
+        // chain", resolved in one place by Lz.Aws.AwsCredentialsFactory. A config that NAMES a
+        // profile is completely unaffected — same resolution, same failure, same message.
         RequireNonEmpty(errors, nameof(config.Region), config.Region);
         RequireNonEmpty(errors, nameof(config.SystemSuffix), config.SystemSuffix);
 

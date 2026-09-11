@@ -1,6 +1,5 @@
 using Amazon.Lambda;
 using Amazon.Lambda.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Aws.Docker;
 using Task = System.Threading.Tasks.Task;
 using Lz.Aws.Auth;
@@ -160,8 +159,8 @@ public class AwsLambdaContainerUpdater
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonLambdaClient(credentials, regionEndpoint);
         }
         return new AmazonLambdaClient(regionEndpoint);

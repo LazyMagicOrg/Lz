@@ -1,6 +1,5 @@
 using Amazon.CloudFront;
 using Amazon.CloudFront.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Lz.Aws.Auth;
@@ -240,8 +239,7 @@ public class AwsParkManager
 
     private Amazon.Runtime.AWSCredentials? GetCredentials()
     {
-        var chain = new CredentialProfileStoreChain();
-        chain.TryGetAWSCredentials(_profile, out var credentials);
+        var credentials = AwsCredentialsFactory.Resolve(_profile);
         return credentials;
     }
 

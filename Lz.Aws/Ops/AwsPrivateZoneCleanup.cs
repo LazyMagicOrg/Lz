@@ -1,6 +1,5 @@
 using Amazon.Route53;
 using Amazon.Route53.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Aws.Auth;
 using Lz.Aws.Compute.Fargate;
 using Lz.Aws.Compute.FargateAlb;
@@ -30,11 +29,17 @@ public static class AwsPrivateZoneCleanup
     public static async Task CleanupStalePrivateZoneAsync(
         string systemKey, string expectedZoneName, string profile, string region)
     {
-        var chain = new CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
+        // A NAMED profile that will not resolve still bails silently, exactly as before. An EMPTY
+        // profile is the ambient case and proceeds on the client's own default chain — which is the
+        // only behaviour change here, and it is unreachable for any config that names a profile.
+        var credentials = AwsCredentialsFactory.Resolve(profile);
+        if (credentials == null && !string.IsNullOrEmpty(profile))
             return;
 
-        using var client = new AmazonRoute53Client(credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+        using var client = credentials != null
+            ? new AmazonRoute53Client(credentials, endpoint)
+            : new AmazonRoute53Client(endpoint);
 
         // Find private zones tagged with this system
         var zones = await client.ListHostedZonesAsync();

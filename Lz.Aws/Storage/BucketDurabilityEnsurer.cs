@@ -1,4 +1,3 @@
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 
@@ -77,9 +76,11 @@ public static class BucketDurabilityEnsurer
 
     private static AmazonS3Client CreateClient(string profile, string region)
     {
-        var chain = new CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException($"Cannot resolve credentials for profile '{profile}'");
-        return new AmazonS3Client(credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+
+        return credentials != null
+            ? new AmazonS3Client(credentials, endpoint)
+            : new AmazonS3Client(endpoint);
     }
 }

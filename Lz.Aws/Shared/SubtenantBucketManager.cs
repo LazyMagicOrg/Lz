@@ -1,4 +1,3 @@
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Lz.Aws.Auth;
@@ -145,13 +144,12 @@ public static class SubtenantBucketManager
 
     private static AmazonS3Client CreateClient(string profile, string region)
     {
-        var chain = new CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException(
-                $"Cannot resolve AWS credentials for profile '{profile}'.");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        return new AmazonS3Client(
-            credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        return credentials != null
+            ? new AmazonS3Client(credentials, endpoint)
+            : new AmazonS3Client(endpoint);
     }
 
     private static async Task<bool> EnsureBucketCreatedAsync(

@@ -236,8 +236,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
 
         try
         {
-            var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-            if (!chain.TryGetAWSCredentials(_config.Profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(_config.Profile);
+            if (credentials == null && !string.IsNullOrEmpty(_config.Profile))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine($"  Apex DNS check skipped — could not resolve credentials for profile '{_config.Profile}'.");
@@ -335,8 +335,8 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
     {
         try
         {
-            var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-            if (!chain.TryGetAWSCredentials(_config.Profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(_config.Profile);
+            if (credentials == null && !string.IsNullOrEmpty(_config.Profile))
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.Error.WriteLine($"  Failed to resolve credentials for profile '{_config.Profile}'");

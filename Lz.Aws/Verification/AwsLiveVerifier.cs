@@ -23,7 +23,6 @@ using Amazon.Lambda.Model;
 using Amazon.Route53;
 using Amazon.Route53.Model;
 using Amazon.Runtime;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
@@ -638,21 +637,12 @@ public static class AwsLiveVerifier
             System = system;
             _region = RegionEndpoint.GetBySystemName(region);
 
-            if (!string.IsNullOrEmpty(profile))
-            {
-                var chain = new CredentialProfileStoreChain();
-                if (!chain.TryGetAWSCredentials(profile, out var credentials))
-                    // A configured-but-unresolvable profile must be an ERROR, not a
-                    // silent fall-through to the default chain — verify verdicts
-                    // against the wrong AWS account are worse than no verdict.
-                    // (global:: — Amazon.CloudWatchLogs.Model also has this type name.)
-                    throw new global::System.InvalidOperationException(
-                        $"AWS profile '{profile}' could not be resolved from the " +
-                        "credential store. Refusing to fall back to the default " +
-                        "credential chain — verify would interrogate whatever " +
-                        "account that chain points at.");
-                _creds = credentials;
-            }
+            // A configured-but-unresolvable profile must be an ERROR, not a silent fall-through to
+            // the default chain — verify verdicts against the wrong AWS account are worse than no
+            // verdict. That is precisely what ResolveOrThrow encodes, and this site is where the
+            // reasoning was written down first. An EMPTY profile still yields null and leaves
+            // _creds null, which the callers already read as "use the default chain".
+            _creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         }
 
         /// <summary>

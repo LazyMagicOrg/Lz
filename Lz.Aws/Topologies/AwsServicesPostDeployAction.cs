@@ -1,6 +1,5 @@
 using Amazon.ECS;
 using Amazon.ECS.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Core.Config;
 using Lz.Aws.Config;
 using Lz.Core.Definitions;
@@ -198,8 +197,8 @@ public class AwsServicesPostDeployAction : IPostDeployAction
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new Amazon.SecretsManager.AmazonSecretsManagerClient(credentials, regionEndpoint);
         }
         return new Amazon.SecretsManager.AmazonSecretsManagerClient(regionEndpoint);
@@ -318,10 +317,11 @@ public class AwsServicesPostDeployAction : IPostDeployAction
 
     private static AmazonECSClient CreateEcsClient(string region, string profile)
     {
-        var chain = new CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException($"AWS profile '{profile}' not found.");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        return new AmazonECSClient(credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        return credentials != null
+            ? new AmazonECSClient(credentials, endpoint)
+            : new AmazonECSClient(endpoint);
     }
 }

@@ -2,7 +2,6 @@ using Amazon.ECR;
 using Amazon.ECR.Model;
 using Amazon.ECS;
 using Amazon.ECS.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Core.Config;
 using Task = System.Threading.Tasks.Task;
 using Lz.Aws.Auth;
@@ -360,8 +359,8 @@ public class AwsSeedRunner
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonECSClient(credentials, regionEndpoint);
         }
 
@@ -374,8 +373,8 @@ public class AwsSeedRunner
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonECRClient(credentials, regionEndpoint);
         }
 

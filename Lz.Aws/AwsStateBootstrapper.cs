@@ -1,6 +1,5 @@
 using Amazon.KeyManagementService;
 using Amazon.KeyManagementService.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Lz.Core.Config;
@@ -231,8 +230,8 @@ public static class AwsStateBootstrapper
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonS3Client(credentials, regionEndpoint);
         }
 
@@ -245,8 +244,8 @@ public static class AwsStateBootstrapper
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonKeyManagementServiceClient(credentials, regionEndpoint);
         }
 

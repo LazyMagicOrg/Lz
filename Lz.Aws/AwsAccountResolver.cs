@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Amazon.KeyManagementService;
 using Amazon.KeyManagementService.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Amazon.SecurityToken;
@@ -23,14 +22,12 @@ public static class AwsAccountResolver
     public static async Task<string> ResolveAccountIdAsync(string profile, string region)
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        var chain = new CredentialProfileStoreChain();
 
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException(
-                $"Could not resolve AWS credentials for profile '{profile}'. " +
-                "Ensure the profile exists and you are authenticated.");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
 
-        var client = new AmazonSecurityTokenServiceClient(credentials, regionEndpoint);
+        var client = credentials != null
+            ? new AmazonSecurityTokenServiceClient(credentials, regionEndpoint)
+            : new AmazonSecurityTokenServiceClient(regionEndpoint);
         var response = await client.GetCallerIdentityAsync(new GetCallerIdentityRequest());
         return response.Account;
     }
@@ -42,12 +39,16 @@ public static class AwsAccountResolver
     public static async Task<string?> ResolveKmsKeyArnAsync(string profile, string region, string aliasName)
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        var chain = new CredentialProfileStoreChain();
 
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
+        // A NAMED profile that will not resolve still returns null, as before. An EMPTY profile is
+        // the ambient case and proceeds on the client's own default chain.
+        var credentials = AwsCredentialsFactory.Resolve(profile);
+        if (credentials == null && !string.IsNullOrEmpty(profile))
             return null;
 
-        var client = new AmazonKeyManagementServiceClient(credentials, regionEndpoint);
+        var client = credentials != null
+            ? new AmazonKeyManagementServiceClient(credentials, regionEndpoint)
+            : new AmazonKeyManagementServiceClient(regionEndpoint);
         try
         {
             var response = await client.DescribeKeyAsync(new DescribeKeyRequest
@@ -77,10 +78,11 @@ public static class AwsAccountResolver
         try
         {
             var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-            var chain = new CredentialProfileStoreChain();
+
+            var credentials = AwsCredentialsFactory.Resolve(profile);
 
             AmazonSecretsManagerClient client;
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            if (credentials != null)
                 client = new AmazonSecretsManagerClient(credentials, regionEndpoint);
             else
                 client = new AmazonSecretsManagerClient(regionEndpoint);
@@ -112,10 +114,11 @@ public static class AwsAccountResolver
         string? description = null)
     {
         var regionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        var chain = new CredentialProfileStoreChain();
+
+        var credentials = AwsCredentialsFactory.Resolve(profile);
 
         AmazonSimpleSystemsManagementClient client;
-        if (chain.TryGetAWSCredentials(profile, out var credentials))
+        if (credentials != null)
             client = new AmazonSimpleSystemsManagementClient(credentials, regionEndpoint);
         else
             client = new AmazonSimpleSystemsManagementClient(regionEndpoint);

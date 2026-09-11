@@ -1,6 +1,5 @@
 using Amazon.CloudFront;
 using Amazon.CloudFront.Model;
-using Amazon.Runtime.CredentialManagement;
 using Lz.Core.Config;
 using Lz.Aws.Webapp;
 // Amazon.CloudFront.Model also defines a TenantConfig — alias to ours.
@@ -137,9 +136,9 @@ public static class AwsTenantConfigPublisher
 
     private static AmazonCloudFrontClient CreateCloudFrontClient(string profile, string region)
     {
-        var chain = new CredentialProfileStoreChain();
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        return chain.TryGetAWSCredentials(profile, out var creds)
+        var creds = AwsCredentialsFactory.Resolve(profile);
+        return creds != null
             ? new AmazonCloudFrontClient(creds, endpoint)
             : new AmazonCloudFrontClient(endpoint);
     }

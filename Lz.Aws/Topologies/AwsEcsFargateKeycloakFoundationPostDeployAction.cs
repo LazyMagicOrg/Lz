@@ -3,7 +3,6 @@ using Lz.Aws.Config;
 using System.Text.Json;
 using Amazon.ECS;
 using Amazon.ECS.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
 using Lz.Core.Config;
@@ -346,8 +345,8 @@ public class AwsEcsFargateKeycloakFoundationPostDeployAction : IPostDeployAction
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonECSClient(credentials, regionEndpoint);
         }
 
@@ -432,8 +431,8 @@ public class AwsEcsFargateKeycloakFoundationPostDeployAction : IPostDeployAction
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonSecretsManagerClient(credentials, regionEndpoint);
         }
 

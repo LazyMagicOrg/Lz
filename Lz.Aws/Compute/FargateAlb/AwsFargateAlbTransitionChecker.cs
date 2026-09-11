@@ -2,7 +2,6 @@ using System.Text;
 using System.Text.Json;
 using Amazon.Lambda;
 using Amazon.Lambda.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.SecretsManager;
 using Lz.Core.Config;
 using Lz.Core.Interfaces;
@@ -212,8 +211,8 @@ public class AwsFargateAlbTransitionChecker : ITransitionChecker
 
         if (!string.IsNullOrEmpty(_config.Profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(_config.Profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(_config.Profile);
+            if (credentials != null)
                 return new AmazonLambdaClient(credentials, lambdaConfig);
         }
 
@@ -227,8 +226,8 @@ public class AwsFargateAlbTransitionChecker : ITransitionChecker
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonSecretsManagerClient(credentials, regionEndpoint);
         }
 

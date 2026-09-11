@@ -177,13 +177,12 @@ public static class SubtenantProvisioner
     private static Amazon.DynamoDBv2.AmazonDynamoDBClient CreateDynamoClient(
         string profile, string region)
     {
-        var chain = new Amazon.Runtime.CredentialManagement.CredentialProfileStoreChain();
-        if (!chain.TryGetAWSCredentials(profile, out var credentials))
-            throw new InvalidOperationException(
-                $"Cannot resolve AWS credentials for profile '{profile}'.");
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
-        return new Amazon.DynamoDBv2.AmazonDynamoDBClient(
-            credentials, Amazon.RegionEndpoint.GetBySystemName(region));
+        return credentials != null
+            ? new Amazon.DynamoDBv2.AmazonDynamoDBClient(credentials, endpoint)
+            : new Amazon.DynamoDBv2.AmazonDynamoDBClient(endpoint);
     }
 
     /// <summary>

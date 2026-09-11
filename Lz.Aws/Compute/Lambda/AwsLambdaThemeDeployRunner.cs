@@ -4,7 +4,6 @@ using System.IO.Compression;
 using System.Text.Json;
 using Amazon.Lambda;
 using Amazon.Lambda.Model;
-using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Lz.Core.Config;
@@ -256,8 +255,8 @@ public class AwsLambdaThemeDeployRunner : IThemeDeployRunner
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonLambdaClient(credentials, lambdaConfig);
         }
 
@@ -271,8 +270,8 @@ public class AwsLambdaThemeDeployRunner : IThemeDeployRunner
 
         if (!string.IsNullOrEmpty(profile))
         {
-            var chain = new CredentialProfileStoreChain();
-            if (chain.TryGetAWSCredentials(profile, out var credentials))
+            var credentials = AwsCredentialsFactory.Resolve(profile);
+            if (credentials != null)
                 return new AmazonS3Client(credentials, regionEndpoint);
         }
 
