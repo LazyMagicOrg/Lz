@@ -54,17 +54,25 @@ class Program
         // platform (Azure, GCP, ...) means registering its extensions here.
         ConfigLoader.RegisterExtensions(new AwsConfigExtensions());
 
-        // Load plugin (optional — core commands work without one)
+        // Load plugin (optional — core commands work without one).
+        //
+        // ABSENCE AND FAILURE ARE DIFFERENT THINGS HERE, which is what this used to conflate.
+        // LoadPlugin RETURNS NULL when no plugin is found — that is the supported "core commands
+        // only" case and reaches none of this. It THROWS only when a plugin WAS found and could
+        // not be loaded: a missing ILzPlugin implementation, or an assembly that will not load.
+        // That was reported as a yellow "Warning:" and execution continued with plugin = null, so
+        // every command the plugin contributes silently ceased to exist and lz still exited 0.
+        // For a system whose plugin declares its services (Scutara's declares aiphost), that means
+        // a deploy of a system with no services, reported as success.
         ILzPlugin? plugin = null;
+        Exception? pluginLoadFailure = null;
         try
         {
             plugin = PluginLoader.LoadPlugin();
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"Warning: Plugin load failed: {ex.Message}");
-            Console.ResetColor();
+            pluginLoadFailure = ex;
         }
 
         // Intercept --version BEFORE System.CommandLine sees it. The default
@@ -75,8 +83,36 @@ class Program
         // in the Monro repo for design rationale.
         if (args.Length == 1 && (args[0] == "--version" || args[0] == "-v"))
         {
+            // --version is the ONE carve-out from the refusal below, and it earns it: this is the
+            // command that names the runner/cli/plugin axes with provenance, so it is what you run
+            // to diagnose a broken plugin. It must not pretend the plugin is merely absent, so the
+            // failure is printed here rather than swallowed.
+            if (pluginLoadFailure != null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine($"Plugin load FAILED (not absent): {pluginLoadFailure.Message}");
+                Console.ResetColor();
+            }
             PrintVersionInfo(plugin);
             return 0;
+        }
+
+        // Everything that is not --version refuses. A plugin that was found and could not be
+        // loaded leaves lz unable to do what the workspace asked of it, and continuing produces
+        // the worst outcome available: a command that appears to succeed having skipped the
+        // plugin's services, topologies and commands.
+        if (pluginLoadFailure != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"Plugin load failed: {pluginLoadFailure.Message}");
+            Console.Error.WriteLine(
+                "A plugin WAS found and could not be loaded — this is not the no-plugin case, which " +
+                "returns quietly. Refusing rather than continuing without it: the plugin contributes " +
+                "commands, topology descriptors and the system's service declarations, so a run " +
+                "without it can report success having deployed something quite different. Run " +
+                "`lz --version` to see which plugin path was resolved, or rebuild it.");
+            Console.ResetColor();
+            return 1;
         }
 
         // Let the plugin contribute or override platform topology descriptors
@@ -4147,6 +4183,14 @@ class Program
             //   2. Deploy/bin/.../Deploy.dll      — deploy plugin that also implements ILzGenPlugin
             // The Deploy path is kept for backward compatibility; Generate is the new home
             // for system-specific directive and artifact types.
+            // BOTH FAILURES BELOW ARE FATAL, and of the three formerly-silent paths these were the
+            // worst: a warning here did not stop the generation, it CHANGED it. The extensions
+            // being registered are the custom directive and artifact types, so without them `lz
+            // gen` does not fail — it emits different code, writes it over the tree, and exits 0.
+            // A generator that half-ran is not a warning.
+            //
+            // Absence is still fine and still silent: LoadGenPlugin returns null when there is no
+            // gen plugin, and TryRegister no-ops on null.
             LzGen.ILzGenPlugin? dedicatedGenPlugin = null;
             try
             {
@@ -4154,26 +4198,36 @@ class Program
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.Error.WriteLine($"Warning: Generate plugin load failed: {ex.Message}");
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine($"Generate plugin load failed: {ex.Message}");
+                Console.Error.WriteLine(
+                    "A gen plugin WAS found and could not be loaded. Refusing rather than generating " +
+                    "without its directive and artifact types, which would overwrite the tree with " +
+                    "different output and report success.");
                 Console.ResetColor();
+                Environment.ExitCode = 1;
+                return;
             }
 
-            void SafeRegister(LzGen.ILzGenPlugin? p, string source)
+            bool TryRegister(LzGen.ILzGenPlugin? p, string source)
             {
-                if (p == null) return;
-                try { p.RegisterGenExtensions(); }
+                if (p == null) return true;
+                try { p.RegisterGenExtensions(); return true; }
                 catch (Exception ex)
                 {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.Error.WriteLine($"Warning: {source}.RegisterGenExtensions threw: {ex.Message}");
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"{source}.RegisterGenExtensions threw: {ex.Message}");
+                    Console.Error.WriteLine(
+                        "Refusing to generate: the custom directive and artifact types are not " +
+                        "registered, so generation would silently produce different output.");
                     Console.ResetColor();
+                    return false;
                 }
             }
 
-            SafeRegister(dedicatedGenPlugin, "Generate plugin");
-            if (plugin is LzGen.ILzGenPlugin genFromDeploy)
-                SafeRegister(genFromDeploy, "Deploy plugin");
+            if (!TryRegister(dedicatedGenPlugin, "Generate plugin")) { Environment.ExitCode = 1; return; }
+            if (plugin is LzGen.ILzGenPlugin genFromDeploy
+                && !TryRegister(genFromDeploy, "Deploy plugin")) { Environment.ExitCode = 1; return; }
 
             var logger = new ConsoleGenLogger();
             var bundled = templatesOverride is not null
