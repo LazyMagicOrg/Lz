@@ -169,10 +169,27 @@ public static class DeployerPlanner
                 Sid = "PassOnlyTheServicesOwnRoles",
                 Effect = "Allow",
                 Action = new[] { "iam:PassRole" },
+                // THE PATTERN COMES FROM THE CODE THAT CREATES THESE ROLES, not from the naming
+                // convention it looks like it should follow. AwsFargateTenantServiceComponent builds
+                // `prefix = {sk}-{tk}-{svc}` and then `{prefix}-task` / `{prefix}-exec`, and Pulumi
+                // auto-naming appends a random suffix — so the live roles are
+                // `scu-mp-aiphost-task-0114517` and `scu-mp-aiphost-exec-7a3f57c`.
+                //
+                // The first version of this was wrong three ways at once: it had an environment
+                // segment these names do not carry (one account per environment, so the env is not
+                // in the name), spelled it `-execution` instead of `-exec`, and had no trailing
+                // wildcard for the Pulumi suffix. It matched nothing, so the deployer could not have
+                // passed a role at all and RegisterTaskDefinition would have failed. Found by
+                // listing the account's actual roles after applying, not by review.
+                //
+                // Still scoped: it cannot pass `scu-dev-deployer`, `scu-website-ci`, `scu-e2e-ci` or
+                // `scu-tailscale-role`. Narrowing further would mean the deployer knowing the tenant
+                // list, which it does not and should not. The PassedToService condition below is the
+                // backstop that keeps these usable only as ECS task roles.
                 Resource = new[]
                 {
-                    $"arn:aws:iam::{accountId}:role/{sk}-{env}-*-task",
-                    $"arn:aws:iam::{accountId}:role/{sk}-{env}-*-execution",
+                    $"arn:aws:iam::{accountId}:role/{sk}-*-task-*",
+                    $"arn:aws:iam::{accountId}:role/{sk}-*-exec-*",
                 },
                 Condition = new Dictionary<string, object>
                 {

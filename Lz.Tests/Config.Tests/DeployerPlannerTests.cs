@@ -37,6 +37,17 @@ public class DeployerPlannerTests
         => JsonDocument.Parse(DeployerPlanner.Plan(Config(approvalRequired), "503947800380").Definition)
             .RootElement;
 
+    /// <summary>
+    /// Does an IAM resource pattern match an ARN? IAM wildcards are <c>*</c> (any run of
+    /// characters) and <c>?</c> (one), which is not regex — so the pattern is translated rather
+    /// than used directly.
+    /// </summary>
+    private static bool Matches(string pattern, string arn) =>
+        System.Text.RegularExpressions.Regex.IsMatch(
+            arn,
+            "^" + System.Text.RegularExpressions.Regex.Escape(pattern)
+                    .Replace("\\*", ".*").Replace("\\?", ".") + "$");
+
     // ---------------------------------------------------------------------------------------
     //  Execution naming — the idempotency key
     // ---------------------------------------------------------------------------------------
@@ -105,8 +116,23 @@ public class DeployerPlannerTests
 
         var resources = pass.GetProperty("Resource").EnumerateArray().Select(r => r.GetString()).ToList();
         Assert.All(resources, r => Assert.DoesNotContain("role/*", r!));
-        Assert.Contains(resources, r => r!.EndsWith("-task"));
-        Assert.Contains(resources, r => r!.EndsWith("-execution"));
+
+        // PINNED AGAINST THE ROLES THAT ACTUALLY EXIST, listed from scu-dev on 2026-09-12, because
+        // the first version of this pattern was derived from the convention the names look like
+        // they follow and matched NONE of them. A test asserting the shape I assumed would have
+        // passed just as happily.
+        Assert.All(
+            new[] { "scu-mp-aiphost-task-0114517", "scu-mp-aiphost-exec-7a3f57c" },
+            role => Assert.True(
+                resources.Any(r => Matches(r!, $"arn:aws:iam::503947800380:role/{role}")),
+                $"no Resource pattern matches the live role {role}"));
+
+        // ... and cannot pass roles that are not ECS task roles.
+        Assert.All(
+            new[] { "scu-dev-deployer", "scu-website-ci", "scu-e2e-ci", "scu-tailscale-role" },
+            role => Assert.False(
+                resources.Any(r => Matches(r!, $"arn:aws:iam::503947800380:role/{role}")),
+                $"the deployer could pass {role}, which is not an ECS task role"));
 
         // And only to ECS, so it cannot be passed to something else that assumes it.
         Assert.Equal("ecs-tasks.amazonaws.com",
