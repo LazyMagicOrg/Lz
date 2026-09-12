@@ -57,7 +57,21 @@ public static class CrossAccount
         }
         else
         {
-            document = JsonNode.Parse(existingPolicy) as JsonObject
+            JsonNode? parsed;
+            try
+            {
+                parsed = JsonNode.Parse(existingPolicy);
+            }
+            catch (JsonException)
+            {
+                // What the first real apply hit: an S3 error document handed over as the policy text.
+                var start = existingPolicy.TrimStart();
+                throw new InvalidOperationException(
+                    $"the existing policy is not JSON (it begins '{start[..Math.Min(start.Length, 40)]}'); refusing to write a " +
+                    "policy over something that could not be read.");
+            }
+
+            document = parsed as JsonObject
                 ?? throw new InvalidOperationException("the existing policy is not a JSON object; refusing to overwrite it.");
         }
 
@@ -76,6 +90,35 @@ public static class CrossAccount
 
         document["Statement"] = new JsonArray(kept.Concat(owned.Select(o => (JsonNode?)o.DeepClone())).ToArray());
         return document.ToJsonString(PolicyJson);
+    }
+
+    /// <summary>
+    /// What a <c>GetBucketPolicy</c> response says about the policy that exists: its text, or null for
+    /// "there is none".
+    ///
+    /// <para>MEASURED, AND NOT WHAT THE CODE FIRST ASSUMED. With AWSSDK.S3 4.0.103.2, a bucket with no
+    /// policy does NOT raise <c>NoSuchBucketPolicy</c>: the call returns normally with status 404 and
+    /// the S3 error DOCUMENT in <c>Policy</c> — <c>&lt;?xml …&gt;&lt;Error&gt;&lt;Code&gt;NoSuchBucketPolicy…</c>.
+    /// The first apply caught the exception that never came, handed the XML to the merge as a policy,
+    /// and died parsing it — before writing anything, which is the only reason that was harmless.</para>
+    ///
+    /// <para>ONLY THAT ONE ABSENCE MEANS NULL. A 404 is also what a missing bucket returns, and a 403 is
+    /// an access denial; treating either as "no policy yet" would write a policy over a document nobody
+    /// could read. Anything but 200, or a 404 naming <c>NoSuchBucketPolicy</c>, is refused.</para>
+    /// </summary>
+    public static string? ExistingBucketPolicy(System.Net.HttpStatusCode status, string? body)
+    {
+        if (status == System.Net.HttpStatusCode.OK)
+            return body;
+
+        if (status == System.Net.HttpStatusCode.NotFound
+            && body != null && body.Contains("<Code>NoSuchBucketPolicy</Code>", StringComparison.Ordinal))
+            return null;
+
+        throw new InvalidOperationException(
+            $"reading the bucket policy returned {(int)status} {status}" +
+            (body is { Length: > 0 } ? $" ({body.TrimStart()[..Math.Min(body.TrimStart().Length, 80)]})" : "") +
+            "; refusing to write a policy over one that could not be read.");
     }
 
     /// <summary>

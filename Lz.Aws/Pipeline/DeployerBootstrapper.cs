@@ -234,7 +234,17 @@ public static class DeployerBootstrapper
         string? existing = null;
         try
         {
-            existing = (await ecr.GetRegistryPolicyAsync(new Amazon.ECR.Model.GetRegistryPolicyRequest())).PolicyText;
+            var response = await ecr.GetRegistryPolicyAsync(new Amazon.ECR.Model.GetRegistryPolicyRequest());
+
+            // S3's SDK hands back "no policy" as a 404 RESPONSE rather than an exception (measured on the
+            // build account's first apply). ECR's raised RegistryPolicyNotFoundException on dev's first apply —
+            // the registry policy written was clean — but a response that is not a success is refused here
+            // all the same, rather than merged into as though it were a policy.
+            if (response.HttpStatusCode != System.Net.HttpStatusCode.OK)
+                throw new InvalidOperationException(
+                    $"reading the registry policy returned {(int)response.HttpStatusCode}; refusing to write over it.");
+
+            existing = response.PolicyText;
         }
         catch (Amazon.ECR.Model.RegistryPolicyNotFoundException)
         {

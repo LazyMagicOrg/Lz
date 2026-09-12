@@ -210,14 +210,18 @@ public static class PipelineBootstrapper
     private static async Task ApplyBuildRecordReadGrantAsync(
         IAmazonS3 s3, string bucket, IReadOnlyList<System.Text.Json.Nodes.JsonObject> grant)
     {
-        string? existing = null;
+        // THE SDK REPORTS "NO POLICY" AS A 404 RESPONSE WITH THE ERROR XML IN Policy, not as an exception
+        // (measured on the first apply); ExistingBucketPolicy is where that is decided. The catch stays for
+        // an SDK that raises instead, and matches only that one absence.
+        string? existing;
         try
         {
-            existing = (await s3.GetBucketPolicyAsync(new GetBucketPolicyRequest { BucketName = bucket })).Policy;
+            var response = await s3.GetBucketPolicyAsync(new GetBucketPolicyRequest { BucketName = bucket });
+            existing = CrossAccount.ExistingBucketPolicy(response.HttpStatusCode, response.Policy);
         }
         catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchBucketPolicy")
         {
-            // No policy yet: the merge starts from an empty document.
+            existing = null;
         }
 
         var merged = CrossAccount.MergeBySid(existing, grant);

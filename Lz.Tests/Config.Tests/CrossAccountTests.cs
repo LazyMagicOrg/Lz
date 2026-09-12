@@ -117,6 +117,61 @@ public class CrossAccountTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  Reading the policy that exists — what the first real apply got wrong
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The SHAPE of what AWSSDK.S3 4.0.103.2 returned on 2026-09-12 for the build-record store, which had
+    /// no policy: status 404, no exception, and this document in <c>Policy</c>. The request and host ids
+    /// are replaced; the rest is the shape measured.
+    /// </summary>
+    private const string NoSuchBucketPolicyBody =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchBucketPolicy</Code>" +
+        "<Message>The bucket policy does not exist</Message><BucketName>scu-build-records-4df6-b9c6</BucketName>" +
+        "<RequestId>REQUEST</RequestId><HostId>HOST</HostId></Error>";
+
+    [Fact]
+    public void A404NamingNoSuchBucketPolicy_MeansThereIsNone()
+    {
+        Assert.Null(CrossAccount.ExistingBucketPolicy(System.Net.HttpStatusCode.NotFound, NoSuchBucketPolicyBody));
+    }
+
+    [Fact]
+    public void AnyOther404_IsRefused_NotTakenAsAbsence()
+    {
+        // A missing BUCKET is also a 404. "No policy yet" would be the wrong conclusion, and writing one
+        // would be writing to something that is not there.
+        var noBucket = NoSuchBucketPolicyBody.Replace("NoSuchBucketPolicy", "NoSuchBucket");
+
+        Assert.Throws<InvalidOperationException>(() => CrossAccount.ExistingBucketPolicy(System.Net.HttpStatusCode.NotFound, noBucket));
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.Forbidden)]
+    [InlineData(System.Net.HttpStatusCode.InternalServerError)]
+    public void AFailedRead_IsRefused_NotTakenAsAbsence(System.Net.HttpStatusCode status)
+    {
+        // An access denial read as "no policy" would write a policy over one nobody could see.
+        Assert.Throws<InvalidOperationException>(() => CrossAccount.ExistingBucketPolicy(status, "<Error><Code>AccessDenied</Code></Error>"));
+    }
+
+    [Fact]
+    public void ASuccessfulRead_IsThePolicy()
+    {
+        Assert.Equal("{}", CrossAccount.ExistingBucketPolicy(System.Net.HttpStatusCode.OK, "{}"));
+    }
+
+    [Fact]
+    public void AnErrorDocumentHandedToTheMerge_IsRefusedByName_NotAParserCrash()
+    {
+        // The first apply died with a raw JsonReaderException. It still refused — nothing was written —
+        // but a refusal should say what it refused.
+        var ex = Assert.Throws<InvalidOperationException>(() => CrossAccount.MergeBySid(NoSuchBucketPolicyBody, new[] { Statement("A") }));
+
+        Assert.Contains("not JSON", ex.Message);
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  The build-record read grant
     // ---------------------------------------------------------------------------------------
 
