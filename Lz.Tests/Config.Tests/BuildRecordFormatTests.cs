@@ -237,4 +237,76 @@ public class BuildRecordFormatTests
             () => BuildRecordFormat.Parse(BuildRecordFormat.Serialize(blanked)));
         Assert.Contains(field, ex.Message);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The contract with the build workflow, which lives in another repository
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// VERBATIM the JSON that ScutaraService/.github/workflows/build-aiphost.yml emits. That
+    /// workflow is in a different repository, written in Python, and nothing compiles the two
+    /// together — so the contract between writer and reader is exactly the kind that drifts
+    /// silently and is discovered by a deployer refusing a record months later.
+    /// </summary>
+    private const string WorkflowEmitted = """
+        {
+          "schema": 1,
+          "class": "image",
+          "builtFrom": {
+            "repo": "Scutara/ScutaraService",
+            "commit": "836f0901b2c3d4e5f60718293a4b5c6d7e8f9012",
+            "lane": "published",
+            "packages": {
+              "LazyMagic.OIDC.Bff": "3.0.26-alpha",
+              "LazyMagic.Service.Authorization": "3.0.26-alpha",
+              "LazyMagic.Service.DynamoDBRepo": "3.0.26-alpha",
+              "LazyMagic.Service.Shared": "3.0.26-alpha",
+              "LazyMagic.Shared": "3.0.26-alpha"
+            }
+          },
+          "identity": {
+            "kind": "image",
+            "digest": "sha256:ba9773aa21a19e0ffd12d5f2cc2335fecb168c041cfd02a902655bb3b68bcadf"
+          },
+          "builtAt": "2026-09-12T16:04:05Z",
+          "builtBy": "tmay",
+          "workflowRunId": "34704181875"
+        }
+        """;
+
+    [Fact]
+    public void TheRecordTheWorkflowEmits_Parses()
+    {
+        var r = BuildRecordFormat.Parse(WorkflowEmitted);
+
+        Assert.Equal("image", r.Class);
+        Assert.Equal("published", r.BuiltFrom.Lane);
+        Assert.Equal(5, r.BuiltFrom.Packages.Count);
+        Assert.StartsWith("sha256:", r.Identity.Digest);
+    }
+
+    [Fact]
+    public void TheKeyTheWorkflowComputes_MatchesKeyFor()
+    {
+        // The workflow builds its key in bash: `tr -d ':-'` over builtAt, then
+        // {prefix}{stamp}-{runId}.json. If KeyFor and that shell line ever disagree, records land
+        // where the reconciler does not look and where the role may not even write.
+        var r = BuildRecordFormat.Parse(WorkflowEmitted);
+
+        Assert.Equal(
+            "image/scutara/scutaraservice/20260912T160405Z-34704181875.json",
+            BuildRecordFormat.KeyFor(r));
+    }
+
+    [Fact]
+    public void TheWorkflowsKeyStaysInsideThePrefixItsRoleMayWrite()
+    {
+        // The role holds s3:PutObject on image/scutara/scutaraservice/* and nothing else, so a key
+        // outside it is an AccessDenied at the last step of a build that already pushed an image.
+        var r = BuildRecordFormat.Parse(WorkflowEmitted);
+
+        Assert.StartsWith(
+            BuildRecordFormat.PrefixFor("image", "Scutara/ScutaraService"),
+            BuildRecordFormat.KeyFor(r));
+    }
 }
