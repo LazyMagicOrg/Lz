@@ -88,10 +88,8 @@ internal sealed class EcrImages(IAmazonECR ecr) : IRegistryImages
                 d => string.Equals(d.ImageDigest, digest, StringComparison.Ordinal));
             if (image is null) return null;
 
-            return new RegistryImage(
-                image.ImageDigest,
-                image.ImageScanStatus?.Status?.Value,
-                image.ImageScanFindingsSummary?.FindingSeverityCounts);
+            var (status, counts) = await ScanAsync(repository, digest);
+            return new RegistryImage(image.ImageDigest, status, counts);
         }
         catch (ImageNotFoundException)
         {
@@ -101,6 +99,52 @@ internal sealed class EcrImages(IAmazonECR ecr) : IRegistryImages
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// The image's scan, from <c>DescribeImageScanFindings</c> — NOT from <c>DescribeImages</c>, whose
+    /// scan attributes AWS says the current basic scanning "doesn't use … to return scan results".
+    /// Reading them refused every image at [scan] on 2026-09-12, although every image had a COMPLETE scan
+    /// (measured the same day, in both registries). Every page is read, because the
+    /// summary's scope is undocumented (<see cref="DeployVerification.SeverityCounts"/>).
+    /// </summary>
+    private async Task<(string? Status, IReadOnlyDictionary<string, int>? Counts)> ScanAsync(string repository, string digest)
+    {
+        string? status = null;
+        IReadOnlyDictionary<string, int>? summary = null;
+        var severities = new List<string?>();
+        string? next = null;
+
+        try
+        {
+            do
+            {
+                var page = await ecr.DescribeImageScanFindingsAsync(new DescribeImageScanFindingsRequest
+                {
+                    RepositoryName = repository,
+                    ImageId = new ImageIdentifier { ImageDigest = digest },
+                    MaxResults = 1000,
+                    NextToken = next,
+                });
+
+                status ??= page.ImageScanStatus?.Status?.Value;
+                summary ??= page.ImageScanFindings?.FindingSeverityCounts;
+                if (page.ImageScanFindings?.Findings is { } findings)
+                    severities.AddRange(findings.Select(f => f.Severity?.Value));
+                if (page.ImageScanFindings?.EnhancedFindings is { } enhanced)
+                    severities.AddRange(enhanced.Select(f => f.Severity));
+
+                next = page.NextToken;
+            }
+            while (!string.IsNullOrEmpty(next));
+        }
+        catch (ScanNotFoundException)
+        {
+            // No scan of this image exists yet. The step waits for scan-on-push.
+            return (null, null);
+        }
+
+        return (status, DeployVerification.SeverityCounts(summary, severities));
     }
 }
 

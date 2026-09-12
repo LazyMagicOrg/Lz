@@ -24,7 +24,10 @@ public sealed record DeploymentSnapshot(string? Status, string? TaskDefinitionAr
 /// <summary>An ACTIVE service: the revision it names and the deployments under way.</summary>
 public sealed record ServiceSnapshot(string TaskDefinitionArn, IReadOnlyList<DeploymentSnapshot>? Deployments);
 
-/// <summary>An image in this account's registry, with its scan state.</summary>
+/// <summary>
+/// An image in this account's registry, with its scan state. <see cref="ScanStatus"/> is null when no
+/// scan of the image exists at all, which is a different thing from a scan that failed.
+/// </summary>
 public sealed record RegistryImage(string Digest, string? ScanStatus, IReadOnlyDictionary<string, int>? FindingCounts);
 
 public interface IRecordStore
@@ -131,10 +134,17 @@ public static class VerifyStep
         var (verdict, reason) = DeployVerification.ScanFromStatus(
             image.ScanStatus, image.FindingCounts, settings.ScanBlockOn);
 
-        if (verdict == ScanVerdict.NotYetAvailable)
-            throw new ScanNotYetAvailable(reason);
-        if (verdict == ScanVerdict.Block)
-            throw new DeployRefused("scan", reason);
+        // ONLY A PASS CONTINUES. Written as the one allowed case rather than the two refused ones, so a
+        // verdict added later stops the deploy instead of falling through to it.
+        switch (verdict)
+        {
+            case ScanVerdict.Pass:
+                break;
+            case ScanVerdict.NotYetAvailable:
+                throw new ScanNotYetAvailable(reason);
+            default:
+                throw new DeployRefused("scan", reason);
+        }
 
         var service = await services.DescribeAsync(input.Target.Cluster, input.Target.Service)
             ?? throw new DeployRefused("target.service",

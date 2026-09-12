@@ -1,6 +1,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Amazon.ECR;
 using Amazon.ECR.Model;
 
@@ -394,6 +395,12 @@ public static class EcrRepositoryHardening
             ImageTagMutability = ImageTagMutability.IMMUTABLE,
         });
 
+        // SCAN-ON-PUSH, THE DEPRECATED WAY, AND KEPT ON PURPOSE. AWS marks PutImageScanningConfiguration
+        // deprecated "in favor of specifying the image scanning configuration at the registry level" — but
+        // this is the setting MEASURED to work: on 2026-09-12, with the registry-level rules empty, it
+        // scanned every push to the build registry and every replica arriving in dev. The registry rule
+        // (EcrRegistryScanning) is applied beside it, and this goes once that rule is seen scanning a
+        // repository on its own.
         await ecr.PutImageScanningConfigurationAsync(new PutImageScanningConfigurationRequest
         {
             RepositoryName = name,
@@ -412,5 +419,146 @@ public static class EcrRepositoryHardening
         });
 
         Console.WriteLine($"      immutable tags, AES256, scan-on-push, untagged expire {untaggedDays}d.");
+    }
+}
+
+/// <summary>
+/// The registry's scan-on-push rule for the pipeline's repositories (DecoupledCd.md §14.1).
+///
+/// <para>AT THE REGISTRY, which is where AWS now puts it: the repository-level API is deprecated "in favor
+/// of specifying the image scanning configuration at the registry level", and under basic scanning "any
+/// repositories that don't match a scan on push filter are set to the manual scan frequency". Both
+/// registries carried <c>{scanType: BASIC, rules: []}</c> — no filter at all — and scanned every image
+/// anyway, through the deprecated repository setting, which <see cref="EcrRepositoryHardening"/> still
+/// applies. This rule is the documented successor, written beside it rather than instead of it.</para>
+///
+/// <para>MERGED, NEVER OVERWRITTEN. A registry has one scanning configuration of at most two rules, and a
+/// rule another system or a person added is not this command's to drop.</para>
+///
+/// <para>REPLICATION COUNTS AS A PUSH, measured rather than documented: on 2026-09-12 the replica of
+/// <c>sha256:1303a913…</c> arrived in dev at 15:13:24 and its scan completed at 15:14:47, under the
+/// repository setting.</para>
+/// </summary>
+public static class EcrRegistryScanning
+{
+    /// <summary>ECR's limits: a registry scanning configuration holds at most 2 rules, a rule at most 100 filters.</summary>
+    public const int MaxRules = 2;
+    public const int MaxFiltersPerRule = 100;
+
+    // ECR's documented pattern for a scanning filter.
+    private static readonly Regex FilterPattern = new(@"^[a-z0-9*](?:[._\-/a-z0-9*]?[a-z0-9*]+)*$", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Does an ECR scanning filter select a repository? As AWS documents it, which is NOT prefix or exact
+    /// matching: "a filter with no wildcard will match all repository names that contain the filter", and
+    /// "a filter with a wildcard (*) matches on any repository name where the wildcard replaces zero or
+    /// more characters". So a repository's own name, used as its filter, also selects every repository
+    /// whose name contains it — harmless for scanning, which only adds scans, and unavoidable: there is
+    /// no exact filter.
+    /// </summary>
+    public static bool FilterSelects(string filter, string repository)
+    {
+        if (!filter.Contains('*'))
+            return repository.Contains(filter, StringComparison.Ordinal);
+
+        var pattern = "^" + string.Join(".*", filter.Split('*').Select(Regex.Escape)) + "$";
+        return Regex.IsMatch(repository, pattern, RegexOptions.CultureInvariant);
+    }
+
+    /// <summary>The configuration to write — null when nothing changes — and what the merge found.</summary>
+    public sealed record Merge(
+        RegistryScanningConfiguration? ToWrite, IReadOnlyList<string> Added, IReadOnlyList<string> AlreadyCovered, int RulesPreserved);
+
+    /// <summary>
+    /// The registry's scanning configuration with every one of <paramref name="repositories"/> selected by
+    /// a scan-on-push filter, and every existing rule and filter kept.
+    ///
+    /// <para>ENHANCED SCANNING IS REFUSED, not converted. Verify reads basic scan results, and AWS warns that
+    /// "switching between Enhanced scanning and Basic scanning will cause previously established scans to
+    /// no longer be available" — a change to every repository in the registry that this command has no
+    /// business making.</para>
+    /// </summary>
+    public static Merge MergeScanOnPush(RegistryScanningConfiguration? existing, IReadOnlyList<string> repositories)
+    {
+        if (repositories is not { Count: > 0 })
+            throw new InvalidOperationException("a scan-on-push rule needs at least one repository.");
+
+        var scanType = existing?.ScanType?.Value ?? ScanType.BASIC.Value;
+        if (scanType != ScanType.BASIC.Value)
+            throw new InvalidOperationException(
+                $"this registry uses {scanType} scanning. The pipeline's Verify reads basic scan results, and " +
+                "switching a registry's scan type makes the scans it already has unavailable, for every " +
+                "repository in it. Refusing to change it; the pipeline is not built for enhanced scanning.");
+
+        // COPIES, so the caller's configuration is never mutated. SDK v4: a collection with no members is null.
+        var rules = (existing?.Rules ?? new List<RegistryScanningRule>())
+            .Select(r => new RegistryScanningRule
+            {
+                ScanFrequency = r.ScanFrequency,
+                RepositoryFilters = (r.RepositoryFilters ?? new List<ScanningRepositoryFilter>())
+                    .Select(f => new ScanningRepositoryFilter { Filter = f.Filter, FilterType = f.FilterType })
+                    .ToList(),
+            })
+            .ToList();
+        var preserved = rules.Count;
+
+        var onPush = rules.FirstOrDefault(r => r.ScanFrequency?.Value == ScanFrequency.SCAN_ON_PUSH.Value);
+        var wanted = repositories.Distinct(StringComparer.Ordinal).ToList();
+        var covered = wanted
+            .Where(repo => onPush?.RepositoryFilters.Any(f => f.Filter != null && FilterSelects(f.Filter, repo)) == true)
+            .ToList();
+        var added = wanted.Except(covered, StringComparer.Ordinal).ToList();
+
+        if (added.Count == 0)
+            return new Merge(null, added, covered, preserved);
+
+        foreach (var repo in added.Where(r => r.Length > 255 || !FilterPattern.IsMatch(r)))
+            throw new InvalidOperationException(
+                $"'{repo}' cannot be written as an ECR scanning filter (1-255 characters matching {FilterPattern}).");
+
+        if (onPush is null)
+        {
+            if (rules.Count >= MaxRules)
+                throw new InvalidOperationException(
+                    $"the registry already has {rules.Count} scanning rules, none of them scan-on-push, and ECR allows " +
+                    $"{MaxRules}. Refusing to replace one; add the pipeline's repositories to a rule by hand.");
+
+            onPush = new RegistryScanningRule { ScanFrequency = ScanFrequency.SCAN_ON_PUSH, RepositoryFilters = new List<ScanningRepositoryFilter>() };
+            rules.Add(onPush);
+        }
+
+        onPush.RepositoryFilters.AddRange(added.Select(repo =>
+            new ScanningRepositoryFilter { Filter = repo, FilterType = ScanningRepositoryFilterType.WILDCARD }));
+
+        if (onPush.RepositoryFilters.Count > MaxFiltersPerRule)
+            throw new InvalidOperationException(
+                $"the scan-on-push rule would hold {onPush.RepositoryFilters.Count} filters; ECR allows {MaxFiltersPerRule}.");
+
+        return new Merge(new RegistryScanningConfiguration { ScanType = ScanType.BASIC, Rules = rules }, added, covered, preserved);
+    }
+
+    /// <summary>Read the registry's scanning configuration, merge the pipeline's repositories in, write it back if it changed.</summary>
+    public static async Task ApplyAsync(IAmazonECR ecr, IReadOnlyList<string> repositories)
+    {
+        var current = await ecr.GetRegistryScanningConfigurationAsync(new GetRegistryScanningConfigurationRequest());
+        if (current.HttpStatusCode != System.Net.HttpStatusCode.OK)
+            throw new InvalidOperationException(
+                $"reading the registry scanning configuration returned {(int)current.HttpStatusCode}; refusing to write over it.");
+
+        var merge = MergeScanOnPush(current.ScanningConfiguration, repositories);
+        if (merge.ToWrite is null)
+        {
+            Console.WriteLine($"  registry scanning: scan-on-push already selects {string.Join(", ", merge.AlreadyCovered)}.");
+            return;
+        }
+
+        await ecr.PutRegistryScanningConfigurationAsync(new PutRegistryScanningConfigurationRequest
+        {
+            ScanType = merge.ToWrite.ScanType,
+            Rules = merge.ToWrite.Rules,
+        });
+        Console.WriteLine(
+            $"  registry scanning: scan-on-push added for {string.Join(", ", merge.Added)}; " +
+            $"{merge.RulesPreserved} existing rule(s) kept.");
     }
 }

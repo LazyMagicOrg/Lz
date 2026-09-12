@@ -577,7 +577,11 @@ public static class DeployerPlanner
         {
             Sid = "FindTheImageAndItsScan",
             Effect = "Allow",
-            Action = new[] { "ecr:DescribeImages" },
+            // DescribeImageScanFindings, because the current basic scanning leaves DescribeImages' scan
+            // attributes empty — with only DescribeImages, Verify refused every image at [scan] while
+            // every one of them had a COMPLETE scan. Still read-only: Verify waits for scan-on-push, and
+            // never starts a scan.
+            Action = new[] { "ecr:DescribeImages", "ecr:DescribeImageScanFindings" },
             Resource = RepositoryArns(region, accountId, repositories),
         },
         new

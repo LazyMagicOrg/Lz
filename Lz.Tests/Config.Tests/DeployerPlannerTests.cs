@@ -246,6 +246,24 @@ public class DeployerPlannerTests
     }
 
     [Fact]
+    public void VerifyReadsScanFindings_OnItsRepositories_AndStartsNothing()
+    {
+        // DescribeImageScanFindings is where the current basic scanning puts results — with DescribeImages
+        // alone, Verify refused every image at [scan] while each had a COMPLETE scan. And it stays read-only:
+        // Verify waits for scan-on-push instead of starting a scan that would race it.
+        var ecr = Statements(Function(Plan(), DeployerHandlers.Verify).Policy)
+            .SelectMany(s => Strings(s.GetProperty("Action"))
+                .Select(a => (Action: a, Resources: Strings(s.GetProperty("Resource")).ToList())))
+            .Where(x => x.Action.StartsWith("ecr:", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(new[] { "ecr:DescribeImageScanFindings", "ecr:DescribeImages" },
+            ecr.Select(x => x.Action).OrderBy(a => a, StringComparer.Ordinal));
+        Assert.All(ecr, x => Assert.Equal(
+            new[] { "arn:aws:ecr:us-west-2:503947800380:repository/scu-4df6-b9c6-aiphost" }, x.Resources));
+    }
+
+    [Fact]
     public void PrepareMayTagOnlyWhileRegistering()
     {
         var tag = Statements(Function(Plan(), DeployerHandlers.Prepare).Policy)

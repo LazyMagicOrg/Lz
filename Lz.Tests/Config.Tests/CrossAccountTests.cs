@@ -353,4 +353,130 @@ public class CrossAccountTests
         Assert.Equal(14, selection.GetProperty("countNumber").GetInt32());
         Assert.Equal("expire", rule.GetProperty("action").GetProperty("type").GetString());
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  Registry scanning — the scan-on-push rule, merged
+    // ---------------------------------------------------------------------------------------
+
+    private static RegistryScanningConfiguration Scanning(string scanType = "BASIC", params RegistryScanningRule[] rules)
+        => new() { ScanType = new ScanType(scanType), Rules = rules.ToList() };
+
+    private static RegistryScanningRule Rule(string frequency, params string[] filters) => new()
+    {
+        ScanFrequency = new ScanFrequency(frequency),
+        RepositoryFilters = filters
+            .Select(f => new ScanningRepositoryFilter { Filter = f, FilterType = ScanningRepositoryFilterType.WILDCARD })
+            .ToList(),
+    };
+
+    [Theory]
+    // AWS's own table (ECR User Guide, "Filters to choose which repositories are scanned"): the filter, then
+    // whether it selects prod, repo-prod, prod-repo, repo-prod-repo and prodrepo.
+    [InlineData("prod", true, true, true, true, true)]
+    [InlineData("*prod", true, true, false, false, false)]
+    [InlineData("prod*", true, false, true, false, true)]
+    [InlineData("*prod*", true, true, true, true, true)]
+    [InlineData("prod*repo", false, false, true, false, true)]
+    public void AFilterSelects_ExactlyAsAwsDocumentsIt(
+        string filter, bool prod, bool repoProd, bool prodRepo, bool repoProdRepo, bool prodrepo)
+    {
+        Assert.Equal(prod, EcrRegistryScanning.FilterSelects(filter, "prod"));
+        Assert.Equal(repoProd, EcrRegistryScanning.FilterSelects(filter, "repo-prod"));
+        Assert.Equal(prodRepo, EcrRegistryScanning.FilterSelects(filter, "prod-repo"));
+        Assert.Equal(repoProdRepo, EcrRegistryScanning.FilterSelects(filter, "repo-prod-repo"));
+        Assert.Equal(prodrepo, EcrRegistryScanning.FilterSelects(filter, "prodrepo"));
+    }
+
+    [Fact]
+    public void ThePipelinesFilter_DoesNotReachTheWorkstationRepository()
+    {
+        // A filter without a wildcard matches every name that CONTAINS it, so it could have reached dev's
+        // other repositories. It does not: the environment sits inside the workstation repository's name.
+        Assert.False(EcrRegistryScanning.FilterSelects("scu-4df6-b9c6-aiphost", "scu-4df6-b9c6-dev-mp-aiphost"));
+    }
+
+    [Fact]
+    public void IntoTheConfigurationBothRegistriesHad_OneScanOnPushRuleIsAdded()
+    {
+        // Read back 2026-09-12 in scu-cicd and scu-dev: {scanType: BASIC, rules: []}.
+        var merge = EcrRegistryScanning.MergeScanOnPush(Scanning(), Repos);
+
+        var written = Assert.IsType<RegistryScanningConfiguration>(merge.ToWrite);
+        Assert.Equal("BASIC", written.ScanType.Value);
+        var rule = Assert.Single(written.Rules);
+        Assert.Equal("SCAN_ON_PUSH", rule.ScanFrequency.Value);
+        var filter = Assert.Single(rule.RepositoryFilters);
+        Assert.Equal(("scu-4df6-b9c6-aiphost", "WILDCARD"), (filter.Filter, filter.FilterType.Value));
+        Assert.Equal(Repos, merge.Added);
+    }
+
+    [Fact]
+    public void ARegistryWithNoScanningConfigurationFromTheSdk_IsNotACrash()
+    {
+        var merge = EcrRegistryScanning.MergeScanOnPush(null, Repos);
+        Assert.Single(merge.ToWrite!.Rules);
+    }
+
+    [Fact]
+    public void OtherRules_AndOtherFiltersInTheScanOnPushRule_ArePreserved()
+    {
+        var existing = Scanning("BASIC", Rule("SCAN_ON_PUSH", "someone-elses-repo"), Rule("MANUAL", "archive-*"));
+
+        var written = EcrRegistryScanning.MergeScanOnPush(existing, Repos).ToWrite!;
+
+        Assert.Equal(2, written.Rules.Count);
+        Assert.Equal(new[] { "someone-elses-repo", "scu-4df6-b9c6-aiphost" },
+            written.Rules.Single(r => r.ScanFrequency.Value == "SCAN_ON_PUSH").RepositoryFilters.Select(f => f.Filter));
+        Assert.Equal(new[] { "archive-*" },
+            written.Rules.Single(r => r.ScanFrequency.Value == "MANUAL").RepositoryFilters.Select(f => f.Filter));
+    }
+
+    [Fact]
+    public void ARepositoryAnExistingFilterAlreadySelects_WritesNothing()
+    {
+        var merge = EcrRegistryScanning.MergeScanOnPush(Scanning("BASIC", Rule("SCAN_ON_PUSH", "*")), Repos);
+
+        Assert.Null(merge.ToWrite);
+        Assert.Equal(Repos, merge.AlreadyCovered);
+    }
+
+    [Fact]
+    public void RunningTwice_WritesOnlyTheFirstTime()
+    {
+        var first = EcrRegistryScanning.MergeScanOnPush(Scanning(), Repos).ToWrite!;
+        Assert.Null(EcrRegistryScanning.MergeScanOnPush(first, Repos).ToWrite);
+    }
+
+    [Fact]
+    public void TheExistingConfiguration_IsNotMutated()
+    {
+        var existing = Scanning("BASIC", Rule("SCAN_ON_PUSH", "someone-elses-repo"));
+
+        EcrRegistryScanning.MergeScanOnPush(existing, Repos);
+
+        Assert.Equal(new[] { "someone-elses-repo" }, existing.Rules.Single().RepositoryFilters.Select(f => f.Filter));
+    }
+
+    [Fact]
+    public void EnhancedScanning_IsRefused_NotSwitchedToBasic()
+    {
+        // AWS: switching scan type makes established scans unavailable — for every repository in the registry.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            EcrRegistryScanning.MergeScanOnPush(Scanning("ENHANCED", Rule("CONTINUOUS_SCAN", "*")), Repos));
+        Assert.Contains("ENHANCED", ex.Message);
+    }
+
+    [Fact]
+    public void TwoRulesNeitherOfThemScanOnPush_IsRefused_RatherThanOneBeingReplaced()
+    {
+        Assert.Throws<InvalidOperationException>(() => EcrRegistryScanning.MergeScanOnPush(
+            Scanning("BASIC", Rule("MANUAL", "a-*"), Rule("MANUAL", "b-*")), Repos));
+    }
+
+    [Fact]
+    public void MoreThanAHundredFilters_IsRefused()
+    {
+        var full = Scanning("BASIC", Rule("SCAN_ON_PUSH", Enumerable.Range(0, 100).Select(i => $"other-{i}-x").ToArray()));
+        Assert.Throws<InvalidOperationException>(() => EcrRegistryScanning.MergeScanOnPush(full, Repos));
+    }
 }

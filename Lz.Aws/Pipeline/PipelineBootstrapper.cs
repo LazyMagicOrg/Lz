@@ -99,6 +99,10 @@ public static class PipelineBootstrapper
                 signingRules.Add(BuildSigningRule(profileArn, role.EcrRepositories));
         }
 
+        // SCANNED ON PUSH, by a rule at the registry — merged into whatever rules it already has.
+        if (plan.EcrRepositories.Count > 0)
+            await EcrRegistryScanning.ApplyAsync(ecr, plan.EcrRepositories);
+
         await ApplySigningConfigurationAsync(ecr, signingRules);
 
         // WHAT CROSSES TO THE ENVIRONMENT this run was given. Merged, never overwritten: the registry
@@ -161,7 +165,7 @@ public static class PipelineBootstrapper
         if (plan.EcrRepositories.Count > 0)
         {
             Console.WriteLine();
-            Console.WriteLine("  ECR repositories (immutable tags, AES256, scan-on-push, signed at push):");
+            Console.WriteLine("  ECR repositories (immutable tags, AES256, signed at push, scan-on-push by the repository setting and a merged registry rule):");
             foreach (var name in plan.EcrRepositories)
                 Console.WriteLine($"    {name}");
         }

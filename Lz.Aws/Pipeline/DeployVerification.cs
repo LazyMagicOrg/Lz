@@ -205,11 +205,17 @@ public static class DeployVerification
     ///
     /// <para>ONLY <c>COMPLETE</c> IS A RESULT. <c>IN_PROGRESS</c> and <c>PENDING</c> are a wait; every
     /// other status — <c>FAILED</c>, <c>UNSUPPORTED_IMAGE</c>, <c>FINDINGS_UNAVAILABLE</c>,
-    /// <c>SCAN_ELIGIBILITY_EXPIRED</c>, <c>LIMIT_EXCEEDED</c>, <c>IMAGE_ARCHIVED</c>, an absent status —
-    /// BLOCKS, with the status named. A scan that cannot produce findings has not found nothing.
-    /// That includes <c>ACTIVE</c>, which enhanced scanning reports: the registry here uses basic
-    /// scan-on-push, so accepting it would be accepting a status this deployer has never seen
-    /// produced. It is refused loudly, and cheap to admit once measured.</para>
+    /// <c>SCAN_ELIGIBILITY_EXPIRED</c>, <c>LIMIT_EXCEEDED</c>, <c>IMAGE_ARCHIVED</c> — BLOCKS, with the
+    /// status named. A scan that cannot produce findings has not found nothing. That includes
+    /// <c>ACTIVE</c>, which enhanced scanning reports: the registry here uses basic scan-on-push, so
+    /// accepting it would be accepting a status this deployer has never seen produced. It is refused
+    /// loudly, and cheap to admit once measured.</para>
+    ///
+    /// <para>NO STATUS AT ALL IS A WAIT, and until 2026-09-12 it blocked. It means no scan exists yet —
+    /// the adapter learns that from <c>ScanNotFoundException</c> — and on a freshly replicated image that
+    /// is the normal first look: scan-on-push starts when the image arrives (measured 2026-09-12: the dev
+    /// replica of <c>sha256:1303a913…</c> finished scanning 83 seconds after it landed). A wait still never
+    /// passes; an image nobody ever scans exhausts the retry and fails, with this reason.</para>
     ///
     /// <para>NO BLOCKING SEVERITIES MEANS NO SCAN IS REQUIRED — an empty <c>BlockOn</c> cannot block
     /// anything, so waiting for a scan it would ignore is a delay with no purpose.</para>
@@ -237,12 +243,39 @@ public static class DeployVerification
             case "PENDING":
                 return (ScanVerdict.NotYetAvailable, $"the scan is {scanStatus}");
 
+            case null:
+                return (ScanVerdict.NotYetAvailable,
+                    "no scan of this image exists yet. Scan-on-push starts one when an image is pushed or " +
+                    "replicated in; if this never changes, the repository is not being scanned");
+
             default:
                 return (ScanVerdict.Block,
                     $"the scan status is '{scanStatus ?? "absent"}', which is not a result. A scan that " +
                     "cannot produce findings has not found nothing, and [" + string.Join(", ", policy) +
                     "] requires one.");
         }
+    }
+
+    /// <summary>
+    /// The per-severity counts a scan is judged on: for each severity, the LARGER of what ECR's summary
+    /// says and what the findings it returned add up to, across every page.
+    ///
+    /// <para>BECAUSE THE SUMMARY'S SCOPE IS NOT DOCUMENTED. <c>findingSeverityCounts</c> is described only
+    /// as "the image vulnerability counts", on a response whose findings are paginated. If it ever
+    /// summarised the returned page alone, an image whose critical finding sat on page two would pass.
+    /// The maximum is right under either reading, and costs a page read per thousand findings.</para>
+    /// </summary>
+    public static IReadOnlyDictionary<string, int> SeverityCounts(
+        IReadOnlyDictionary<string, int>? summary, IEnumerable<string?> findingSeverities)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (severity, n) in summary ?? new Dictionary<string, int>())
+            counts[severity] = n;
+
+        foreach (var group in findingSeverities.OfType<string>().Where(s => s.Length > 0).GroupBy(s => s, StringComparer.Ordinal))
+            counts[group.Key] = Math.Max(counts.GetValueOrDefault(group.Key), group.Count());
+
+        return counts;
     }
 
     /// <summary>

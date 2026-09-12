@@ -102,6 +102,11 @@ public static class DeployerBootstrapper
             foreach (var repository in plan.ImageRepositories)
                 await EcrRepositoryHardening.EnsureAsync(ecr, repository, config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14);
 
+            // THE SCAN RULE BEFORE THE PERMISSION TOO, merged into the registry's rules: this registry also
+            // holds repositories the pipeline does not own. A replica counts as a push (measured 2026-09-12),
+            // so an image arrives and is scanned without Verify doing anything but wait.
+            await EcrRegistryScanning.ApplyAsync(ecr, plan.ImageRepositories);
+
             await ApplyReplicationPermissionAsync(ecr, plan.ReplicationPermission
                 ?? throw new InvalidOperationException("the plan has no replication permission; it was planned without an account."));
         }
@@ -201,7 +206,7 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    {fn.Name,-40} {fn.Package}.zip  {fn.TimeoutSeconds}s  {fn.MemoryMb} MB");
         Console.WriteLine($"  hook invoker:  {plan.HookInvokerRoleName}  (assumed by ECS; invokes the hook only)");
         Console.WriteLine();
-        Console.WriteLine($"  replicated repositories (immutable tags, AES256, scan-on-push): {string.Join(", ", plan.ImageRepositories)}");
+        Console.WriteLine($"  replicated repositories (immutable tags, AES256, scan-on-push by the repository setting and a merged registry rule): {string.Join(", ", plan.ImageRepositories)}");
         Console.WriteLine($"  registry policy {CrossAccount.ReplicationSid}: ecr:ReplicateImage from {config.Pipeline?.ArtifactAccountId} into exactly those, never ecr:CreateRepository");
         var target = config.Pipeline?.TargetAccountId;
         Console.WriteLine(target == accountId

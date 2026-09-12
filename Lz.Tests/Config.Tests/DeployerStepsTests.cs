@@ -46,8 +46,13 @@ public class DeployerStepsTests
 
     private sealed class Registry(RegistryImage? image) : IRegistryImages
     {
-        public int Calls { get; private set; }
-        public Task<RegistryImage?> DescribeAsync(string repository, string digest) { Calls++; return Task.FromResult(image); }
+        public List<(string Repository, string Digest)> Describes { get; } = new();
+        public int Calls => Describes.Count;
+        public Task<RegistryImage?> DescribeAsync(string repository, string digest)
+        {
+            Describes.Add((repository, digest));
+            return Task.FromResult(image);
+        }
     }
 
     private sealed class Services(ServiceSnapshot? service, IReadOnlyList<TaskSnapshot>? tasks = null) : IServices
@@ -78,8 +83,11 @@ public class DeployerStepsTests
     public async Task TheRealRecord_AtItsRealKey_Verifies()
     {
         // The baseline: the record the workflow wrote on 2026-09-12, where it wrote it.
-        var result = await Verify();
+        var registry = new Registry(Scanned());
+        var result = await Verify(registry: registry);
 
+        // The image and its scan are looked up by the RECORD's digest in the TARGET's repository.
+        Assert.Equal(new[] { (Repository, Digest) }, registry.Describes);
         Assert.Equal(Digest, result["digest"]!.GetValue<string>());
         Assert.Equal("Pass", result["scan"]!["verdict"]!.GetValue<string>());
         Assert.Equal(CurrentTd, result["previousTaskDefinition"]!.GetValue<string>());
@@ -160,6 +168,15 @@ public class DeployerStepsTests
         // ScanNotYetAvailable is what the definition retries. A DeployRefused here would end the
         // execution on the first look at a scan that was about to finish.
         await Assert.ThrowsAsync<ScanNotYetAvailable>(() => Verify(image: Scanned(status)));
+    }
+
+    [Fact]
+    public async Task NoScanYet_IsTheRetriedError_NotARefusal()
+    {
+        // The first look at a replica that landed seconds ago: no scan exists until scan-on-push starts
+        // one. A refusal here would end every triggered deploy that looked too early.
+        var ex = await Assert.ThrowsAsync<ScanNotYetAvailable>(() => Verify(image: new RegistryImage(Digest, null, null)));
+        Assert.Contains("no scan of this image exists yet", ex.Message);
     }
 
     [Fact]

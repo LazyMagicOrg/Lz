@@ -368,10 +368,16 @@ public class DeployVerificationTests
     }
 
     [Fact]
-    public void NoScanStatusAtAll_Blocks()
+    public void NoScanYet_IsAWait_NeverAPass_AndNotARefusal()
     {
-        // A repository with scanning off reports nothing. Nothing is not clean.
-        Assert.Equal(ScanVerdict.Block, DeployVerification.ScanFromStatus(null, null, new[] { "CRITICAL" }).Verdict);
+        // No status means no scan exists yet: the first look at a replica that landed seconds ago
+        // (measured 2026-09-12 — the dev replica's scan completed 83 s after it arrived). Until then this
+        // BLOCKED, which would have refused every triggered deploy that looked before its scan finished.
+        // A wait still cannot pass: an image nobody scans exhausts the retry.
+        var (verdict, reason) = DeployVerification.ScanFromStatus(null, null, new[] { "CRITICAL" });
+
+        Assert.Equal(ScanVerdict.NotYetAvailable, verdict);
+        Assert.Contains("no scan of this image exists yet", reason);
     }
 
     [Fact]
@@ -382,6 +388,48 @@ public class DeployVerificationTests
 
         Assert.Equal(ScanVerdict.Block, verdict);
         Assert.Contains("CRITICAL=2", reason);
+    }
+
+    [Fact]
+    public void ACriticalFindingTheSummaryOmits_StillBlocks()
+    {
+        // THE CASE THE PAGING EXISTS FOR. If ECR's summary ever covered only the returned page, a critical
+        // finding elsewhere would be missing from it; the tally over every page still counts it.
+        var counts = DeployVerification.SeverityCounts(
+            new Dictionary<string, int> { ["HIGH"] = 1 }, new[] { "HIGH", "CRITICAL" });
+
+        Assert.Equal(1, counts["CRITICAL"]);
+        Assert.Equal(ScanVerdict.Block, DeployVerification.ScanFromStatus("COMPLETE", counts, new[] { "CRITICAL" }).Verdict);
+    }
+
+    [Fact]
+    public void TheSummaryAndTheTally_AreCombinedByMaximum_NotBySum()
+    {
+        // Under the other reading — the summary covers every finding and only some were returned — the
+        // summary is the larger, and must not be reduced. Summing would count a finding twice.
+        var counts = DeployVerification.SeverityCounts(
+            new Dictionary<string, int> { ["MEDIUM"] = 40, ["LOW"] = 2 }, new[] { "MEDIUM", "LOW", "LOW", "LOW" });
+
+        Assert.Equal(40, counts["MEDIUM"]);
+        Assert.Equal(3, counts["LOW"]);
+    }
+
+    [Fact]
+    public void TheCleanScanBothRegistriesReturned_Passes()
+    {
+        // Measured 2026-09-12 on sha256:1303a913 in scu-cicd and scu-dev: COMPLETE, findingSeverityCounts {},
+        // no findings. Empty means none found, not unknown.
+        var counts = DeployVerification.SeverityCounts(new Dictionary<string, int>(), Array.Empty<string?>());
+
+        Assert.Empty(counts);
+        Assert.Equal(ScanVerdict.Pass, DeployVerification.ScanFromStatus("COMPLETE", counts, new[] { "CRITICAL" }).Verdict);
+    }
+
+    [Fact]
+    public void AFindingWithNoSeverity_IsNotCountedUnderAnEmptyName()
+    {
+        var counts = DeployVerification.SeverityCounts(null, new[] { null, "", "HIGH" });
+        Assert.Equal(new[] { "HIGH" }, counts.Keys);
     }
 
     [Fact]
