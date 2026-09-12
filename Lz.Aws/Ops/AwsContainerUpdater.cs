@@ -324,36 +324,11 @@ public class AwsContainerUpdater
 
         // The repository URI without whatever it is currently pinned to, so this works
         // whether the definition names a tag or an existing digest.
-        var repoUri = target.Image!;
-        var at = repoUri.LastIndexOf('@');
-        if (at >= 0) repoUri = repoUri[..at];
-        else
-        {
-            var colon = repoUri.LastIndexOf(':');
-            var slash = repoUri.LastIndexOf('/');
-            if (colon > slash) repoUri = repoUri[..colon];
-        }
-        target.Image = $"{repoUri}@{digest}";
+        target.Image = TaskDefinitionRevision.RepinImage(target.Image!, digest);
 
-        var register = new RegisterTaskDefinitionRequest
-        {
-            Family = td.Family,
-            TaskRoleArn = td.TaskRoleArn,
-            ExecutionRoleArn = td.ExecutionRoleArn,
-            NetworkMode = td.NetworkMode,
-            ContainerDefinitions = td.ContainerDefinitions,
-            Volumes = td.Volumes,
-            PlacementConstraints = td.PlacementConstraints,
-            RequiresCompatibilities = td.RequiresCompatibilities,
-            Cpu = td.Cpu,
-            Memory = td.Memory,
-            PidMode = td.PidMode,
-            IpcMode = td.IpcMode,
-            ProxyConfiguration = td.ProxyConfiguration,
-            EphemeralStorage = td.EphemeralStorage,
-            RuntimePlatform = td.RuntimePlatform,
-            Tags = described.Tags,
-        };
+        // THE FIELD COPY IS SHARED with the decoupled-CD deployer's Prepare function — see
+        // TaskDefinitionRevision for why it must not exist twice.
+        var register = TaskDefinitionRevision.RegisterRequestFor(td, described.Tags);
 
         var registered = await _ecs.RegisterTaskDefinitionAsync(register, ct);
         return registered.TaskDefinition.TaskDefinitionArn;
