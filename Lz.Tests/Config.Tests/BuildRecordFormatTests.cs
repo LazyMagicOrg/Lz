@@ -243,8 +243,9 @@ public class BuildRecordFormatTests
     // ---------------------------------------------------------------------------------------
 
     /// <summary>
-    /// VERBATIM the JSON that ScutaraService/.github/workflows/build-aiphost.yml emits. That
-    /// workflow is in a different repository, written in Python, and nothing compiles the two
+    /// VERBATIM a record the workflow ACTUALLY WROTE — run 34707373278, 2026-09-12, read back
+    /// from s3://scu-build-records-4df6-b9c6/. It is real data rather than my approximation of it.
+    /// The workflow is in a different repository, written in Python, and nothing compiles the two
     /// together — so the contract between writer and reader is exactly the kind that drifts
     /// silently and is discovered by a deployer refusing a record months later.
     /// </summary>
@@ -254,7 +255,7 @@ public class BuildRecordFormatTests
           "class": "image",
           "builtFrom": {
             "repo": "Scutara/ScutaraService",
-            "commit": "836f0901b2c3d4e5f60718293a4b5c6d7e8f9012",
+            "commit": "57d2d67e5413b1c40e02ccdae6838947a4ebd656",
             "lane": "published",
             "packages": {
               "LazyMagic.OIDC.Bff": "3.0.26-alpha",
@@ -266,11 +267,11 @@ public class BuildRecordFormatTests
           },
           "identity": {
             "kind": "image",
-            "digest": "sha256:ba9773aa21a19e0ffd12d5f2cc2335fecb168c041cfd02a902655bb3b68bcadf"
+            "digest": "sha256:5e4f504e5ba9a0d90d25f1f111da78e1ce16ca5b40410332fb242a192a4f9e95"
           },
-          "builtAt": "2026-09-12T16:04:05Z",
-          "builtBy": "tmay",
-          "workflowRunId": "34704181875"
+          "builtAt": "2026-09-12T17:11:47Z",
+          "builtBy": "tmay57",
+          "workflowRunId": "34707373278"
         }
         """;
 
@@ -294,7 +295,7 @@ public class BuildRecordFormatTests
         var r = BuildRecordFormat.Parse(WorkflowEmitted);
 
         Assert.Equal(
-            "image/scutara/scutaraservice/20260912T160405Z-34704181875.json",
+            "image/scutara/scutaraservice/20260912T171147Z-34707373278.json",
             BuildRecordFormat.KeyFor(r));
     }
 
