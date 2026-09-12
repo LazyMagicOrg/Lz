@@ -102,7 +102,9 @@ public static class PipelineBootstrapPlanner
         // because two repositories can produce the same class (SellerApp and AdminApp are both
         // `client`) and must not share a prefix.
         var prefixes = repos
-            .Select(r => PrefixFor(RequireNonEmpty(r.Repo, "Pipeline.Repositories[].Repo")))
+            .Select(r => BuildRecordFormat.PrefixFor(
+                RequireNonEmpty(r.Class, "Pipeline.Repositories[].Class"),
+                RequireNonEmpty(r.Repo, "Pipeline.Repositories[].Repo")))
             .ToList();
 
         // NO ENVIRONMENT IN THESE NAMES, deliberately. One build account holds artifacts that are
@@ -128,8 +130,13 @@ public static class PipelineBootstrapPlanner
             sk, region, p.ArtifactAccountId, stores, roles, OidcProvider, SelfRewriteDenied);
     }
 
-    /// <summary>The S3 key prefix a repository's writer role owns: <c>owner/name/</c> lowercased.</summary>
-    public static string PrefixFor(string repo) => repo.ToLowerInvariant().TrimEnd('/') + "/";
+    /// <summary>
+    /// The S3 key prefix a repository's writer role owns, <c>{class}/{repo}/</c>. Delegates to
+    /// <see cref="BuildRecordFormat.PrefixFor"/> so the prefix a role is GRANTED and the prefix a
+    /// record is WRITTEN to are one definition — two that agreed today would drift, and the failure
+    /// would be an AccessDenied at the first build rather than anything naming the cause.
+    /// </summary>
+    public static string PrefixFor(string cls, string repo) => BuildRecordFormat.PrefixFor(cls, repo);
 
     private static PipelineRole BuildRole(string sk, PipelineRepositoryConfig r)
     {

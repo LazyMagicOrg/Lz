@@ -226,12 +226,24 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
-    public void PrefixesAreDerivedFromTheRepository_SoTheyCannotCollide()
+    public void PrefixesAreClassThenRepository_SoTheyCannotCollide()
     {
-        Assert.Equal("scutara/scutaraservice/", PipelineBootstrapPlanner.PrefixFor("Scutara/ScutaraService"));
+        Assert.Equal("image/scutara/scutaraservice/",
+            PipelineBootstrapPlanner.PrefixFor("image", "Scutara/ScutaraService"));
+
         Assert.NotEqual(
-            PipelineBootstrapPlanner.PrefixFor("Scutara/ScutaraSellerApp"),
-            PipelineBootstrapPlanner.PrefixFor("Scutara/ScutaraAdminApp"));
+            PipelineBootstrapPlanner.PrefixFor("client", "Scutara/ScutaraSellerApp"),
+            PipelineBootstrapPlanner.PrefixFor("client", "Scutara/ScutaraAdminApp"));
+    }
+
+    [Fact]
+    public void TheGrantedPrefixIsTheSameOneRecordsAreWrittenTo()
+    {
+        // Two definitions that agreed today would drift, and the failure would be an AccessDenied
+        // at the first build rather than anything naming the cause.
+        Assert.Equal(
+            Lz.Aws.Pipeline.BuildRecordFormat.PrefixFor("image", "Scutara/ScutaraService"),
+            PipelineBootstrapPlanner.PrefixFor("image", "Scutara/ScutaraService"));
     }
 
     // ---------------------------------------------------------------------------------------

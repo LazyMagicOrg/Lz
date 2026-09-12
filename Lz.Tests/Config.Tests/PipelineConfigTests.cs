@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Lz.Core.Config;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -85,7 +86,7 @@ public class PipelineConfigTests
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
                      && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
                      && !f.Contains($"{Path.DirectorySeparatorChar}Lz.Tests{Path.DirectorySeparatorChar}"))
-            .Where(f => File.ReadAllText(f).Contains(".Pipeline"))
+            .Where(f => ReadsThePipelineProperty(File.ReadAllText(f)))
             .Select(f => Path.GetRelativePath(root, f))
             .Where(rel => !allowed.Contains(rel))
             .OrderBy(rel => rel)
@@ -394,6 +395,21 @@ public class PipelineConfigTests
         Assert.Equal(new[] { "CRITICAL" }, p.Scan!.BlockOn);
         Assert.Equal(new[] { "Aws", "E2E" }, p.PostDeployTests);
     }
+
+    /// <summary>
+    /// Does this source READ <c>SystemConfig.Pipeline</c>?
+    ///
+    /// <para>A plain <c>Contains(".Pipeline")</c> was the first version and it was wrong: the
+    /// namespace <c>Lz.Aws.Pipeline</c> contains that substring, so every file in the pipeline
+    /// namespace reported itself as a consumer — a false positive that would have made this test
+    /// noise within a day of being useful. Namespace and using lines are excluded, and the match is
+    /// a property access: <c>.Pipeline</c> followed by something that cannot continue an identifier.</para>
+    /// </summary>
+    private static bool ReadsThePipelineProperty(string source) =>
+        source.Split('\n')
+            .Where(l => !l.TrimStart().StartsWith("using ", StringComparison.Ordinal)
+                     && !l.TrimStart().StartsWith("namespace ", StringComparison.Ordinal))
+            .Any(l => Regex.IsMatch(l, @"\.Pipeline\b(?![\w.])"));
 
     /// <summary>Walk up from the test assembly to the directory holding Lz.slnx.</summary>
     private static string RepoRoot()
