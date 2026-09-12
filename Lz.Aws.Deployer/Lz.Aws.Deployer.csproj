@@ -1,0 +1,68 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The decoupled-CD deployer's Lambda functions (DecoupledCd.md §5) and the ECS signature hook
+    (§4.4.1). NOT A PACKAGE: Lz.Aws publishes this project during its own build and ships the result
+    as Lambda/deployer.zip and Lambda/signature-hook.zip, beside gate-checker.zip, which is where
+    `lz bootstrapdeployer` reads them from.
+
+    WHY IT COMPILES LINKED FILES INSTEAD OF REFERENCING Lz.Aws. Lz.Aws carries Pulumi.Aws and some
+    thirty AWS SDKs, and Lz.Core carries Pulumi and its gRPC stack; a function that only reads a record
+    and a registry would ship all of it. The decisions it runs are plain C# with no such dependency,
+    so it compiles the SAME source files Lz.Aws compiles and Lz.Tests tests — not copies, the files.
+    What runs in the account is what the suite pinned.
+
+    The handlers in this project are deliberately thin: read the payload, construct SDK adapters,
+    call a step, write the answer. Everything that decides lives in the linked files.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Lz.Aws.Deployer</AssemblyName>
+    <RootNamespace>Lz.Aws.Deployer</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!-- What a .NET Lambda package needs: the runtimeconfig the managed runtime reads, and every
+         dependency copied beside the handler assembly. -->
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AWSProjectType>Lambda</AWSProjectType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Lz.Core\Config\PipelineConfig.cs" Link="Linked\Lz.Core\Config\PipelineConfig.cs" />
+    <!-- The whole folder, for one predicate: DeployVerification calls PackageLaneSync.CarriesACommitId,
+         the shared NBGV check, and that file uses its siblings. BCL-only. -->
+    <Compile Include="..\Lz.Core\PackageLane\*.cs" Link="Linked\Lz.Core\PackageLane\%(Filename)%(Extension)" />
+    <Compile Include="..\Lz.Aws\Pipeline\BuildRecord.cs" Link="Linked\Lz.Aws\Pipeline\BuildRecord.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\DeployVerification.cs" Link="Linked\Lz.Aws\Pipeline\DeployVerification.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\DeployerContract.cs" Link="Linked\Lz.Aws\Pipeline\DeployerContract.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\DeployerSteps.cs" Link="Linked\Lz.Aws\Pipeline\DeployerSteps.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
+    <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
+  </ItemGroup>
+
+  <!-- Versions are exact, and match what Lz.Aws resolves, so the deployed functions and the CLI run
+       the same SDK.
+
+       NO PrivateAssets HERE, and that is a measured requirement rather than an oversight: the first
+       build set PrivateAssets="all" on these to keep them out of Lz.Aws's graph, and the SDK treats a
+       PrivateAssets="all" package as a development dependency and LEAVES IT OUT OF PUBLISH. The zip came
+       out with four files and no AWS SDK at all — a function that would have died on its first
+       invocation with a missing assembly. Lz.Aws's ProjectReference carries the exclusion instead. -->
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.Core" Version="2.8.0" />
+    <PackageReference Include="AWSSDK.ECR" Version="4.0.101.5" />
+    <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.103.2" />
+  </ItemGroup>
+
+  <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.
+       They are third-party binaries and are NOT committed; see the `notation/` entry in .gitignore. -->
+  <ItemGroup>
+    <None Remove="notation\**" />
+    <Compile Remove="notation\**" />
+  </ItemGroup>
+
+</Project>

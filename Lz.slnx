@@ -8,6 +8,8 @@
 -->
 <Solution>
   <Project Path="Lz.Aws/Lz.Aws.csproj" />
+  <!-- The deployer's Lambda functions. Published by Lz.Aws's build into Lambda/*.zip, never packed. -->
+  <Project Path="Lz.Aws.Deployer/Lz.Aws.Deployer.csproj" />
   <Project Path="Lz.Azure/Lz.Azure.csproj" />
   <Project Path="Lz.Core/Lz.Core.csproj" />
   <Project Path="Lz.Gen/Lz.Gen.csproj" />

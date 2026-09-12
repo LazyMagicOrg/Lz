@@ -65,6 +65,79 @@
     <Warning Text="Lambda/gate-checker.zip is missing. Run Lambda/build-gate-checker.ps1 to build it." />
   </Target>
 
+  <!-- THE DECOUPLED-CD DEPLOYER'S PACKAGES (DecoupledCd.md §5, P2 stage C3): Lambda/deployer.zip and
+       Lambda/signature-hook.zip, which `lz bootstrapdeployer` uploads.
+
+       BUILT HERE, EVERY BUILD — NOT COMMITTED like gate-checker.zip. Those functions run the pipeline's
+       deploy decisions, and a committed zip is a copy of that code that drifts the first time someone
+       edits a decision and does not rebuild it: the suite would stay green on the source while the
+       account ran the old logic. Building it with Lz.Aws means the package in the nupkg is always the
+       code the tests just ran against.
+
+       The ProjectReference exists to put Lz.Aws.Deployer in the restore graph and the build order —
+       `dotnet run \-\-project Lz.Cli` in CI builds project by project and would otherwise publish an
+       unrestored project. It references no assembly (the deployer compiles some of Lz.Aws's own files,
+       so referencing its output would define those types twice), excludes every asset so the
+       deployer's packages do not flow into Lz.Aws, and is PrivateAssets so the nupkg does not declare
+       a dependency on a package that does not exist.
+
+       Shipped in the same three places as gate-checker.zip, for the same three load scenarios. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Lz.Aws.Deployer\Lz.Aws.Deployer.csproj"
+                      ReferenceOutputAssembly="false" ExcludeAssets="all" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Forward slashes in the new paths: MSBuild takes them on Windows, and CI builds this on Linux. -->
+  <PropertyGroup>
+    <LzLambdaDir>$(MSBuildProjectDirectory)/$(BaseIntermediateOutputPath)lambda/</LzLambdaDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <LzDeployerPackage Include="$(LzLambdaDir)deployer.zip" />
+    <LzDeployerPackage Include="$(LzLambdaDir)signature-hook.zip" />
+
+    <None Include="@(LzDeployerPackage)" Link="Lambda\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" Pack="false" Visible="false" />
+    <None Include="@(LzDeployerPackage)" Pack="true" Visible="false"
+          PackagePath="lib\$(TargetFramework)\Lambda\%(Filename)%(Extension)" />
+    <None Include="@(LzDeployerPackage)" Pack="true" Visible="false"
+          PackagePath="contentFiles\any\$(TargetFramework)\Lambda\%(Filename)%(Extension)">
+      <PackageCopyToOutput>true</PackageCopyToOutput>
+      <BuildAction>None</BuildAction>
+    </None>
+  </ItemGroup>
+
+  <Target Name="LzBuildDeployerPackages" AfterTargets="ResolveProjectReferences" BeforeTargets="CopyFilesToOutputDirectory"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <_LzPublishDir>$(LzLambdaDir)publish/</_LzPublishDir>
+      <_LzHookDir>$(LzLambdaDir)signature-hook/</_LzHookDir>
+      <_LzVerifierDir>$(MSBuildProjectDirectory)/../Lz.Aws.Deployer/notation/</_LzVerifierDir>
+    </PropertyGroup>
+
+    <!-- A clean directory each time, so a dependency that was removed does not linger in the zip. -->
+    <RemoveDir Directories="$(_LzPublishDir);$(_LzHookDir)" />
+
+    <!-- NoBuild: the ProjectReference above has just built it with these same global properties, so
+         publishing must not compile it a second time into the same obj directory. -->
+    <MSBuild Projects="../Lz.Aws.Deployer/Lz.Aws.Deployer.csproj" Targets="Publish"
+             Properties="NoBuild=true;PublishDir=$(_LzPublishDir)" />
+
+    <ItemGroup>
+      <_LzPublished Include="$(_LzPublishDir)**/*" />
+      <_LzVerifier Include="$(_LzVerifierDir)*" />
+    </ItemGroup>
+
+    <ZipDirectory SourceDirectory="$(_LzPublishDir)" DestinationFile="$(LzLambdaDir)deployer.zip" Overwrite="true" />
+
+    <Copy SourceFiles="@(_LzPublished)" DestinationFiles="@(_LzPublished->'$(_LzHookDir)%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(_LzVerifier)" DestinationFolder="$(_LzHookDir)notation/" />
+    <ZipDirectory SourceDirectory="$(_LzHookDir)" DestinationFile="$(LzLambdaDir)signature-hook.zip" Overwrite="true" />
+
+    <Message Importance="high" Condition="'@(_LzVerifier)' == ''"
+             Text="Lz.Aws: signature-hook.zip built WITHOUT the Notation verifier (Lz.Aws.Deployer/notation/ is empty). The hook will refuse every deployment until it is packaged." />
+  </Target>
+
   <!-- M0-7 Cognito Custom-Auth trigger (inline Node.js). AwsCognitoComponent zips the
        CognitoCustomAuth/ dir found next to typeof(...).Assembly.Location, so custom-auth.mjs must
        land at <asmDir>/CognitoCustomAuth/custom-auth.mjs in all three load scenarios — identical to

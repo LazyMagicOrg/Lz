@@ -270,4 +270,155 @@ public class DeployVerificationTests
         Assert.Throws<ArgumentException>(() =>
             DeployVerification.Rollout(new[] { Digest }, "", "COMPLETED"));
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  Provenance — where the record's authority comes from
+    // ---------------------------------------------------------------------------------------
+
+    private const string Store = "scu-build-records-4df6-b9c6";
+    private const string RealKey = "image/scutara/scutaraservice/20260912T171147Z-34707373278.json";
+
+    [Fact]
+    public void TheRealRecord_AtItsRealKey_HasProvenance()
+    {
+        Assert.Empty(DeployVerification.Provenance(Real(), new RecordLocation(Store, RealKey), Store));
+    }
+
+    [Fact]
+    public void ARecordInAnotherBucket_HasNone()
+    {
+        Assert.Contains(DeployVerification.Provenance(Real(), new RecordLocation("elsewhere", RealKey), Store),
+            r => r.Check == "record.bucket");
+    }
+
+    [Fact]
+    public void ARecordClaimingARepositoryWhosePrefixItIsNotUnder_HasNone()
+    {
+        // Written by whichever role owns the prefix it is under — not by the repository it names.
+        var refusal = Assert.Single(DeployVerification.Provenance(
+            Real(), new RecordLocation(Store, "client/scutara/scutarasellerapp/20260912T171147Z-34707373278.json"), Store));
+
+        Assert.Equal("record.key", refusal.Check);
+        // The DIAGNOSIS is pinned, not just the refusal: the exact-key check alone would also refuse
+        // this, but would say "wrong key" about what is really a different role's write. Mutation-checked
+        // — with only the check asserted, removing the prefix branch left this test green.
+        Assert.Contains("different repository's role", refusal.Reason);
+    }
+
+    [Fact]
+    public void APrefixThatMerelyStartsTheSame_IsNotTheSamePrefix()
+    {
+        // image/scutara/scutaraservice-evil/ starts with "image/scutara/scutaraservice" but not with the
+        // prefix, which ends in a slash — a repository cannot borrow another's authority by name-squatting.
+        Assert.Contains(DeployVerification.Provenance(
+            Real(), new RecordLocation(Store, "image/scutara/scutaraservice-evil/20260912T171147Z-34707373278.json"), Store),
+            r => r.Check == "record.key" && r.Reason.Contains("different repository's role"));
+    }
+
+    [Fact]
+    public void ARecordUnderItsOwnPrefix_AtAKeyItsContentsDoNotImply_HasNone()
+    {
+        // THE LOAD-BEARING CHECK. A key equal to KeyFor(record) necessarily starts with the record's own
+        // prefix, so this exact comparison is what actually refuses; the prefix branch above only names
+        // the likelier cause.
+        var refusal = Assert.Single(DeployVerification.Provenance(
+            Real(), new RecordLocation(Store, "image/scutara/scutaraservice/20260101T000000Z-1.json"), Store));
+
+        Assert.Equal("record.key", refusal.Check);
+    }
+
+    [Fact]
+    public void OnlyAnImageRecord_FromAPipelineRepository_IsATarget()
+    {
+        var target = new DeployTarget("c", "s", "aiphost", "scu-4df6-b9c6-aiphost");
+
+        Assert.Empty(DeployVerification.Target(Real(), target, new[] { "scu-4df6-b9c6-aiphost" }));
+        Assert.Contains(DeployVerification.Target(Real(cls: "client"), target, new[] { "scu-4df6-b9c6-aiphost" }), r => r.Check == "class");
+        Assert.Contains(DeployVerification.Target(Real(), target, new[] { "scu-4df6-b9c6-other" }), r => r.Check == "target.repository");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  Scan status — every status ECR can report, enumerated from the SDK
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void EveryScanStatusTheSdkKnows_HasADeliberateVerdict()
+    {
+        // ENUMERATED FROM AWSSDK.ECR, so a status ECR adds later lands in the BLOCK branch by default
+        // and this test names it — rather than a new status silently meaning whatever the switch's
+        // fallthrough happened to be.
+        var statuses = typeof(Amazon.ECR.ScanStatus)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.FieldType == typeof(Amazon.ECR.ScanStatus))
+            .Select(f => ((Amazon.ECR.ScanStatus)f.GetValue(null)!).Value)
+            .ToList();
+        Assert.True(statuses.Count >= 10, "reflection found too few statuses to mean anything");
+
+        foreach (var status in statuses)
+        {
+            var (verdict, _) = DeployVerification.ScanFromStatus(status, new Dictionary<string, int>(), new[] { "CRITICAL" });
+            var expected = status switch
+            {
+                "COMPLETE" => ScanVerdict.Pass,
+                "IN_PROGRESS" or "PENDING" => ScanVerdict.NotYetAvailable,
+                _ => ScanVerdict.Block,
+            };
+            Assert.True(expected == verdict, $"scan status {status}: expected {expected}, got {verdict}");
+        }
+    }
+
+    [Fact]
+    public void NoScanStatusAtAll_Blocks()
+    {
+        // A repository with scanning off reports nothing. Nothing is not clean.
+        Assert.Equal(ScanVerdict.Block, DeployVerification.ScanFromStatus(null, null, new[] { "CRITICAL" }).Verdict);
+    }
+
+    [Fact]
+    public void ACompleteScanWithABlockingFinding_Blocks_AndSaysWhat()
+    {
+        var (verdict, reason) = DeployVerification.ScanFromStatus(
+            "COMPLETE", new Dictionary<string, int> { ["CRITICAL"] = 2, ["HIGH"] = 5 }, new[] { "CRITICAL" });
+
+        Assert.Equal(ScanVerdict.Block, verdict);
+        Assert.Contains("CRITICAL=2", reason);
+    }
+
+    [Fact]
+    public void NoBlockingSeverities_NeedsNoScan()
+    {
+        Assert.Equal(ScanVerdict.Pass, DeployVerification.ScanFromStatus(null, null, Array.Empty<string>()).Verdict);
+        Assert.Equal(ScanVerdict.Pass, DeployVerification.ScanFromStatus("IN_PROGRESS", null, null).Verdict);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  What is running
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void OnlyRunningTasks_AndOnlyTheNamedContainer_Count()
+    {
+        var tasks = new[]
+        {
+            new TaskSnapshot("RUNNING", new[] { new ContainerSnapshot("sidecar", OldDigest), new ContainerSnapshot("aiphost", Digest) }),
+            new TaskSnapshot("PROVISIONING", new[] { new ContainerSnapshot("aiphost", null) }),
+            new TaskSnapshot("RUNNING", null),
+        };
+
+        // The provisioning task is left out; the running task WITHOUT the container contributes a null,
+        // so it can never be counted as running the deployed digest.
+        Assert.Equal(new[] { Digest, null }, DeployVerification.RunningDigests(tasks, "aiphost"));
+    }
+
+    [Fact]
+    public void ARunningTaskWithoutTheContainer_PreventsLanded()
+    {
+        var digests = DeployVerification.RunningDigests(new[]
+        {
+            new TaskSnapshot("RUNNING", new[] { new ContainerSnapshot("aiphost", Digest) }),
+            new TaskSnapshot("RUNNING", new[] { new ContainerSnapshot("other", Digest) }),
+        }, "aiphost");
+
+        Assert.NotEqual(RolloutVerdict.Landed, DeployVerification.Rollout(digests, Digest, "COMPLETED"));
+    }
 }

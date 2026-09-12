@@ -129,7 +129,7 @@ public static class PipelineBootstrapPlanner
         // Store names first: the roles' permission policies name the stores, so they cannot be
         // built until the names exist.
         var artifacts = $"{sk}-artifacts-{suffix}";
-        var buildRecords = $"{sk}-build-records-{suffix}";
+        var buildRecords = BuildRecordStoreFor(sk, suffix);
         var requests = $"{sk}-deploy-requests-{suffix}";
 
         var acct = accountId ?? "<build-account-id>";
@@ -181,6 +181,21 @@ public static class PipelineBootstrapPlanner
     /// would be an AccessDenied at the first build rather than anything naming the cause.
     /// </summary>
     public static string PrefixFor(string cls, string repo) => BuildRecordFormat.PrefixFor(cls, repo);
+
+    /// <summary>
+    /// The build-record store's name. One definition, because two sides need it: this planner creates
+    /// the store in the build account, and the deployer's Verify function in each target account is
+    /// configured to accept records from it and nowhere else.
+    /// </summary>
+    public static string BuildRecordStoreFor(string systemKey, string systemSuffix)
+        => $"{systemKey}-build-records-{systemSuffix}";
+
+    /// <summary>
+    /// A signing profile's UNVERSIONED ARN — the form a Notation trust policy names. Profiles live in
+    /// the build account, beside the registry that signs at push.
+    /// </summary>
+    public static string SigningProfileArn(string region, string artifactAccountId, string profileName)
+        => $"arn:aws:signer:{region}:{artifactAccountId}:/signing-profiles/{profileName}";
 
     private static PipelineRole BuildRole(
         SystemConfig config, string sk, string region, string accountId, string artifacts,

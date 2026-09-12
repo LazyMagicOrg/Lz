@@ -249,7 +249,7 @@ public class BuildRecordFormatTests
     /// together — so the contract between writer and reader is exactly the kind that drifts
     /// silently and is discovered by a deployer refusing a record months later.
     /// </summary>
-    private const string WorkflowEmitted = """
+    internal const string WorkflowEmitted = """
         {
           "schema": 1,
           "class": "image",

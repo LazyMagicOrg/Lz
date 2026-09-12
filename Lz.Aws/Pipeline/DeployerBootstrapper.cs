@@ -1,6 +1,8 @@
+using System.IO.Compression;
 using Amazon.IdentityManagement;
 using Amazon.IdentityManagement.Model;
 using Amazon.Lambda;
+using Amazon.Lambda.Model;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.SecurityToken;
@@ -23,12 +25,10 @@ namespace Lz.Aws.Pipeline;
 /// meant to be narrow and time-boxed (§5.5); two commands keep each one pointed at a single
 /// account and a single set of rights.</para>
 ///
-/// <para>IT STOPS SHORT OF MAKING THE DEPLOYER LIVE, deliberately. The role, the evidence store and
-/// the state machine are created; the EventBridge rule that starts an execution when a build record
-/// lands is NOT. The machine references three Lambdas that do not exist yet (P2 stage C), and
-/// wiring the trigger before them would mean a real build record starting an execution that dies on
-/// its first state. Inert and inspectable beats live and broken — and an un-triggered machine
-/// harms nothing, while a half-wired one produces failed executions nobody asked for.</para>
+/// <para>IT STOPS SHORT OF MAKING THE DEPLOYER LIVE, deliberately. The roles, the evidence store, the
+/// functions and the state machine are created; the EventBridge rule that starts an execution when a
+/// build record lands is NOT (stage D), and the signature hook is attached to no service (C4's wiring,
+/// which moves the deploy plan). Inert and inspectable beats live and broken.</para>
 /// </summary>
 public static class DeployerBootstrapper
 {
@@ -50,7 +50,11 @@ public static class DeployerBootstrapper
         var accountId = await ResolveAccountAsync(profile, region);
         var plan = DeployerPlanner.Plan(config, accountId);
 
-        Print(config, plan, accountId, profile, apply);
+        // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
+        // rather than half-way through an apply.
+        var packages = LocatePackages(plan);
+
+        Print(config, plan, accountId, profile, apply, packages);
 
         if (!apply)
         {
@@ -84,8 +88,24 @@ public static class DeployerBootstrapper
             ? new AmazonLambdaClient(creds, endpoint) : new AmazonLambdaClient(endpoint);
 
         await EnsureEvidenceStoreAsync(s3, plan.EvidenceStore, region);
-        var roleArn = await EnsureRoleAsync(iam, plan, accountId);
-        var missing = await ReportMissingFunctionsAsync(lambda, plan.Functions);
+
+        var roleArn = await EnsureRoleAsync(iam, plan.RoleName, "states.amazonaws.com",
+            "lz decoupled-CD deployer. Rolls the service image by digest.",
+            ($"{plan.RoleName}-deploy", plan.RolePolicy), plan.DenyPolicy);
+
+        foreach (var fn in plan.Functions)
+        {
+            var fnRole = await EnsureRoleAsync(iam, fn.RoleName, "lambda.amazonaws.com",
+                $"lz decoupled-CD deployer function {fn.Name}.",
+                ($"{fn.RoleName}-grant", fn.Policy), plan.DenyPolicy);
+
+            await EnsureFunctionAsync(lambda, fn, fnRole, packages[fn.Package]);
+        }
+
+        await EnsureRoleAsync(iam, plan.HookInvokerRoleName, "ecs.amazonaws.com",
+            "Lets ECS invoke the lz signature hook during a service deployment.",
+            ($"{plan.HookInvokerRoleName}-invoke", plan.HookInvokerPolicy), plan.DenyPolicy);
+
         await EnsureStateMachineAsync(sfn, plan, roleArn, accountId, region);
 
         Console.WriteLine();
@@ -95,17 +115,44 @@ public static class DeployerBootstrapper
 
         Console.WriteLine();
         Console.WriteLine("THE DEPLOYER IS NOT LIVE, and nothing here made it so:");
-        Console.WriteLine("  - no EventBridge rule starts it when a build record lands");
-        Console.WriteLine("  - no reconciler schedule enumerates the build-record store");
-        Console.WriteLine("  - no artifact-without-a-record anomaly alarm");
-        if (missing.Count > 0)
-        {
-            Console.WriteLine($"  - {missing.Count} of its {plan.Functions.Count} Lambda functions do not exist:");
-            foreach (var fn in missing) Console.WriteLine($"      {fn}");
-        }
-        Console.WriteLine("Wiring the trigger before those exist would mean a real build record");
-        Console.WriteLine("starting an execution that dies on its first state. See DecoupledCd.md P2.");
+        Console.WriteLine("  - no EventBridge rule starts it when a build record lands (stage D)");
+        Console.WriteLine("  - no reconciler schedule enumerates the build-record store (stage D)");
+        Console.WriteLine("  - no artifact-without-a-record anomaly alarm (stage D)");
+        Console.WriteLine("  - the signature hook is attached to no ECS service (C4 wiring, which moves the deploy plan)");
+        Console.WriteLine();
+        Console.WriteLine("BEFORE A REAL EXECUTION CAN SUCCEED, two things outside this account:");
+        var verifyRole = plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify).RoleName;
+        Console.WriteLine($"  - the build-record store's bucket policy must let {verifyRole} read image/*");
+        Console.WriteLine("  - replication must deliver the image into this account's registry (Verify resolves it here)");
     }
+
+    /// <summary>
+    /// The zips each function's code comes from, read into memory, or a refusal naming what is
+    /// missing. Looked for next to Lz.Aws.dll, where the build puts them in every load scenario.
+    /// </summary>
+    private static Dictionary<string, PackageBytes> LocatePackages(PipelineDeployer plan)
+    {
+        var dir = Path.Combine(Path.GetDirectoryName(typeof(DeployerBootstrapper).Assembly.Location)!, "Lambda");
+        var result = new Dictionary<string, PackageBytes>();
+
+        foreach (var package in plan.Functions.Select(f => f.Package).Distinct())
+        {
+            var path = Path.Combine(dir, DeployerPackages.ZipFor(package));
+            if (!File.Exists(path))
+                throw new InvalidOperationException(
+                    $"the deployment package {path} does not exist. It is built with Lz.Aws " +
+                    "(`dotnet build Lz.slnx`); a build that skipped it cannot create the deployer's functions.");
+
+            var bytes = File.ReadAllBytes(path);
+            using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+            var missing = NotationLayout.MissingFromPackage(zip.Entries.Select(e => e.FullName));
+            result[package] = new PackageBytes(path, bytes, missing);
+        }
+
+        return result;
+    }
+
+    private sealed record PackageBytes(string Path, byte[] Bytes, IReadOnlyList<string> MissingVerifierFiles);
 
     private static async Task<string> ResolveAccountAsync(string? profile, string region)
     {
@@ -119,7 +166,8 @@ public static class DeployerBootstrapper
     }
 
     private static void Print(
-        SystemConfig config, PipelineDeployer plan, string accountId, string? profile, bool apply)
+        SystemConfig config, PipelineDeployer plan, string accountId, string? profile, bool apply,
+        IReadOnlyDictionary<string, PackageBytes> packages)
     {
         Console.WriteLine($"=== Deployer bootstrap: {config.SystemKey} / {config.Environment} ===");
         Console.WriteLine($"  account:  {accountId}{(string.IsNullOrEmpty(profile) ? " (ambient credentials)" : $" (profile {profile})")}");
@@ -130,7 +178,25 @@ public static class DeployerBootstrapper
         Console.WriteLine($"  role:          {plan.RoleName}  + an explicit self-rewrite Deny");
         Console.WriteLine($"  evidence:      {plan.EvidenceStore}");
         Console.WriteLine($"  approval:      {(plan.ApprovalRequired ? "REQUIRED — a waitForTaskToken gate" : "not required (this environment deploys on its own)")}");
-        Console.WriteLine($"  functions it references: {string.Join(", ", plan.Functions)}");
+        Console.WriteLine();
+        Console.WriteLine("  functions (each with its own role and the same Deny):");
+        foreach (var fn in plan.Functions)
+            Console.WriteLine($"    {fn.Name,-40} {fn.Package}.zip  {fn.TimeoutSeconds}s  {fn.MemoryMb} MB");
+        Console.WriteLine($"  hook invoker:  {plan.HookInvokerRoleName}  (assumed by ECS; invokes the hook only)");
+        Console.WriteLine();
+
+        foreach (var (name, package) in packages.OrderBy(p => p.Key))
+        {
+            Console.WriteLine($"  package {name}.zip: {package.Bytes.Length / 1024} KB");
+            if (name == DeployerPackages.SignatureHook && package.MissingVerifierFiles.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("    WITHOUT THE VERIFIER — missing " + string.Join(", ", package.MissingVerifierFiles));
+                Console.WriteLine("    The hook will answer FAILED to every deployment until Notation is packaged.");
+                Console.WriteLine("    Harmless while it is attached to nothing; not usable until it is.");
+                Console.ResetColor();
+            }
+        }
         Console.WriteLine();
     }
 
@@ -164,8 +230,17 @@ public static class DeployerBootstrapper
         Console.WriteLine("      versioning on, public access blocked.");
     }
 
+    /// <summary>
+    /// A role trusted by one service principal, with its grant and the self-rewrite Deny re-put on
+    /// every run — so a policy that drifted from the plan is corrected, not skipped.
+    ///
+    /// <para>TWO POLICIES, NOT ONE. The Deny is separate so it is visible in the console rather than
+    /// buried mid-document, and because an explicit Deny beats any Allow — including a future one
+    /// nobody connects to this decision (§5.5).</para>
+    /// </summary>
     private static async Task<string> EnsureRoleAsync(
-        IAmazonIdentityManagementService iam, PipelineDeployer plan, string accountId)
+        IAmazonIdentityManagementService iam, string roleName, string servicePrincipal, string description,
+        (string Name, string Document) grant, string denyPolicy)
     {
         var trust = System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -175,76 +250,147 @@ public static class DeployerBootstrapper
                 new
                 {
                     Effect = "Allow",
-                    Principal = new { Service = "states.amazonaws.com" },
+                    Principal = new { Service = servicePrincipal },
                     Action = "sts:AssumeRole",
                 },
             },
         });
 
-        var arn = $"arn:aws:iam::{accountId}:role/{plan.RoleName}";
-
+        string arn;
         try
         {
-            await iam.GetRoleAsync(new GetRoleRequest { RoleName = plan.RoleName });
-            Console.WriteLine($"  role '{plan.RoleName}' already exists — updating its policies.");
+            arn = (await iam.GetRoleAsync(new GetRoleRequest { RoleName = roleName })).Role.Arn;
+            Console.WriteLine($"  role '{roleName}' already exists — updating its policies.");
             await iam.UpdateAssumeRolePolicyAsync(new UpdateAssumeRolePolicyRequest
             {
-                RoleName = plan.RoleName, PolicyDocument = trust,
+                RoleName = roleName, PolicyDocument = trust,
             });
         }
         catch (NoSuchEntityException)
         {
-            await iam.CreateRoleAsync(new CreateRoleRequest
+            arn = (await iam.CreateRoleAsync(new CreateRoleRequest
             {
-                RoleName = plan.RoleName,
+                RoleName = roleName,
                 AssumeRolePolicyDocument = trust,
-                Description = "lz decoupled-CD deployer. Rolls the service image by digest.",
+                Description = description,
                 MaxSessionDuration = 3600,
-            });
-            Console.WriteLine($"  role '{plan.RoleName}' created.");
+            })).Role.Arn;
+            Console.WriteLine($"  role '{roleName}' created (trusted by {servicePrincipal}).");
         }
 
-        // TWO POLICIES, NOT ONE. The Deny is separate so it is visible in the console rather than
-        // buried mid-document, and because an explicit Deny beats any Allow — including a future
-        // one nobody connects to this decision (§5.5).
         await iam.PutRolePolicyAsync(new PutRolePolicyRequest
         {
-            RoleName = plan.RoleName,
-            PolicyName = $"{plan.RoleName}-deploy",
-            PolicyDocument = plan.RolePolicy,
+            RoleName = roleName, PolicyName = grant.Name, PolicyDocument = grant.Document,
         });
         await iam.PutRolePolicyAsync(new PutRolePolicyRequest
         {
-            RoleName = plan.RoleName,
-            PolicyName = $"{plan.RoleName}-deny-self-rewrite",
-            PolicyDocument = plan.DenyPolicy,
+            RoleName = roleName, PolicyName = $"{roleName}-deny-self-rewrite", PolicyDocument = denyPolicy,
         });
-        Console.WriteLine("      deploy policy + explicit self-rewrite Deny applied.");
+        Console.WriteLine("      grant + explicit self-rewrite Deny applied.");
 
         return arn;
     }
 
     /// <summary>
-    /// Which of the definition's Lambdas do not exist. REPORTED, not refused: the machine is inert
-    /// until something triggers it, and nothing here wires a trigger — so creating it with its
-    /// functions missing is a state that can be inspected rather than one that can misfire.
+    /// Create the function, or bring an existing one to the plan: code first, then configuration,
+    /// waiting for each update to settle — Lambda refuses a configuration change while a code update
+    /// is still in progress.
     /// </summary>
-    private static async Task<List<string>> ReportMissingFunctionsAsync(
-        IAmazonLambda lambda, IReadOnlyList<string> functions)
+    private static async Task EnsureFunctionAsync(
+        IAmazonLambda lambda, DeployerFunction fn, string roleArn, PackageBytes package)
     {
-        var missing = new List<string>();
-        foreach (var fn in functions)
+        var environment = new Amazon.Lambda.Model.Environment
         {
-            try
-            {
-                await lambda.GetFunctionAsync(new Amazon.Lambda.Model.GetFunctionRequest { FunctionName = fn });
-            }
-            catch (Amazon.Lambda.Model.ResourceNotFoundException)
-            {
-                missing.Add(fn);
-            }
+            Variables = new Dictionary<string, string>(fn.Environment),
+        };
+
+        bool exists;
+        try
+        {
+            await lambda.GetFunctionConfigurationAsync(new GetFunctionConfigurationRequest { FunctionName = fn.Name });
+            exists = true;
         }
-        return missing;
+        catch (Amazon.Lambda.Model.ResourceNotFoundException)
+        {
+            exists = false;
+        }
+
+        if (!exists)
+        {
+            // A ROLE CREATED SECONDS AGO IS NOT YET ASSUMABLE BY LAMBDA — IAM is eventually consistent,
+            // and CreateFunction checks the role immediately. Retried on exactly that refusal and no
+            // other, so a genuinely bad role still fails at once.
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    await lambda.CreateFunctionAsync(new CreateFunctionRequest
+                    {
+                        FunctionName = fn.Name,
+                        Runtime = Runtime.Dotnet10,
+                        Handler = fn.Handler,
+                        Role = roleArn,
+                        Code = new FunctionCode { ZipFile = new MemoryStream(package.Bytes) },
+                        Timeout = fn.TimeoutSeconds,
+                        MemorySize = fn.MemoryMb,
+                        Architectures = new List<string> { Architecture.X86_64 },
+                        Environment = environment,
+                        PackageType = PackageType.Zip,
+                        Description = "lz decoupled-CD deployer (DecoupledCd.md §5).",
+                    });
+                    break;
+                }
+                catch (InvalidParameterValueException ex)
+                    when (attempt < 10 && ex.Message.Contains("cannot be assumed", StringComparison.OrdinalIgnoreCase))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3));
+                }
+            }
+
+            await WaitForSettledAsync(lambda, fn.Name);
+            Console.WriteLine($"  function '{fn.Name}' created.");
+            return;
+        }
+
+        await lambda.UpdateFunctionCodeAsync(new UpdateFunctionCodeRequest
+        {
+            FunctionName = fn.Name,
+            ZipFile = new MemoryStream(package.Bytes),
+            Architectures = new List<string> { Architecture.X86_64 },
+        });
+        await WaitForSettledAsync(lambda, fn.Name);
+
+        await lambda.UpdateFunctionConfigurationAsync(new UpdateFunctionConfigurationRequest
+        {
+            FunctionName = fn.Name,
+            Runtime = Runtime.Dotnet10,
+            Handler = fn.Handler,
+            Role = roleArn,
+            Timeout = fn.TimeoutSeconds,
+            MemorySize = fn.MemoryMb,
+            Environment = environment,
+        });
+        await WaitForSettledAsync(lambda, fn.Name);
+        Console.WriteLine($"  function '{fn.Name}' already exists — code and configuration updated.");
+    }
+
+    private static async Task WaitForSettledAsync(IAmazonLambda lambda, string name)
+    {
+        for (var i = 0; i < 45; i++)
+        {
+            var c = await lambda.GetFunctionConfigurationAsync(new GetFunctionConfigurationRequest { FunctionName = name });
+
+            if (c.State == State.Failed || c.LastUpdateStatus == LastUpdateStatus.Failed)
+                throw new InvalidOperationException(
+                    $"function '{name}' failed to settle: {c.StateReason ?? c.LastUpdateStatusReason}");
+
+            if (c.State == State.Active && c.LastUpdateStatus != LastUpdateStatus.InProgress)
+                return;
+
+            await Task.Delay(TimeSpan.FromSeconds(2));
+        }
+
+        throw new InvalidOperationException($"function '{name}' did not settle within 90 seconds.");
     }
 
     private static async Task EnsureStateMachineAsync(

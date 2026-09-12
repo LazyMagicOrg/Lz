@@ -373,3 +373,8 @@ FodyWeavers.xsd
 # folder is build output and stays ignored.
 !**/[Pp]ackages/README.md
 !**/[Pp]ackages/.gitkeep
+
+# The Notation CLI, AWS Signer plugin and root certificate that signature-hook.zip packages when
+# present (Lz.Aws.Deployer/notation/). Third-party binaries, placed on a build machine and never
+# committed — Lz.Aws's build packages whatever is there, and says loudly when nothing is.
+Lz.Aws.Deployer/notation/
