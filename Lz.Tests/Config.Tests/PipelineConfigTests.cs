@@ -78,6 +78,17 @@ public class PipelineConfigTests
             Path.Combine("Lz.Core", "Config", "PipelineConfig.cs"),
             Path.Combine("Lz.Core", "Config", "ConfigValidator.cs"),
             Path.Combine("Lz.Aws", "Pipeline", "PipelineBootstrapPlan.cs"),
+
+            // EcrRepositoryNaming, added 2026-09-12. It reads Registry.RepositoryNaming and is
+            // admitted on the same terms — today its ONLY caller is the planner, so no deploy path
+            // reaches it. Its default is also the un-opted-in name, so even a future caller sees no
+            // change for a system without the block.
+            //
+            // THIS IS THE ONE TO WATCH. The deploy side is meant to call it (DecoupledCd.md §8.1,
+            // §8.5), and on the day it does, an opted-in system's emitted plan MOVES — a repository
+            // rename is a create-and-orphan, not an edit. That caller needs the real absent-path
+            // comparison and the cross-workspace plan diff, not an argument.
+            Path.Combine("Lz.Aws", "Pipeline", "EcrRepositoryNaming.cs"),
         };
 
         var root = RepoRoot();

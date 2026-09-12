@@ -73,22 +73,50 @@ public static class PipelineBootstrapper
         foreach (var store in plan.Stores)
             await EnsureStoreAsync(s3, store, region);
 
+        using var ecr = creds != null
+            ? new Amazon.ECR.AmazonECRClient(creds, endpoint)
+            : new Amazon.ECR.AmazonECRClient(endpoint);
+
+        var signingRules = new List<Amazon.ECR.Model.SigningRule>();
+
         foreach (var role in plan.Roles)
         {
+            string? profileArn = null;
             if (role.SigningProfile is { } sp)
-                await EnsureSigningProfileAsync(signer, sp);
+                profileArn = await EnsureSigningProfileAsync(signer, sp);
 
             await EnsureRoleAsync(iam, role, providerArn);
+
+            foreach (var repo in role.EcrRepositories)
+                await EnsureRepositoryAsync(ecr, repo, config);
+
+            // ONE RULE PER BUILD ROLE, filtered to that role's repositories (§4.2). Verification
+            // trusts PROFILE ARNs, so provenance is expressed through profiles: a valid signature
+            // under this profile means "signed at push under the profile only this repository's
+            // workflow can use", and because no human permission set holds signer:SignPayload on it,
+            // it also means "built by that workflow".
+            if (profileArn != null && role.EcrRepositories.Count > 0)
+            {
+                signingRules.Add(new Amazon.ECR.Model.SigningRule
+                {
+                    SigningProfileArn = profileArn,
+                    RepositoryFilters = role.EcrRepositories
+                        .Select(n => new Amazon.ECR.Model.SigningRepositoryFilter
+                        {
+                            Filter = n,
+                            FilterType = "WILDCARD",
+                        })
+                        .ToList(),
+                });
+            }
         }
+
+        await ApplySigningConfigurationAsync(ecr, signingRules);
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("Pipeline bootstrap complete.");
         Console.ResetColor();
-        Console.WriteLine(
-            "NOT done here and still required before a build can push: registry hardening " +
-            "(neutral repository name, tag immutability, lifecycle) and the ECR managed-signing " +
-            "rule per profile. See DecoupledCd.md §8.5.");
     }
 
     private static async Task<string> ResolveAccountAsync(string? profile, string region)
@@ -128,6 +156,16 @@ public static class PipelineBootstrapper
             Console.WriteLine($"    {r.Name}");
             Console.WriteLine($"      for {r.Repo} building '{r.Class}'");
             Console.WriteLine($"      signing profile: {r.SigningProfile ?? "none (bundles carry no registry signature)"}");
+            if (r.EcrRepositories.Count > 0)
+                Console.WriteLine($"      may push to: {string.Join(", ", r.EcrRepositories)}");
+        }
+
+        if (plan.EcrRepositories.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  ECR repositories (immutable tags, AES256, scan-on-push, signed at push):");
+            foreach (var name in plan.EcrRepositories)
+                Console.WriteLine($"    {name}");
         }
         Console.WriteLine();
     }
@@ -200,13 +238,119 @@ public static class PipelineBootstrapper
         Console.WriteLine("      versioning on, public access blocked.");
     }
 
-    private static async Task EnsureSigningProfileAsync(IAmazonSigner signer, string profileName)
+    /// <summary>
+    /// The ECR repository for one artifact, hardened. Registry hardening is DecoupledCd.md §8.5.
+    /// </summary>
+    private static async Task EnsureRepositoryAsync(
+        Amazon.ECR.IAmazonECR ecr, string name, SystemConfig config)
     {
         try
         {
-            await signer.GetSigningProfileAsync(new GetSigningProfileRequest { ProfileName = profileName });
-            Console.WriteLine($"  signing profile '{profileName}' already exists. Skipping.");
+            await ecr.DescribeRepositoriesAsync(new Amazon.ECR.Model.DescribeRepositoriesRequest
+            {
+                RepositoryNames = new List<string> { name },
+            });
+            Console.WriteLine($"  repository '{name}' already exists.");
+        }
+        catch (Amazon.ECR.Model.RepositoryNotFoundException)
+        {
+            await ecr.CreateRepositoryAsync(new Amazon.ECR.Model.CreateRepositoryRequest
+            {
+                RepositoryName = name,
+                // AES256 rather than a customer-managed key: ECR encrypts at rest either way, and a
+                // CMK adds a key to rotate, grant across accounts and pay for. Named explicitly
+                // rather than left to the default so the choice is visible in the plan.
+                EncryptionConfiguration = new Amazon.ECR.Model.EncryptionConfiguration
+                {
+                    EncryptionType = "AES256",
+                },
+                ImageScanningConfiguration = new Amazon.ECR.Model.ImageScanningConfiguration
+                {
+                    ScanOnPush = true,
+                },
+            });
+            Console.WriteLine($"  repository '{name}' created.");
+        }
+
+        // IMMUTABLE TAGS, applied every run rather than only on create. This is what makes "nothing
+        // deploys a tag" enforceable rather than a convention: a mutable tag is a pointer anyone
+        // with push rights can move to different content, and the whole design rests on an identity
+        // that cannot be repointed.
+        await ecr.PutImageTagMutabilityAsync(new Amazon.ECR.Model.PutImageTagMutabilityRequest
+        {
+            RepositoryName = name,
+            ImageTagMutability = "IMMUTABLE",
+        });
+
+        // THE LIFECYCLE POLICY IS DELIBERATELY NARROW. §8.4 wants "keep every identity named in any
+        // request of the last N deploys", and ECR lifecycle rules cannot express that — they select
+        // by age and count, and know nothing about the request store. So this expires only UNTAGGED
+        // images, which under immutable tags means genuinely orphaned layers, and leaves every
+        // tagged image alone. Erring toward keeping too much: a deleted digest breaks a rollback
+        // target, and storage is cheap next to that.
+        var untaggedDays = config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14;
+        var policy = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            rules = new[]
+            {
+                new
+                {
+                    rulePriority = 1,
+                    description =
+                        $"Expire untagged images after {untaggedDays} days. Tagged images are never " +
+                        "selected: under immutable tags they are the deployable identities, and a " +
+                        "deploy request may still name any of them.",
+                    selection = new
+                    {
+                        tagStatus = "untagged",
+                        countType = "sinceImagePushed",
+                        countUnit = "days",
+                        countNumber = untaggedDays,
+                    },
+                    action = new { type = "expire" },
+                },
+            },
+        });
+
+        await ecr.PutLifecyclePolicyAsync(new Amazon.ECR.Model.PutLifecyclePolicyRequest
+        {
+            RepositoryName = name,
+            LifecyclePolicyText = policy,
+        });
+
+        Console.WriteLine($"      immutable tags, AES256, scan-on-push, untagged expire {untaggedDays}d.");
+    }
+
+    /// <summary>
+    /// ECR managed signing: images are signed AS THEY ARE PUSHED, under the profile the pushing
+    /// role holds <c>signer:SignPayload</c> on. Registry-wide configuration, so every rule is
+    /// written in one call — which is why the rules are collected first rather than applied per role.
+    /// </summary>
+    private static async Task ApplySigningConfigurationAsync(
+        Amazon.ECR.IAmazonECR ecr, List<Amazon.ECR.Model.SigningRule> rules)
+    {
+        if (rules.Count == 0)
+        {
+            Console.WriteLine("  no image roles — no signing configuration written.");
             return;
+        }
+
+        await ecr.PutSigningConfigurationAsync(new Amazon.ECR.Model.PutSigningConfigurationRequest
+        {
+            SigningConfiguration = new Amazon.ECR.Model.SigningConfiguration { Rules = rules },
+        });
+
+        Console.WriteLine($"  signing configuration written: {rules.Count} rule(s).");
+    }
+
+    private static async Task<string> EnsureSigningProfileAsync(IAmazonSigner signer, string profileName)
+    {
+        try
+        {
+            var existing = await signer.GetSigningProfileAsync(
+                new GetSigningProfileRequest { ProfileName = profileName });
+            Console.WriteLine($"  signing profile '{profileName}' already exists. Skipping.");
+            return existing.Arn;
         }
         catch (Amazon.Signer.Model.ResourceNotFoundException)
         {
@@ -217,13 +361,14 @@ public static class PipelineBootstrapper
         // optional, the platform default is 135 months, and the 365 days this design once carried
         // was an ~11x tightening nothing justified: an expired signature fails a deploy of an
         // artifact that never changed.
-        await signer.PutSigningProfileAsync(new PutSigningProfileRequest
+        var created = await signer.PutSigningProfileAsync(new PutSigningProfileRequest
         {
             ProfileName = profileName,
             PlatformId = "Notation-OCI-SHA384-ECDSA",
         });
 
         Console.WriteLine($"  signing profile '{profileName}' created.");
+        return created.Arn;
     }
 
     private static async Task EnsureRoleAsync(

@@ -138,6 +138,18 @@ public class PipelineRepositoryConfig
     /// signature).</para>
     /// </summary>
     public string? Class { get; set; }
+
+    /// <summary>
+    /// For <c>image</c> repositories: the service names this repository builds images for, e.g.
+    /// <c>aiphost</c>. One ECR repository is created per entry, named by
+    /// <c>EcrRepositoryNaming</c>. Ignored for bundle classes, which have no registry.
+    ///
+    /// <para>NAMING THEM NARROWS THE GRANT, which is the reason it is not optional for images. A
+    /// build role whose ECR permissions read <c>{sk}-*</c> may push to every repository this system
+    /// will ever have; naming the artifacts scopes it to the ones this repository actually
+    /// produces. The list is short and it is the trust boundary, so it is worth writing down.</para>
+    /// </summary>
+    public List<string>? Artifacts { get; set; }
 }
 
 /// <summary>Registry hardening for the pipeline. See DecoupledCd.md sections 4.1 and 8.</summary>

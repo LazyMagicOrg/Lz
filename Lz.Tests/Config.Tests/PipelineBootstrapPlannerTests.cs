@@ -23,9 +23,10 @@ public class PipelineBootstrapPlannerTests
     {
         Enabled = true,
         Classes = new List<string> { "image", "client", "config" },
+        Registry = new PipelineRegistryConfig { RepositoryNaming = "neutral" },
         Repositories = new List<PipelineRepositoryConfig>
         {
-            new() { Repo = "Scutara/ScutaraService",   Class = "image" },
+            new() { Repo = "Scutara/ScutaraService",   Class = "image", Artifacts = new List<string> { "aiphost" } },
             new() { Repo = "Scutara/ScutaraSellerApp", Class = "client" },
             new() { Repo = "Scutara/ScutaraAdminApp",  Class = "client" },
         },
@@ -74,7 +75,7 @@ public class PipelineBootstrapPlannerTests
     public void ItRefusesARepositoryThatIsNotOwnerSlashName()
     {
         var p = Enabled();
-        p.Repositories = new List<PipelineRepositoryConfig> { new() { Repo = "Service", Class = "image" } };
+        p.Repositories = new List<PipelineRepositoryConfig> { new() { Repo = "Service", Class = "image", Artifacts = new List<string> { "aiphost" } } };
 
         var ex = Assert.Throws<InvalidOperationException>(() => PipelineBootstrapPlanner.Plan(WithPipeline(p)));
         Assert.Contains("owner/name", ex.Message);
@@ -86,7 +87,7 @@ public class PipelineBootstrapPlannerTests
         var p = Enabled();
         p.Repositories = new List<PipelineRepositoryConfig>
         {
-            new() { Repo = "Scutara/ScutaraService", Class = "container" }, // 'image' is the name
+            new() { Repo = "Scutara/ScutaraService", Class = "container", Artifacts = new List<string> { "aiphost" } },
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => PipelineBootstrapPlanner.Plan(WithPipeline(p)));
@@ -366,6 +367,41 @@ public class PipelineBootstrapPlannerTests
         var image = plan.Roles.Single(r => r.Class == "image");
 
         Assert.Contains("<build-account-id>", image.PermissionPolicy);
+    }
+
+    [Fact]
+    public void TheEcrGrantNamesExactRepositories_NotAWildcard()
+    {
+        // `{sk}-*` would let one build repository push to every repository the system will ever
+        // have. Naming the artifacts is what makes the grant match what the repo produces.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+        var image = plan.Roles.Single(r => r.Class == "image");
+
+        Assert.Contains("repository/scu-abcd-1234-aiphost", image.PermissionPolicy);
+        Assert.DoesNotContain("repository/scu-*", image.PermissionPolicy);
+    }
+
+    [Fact]
+    public void AnImageRepositoryWithNoArtifacts_IsRefused()
+    {
+        var p = Enabled();
+        p.Repositories = new List<PipelineRepositoryConfig>
+        {
+            new() { Repo = "Scutara/ScutaraService", Class = "image" }, // no Artifacts
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635"));
+        Assert.Contains("Artifacts", ex.Message);
+    }
+
+    [Fact]
+    public void OnlyImageRolesCarryEcrRepositories()
+    {
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+
+        Assert.Equal(new[] { "scu-abcd-1234-aiphost" }, plan.EcrRepositories);
+        Assert.All(plan.Roles.Where(r => r.Class != "image"), r => Assert.Empty(r.EcrRepositories));
     }
 
     [Fact]
