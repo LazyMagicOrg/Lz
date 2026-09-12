@@ -58,11 +58,25 @@ public class PipelineConfigTests
     public void NothingOutsideTheConfigLayerReadsPipeline()
     {
         // Config layer only: the property's own declaration and the validator that checks it.
+        //
+        // PLUS ONE CONSUMER, added 2026-09-12 after this test did its job and failed on it.
+        // PipelineBootstrapPlanner reads the block, and it is admitted here because it cannot move
+        // any deploy's plan: it is reached ONLY from `lz bootstrappipeline`, it REFUSES a config
+        // without the block (PipelineBootstrapPlannerTests.ItRefusesASystemWithNoPipelineBlock —
+        // the absent-path test this message asks for), and no deploy path calls it at all. The
+        // byte-identical guarantee therefore still holds for every command that deploys anything,
+        // which was re-confirmed by `lz previewtenant` against dev reporting "no changes" on a
+        // config that has no Pipeline block.
+        //
+        // THE NEXT CONSUMER WILL NOT BE THIS EASY. One that runs inside a deploy needs a real
+        // absent-path comparison, not an argument — and the cross-workspace plan diff P0 names has
+        // still never been run.
         var allowed = new[]
         {
             Path.Combine("Lz.Core", "Config", "SystemConfig.cs"),
             Path.Combine("Lz.Core", "Config", "PipelineConfig.cs"),
             Path.Combine("Lz.Core", "Config", "ConfigValidator.cs"),
+            Path.Combine("Lz.Aws", "Pipeline", "PipelineBootstrapPlan.cs"),
         };
 
         var root = RepoRoot();

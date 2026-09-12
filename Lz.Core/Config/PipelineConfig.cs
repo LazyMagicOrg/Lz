@@ -74,6 +74,23 @@ public class PipelineConfig
     /// </summary>
     public List<string>? Classes { get; set; }
 
+    /// <summary>
+    /// The GitHub repositories that BUILD artifacts, each with the class it produces. Required by
+    /// <c>lz bootstrappipeline</c>, which creates one role — and for images one signing profile and
+    /// rule — per entry.
+    ///
+    /// <para>IT HAS TO BE DECLARED, because nothing lz already knows can supply it. The obvious
+    /// candidate is <c>repos.yaml</c>, and it cannot: that is a bootstrap CLONE manifest with no
+    /// package ids, no producer→consumer edges and no notion of what a repo produces
+    /// (SdlcVersioning.md §7 records the same correction). Service definitions know about images
+    /// but nothing at all about the four bundle classes.</para>
+    ///
+    /// <para>Declaring it is also the safer shape for what it feeds: every entry becomes a role
+    /// GitHub can assume, so the list IS the trust boundary. A list that were derived could widen
+    /// the boundary as a side effect of an unrelated change.</para>
+    /// </summary>
+    public List<PipelineRepositoryConfig>? Repositories { get; set; }
+
     public PipelineRegistryConfig? Registry { get; set; }
     public PipelineApprovalConfig? Approval { get; set; }
     public PipelineReconcilerConfig? Reconciler { get; set; }
@@ -94,6 +111,33 @@ public class PipelineConfig
     /// <summary>The class names <see cref="Classes"/> accepts. See that property for the mapping.</summary>
     public static readonly string[] KnownClasses =
         { "image", "client", "site", "assets", "config", "tooling" };
+}
+
+/// <summary>
+/// One GitHub repository that builds artifacts, and the artifact class it produces.
+/// </summary>
+public class PipelineRepositoryConfig
+{
+    /// <summary>
+    /// <c>owner/name</c> exactly as GitHub spells it, e.g. <c>Scutara/ScutaraService</c>. The owner
+    /// half is also how the plan learns the organisation, so it is not repeated elsewhere.
+    ///
+    /// <para>Note this is the REPOSITORY name, which for this system deliberately differs from the
+    /// workspace folder — <c>repos/Service</c> is <c>Scutara/ScutaraService</c>. The OIDC trust
+    /// policy matches on what GitHub puts in the token, so it must be GitHub's spelling.</para>
+    /// </summary>
+    public string? Repo { get; set; }
+
+    /// <summary>
+    /// The artifact class this repository produces — one of <see cref="PipelineConfig.KnownClasses"/>.
+    ///
+    /// <para>It selects the ROLE SHAPE, which is the whole reason it is here: <c>image</c> gets a
+    /// push-only ECR role plus a signing profile and rule, everything else gets an S3 role holding
+    /// <c>PutObject</c> on its own prefix and nothing more. A bundle role that was given a signing
+    /// profile would imply a signature that never exists (§4.2: bundles get no registry
+    /// signature).</para>
+    /// </summary>
+    public string? Class { get; set; }
 }
 
 /// <summary>Registry hardening for the pipeline. See DecoupledCd.md sections 4.1 and 8.</summary>

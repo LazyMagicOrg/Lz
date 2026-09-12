@@ -261,6 +261,32 @@ public static class ConfigValidator
             }
         }
 
+        // WELL-FORMEDNESS ONLY — the list is deliberately NOT required here, though
+        // `lz bootstrappipeline` does require it. An environment can enable the pipeline to RECEIVE
+        // deploys without building anything, and making every lz command fail for such a system
+        // would be validating sufficiency for one command at the expense of all the others. The
+        // command checks that it has enough; the validator checks that what is there is sane.
+        foreach (var r in p.Repositories ?? new List<PipelineRepositoryConfig>())
+        {
+            if (string.IsNullOrWhiteSpace(r.Repo) || !r.Repo.Contains('/'))
+            {
+                errors.Add(
+                    $"Pipeline.Repositories has an entry with Repo '{r.Repo}', which is not " +
+                    "owner/name. The OIDC trust policy matches on what GitHub puts in the token, so " +
+                    "it needs GitHub's own spelling — note the repository name may differ from the " +
+                    "workspace folder (repos/Service is Scutara/ScutaraService).");
+            }
+
+            if (r.Class is null || !PipelineConfig.KnownClasses.Contains(r.Class))
+            {
+                errors.Add(
+                    $"Pipeline.Repositories entry '{r.Repo}' names class '{r.Class}'. Valid: " +
+                    string.Join(", ", PipelineConfig.KnownClasses) + ". The class selects the ROLE " +
+                    "SHAPE — 'image' gets a push-only ECR role and a signing profile, everything " +
+                    "else gets an S3 role scoped to its own prefix.");
+            }
+        }
+
         if (p.Registry?.RepositoryNaming is { } naming
             && !PipelineRegistryConfig.KnownNamings.Contains(naming))
         {
