@@ -261,6 +261,113 @@ public class PipelineBootstrapPlannerTests
             plan.DeniedActions);
     }
 
+    // ---------------------------------------------------------------------------------------
+    //  Permission policies — what GitHub can actually do once it has assumed a role
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void NoRoleCanDeleteAnything()
+    {
+        // Push-only BY CONSTRUCTION. This is what makes the stores append-only to GitHub — not
+        // Object Lock, which does not stop a writer putting a new current version at an existing
+        // key either.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+
+        foreach (var role in plan.Roles)
+        {
+            Assert.DoesNotContain("Delete", role.PermissionPolicy, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("s3:*", role.PermissionPolicy);
+            Assert.DoesNotContain("ecr:*", role.PermissionPolicy);
+        }
+    }
+
+    [Fact]
+    public void NoRoleCanTouchTheRequestStore()
+    {
+        // The deployer writes deploy requests. GitHub holding admission control over prod is the
+        // thing this whole design exists to prevent (§4.3).
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+        var requests = plan.Stores.Single(s => s.Name.Contains("deploy-requests")).Name;
+
+        Assert.All(plan.Roles, r => Assert.DoesNotContain(requests, r.PermissionPolicy));
+    }
+
+    [Fact]
+    public void EveryRoleCanWriteItsOwnBuildRecord_IncludingImageRoles()
+    {
+        // §3's trust-boundary table lists only ECR and signer actions for {sk}-build-ci, which
+        // would leave an image build unable to write the record §4.1 requires of EVERY build. The
+        // grant is here for both shapes; the table is noted as having the gap.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+        var records = plan.Stores.Single(s => s.Name.Contains("build-records")).Name;
+
+        Assert.All(plan.Roles, r =>
+        {
+            Assert.Contains($"arn:aws:s3:::{records}/", r.PermissionPolicy);
+            Assert.Contains("s3:PutObject", r.PermissionPolicy);
+        });
+    }
+
+    [Fact]
+    public void EachRoleIsScopedToItsOwnPrefix_AndNoOthers()
+    {
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+
+        var seller = plan.Roles.Single(r => r.Repo.EndsWith("SellerApp"));
+        var adminPrefix = PipelineBootstrapPlanner.PrefixFor("client", "Scutara/ScutaraAdminApp");
+
+        Assert.Contains(PipelineBootstrapPlanner.PrefixFor("client", "Scutara/ScutaraSellerApp"),
+            seller.PermissionPolicy);
+        Assert.DoesNotContain(adminPrefix, seller.PermissionPolicy);
+    }
+
+    [Fact]
+    public void OnlyImageRolesGetEcrAndSignerActions()
+    {
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+
+        var image = plan.Roles.Single(r => r.Class == "image");
+        Assert.Contains("ecr:PutImage", image.PermissionPolicy);
+        Assert.Contains("signer:SignPayload", image.PermissionPolicy);
+
+        // A bundle role holding signer actions would imply a signature that never exists (§4.2).
+        Assert.All(plan.Roles.Where(r => r.Class != "image"), r =>
+        {
+            Assert.DoesNotContain("ecr:", r.PermissionPolicy);
+            Assert.DoesNotContain("signer:", r.PermissionPolicy);
+        });
+    }
+
+    [Fact]
+    public void OnlyGetAuthorizationTokenIsGrantedOnStar()
+    {
+        // That action takes no resource, so it cannot be narrowed. Everything else must be scoped,
+        // and a review of this policy should be able to see at a glance that only one wildcard
+        // resource exists and which action it belongs to.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
+        var image = plan.Roles.Single(r => r.Class == "image");
+
+        using var doc = JsonDocument.Parse(image.PermissionPolicy);
+        var starred = doc.RootElement.GetProperty("Statement").EnumerateArray()
+            .Where(s => s.GetProperty("Resource").ValueKind == JsonValueKind.String
+                     && s.GetProperty("Resource").GetString() == "*")
+            .SelectMany(s => s.GetProperty("Action").EnumerateArray().Select(a => a.GetString()))
+            .ToList();
+
+        Assert.Equal(new[] { "ecr:GetAuthorizationToken" }, starred);
+    }
+
+    [Fact]
+    public void WithNoAccountId_ThePolicyCarriesAVisiblePlaceholder()
+    {
+        // A plan can be printed for an account nobody has logged into. The placeholder must be
+        // obviously not-an-account-id, so a policy pasted from a dry run cannot silently apply.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));
+        var image = plan.Roles.Single(r => r.Class == "image");
+
+        Assert.Contains("<build-account-id>", image.PermissionPolicy);
+    }
+
     [Fact]
     public void ThePlanCarriesTheArtifactAccountWhenOneIsNamed()
     {

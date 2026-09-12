@@ -111,6 +111,10 @@
     <PackageReference Include="AWSSDK.RDS" Version="4.*" />
     <PackageReference Include="AWSSDK.Route53" Version="4.*" />
     <PackageReference Include="AWSSDK.S3" Version="4.*" />
+    <!-- Signer: the pipeline's signing profiles (DecoupledCd.md §4.2). ECR managed signing signs
+         images at push under a profile, and Notation verifies against the profile ARN — which is
+         how provenance is expressed. -->
+    <PackageReference Include="AWSSDK.Signer" Version="4.*" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.*" />

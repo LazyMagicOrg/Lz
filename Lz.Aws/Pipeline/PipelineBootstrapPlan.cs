@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Lz.Core.Config;
 
@@ -20,8 +21,13 @@ public sealed record PipelineStore(string Name, string Purpose, IReadOnlyList<st
 /// For image roles only: the signing profile that role's pushes are signed under. Null for bundle
 /// roles, because bundles get no registry signature (§4.2).
 /// </param>
+/// <param name="PermissionPolicy">
+/// What the role may DO once assumed, JSON. Push-only by construction: no delete action of any
+/// kind appears in either shape, which is what makes the stores append-only to GitHub.
+/// </param>
 public sealed record PipelineRole(
-    string Name, string Repo, string Class, string TrustPolicy, string? SigningProfile);
+    string Name, string Repo, string Class, string TrustPolicy, string? SigningProfile,
+    string PermissionPolicy);
 
 /// <summary>Everything <c>lz bootstrappipeline</c> would create, decided before anything is called.</summary>
 public sealed record PipelineBootstrapPlan(
@@ -53,6 +59,21 @@ public static class PipelineBootstrapPlanner
     public const string OidcProvider = "token.actions.githubusercontent.com";
 
     /// <summary>
+    /// How policy documents are written. RELAXED ESCAPING is deliberate: the default encoder is
+    /// HTML-safe and escapes angle brackets to their unicode form, which matters twice here. A dry
+    /// run PRINTS these documents for a human to read before they exist, and escaped placeholders
+    /// are unreadable; and it already caused a real defect — the applier substituted the OIDC
+    /// provider ARN by replacing a bracketed placeholder that the serializer had escaped, so the
+    /// match silently never happened and the role would have been created trusting a literal
+    /// placeholder. These are IAM documents, never HTML.
+    /// </summary>
+    private static readonly JsonSerializerOptions PolicyJson = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
     /// The actions deployer roles are explicitly DENIED, so a config bundle can change what the
     /// deployer deploys but never the deployer itself (DecoupledCd.md §5.5).
     /// </summary>
@@ -68,7 +89,12 @@ public static class PipelineBootstrapPlanner
     /// <summary>
     /// Build the plan, or throw with a message naming what is missing.
     /// </summary>
-    public static PipelineBootstrapPlan Plan(SystemConfig config)
+    /// <param name="accountId">
+    /// The build account, for the ARNs in permission policies. Optional: when null the ARNs carry a
+    /// visible placeholder, so a plan can be printed and reviewed for an account nobody has logged
+    /// into. The applier passes the real id from <c>sts:GetCallerIdentity</c>.
+    /// </param>
+    public static PipelineBootstrapPlan Plan(SystemConfig config, string? accountId = null)
     {
         var p = config.Pipeline;
 
@@ -94,7 +120,15 @@ public static class PipelineBootstrapPlanner
         var suffix = RequireNonEmpty(config.SystemSuffix, nameof(config.SystemSuffix));
 
         var repos = p.Repositories!;
-        var roles = repos.Select(r => BuildRole(sk, r)).ToList();
+
+        // Store names first: the roles' permission policies name the stores, so they cannot be
+        // built until the names exist.
+        var artifacts = $"{sk}-artifacts-{suffix}";
+        var buildRecords = $"{sk}-build-records-{suffix}";
+        var requests = $"{sk}-deploy-requests-{suffix}";
+
+        var acct = accountId ?? "<build-account-id>";
+        var roles = repos.Select(r => BuildRole(sk, region, acct, artifacts, buildRecords, r)).ToList();
 
         // PREFIXES ARE PER REPOSITORY, which is what makes "push-only" mean something: a role holds
         // PutObject on its own prefix and nothing else, so one compromised build repository cannot
@@ -113,11 +147,11 @@ public static class PipelineBootstrapPlanner
         // `neutral` naming (§8.5).
         var stores = new List<PipelineStore>
         {
-            new($"{sk}-artifacts-{suffix}",
+            new(artifacts,
                 "bundles, written once and named by object version id", prefixes),
-            new($"{sk}-build-records-{suffix}",
+            new(buildRecords,
                 "one build record per artifact — the uniform trigger (§4.3)", prefixes),
-            new($"{sk}-deploy-requests-{suffix}",
+            new(requests,
                 "deploy requests: what may enter an environment (§6)",
                 // EMPTY ON PURPOSE. The request store is written by the DEPLOYER, never by GitHub —
                 // "GitHub writes build records; the deployer writes deploy requests. That separation
@@ -138,7 +172,9 @@ public static class PipelineBootstrapPlanner
     /// </summary>
     public static string PrefixFor(string cls, string repo) => BuildRecordFormat.PrefixFor(cls, repo);
 
-    private static PipelineRole BuildRole(string sk, PipelineRepositoryConfig r)
+    private static PipelineRole BuildRole(
+        string sk, string region, string accountId, string artifacts, string buildRecords,
+        PipelineRepositoryConfig r)
     {
         var repo = RequireNonEmpty(r.Repo, "Pipeline.Repositories[].Repo");
         var cls = RequireNonEmpty(r.Class, "Pipeline.Repositories[].Class");
@@ -158,13 +194,98 @@ public static class PipelineBootstrapPlanner
         // to S3 and gets no signing profile, because bundles carry no registry signature (§4.2).
         var kind = cls == "image" ? "build" : "bundle";
         var slug = SlugFor(repo);
+        var profile = cls == "image" ? $"{sk}_build_ci_{slug.Replace('-', '_')}" : null;
+        var prefix = BuildRecordFormat.PrefixFor(cls, repo);
 
         return new PipelineRole(
             Name: $"{sk}-{kind}-ci-{slug}",
             Repo: repo,
             Class: cls,
             TrustPolicy: TrustPolicyFor(repo),
-            SigningProfile: cls == "image" ? $"{sk}_build_ci_{slug.Replace('-', '_')}" : null);
+            SigningProfile: profile,
+            PermissionPolicy: PermissionPolicyFor(
+                region, accountId, artifacts, buildRecords, prefix, sk, slug, profile));
+    }
+
+    /// <summary>
+    /// What one role may do once assumed.
+    ///
+    /// <para>PUSH-ONLY BY CONSTRUCTION: no delete action of any kind appears in either shape. That
+    /// is what makes the stores append-only to GitHub — not Object Lock, which does not stop a
+    /// writer putting a NEW current version at an existing key either. Immutability of a written
+    /// record comes from the conditional write; durability from versioning plus replication into an
+    /// account GitHub cannot reach.</para>
+    ///
+    /// <para>EVERY ROLE WRITES A BUILD RECORD, including image roles. §3's trust-boundary table
+    /// lists only ECR and signer actions for <c>{sk}-build-ci</c>, which would leave an image build
+    /// unable to write the record §4.1 requires of every build — so the build-record grant is here
+    /// for both shapes. Noted as a gap in that table rather than silently diverging from it.</para>
+    ///
+    /// <para>Both S3 grants are scoped to this repository's own <c>{class}/{repo}/</c> prefix, so a
+    /// compromised build repository cannot write another's artifacts or records. Nothing grants any
+    /// access to the REQUEST store: the deployer writes those, and GitHub holding admission control
+    /// over prod is the thing this design exists to prevent.</para>
+    /// </summary>
+    private static string PermissionPolicyFor(
+        string region, string accountId, string artifacts, string buildRecords, string prefix,
+        string sk, string slug, string? signingProfile)
+    {
+        var statements = new List<object>
+        {
+            new
+            {
+                Sid = "WriteItsOwnBuildRecords",
+                Effect = "Allow",
+                Action = new[] { "s3:PutObject" },
+                Resource = $"arn:aws:s3:::{buildRecords}/{prefix}*",
+            },
+        };
+
+        if (signingProfile is null)
+        {
+            statements.Add(new
+            {
+                Sid = "WriteItsOwnBundles",
+                Effect = "Allow",
+                Action = new[] { "s3:PutObject" },
+                Resource = $"arn:aws:s3:::{artifacts}/{prefix}*",
+            });
+        }
+        else
+        {
+            // ECR's documented single-repository push policy: the layer-upload actions and PutImage
+            // on the repository, plus GetAuthorizationToken on "*" — that action takes no resource,
+            // so it cannot be narrowed and is granted alone rather than bundled with the writes.
+            statements.Add(new
+            {
+                Sid = "PushToItsOwnRepositories",
+                Effect = "Allow",
+                Action = new[]
+                {
+                    "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload",
+                    "ecr:BatchCheckLayerAvailability", "ecr:PutImage",
+                },
+                Resource = $"arn:aws:ecr:{region}:{accountId}:repository/{sk}-*",
+            });
+            statements.Add(new
+            {
+                Sid = "EcrAuthTokenTakesNoResource",
+                Effect = "Allow",
+                Action = new[] { "ecr:GetAuthorizationToken" },
+                Resource = "*",
+            });
+            statements.Add(new
+            {
+                Sid = "SignItsOwnPushes",
+                Effect = "Allow",
+                Action = new[] { "signer:SignPayload" },
+                Resource = $"arn:aws:signer:{region}:{accountId}:/signing-profiles/{signingProfile}",
+            });
+        }
+
+        return JsonSerializer.Serialize(
+            new { Version = "2012-10-17", Statement = statements },
+            PolicyJson);
     }
 
     /// <summary>
@@ -217,7 +338,7 @@ public static class PipelineBootstrapPlanner
                     },
                 },
             },
-        }, new JsonSerializerOptions { WriteIndented = true });
+        }, PolicyJson);
     }
 
     /// <summary>A repository name reduced to an IAM-safe slug: <c>Scutara/ScutaraService</c> → <c>scutaraservice</c>.</summary>

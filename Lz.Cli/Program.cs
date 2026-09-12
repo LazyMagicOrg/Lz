@@ -161,6 +161,7 @@ class Program
         RegisterGetTestTenantCommand(rootCommand);
         RegisterReposCommand(rootCommand);
         RegisterCloneReposCommand(rootCommand);
+        RegisterBootstrapPipelineCommand(rootCommand, systemKeyOption, envOption);
         RegisterPackagesCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
@@ -2895,6 +2896,72 @@ class Program
     // already be cloned for this command to have anything to read. The manifest still lists it —
     // the file describes the whole system — and the "already present" skip handles it for free.
     // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // lz bootstrappipeline — create the decoupled-CD pipeline's account-side resources.
+    //
+    // DRY RUN BY DEFAULT, and that is not timidity: this creates IAM roles that GitHub can assume.
+    // The plan is a pure function (PipelineBootstrapPlanner), so the dry run prints the real plan
+    // rather than an approximation of it — which makes reading it beforehand worth something.
+    //
+    // GATED: it refuses a config with no `Pipeline:` block, per DecoupledCd.md §8 item 6. Every
+    // other lz command is unaffected by that block's absence, so this is the one place where
+    // opting in is load-bearing rather than cosmetic.
+    // ---------------------------------------------------------------
+    private static void RegisterBootstrapPipelineCommand(
+        RootCommand root, Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("bootstrappipeline",
+            "Create the decoupled-CD pipeline's account-side resources in the build account: the " +
+            "versioned artifact, build-record and deploy-request stores, the GitHub OIDC provider, " +
+            "one push-only role per building repository, and a signing profile per image role. " +
+            "PRINTS THE PLAN AND STOPS unless --apply is given. Idempotent: re-run to adopt a " +
+            "newly-added repository. Refuses a config with no Pipeline block.");
+
+        var applyOption = new Option<bool>("--apply",
+            "Actually create the resources. Without it the plan is printed and nothing is created.");
+
+        // THE BUILD ACCOUNT IS NOT THE SYSTEM'S ACCOUNT, which is the whole point of it — so the
+        // system config's Profile (scu-dev, say) is the wrong credential here and there is nowhere
+        // in that config to put the right one. It belongs on the command rather than in config for
+        // the reason §5.5 gives: bootstrapping is a person-run, time-boxed operation under a
+        // bootstrap role, not something a deploy should be able to reach.
+        var profileOption = new Option<string?>("--profile",
+            "AWS profile for the BUILD account (e.g. scu-cicd). Defaults to the system config's " +
+            "profile, which is usually NOT what you want — the pipeline lives in its own account.");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(applyOption);
+        cmd.AddOption(profileOption);
+
+        cmd.SetHandler(async (systemKey, env, apply, profileOverride) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(profileOverride))
+                        config.Profile = profileOverride;
+
+                    await Lz.Aws.Pipeline.PipelineBootstrapper.BootstrapAsync(config, apply);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(ex.Message);
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                    return;
+                }
+            }
+        }, systemKeyOption, envOption, applyOption, profileOption);
+
+        root.AddCommand(cmd);
+    }
+
     private static void RegisterCloneReposCommand(RootCommand root)
     {
         var cmd = new Command("clonerepos",
