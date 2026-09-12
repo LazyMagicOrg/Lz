@@ -89,6 +89,11 @@ public class PipelineConfigTests
             // rename is a create-and-orphan, not an edit. That caller needs the real absent-path
             // comparison and the cross-workspace plan diff, not an argument.
             Path.Combine("Lz.Aws", "Pipeline", "EcrRepositoryNaming.cs"),
+
+            // DeployerPlan, added 2026-09-12 (P2 stage A). Same terms again: it reads the block,
+            // its only caller is a planner, and nothing that deploys anything calls it. It plans
+            // resources that do not exist yet in an account the deploy path never touches.
+            Path.Combine("Lz.Aws", "Pipeline", "DeployerPlan.cs"),
         };
 
         var root = RepoRoot();
