@@ -46,6 +46,10 @@ public sealed record DeployerFunction(
 /// The role ECS assumes to invoke the signature hook — the <c>roleArn</c> of a lifecycle hook.
 /// </param>
 /// <param name="HookInvokerPolicy">That role's grant: invoke the hook function, nothing else.</param>
+/// <param name="ImageRepositories">The repositories images replicate into, hardened here before
+/// anything may replicate into them — same names as the build registry's, as replication requires.</param>
+/// <param name="ReplicationPermission">This registry's policy statement letting the build account
+/// replicate into exactly those repositories, merged by Sid at apply.</param>
 public sealed record PipelineDeployer(
     string StateMachineName,
     string RoleName,
@@ -56,7 +60,9 @@ public sealed record PipelineDeployer(
     bool ApprovalRequired,
     IReadOnlyList<DeployerFunction> Functions,
     string HookInvokerRoleName,
-    string HookInvokerPolicy);
+    string HookInvokerPolicy,
+    IReadOnlyList<string> ImageRepositories,
+    System.Text.Json.Nodes.JsonObject? ReplicationPermission);
 
 /// <summary>The deployment packages the functions are built from, shipped inside Lz.Aws.</summary>
 public static class DeployerPackages
@@ -337,6 +343,8 @@ public static class DeployerPlanner
         var evidence = $"{sk}-{env}-deploy-evidence-{config.SystemSuffix}";
 
         var verify = $"{sk}-{env}-deployer-verify";
+        if ($"{verify}-fn" != VerifyRoleName(config))
+            throw new InvalidOperationException("the Verify role name diverged from VerifyRoleName, which the build account's grant names.");
         var prepare = $"{sk}-{env}-deployer-prepare";
         var rollout = $"{sk}-{env}-deployer-verify-rollout";
         var failure = $"{sk}-{env}-deployer-record-failure";
@@ -405,8 +413,21 @@ public static class DeployerPlanner
                 Effect = "Allow",
                 Action = new[] { "lambda:InvokeFunction" },
                 Resource = FnArn(hook),
-            }));
+            }),
+            ImageRepositories: imageRepositories,
+            // Only with a real account: a policy statement naming a placeholder account is not a plan
+            // anyone could apply, and the applier always resolves the account first.
+            ReplicationPermission: accountId is null
+                ? null
+                : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories));
     }
+
+    /// <summary>
+    /// The Verify function's role name. ONE DEFINITION FOR BOTH ACCOUNTS: this planner creates the role
+    /// in the target account, and the build account's bucket policy names it — a rename on one side
+    /// alone would leave Verify unable to read a single record, with an access denial that names neither.
+    /// </summary>
+    public static string VerifyRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-verify-fn";
 
     /// <summary>
     /// The state machine's role: invoke its four functions, roll the service, write deploy evidence,

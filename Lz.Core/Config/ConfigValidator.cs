@@ -331,6 +331,23 @@ public static class ConfigValidator
                 $"Pipeline.ArtifactAccountId is '{acct}', which is not a 12-digit AWS account id.");
         }
 
+        if (p.TargetAccountId is { } target && !Regex.IsMatch(target, @"^\d{12}$"))
+        {
+            errors.Add(
+                $"Pipeline.TargetAccountId is '{target}', which is not a 12-digit AWS account id.");
+        }
+
+        // THE BUILD ACCOUNT RUNS NO WORKLOAD (DecoupledCd.md §11.1). An environment that names it as
+        // the account it deploys into would put the deployer — a role that can roll ECS services —
+        // in the one account every GitHub-assumable role lives in.
+        if (p.TargetAccountId is { } t && p.ArtifactAccountId is { } a && t == a)
+        {
+            errors.Add(
+                $"Pipeline.TargetAccountId and Pipeline.ArtifactAccountId are both {t}. The build " +
+                "account holds artifacts and the roles GitHub assumes, and runs no workload; an " +
+                "environment deploys into its own account. Name this environment's account.");
+        }
+
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {
             if (!PipelineScanConfig.KnownSeverities.Contains(s))

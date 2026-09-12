@@ -28,6 +28,7 @@ public class DeployerPlannerTests
         {
             Enabled = true,
             ArtifactAccountId = BuildAccount,
+            TargetAccountId = TargetAccount,
             Classes = new List<string> { "image" },
             Repositories = new List<PipelineRepositoryConfig>
             {
@@ -628,5 +629,42 @@ public class DeployerPlannerTests
 
         Assert.Contains(gaps, g => g.Contains("takes its SNS topic from the execution state"));
         Assert.Contains(gaps, g => g.Contains("waits for a task token it never sends"));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  Receiving replicated images (MigrationPlan M5)
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void TheRepositoriesImagesReplicateInto_AreTheBuildRegistrysNames()
+    {
+        // ECR keeps the repository name across accounts, so these must match the build side exactly.
+        var build = PipelineBootstrapPlanner.Plan(Config(false), BuildAccount);
+
+        Assert.Equal(build.Roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories), Plan().ImageRepositories);
+    }
+
+    [Fact]
+    public void TheRegistryAdmitsTheBuildAccount_IntoThoseRepositoriesOnly_AndCannotBeAskedToCreateOne()
+    {
+        var statement = Plan().ReplicationPermission!;
+
+        Assert.Equal("ecr:ReplicateImage", statement["Action"]!.GetValue<string>());
+        Assert.DoesNotContain("CreateRepository", statement.ToJsonString());
+        Assert.Equal(Plan().ImageRepositories.Select(r => $"arn:aws:ecr:us-west-2:{TargetAccount}:repository/{r}"),
+            statement["Resource"]!.AsArray().Select(x => x!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void APlanWithoutARealAccount_WritesNoRegistryPolicy()
+    {
+        // A statement naming a placeholder account is not something anyone could apply.
+        Assert.Null(DeployerPlanner.Plan(Config(false)).ReplicationPermission);
+    }
+
+    [Fact]
+    public void VerifyRoleName_IsTheVerifyFunctionsRole()
+    {
+        Assert.Equal(DeployerPlanner.VerifyRoleName(Config(false)), Function(Plan(), DeployerHandlers.Verify).RoleName);
     }
 }

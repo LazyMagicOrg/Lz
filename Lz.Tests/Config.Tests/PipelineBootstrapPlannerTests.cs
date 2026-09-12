@@ -412,4 +412,56 @@ public class PipelineBootstrapPlannerTests
 
         Assert.Equal("147440642635", PipelineBootstrapPlanner.Plan(WithPipeline(p)).ArtifactAccountId);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  What crosses to the environment this run was given (MigrationPlan M5)
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void WithATargetAccount_ItReplicatesTheImageRepositoriesThere()
+    {
+        var p = Enabled();
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        var destination = Assert.Single(plan.Replication!.Destinations);
+        Assert.Equal(("503947800380", "us-west-2"), (destination.RegistryId, destination.Region));
+        // Image repositories only: the two client builders have no registry at all.
+        Assert.Equal(plan.Roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories),
+            plan.Replication.RepositoryFilters.Select(f => f.Filter));
+    }
+
+    [Fact]
+    public void TheReadGrant_NamesTheRoleTheDeployerPlannerCreates()
+    {
+        // TWO ACCOUNTS, ONE NAME. The build account's bucket policy names a role the target account's
+        // planner creates; if the two ever spelled it differently, Verify could not read a single record
+        // and the denial would name neither side.
+        var p = Enabled();
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        var config = WithPipeline(p);
+
+        var plan = PipelineBootstrapPlanner.Plan(config, "147440642635");
+        var verify = DeployerPlanner.Plan(config, "503947800380").Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+
+        Assert.All(plan.BuildRecordReadGrant!, s => Assert.Equal(
+            $"arn:aws:iam::503947800380:role/{verify.RoleName}",
+            s["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>()));
+        Assert.Equal(plan.BuildRecordStore, verify.Environment[DeployerEnvironment.BuildRecordStore]);
+    }
+
+    [Fact]
+    public void WithoutATargetAccount_NothingCrosses()
+    {
+        // A guessed account would replicate artifacts somewhere nobody chose. The rest of the plan is
+        // unchanged, so a build-only environment still bootstraps.
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));
+
+        Assert.Null(plan.Replication);
+        Assert.Null(plan.BuildRecordReadGrant);
+        Assert.NotEmpty(plan.Roles);
+    }
 }

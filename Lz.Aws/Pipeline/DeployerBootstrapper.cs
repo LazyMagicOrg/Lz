@@ -74,6 +74,11 @@ public static class DeployerBootstrapper
                 "BUILD account. The deployer belongs in the account it deploys into. Pass the " +
                 "target environment's profile (e.g. --profile scu-dev).");
 
+        // AND IT MUST BE THIS ENVIRONMENT'S ACCOUNT, not merely not the build account: this run writes a
+        // registry policy admitting the build account's images, and prod's profile against dev's config
+        // would admit dev's replication into prod.
+        CrossAccount.RequireTargetAccount(config.Pipeline?.TargetAccountId, accountId, "bootstrapdeployer");
+
         var creds = AwsCredentialsFactory.Resolve(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
@@ -88,6 +93,18 @@ public static class DeployerBootstrapper
             ? new AmazonLambdaClient(creds, endpoint) : new AmazonLambdaClient(endpoint);
 
         await EnsureEvidenceStoreAsync(s3, plan.EvidenceStore, region);
+
+        // THE REPOSITORIES BEFORE THE PERMISSION, so there is no moment at which the build account may
+        // replicate into a repository this account has not hardened. Without ecr:CreateRepository in the
+        // policy, replication into a missing repository fails rather than creating an unhardened one.
+        using (var ecr = creds != null ? new Amazon.ECR.AmazonECRClient(creds, endpoint) : new Amazon.ECR.AmazonECRClient(endpoint))
+        {
+            foreach (var repository in plan.ImageRepositories)
+                await EcrRepositoryHardening.EnsureAsync(ecr, repository, config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14);
+
+            await ApplyReplicationPermissionAsync(ecr, plan.ReplicationPermission
+                ?? throw new InvalidOperationException("the plan has no replication permission; it was planned without an account."));
+        }
 
         var roleArn = await EnsureRoleAsync(iam, plan.RoleName, "states.amazonaws.com",
             "lz decoupled-CD deployer. Rolls the service image by digest.",
@@ -120,10 +137,10 @@ public static class DeployerBootstrapper
         Console.WriteLine("  - no artifact-without-a-record anomaly alarm (stage D)");
         Console.WriteLine("  - the signature hook is attached to no ECS service (C4 wiring, which moves the deploy plan)");
         Console.WriteLine();
-        Console.WriteLine("BEFORE A REAL EXECUTION CAN SUCCEED, two things outside this account:");
         var verifyRole = plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify).RoleName;
-        Console.WriteLine($"  - the build-record store's bucket policy must let {verifyRole} read image/*");
-        Console.WriteLine("  - replication must deliver the image into this account's registry (Verify resolves it here)");
+        Console.WriteLine("THE BUILD ACCOUNT'S HALF is a separate command, run with that account's profile:");
+        Console.WriteLine($"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*)");
+        Console.WriteLine("  Only images pushed AFTER it runs replicate here — ECR does not copy what is already there.");
     }
 
     /// <summary>
@@ -184,6 +201,13 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    {fn.Name,-40} {fn.Package}.zip  {fn.TimeoutSeconds}s  {fn.MemoryMb} MB");
         Console.WriteLine($"  hook invoker:  {plan.HookInvokerRoleName}  (assumed by ECS; invokes the hook only)");
         Console.WriteLine();
+        Console.WriteLine($"  replicated repositories (immutable tags, AES256, scan-on-push): {string.Join(", ", plan.ImageRepositories)}");
+        Console.WriteLine($"  registry policy {CrossAccount.ReplicationSid}: ecr:ReplicateImage from {config.Pipeline?.ArtifactAccountId} into exactly those, never ecr:CreateRepository");
+        var target = config.Pipeline?.TargetAccountId;
+        Console.WriteLine(target == accountId
+            ? $"  target account: {accountId} matches Pipeline.TargetAccountId"
+            : $"  target account: THIS PROFILE RESOLVES TO {accountId}, BUT Pipeline.TargetAccountId IS {target ?? "not set"}; apply will refuse");
+        Console.WriteLine();
 
         foreach (var (name, package) in packages.OrderBy(p => p.Key))
         {
@@ -198,6 +222,30 @@ public static class DeployerBootstrapper
             }
         }
         Console.WriteLine();
+    }
+
+    /// <summary>
+    /// Merge the replication permission into this registry's policy by Sid, preserving every other
+    /// statement: the registry has one policy, and it may already grant something else.
+    /// </summary>
+    private static async Task ApplyReplicationPermissionAsync(
+        Amazon.ECR.IAmazonECR ecr, System.Text.Json.Nodes.JsonObject statement)
+    {
+        string? existing = null;
+        try
+        {
+            existing = (await ecr.GetRegistryPolicyAsync(new Amazon.ECR.Model.GetRegistryPolicyRequest())).PolicyText;
+        }
+        catch (Amazon.ECR.Model.RegistryPolicyNotFoundException)
+        {
+            // No registry policy yet: the merge starts from an empty document.
+        }
+
+        var merged = CrossAccount.MergeBySid(existing, new[] { statement });
+        await ecr.PutRegistryPolicyAsync(new Amazon.ECR.Model.PutRegistryPolicyRequest { PolicyText = merged });
+
+        var total = System.Text.Json.Nodes.JsonNode.Parse(merged)!["Statement"]!.AsArray().Count;
+        Console.WriteLine($"  registry policy written: ecr:ReplicateImage for the build account; {total - 1} other statement(s) preserved.");
     }
 
     private static async Task EnsureEvidenceStoreAsync(IAmazonS3 s3, string bucket, string region)

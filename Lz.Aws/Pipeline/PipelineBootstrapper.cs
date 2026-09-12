@@ -88,7 +88,7 @@ public static class PipelineBootstrapper
             await EnsureRoleAsync(iam, role, providerArn);
 
             foreach (var repo in role.EcrRepositories)
-                await EnsureRepositoryAsync(ecr, repo, config);
+                await EcrRepositoryHardening.EnsureAsync(ecr, repo, config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14);
 
             // ONE RULE PER BUILD ROLE, filtered to that role's repositories (§4.2). Verification
             // trusts PROFILE ARNs, so provenance is expressed through profiles: a valid signature
@@ -100,6 +100,16 @@ public static class PipelineBootstrapper
         }
 
         await ApplySigningConfigurationAsync(ecr, signingRules);
+
+        // WHAT CROSSES TO THE ENVIRONMENT this run was given. Merged, never overwritten: the registry
+        // has one replication configuration and the store one bucket policy, and another environment's
+        // run owns its own part of each.
+        if (plan.Replication is { } rule)
+            await ApplyReplicationAsync(ecr, rule);
+        if (plan.BuildRecordReadGrant is { } grant && plan.BuildRecordStore is { } recordStore)
+            await ApplyBuildRecordReadGrantAsync(s3, recordStore, grant);
+        if (plan.TargetAccountId is null)
+            Console.WriteLine("  no Pipeline.TargetAccountId: nothing replicates and no deployer may read build records from this run.");
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
@@ -155,7 +165,66 @@ public static class PipelineBootstrapper
             foreach (var name in plan.EcrRepositories)
                 Console.WriteLine($"    {name}");
         }
+
         Console.WriteLine();
+        if (plan.TargetAccountId is null)
+        {
+            Console.WriteLine("  to an environment: nothing (the config names no Pipeline.TargetAccountId)");
+        }
+        else
+        {
+            Console.WriteLine($"  to environment account {plan.TargetAccountId} (merged with whatever other environments already have):");
+            if (plan.Replication is { } rule)
+                Console.WriteLine($"    replicate {string.Join(", ", rule.RepositoryFilters.Select(f => f.Filter))} -> {rule.Destinations[0].RegistryId} {rule.Destinations[0].Region}");
+            if (plan.BuildRecordReadGrant is { } grant)
+                foreach (var statement in grant)
+                    Console.WriteLine($"    bucket policy {statement["Sid"]}: {statement["Action"]} on {statement["Resource"]}, only {statement["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]}");
+        }
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// Merge this environment's replication rule into the registry's configuration and write it back.
+    /// Every other destination is preserved, and the output says how many.
+    /// </summary>
+    private static async Task ApplyReplicationAsync(Amazon.ECR.IAmazonECR ecr, Amazon.ECR.Model.ReplicationRule rule)
+    {
+        var registry = await ecr.DescribeRegistryAsync(new Amazon.ECR.Model.DescribeRegistryRequest());
+        var before = registry.ReplicationConfiguration;
+        var merged = CrossAccount.MergeReplication(before, rule);
+
+        await ecr.PutReplicationConfigurationAsync(new Amazon.ECR.Model.PutReplicationConfigurationRequest
+        {
+            ReplicationConfiguration = merged,
+        });
+
+        var destination = rule.Destinations[0];
+        var others = merged.Rules.Count - 1;
+        Console.WriteLine($"  replication to {destination.RegistryId} ({destination.Region}) written; {others} other rule(s) preserved.");
+        Console.WriteLine("      only images pushed from now on replicate — ECR does not copy what is already there.");
+    }
+
+    /// <summary>
+    /// Merge this environment's statements into the build-record store's bucket policy by Sid.
+    /// </summary>
+    private static async Task ApplyBuildRecordReadGrantAsync(
+        IAmazonS3 s3, string bucket, IReadOnlyList<System.Text.Json.Nodes.JsonObject> grant)
+    {
+        string? existing = null;
+        try
+        {
+            existing = (await s3.GetBucketPolicyAsync(new GetBucketPolicyRequest { BucketName = bucket })).Policy;
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchBucketPolicy")
+        {
+            // No policy yet: the merge starts from an empty document.
+        }
+
+        var merged = CrossAccount.MergeBySid(existing, grant);
+        await s3.PutBucketPolicyAsync(new PutBucketPolicyRequest { BucketName = bucket, Policy = merged });
+
+        var total = System.Text.Json.Nodes.JsonNode.Parse(merged)!["Statement"]!.AsArray().Count;
+        Console.WriteLine($"  bucket policy on '{bucket}' written: {grant.Count} statement(s) for this environment, {total - grant.Count} other(s) preserved.");
     }
 
     // -------------------------------------------------------------------------------------------
@@ -263,89 +332,6 @@ public static class PipelineBootstrapper
         });
 
         Console.WriteLine("      versioning on, public access blocked.");
-    }
-
-    /// <summary>
-    /// The ECR repository for one artifact, hardened. Registry hardening is DecoupledCd.md §8.5.
-    /// </summary>
-    private static async Task EnsureRepositoryAsync(
-        Amazon.ECR.IAmazonECR ecr, string name, SystemConfig config)
-    {
-        try
-        {
-            await ecr.DescribeRepositoriesAsync(new Amazon.ECR.Model.DescribeRepositoriesRequest
-            {
-                RepositoryNames = new List<string> { name },
-            });
-            Console.WriteLine($"  repository '{name}' already exists.");
-        }
-        catch (Amazon.ECR.Model.RepositoryNotFoundException)
-        {
-            await ecr.CreateRepositoryAsync(new Amazon.ECR.Model.CreateRepositoryRequest
-            {
-                RepositoryName = name,
-                // AES256 rather than a customer-managed key: ECR encrypts at rest either way, and a
-                // CMK adds a key to rotate, grant across accounts and pay for. Named explicitly
-                // rather than left to the default so the choice is visible in the plan.
-                EncryptionConfiguration = new Amazon.ECR.Model.EncryptionConfiguration
-                {
-                    EncryptionType = Amazon.ECR.EncryptionType.AES256,
-                },
-                ImageScanningConfiguration = new Amazon.ECR.Model.ImageScanningConfiguration
-                {
-                    ScanOnPush = true,
-                },
-            });
-            Console.WriteLine($"  repository '{name}' created.");
-        }
-
-        // IMMUTABLE TAGS, applied every run rather than only on create. This is what makes "nothing
-        // deploys a tag" enforceable rather than a convention: a mutable tag is a pointer anyone
-        // with push rights can move to different content, and the whole design rests on an identity
-        // that cannot be repointed.
-        await ecr.PutImageTagMutabilityAsync(new Amazon.ECR.Model.PutImageTagMutabilityRequest
-        {
-            RepositoryName = name,
-            ImageTagMutability = Amazon.ECR.ImageTagMutability.IMMUTABLE,
-        });
-
-        // THE LIFECYCLE POLICY IS DELIBERATELY NARROW. §8.4 wants "keep every identity named in any
-        // request of the last N deploys", and ECR lifecycle rules cannot express that — they select
-        // by age and count, and know nothing about the request store. So this expires only UNTAGGED
-        // images, which under immutable tags means genuinely orphaned layers, and leaves every
-        // tagged image alone. Erring toward keeping too much: a deleted digest breaks a rollback
-        // target, and storage is cheap next to that.
-        var untaggedDays = config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14;
-        var policy = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            rules = new[]
-            {
-                new
-                {
-                    rulePriority = 1,
-                    description =
-                        $"Expire untagged images after {untaggedDays} days. Tagged images are never " +
-                        "selected: under immutable tags they are the deployable identities, and a " +
-                        "deploy request may still name any of them.",
-                    selection = new
-                    {
-                        tagStatus = "untagged",
-                        countType = "sinceImagePushed",
-                        countUnit = "days",
-                        countNumber = untaggedDays,
-                    },
-                    action = new { type = "expire" },
-                },
-            },
-        });
-
-        await ecr.PutLifecyclePolicyAsync(new Amazon.ECR.Model.PutLifecyclePolicyRequest
-        {
-            RepositoryName = name,
-            LifecyclePolicyText = policy,
-        });
-
-        Console.WriteLine($"      immutable tags, AES256, scan-on-push, untagged expire {untaggedDays}d.");
     }
 
     /// <summary>

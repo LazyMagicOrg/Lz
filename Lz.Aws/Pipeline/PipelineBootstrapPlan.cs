@@ -34,6 +34,13 @@ public sealed record PipelineRole(
     string PermissionPolicy, IReadOnlyList<string> EcrRepositories);
 
 /// <summary>Everything <c>lz bootstrappipeline</c> would create, decided before anything is called.</summary>
+/// <param name="TargetAccountId">The environment whose config this run was given: where its images
+/// replicate to and whose Verify function may read build records. Null when the config names none.</param>
+/// <param name="BuildRecordStore">The store the read grant is written into.</param>
+/// <param name="Replication">This environment's replication rule, merged into the registry's
+/// configuration at apply. Null without a target account or without image repositories.</param>
+/// <param name="BuildRecordReadGrant">This environment's statements in the build-record store's bucket
+/// policy, merged by Sid at apply. Null without a target account.</param>
 public sealed record PipelineBootstrapPlan(
     string SystemKey,
     string Region,
@@ -42,7 +49,11 @@ public sealed record PipelineBootstrapPlan(
     IReadOnlyList<PipelineRole> Roles,
     IReadOnlyList<string> EcrRepositories,
     string OidcProviderUrl,
-    IReadOnlyList<string> DeniedActions);
+    IReadOnlyList<string> DeniedActions,
+    string? TargetAccountId = null,
+    string? BuildRecordStore = null,
+    Amazon.ECR.Model.ReplicationRule? Replication = null,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? BuildRecordReadGrant = null);
 
 /// <summary>
 /// Decides what <c>lz bootstrappipeline</c> creates, as a pure function of config.
@@ -169,9 +180,24 @@ public static class PipelineBootstrapPlanner
                 Array.Empty<string>()),
         };
 
+        // WHAT CROSSES TO THIS ENVIRONMENT (DecoupledCd.md §6, MigrationPlan M5): its images, by
+        // replication, and its Verify function's read of image records. Only when the config names
+        // the account — the build account cannot ask STS about dev, and a guessed id would replicate
+        // artifacts somewhere nobody chose.
+        var target = p.TargetAccountId;
+        var imageRepositories = roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories).Distinct().ToList();
+
         return new PipelineBootstrapPlan(
             sk, region, p.ArtifactAccountId, stores, roles, ecrRepositories, OidcProvider,
-            SelfRewriteDenied);
+            SelfRewriteDenied,
+            TargetAccountId: target,
+            BuildRecordStore: buildRecords,
+            Replication: target != null && imageRepositories.Count > 0
+                ? CrossAccount.ReplicationRule(region, target, imageRepositories)
+                : null,
+            BuildRecordReadGrant: target != null
+                ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config))
+                : null);
     }
 
     /// <summary>

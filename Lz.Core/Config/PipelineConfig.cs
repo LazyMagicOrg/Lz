@@ -51,6 +51,24 @@ public class PipelineConfig
     public string? ArtifactAccountId { get; set; }
 
     /// <summary>
+    /// The account THIS environment deploys into — the target account (DecoupledCd.md §3), where the
+    /// deployer runs. Twelve digits, and never the build account.
+    ///
+    /// <para>BOTH HALVES NEED IT, which is why it is config rather than something each command
+    /// resolves. <c>lz bootstrappipeline</c> runs in the build account and cannot ask STS about dev: it
+    /// needs the id to replicate images into this account and to let this account's Verify function
+    /// read build records. <c>lz bootstrapdeployer</c> runs here and CAN resolve its own account — so it
+    /// uses this to refuse a profile that resolves anywhere else, which catches more than the build
+    /// account alone.</para>
+    ///
+    /// <para>NOT REQUIRED by the validator, in the same way <see cref="Repositories"/> is not: an
+    /// environment can enable the pipeline without either command ever being run against it, and
+    /// failing every <c>lz</c> command for that system would validate one command's needs at the
+    /// expense of all the others. The commands that need it refuse without it.</para>
+    /// </summary>
+    public string? TargetAccountId { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

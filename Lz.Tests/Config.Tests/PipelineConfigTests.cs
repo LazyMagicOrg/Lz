@@ -323,6 +323,45 @@ public class PipelineConfigTests
         ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
     }
 
+    [Theory]
+    [InlineData("12345678901")]
+    [InlineData("scu-dev")]
+    public void AMalformedTargetAccountId_IsRefused(string id)
+    {
+        var p = Enabled();
+        p.TargetAccountId = id;
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("TargetAccountId", ex.Message);
+    }
+
+    [Fact]
+    public void TheBuildAccountAsTheTarget_IsRefused()
+    {
+        // The build account runs no workload; an environment deploys into its own account.
+        var p = Enabled();
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "147440642635";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("runs no workload", ex.Message);
+    }
+
+    [Fact]
+    public void TheTargetAccount_IsNotRequiredByTheValidator()
+    {
+        // Like Repositories: the commands that need it refuse without it; every other lz command must
+        // still work for a system that has not named it.
+        var p = Enabled();
+        p.TargetAccountId = null;
+
+        ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
+    }
+
     [Fact]
     public void AnUnknownRepositoryNaming_IsRefused()
     {
@@ -379,6 +418,7 @@ public class PipelineConfigTests
             Pipeline:
               Enabled: true
               ArtifactAccountId: "503947800380"
+              TargetAccountId: "982408502448"
               Classes: [image, client, site, assets, config]
               Registry:
                 RepositoryNaming: neutral
@@ -406,6 +446,7 @@ public class PipelineConfigTests
         var p = config.Pipeline!;
         Assert.True(p.Enabled);
         Assert.Equal("503947800380", p.ArtifactAccountId);
+        Assert.Equal("982408502448", p.TargetAccountId);
         Assert.Equal(new[] { "image", "client", "site", "assets", "config" }, p.Classes);
         Assert.Equal("neutral", p.Registry!.RepositoryNaming);
         Assert.True(p.Registry.TagImmutability);
