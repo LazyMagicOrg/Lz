@@ -217,9 +217,11 @@ public static class CrossAccount
     /// The build registry's replication rule for ONE target account: the named repositories, to that
     /// account's registry in the same region.
     ///
-    /// <para>ONE PREFIX FILTER PER REPOSITORY NAME rather than the system prefix: only repositories the
-    /// pipeline created replicate, and a repository someone adds later under the same prefix does not
-    /// start flowing into every target account unannounced.</para>
+    /// <para>ONE PREFIX FILTER PER REPOSITORY NAME rather than the system prefix, because PREFIX_MATCH
+    /// is ECR's only filter type: this is narrower than the system prefix but still selects any
+    /// repository whose name EXTENDS this one (<c>scu-4df6-b9c6-aiphost-worker</c> would match). What
+    /// keeps replication exact is the TARGET: its registry policy names exact repository ARNs and
+    /// withholds ecr:CreateRepository, so an over-matched repository is refused there.</para>
     /// </summary>
     public static ReplicationRule ReplicationRule(string region, string targetAccountId, IReadOnlyList<string> repositories)
     {

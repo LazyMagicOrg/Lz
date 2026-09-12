@@ -26,10 +26,11 @@ namespace Lz.Core.Config;
 /// byte-identical". Instead the validator REFUSES the combination and names the flag to add. Two
 /// explicit flags beat one flag with a hidden second effect.</para>
 ///
-/// <para>NOTHING HERE IS BUILT YET. This is the schema and its validator — P0 of DecoupledCd's
-/// punchlist — landing before the state machine, stores and roles so that later work has a gate to
-/// hang from. A config that sets <c>Enabled: true</c> today gets a validated block that no
-/// component reads.</para>
+/// <para>WHO READS IT (as of 2026-09-12): <c>PipelineBootstrapPlanner</c> (lz bootstrappipeline, which
+/// refuses without <c>Enabled</c>), <c>DeployerPlanner</c>/<c>DeployerBootstrapper</c> (lz
+/// bootstrapdeployer), <c>DeployVerification.Verify</c> inside the deployer's Verify function, and
+/// <c>EcrRepositoryNaming</c>. No deploy path reads it, and
+/// <c>PipelineConfigTests.NothingOutsideTheConfigLayerReadsPipeline</c> is the pin.</para>
 /// </summary>
 public class PipelineConfig
 {
@@ -44,9 +45,9 @@ public class PipelineConfig
 
     /// <summary>
     /// The account holding the registry and the artifact, build-record and request stores. Twelve
-    /// digits. Optional: when null the artifact origin is THIS account, which is the arrangement
-    /// until the separate build account exists (DecoupledCd.md section 11.1 is still OPEN, so this
-    /// deliberately has no default pointing anywhere).
+    /// digits. The build account, <c>scu-cicd</c>, exists since 2026-09-06 (DecoupledCd.md §11.1 is
+    /// decided); <c>lz bootstrappipeline</c> refuses a profile that resolves anywhere else. Optional
+    /// only because the validator does not require it — the deployer planner does.
     /// </summary>
     public string? ArtifactAccountId { get; set; }
 
