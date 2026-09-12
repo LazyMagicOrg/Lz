@@ -52,4 +52,29 @@ public class PipelineBootstrapperTests
         // ARNs are case-sensitive; treating them otherwise would be a guess rather than a check.
         Assert.False(PipelineBootstrapper.AlreadyHasProvider(new[] { Arn.ToUpperInvariant() }, Arn));
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The signing rule — where a guessed enum string cost an apply
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void TheFilterTypeIsTheSdkConstant_NotAGuessedString()
+    {
+        // THE REGRESSION. The literal "WILDCARD" was rejected by ECR with "Member must satisfy
+        // enum value set: [WILDCARD_MATCH]", after every other resource had already been created.
+        var rule = PipelineBootstrapper.BuildSigningRule("arn:profile", new[] { "scu-4df6-b9c6-aiphost" });
+
+        Assert.Equal(Amazon.ECR.SigningRepositoryFilterType.WILDCARD_MATCH,
+            rule.RepositoryFilters.Single().FilterType);
+        Assert.Equal("WILDCARD_MATCH", rule.RepositoryFilters.Single().FilterType.Value);
+    }
+
+    [Fact]
+    public void OneFilterPerRepository_AndTheProfileIsCarriedThrough()
+    {
+        var rule = PipelineBootstrapper.BuildSigningRule("arn:profile", new[] { "a", "b" });
+
+        Assert.Equal("arn:profile", rule.SigningProfileArn);
+        Assert.Equal(new[] { "a", "b" }, rule.RepositoryFilters.Select(f => f.Filter));
+    }
 }

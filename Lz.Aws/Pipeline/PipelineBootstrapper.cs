@@ -96,19 +96,7 @@ public static class PipelineBootstrapper
             // workflow can use", and because no human permission set holds signer:SignPayload on it,
             // it also means "built by that workflow".
             if (profileArn != null && role.EcrRepositories.Count > 0)
-            {
-                signingRules.Add(new Amazon.ECR.Model.SigningRule
-                {
-                    SigningProfileArn = profileArn,
-                    RepositoryFilters = role.EcrRepositories
-                        .Select(n => new Amazon.ECR.Model.SigningRepositoryFilter
-                        {
-                            Filter = n,
-                            FilterType = "WILDCARD",
-                        })
-                        .ToList(),
-                });
-            }
+                signingRules.Add(BuildSigningRule(profileArn, role.EcrRepositories));
         }
 
         await ApplySigningConfigurationAsync(ecr, signingRules);
@@ -171,6 +159,31 @@ public static class PipelineBootstrapper
     }
 
     // -------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// One signing rule: this profile signs pushes to these repositories.
+    ///
+    /// <para>EXTRACTED SO THE ENUM IS ASSERTED RATHER THAN TRUSTED. The filter type was written as
+    /// the literal <c>"WILDCARD"</c>, which ECR rejected on the first apply — the value is
+    /// <c>WILDCARD_MATCH</c>. Two neighbouring literals (<c>AES256</c>, <c>IMMUTABLE</c>) happened
+    /// to be right, which is the worse half of the lesson: guessing a string that the SDK publishes
+    /// as a constant is a coin flip that costs an apply. Every one of them is now the SDK's own
+    /// constant, so a wrong value is a compile error, and this function exists so a test can pin it
+    /// without AWS.</para>
+    /// </summary>
+    internal static Amazon.ECR.Model.SigningRule BuildSigningRule(
+        string profileArn, IReadOnlyList<string> repositories)
+        => new()
+        {
+            SigningProfileArn = profileArn,
+            RepositoryFilters = repositories
+                .Select(n => new Amazon.ECR.Model.SigningRepositoryFilter
+                {
+                    Filter = n,
+                    FilterType = Amazon.ECR.SigningRepositoryFilterType.WILDCARD_MATCH,
+                })
+                .ToList(),
+        };
 
     /// <summary>
     /// Is this OIDC provider already registered?
@@ -276,7 +289,7 @@ public static class PipelineBootstrapper
                 // rather than left to the default so the choice is visible in the plan.
                 EncryptionConfiguration = new Amazon.ECR.Model.EncryptionConfiguration
                 {
-                    EncryptionType = "AES256",
+                    EncryptionType = Amazon.ECR.EncryptionType.AES256,
                 },
                 ImageScanningConfiguration = new Amazon.ECR.Model.ImageScanningConfiguration
                 {
@@ -293,7 +306,7 @@ public static class PipelineBootstrapper
         await ecr.PutImageTagMutabilityAsync(new Amazon.ECR.Model.PutImageTagMutabilityRequest
         {
             RepositoryName = name,
-            ImageTagMutability = "IMMUTABLE",
+            ImageTagMutability = Amazon.ECR.ImageTagMutability.IMMUTABLE,
         });
 
         // THE LIFECYCLE POLICY IS DELIBERATELY NARROW. §8.4 wants "keep every identity named in any
