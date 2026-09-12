@@ -115,6 +115,9 @@
          images at push under a profile, and Notation verifies against the profile ARN — which is
          how provenance is expressed. -->
     <PackageReference Include="AWSSDK.Signer" Version="4.*" />
+    <!-- StepFunctions: the in-account deployer's state machine (§5.1). Standard workflows only —
+         .waitForTaskToken, which the approval gate needs, does not exist on Express. -->
+    <PackageReference Include="AWSSDK.StepFunctions" Version="4.*" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.*" />

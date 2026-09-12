@@ -162,6 +162,7 @@ class Program
         RegisterReposCommand(rootCommand);
         RegisterCloneReposCommand(rootCommand);
         RegisterBootstrapPipelineCommand(rootCommand, systemKeyOption, envOption);
+        RegisterBootstrapDeployerCommand(rootCommand, systemKeyOption, envOption);
         RegisterPackagesCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
@@ -2947,6 +2948,68 @@ class Program
                         config.Profile = profileOverride;
 
                     await Lz.Aws.Pipeline.PipelineBootstrapper.BootstrapAsync(config, apply);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine(ex.Message);
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                    return;
+                }
+            }
+        }, systemKeyOption, envOption, applyOption, profileOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // lz bootstrapdeployer — create the in-account deployer, in a TARGET account.
+    //
+    // SEPARATE FROM bootstrappipeline BECAUSE THE CARDINALITY DIFFERS. One build account per
+    // system, one target account per ENVIRONMENT — so that command runs once ever and this one
+    // runs once per environment. Folding them together would require build-account write
+    // credentials to stand up a test deployer, coupling two privilege domains for no benefit.
+    // §5.5's "created by lz bootstrappipeline" predates the two-account split being concrete.
+    // ---------------------------------------------------------------
+    private static void RegisterBootstrapDeployerCommand(
+        RootCommand root, Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("bootstrapdeployer",
+            "Create the decoupled-CD deployer in a TARGET account: the Step Functions state " +
+            "machine, the deploy role with its explicit self-rewrite Deny, and the versioned " +
+            "evidence store. PRINTS THE PLAN AND STOPS unless --apply is given. Does NOT make the " +
+            "deployer live — no event rule, no reconciler schedule — because the state machine's " +
+            "Lambdas are a later step and a wired trigger would start executions that die.");
+
+        var applyOption = new Option<bool>("--apply",
+            "Actually create the resources. Without it the plan is printed and nothing is created.");
+        var profileOption = new Option<string?>("--profile",
+            "AWS profile for the TARGET account (e.g. scu-dev). Defaults to the system config's " +
+            "profile, which for a target environment is usually correct — unlike bootstrappipeline, " +
+            "where it is usually not.");
+
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(applyOption);
+        cmd.AddOption(profileOption);
+
+        cmd.SetHandler(async (systemKey, env, apply, profileOverride) =>
+        {
+            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
+
+            foreach (var config in configs)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(profileOverride))
+                        config.Profile = profileOverride;
+
+                    // The opted-in check lives in the bootstrapper, not here: the refusal belongs
+                    // with the thing that refuses, and keeping config.Pipeline out of the CLI is
+                    // what lets PipelineConfigTests pin who reads the block at all.
+                    await Lz.Aws.Pipeline.DeployerBootstrapper.BootstrapAsync(config, apply);
                 }
                 catch (InvalidOperationException ex)
                 {

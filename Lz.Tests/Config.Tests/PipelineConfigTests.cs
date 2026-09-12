@@ -94,6 +94,11 @@ public class PipelineConfigTests
             // its only caller is a planner, and nothing that deploys anything calls it. It plans
             // resources that do not exist yet in an account the deploy path never touches.
             Path.Combine("Lz.Aws", "Pipeline", "DeployerPlan.cs"),
+
+            // DeployerBootstrapper, 2026-09-12 (P2 stage B). Reads the block to refuse a system
+            // that has not opted in — the same gate bootstrappipeline has. Reached only from
+            // `lz bootstrapdeployer`; no deploy path calls it.
+            Path.Combine("Lz.Aws", "Pipeline", "DeployerBootstrapper.cs"),
         };
 
         var root = RepoRoot();
@@ -425,6 +430,18 @@ public class PipelineConfigTests
         source.Split('\n')
             .Where(l => !l.TrimStart().StartsWith("using ", StringComparison.Ordinal)
                      && !l.TrimStart().StartsWith("namespace ", StringComparison.Ordinal))
+            // COMMENTS STRIPPED, because a file that merely DISCUSSES the block is not a consumer
+            // of it. This scan has now produced two false positives of that family — the namespace
+            // `Lz.Aws.Pipeline`, and a comment explaining why the CLI deliberately does not read
+            // `config.Pipeline` — and a guard that cries wolf gets an allowlist entry it does not
+            // deserve, which is how it stops guarding. Code before a `//` is still scanned.
+            //
+            // KNOWN BLIND SPOT, found while mutation-checking this: a read on a line that STARTS
+            // with `using` or `namespace` is dropped by the filter above and would not be seen.
+            // Left as-is because reaching it means writing a property access on a namespace
+            // declaration line, and narrowing the filter to match those keywords precisely would
+            // add more surface than the case is worth. Recorded rather than unnoticed.
+            .Select(l => l.Split("//", 2)[0])
             .Any(l => Regex.IsMatch(l, @"\.Pipeline\b(?![\w.])"));
 
     /// <summary>Walk up from the test assembly to the directory holding Lz.slnx.</summary>
