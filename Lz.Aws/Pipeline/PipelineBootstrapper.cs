@@ -23,12 +23,12 @@ namespace Lz.Aws.Pipeline;
 /// after. The plan is a pure function, so the dry run is the real plan and not an approximation
 /// of it.</para>
 ///
-/// <para>WHAT IT DOES NOT DO YET, stated so nobody assumes otherwise: registry hardening — the
-/// environment-neutral repository name, tag immutability and the lifecycle policy (DecoupledCd.md
-/// §8.5) — and the ECR managed-signing RULE that binds a profile to a repository filter. Both need
-/// the repository names, which come from service definitions rather than from the Pipeline block,
-/// so they are a separate step. The signing PROFILES are created here, because the roles reference
-/// them.</para>
+/// <para>A NOTE ON AWS SDK v4 COLLECTIONS, learned the expensive way. A list response property is
+/// NULL, not empty, when the account has none of that resource — and a bootstrap runs against
+/// exactly that account. The first real apply against the greenfield build account died on
+/// <c>OpenIDConnectProviderList.Any()</c>. Treat every collection off a response as nullable here;
+/// <see cref="AlreadyHasProvider"/> is the one that bit, and it is a named, tested function for
+/// that reason rather than because the comparison is interesting.</para>
 /// </summary>
 public static class PipelineBootstrapper
 {
@@ -172,13 +172,27 @@ public static class PipelineBootstrapper
 
     // -------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// Is this OIDC provider already registered?
+    /// </summary>
+    /// <param name="existingArns">
+    /// The ARNs the account already has — <b>nullable, and that is the whole reason this is a named
+    /// function rather than an inline <c>.Any()</c></b>. The AWS SDK v4 returns NULL rather than an
+    /// empty list for a collection with no members, so a greenfield account — exactly the account a
+    /// bootstrap runs against — made the obvious code throw <c>ArgumentNullException</c> on the
+    /// first apply, 2026-09-12. <c>AwsLiveVerifier</c> already guarded the same hazard with
+    /// <c>?? new List&lt;&gt;()</c>; this is that lesson, made testable.
+    /// </param>
+    internal static bool AlreadyHasProvider(IEnumerable<string>? existingArns, string arn)
+        => existingArns?.Any(a => string.Equals(a, arn, StringComparison.Ordinal)) ?? false;
+
     private static async Task<string> EnsureOidcProviderAsync(
         IAmazonIdentityManagementService iam, string accountId)
     {
         var arn = $"arn:aws:iam::{accountId}:oidc-provider/{PipelineBootstrapPlanner.OidcProvider}";
 
         var existing = await iam.ListOpenIDConnectProvidersAsync(new ListOpenIDConnectProvidersRequest());
-        if (existing.OpenIDConnectProviderList.Any(p => p.Arn == arn))
+        if (AlreadyHasProvider(existing.OpenIDConnectProviderList?.Select(p => p.Arn), arn))
         {
             Console.WriteLine($"  OIDC provider already exists. Skipping. ({arn})");
             return arn;
