@@ -446,10 +446,10 @@ public class DeployerTriggerTests
     {
         public List<(string Bucket, string Key)> Reads { get; } = new();
 
-        public Task<string?> ReadAsync(string bucket, string key)
+        public Task<StoredRecord?> ReadAsync(string bucket, string key)
         {
             Reads.Add((bucket, key));
-            return Task.FromResult(body);
+            return Task.FromResult(body is null ? null : new StoredRecord(body, "3sL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY"));
         }
     }
 

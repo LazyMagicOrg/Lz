@@ -36,10 +36,13 @@ public sealed record ServiceDeploymentRecord(string? TaskDefinitionArn, string? 
 /// </summary>
 public sealed record RegistryImage(string Digest, string? ScanStatus, IReadOnlyDictionary<string, int>? FindingCounts);
 
+/// <summary>A stored object as read: its text, and the object version S3 served — null when S3 named none.</summary>
+public sealed record StoredRecord(string Json, string? VersionId);
+
 public interface IRecordStore
 {
-    /// <summary>The object's text, or null when there is no such object.</summary>
-    Task<string?> ReadAsync(string bucket, string key);
+    /// <summary>The object as read, or null when there is no such object.</summary>
+    Task<StoredRecord?> ReadAsync(string bucket, string key);
 }
 
 public interface IRegistryImages
@@ -126,14 +129,23 @@ public static class VerifyStep
                 $"the input names a record in '{input.Record.Bucket}', not the build-record store " +
                 $"'{settings.BuildRecordStore}'. Records have authority only there.");
 
-        var json = await records.ReadAsync(input.Record.Bucket, input.Record.Key)
+        var stored = await records.ReadAsync(input.Record.Bucket, input.Record.Key)
             ?? throw new DeployRefused("record",
                 $"there is no build record at s3://{input.Record.Bucket}/{input.Record.Key}.");
+
+        // THE VERSION READ IS THE RECORD'S IDENTITY (§14.3), carried into the evidence: a key can gain a second version,
+        // after a delete, and the evidence must say which one this deploy was judged on. A store that serves no version
+        // cannot say — S3 names none in an unversioned bucket and "null" for an object written while versioning was off —
+        // so that is refused, not recorded as unknown.
+        if (string.IsNullOrEmpty(stored.VersionId) || stored.VersionId == "null")
+            throw new DeployRefused("record",
+                $"s3://{input.Record.Bucket}/{input.Record.Key} was served without an object version, so the evidence could " +
+                "not name the record this deploy acted on. The build-record store must keep versioning on.");
 
         BuildRecord record;
         try
         {
-            record = BuildRecordFormat.Parse(json);
+            record = BuildRecordFormat.Parse(stored.Json);
         }
         catch (InvalidOperationException ex)
         {
@@ -200,6 +212,7 @@ public static class VerifyStep
         {
             ["class"] = record.Class,
             ["digest"] = digest,
+            ["recordVersionId"] = stored.VersionId,
             ["builtFrom"] = builtFrom,
             ["builtAt"] = record.BuiltAt,
             ["workflowRunId"] = record.WorkflowRunId,

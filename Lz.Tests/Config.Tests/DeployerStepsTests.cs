@@ -38,10 +38,17 @@ public class DeployerStepsTests
     //  Fakes — each records what it was asked, so a test can assert what was NEVER asked
     // ---------------------------------------------------------------------------------------
 
-    private sealed class Records(string? json) : IRecordStore
+    /// <summary>A version id in the shape S3 issues.</summary>
+    private const string RecordVersion = "3sL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY";
+
+    private sealed class Records(string? json, string? versionId = RecordVersion) : IRecordStore
     {
         public List<(string Bucket, string Key)> Reads { get; } = new();
-        public Task<string?> ReadAsync(string bucket, string key) { Reads.Add((bucket, key)); return Task.FromResult(json); }
+        public Task<StoredRecord?> ReadAsync(string bucket, string key)
+        {
+            Reads.Add((bucket, key));
+            return Task.FromResult(json is null ? null : new StoredRecord(json, versionId));
+        }
     }
 
     private sealed class Registry(RegistryImage? image) : IRegistryImages
@@ -513,6 +520,36 @@ public class DeployerStepsTests
         var without = await Verify();
         Assert.Null(((JsonObject)without["builtFrom"]!)["ref"]);
         Assert.False(((JsonObject)without["builtFrom"]!).ContainsKey("ref"));
+    }
+
+    [Fact]
+    public async Task Verify_RecordsTheObjectVersionItRead_AndTheEvidenceCarriesIt()
+    {
+        var verified = await Verify();
+
+        Assert.Equal(RecordVersion, verified["recordVersionId"]!.GetValue<string>());
+
+        // The evidence copies what Verify established, so the kept record of a deploy names the version it was judged on.
+        var evidence = JsonNode.Parse(DeployEvidence.Deployed(
+            "req-1", DateTimeOffset.UnixEpoch, DeployerInput.From(State()), verified,
+            new JsonObject { ["taskDefinitionArn"] = NewTd }, new[] { Digest }))!;
+        Assert.Equal(RecordVersion, evidence["verified"]!["recordVersionId"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(null)]    // an unversioned bucket names no version
+    [InlineData("")]
+    [InlineData("null")]  // what S3 names an object written while versioning was off
+    public async Task Verify_RefusesARecordServedWithoutAVersion_AndGoesNoFurther(string? versionId)
+    {
+        var registry = new Registry(Scanned());
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Verify(
+            records: new Records(BuildRecordFormatTests.WorkflowEmitted, versionId), registry: registry));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "record");
+        Assert.Contains("without an object version", ex.Message);
+        Assert.Equal(0, registry.Calls);
     }
 
     // ---------------------------------------------------------------------------------------

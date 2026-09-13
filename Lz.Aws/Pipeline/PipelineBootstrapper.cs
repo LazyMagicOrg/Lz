@@ -71,7 +71,12 @@ public static class PipelineBootstrapper
         var providerArn = await EnsureOidcProviderAsync(iam, accountId);
 
         foreach (var store in plan.Stores)
+        {
             await EnsureStoreAsync(s3, store, region);
+
+            // WRITE-ONCE BEFORE ANY ROLE EXISTS THAT COULD WRITE: the roles below are what GitHub assumes.
+            await BucketPolicies.MergeAsync(s3, store.Name, store.PolicyStatements);
+        }
 
         using var ecr = creds != null
             ? new Amazon.ECR.AmazonECRClient(creds, endpoint)
@@ -111,7 +116,7 @@ public static class PipelineBootstrapper
         if (plan.Replication is { } rule)
             await ApplyReplicationAsync(ecr, rule);
         if (plan.BuildRecordReadGrant is { } grant && plan.BuildRecordStore is { } recordStore)
-            await ApplyBuildRecordReadGrantAsync(s3, recordStore, grant);
+            await BucketPolicies.MergeAsync(s3, recordStore, grant);
         if (plan.TargetAccountId is null)
             Console.WriteLine("  no Pipeline.TargetAccountId: nothing replicates and no deployer may read build records from this run.");
 
@@ -169,6 +174,8 @@ public static class PipelineBootstrapper
             Console.WriteLine(s.WriterPrefixes.Count == 0
                 ? "      writable by GitHub: NOTHING (the deployer writes these)"
                 : $"      writable by GitHub under: {string.Join(", ", s.WriterPrefixes)}");
+            if (s.PolicyStatements.Any(p => p["Sid"]?.GetValue<string>() == WriteOnceStore.Sid))
+                Console.WriteLine($"      write-once: bucket policy {WriteOnceStore.Sid} refuses any PutObject without If-None-Match, from anyone");
         }
 
         Console.WriteLine();
@@ -238,33 +245,6 @@ public static class PipelineBootstrapper
         var others = merged.Rules.Count - 1;
         Console.WriteLine($"  replication to {destination.RegistryId} ({destination.Region}) written; {others} other rule(s) preserved.");
         Console.WriteLine("      only images pushed from now on replicate — ECR does not copy what is already there.");
-    }
-
-    /// <summary>
-    /// Merge this environment's statements into the build-record store's bucket policy by Sid.
-    /// </summary>
-    private static async Task ApplyBuildRecordReadGrantAsync(
-        IAmazonS3 s3, string bucket, IReadOnlyList<System.Text.Json.Nodes.JsonObject> grant)
-    {
-        // THE SDK REPORTS "NO POLICY" AS A 404 RESPONSE WITH THE ERROR XML IN Policy, not as an exception
-        // (measured on the first apply); ExistingBucketPolicy is where that is decided. The catch stays for
-        // an SDK that raises instead, and matches only that one absence.
-        string? existing;
-        try
-        {
-            var response = await s3.GetBucketPolicyAsync(new GetBucketPolicyRequest { BucketName = bucket });
-            existing = CrossAccount.ExistingBucketPolicy(response.HttpStatusCode, response.Policy);
-        }
-        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchBucketPolicy")
-        {
-            existing = null;
-        }
-
-        var merged = CrossAccount.MergeBySid(existing, grant);
-        await s3.PutBucketPolicyAsync(new PutBucketPolicyRequest { BucketName = bucket, Policy = merged });
-
-        var total = System.Text.Json.Nodes.JsonNode.Parse(merged)!["Statement"]!.AsArray().Count;
-        Console.WriteLine($"  bucket policy on '{bucket}' written: {grant.Count} statement(s) for this environment, {total - grant.Count} other(s) preserved.");
     }
 
     // -------------------------------------------------------------------------------------------

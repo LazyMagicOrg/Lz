@@ -594,6 +594,17 @@ public class DeployerPlannerTests
         Assert.Contains("dev", dev);
     }
 
+    [Fact]
+    public void TheEvidenceStore_IsWriteOnce_ByItsOwnBucketPolicy()
+    {
+        // Evidence is written once and never replaced; the writer's conditional put is no longer the only thing saying so.
+        var plan = Plan();
+
+        var statement = Assert.Single(plan.EvidenceStorePolicy);
+        Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(WriteOnceStore.Deny(plan.EvidenceStore), statement),
+            statement.ToJsonString());
+    }
+
     // ---------------------------------------------------------------------------------------
     //  The state machine — data flow and permission
     // ---------------------------------------------------------------------------------------

@@ -10,7 +10,13 @@ namespace Lz.Aws.Pipeline;
 /// <param name="WriterPrefixes">
 /// The per-repository prefixes a writer role may PutObject under. Nothing may write outside these.
 /// </param>
-public sealed record PipelineStore(string Name, string Purpose, IReadOnlyList<string> WriterPrefixes);
+/// <param name="PolicyStatements">
+/// What the store's bucket policy must hold, merged by Sid as soon as the store exists: the write-once Deny
+/// (<see cref="WriteOnceStore"/>). The build-record store's grant to an environment is planned separately, in
+/// <see cref="PipelineBootstrapPlan.BuildRecordReadGrant"/>, because it differs per environment and this does not.
+/// </param>
+public sealed record PipelineStore(
+    string Name, string Purpose, IReadOnlyList<string> WriterPrefixes, IReadOnlyList<System.Text.Json.Nodes.JsonObject> PolicyStatements);
 
 /// <summary>A GitHub-assumable role. See the trust-boundary table in DecoupledCd.md §3.</summary>
 /// <param name="Name">IAM role name.</param>
@@ -208,19 +214,25 @@ public static class PipelineBootstrapPlanner
         // PROMOTED between environments; an artifact that carried `-dev-` in the name of the bucket
         // it lives in could not be the same artifact in prod. Same reasoning as the registry's
         // `neutral` naming (§8.5).
+        //
+        // ALL THREE ARE WRITE-ONCE — §2 says so of bundles, §4.3 of records, §6 of requests — and the store enforces it
+        // rather than trusting its writers (§14.3).
         var stores = new List<PipelineStore>
         {
             new(artifacts,
-                "bundles, written once and named by object version id", prefixes),
+                "bundles, written once and named by object version id", prefixes,
+                new[] { WriteOnceStore.Deny(artifacts) }),
             new(buildRecords,
-                "one build record per artifact — the uniform trigger (§4.3)", prefixes),
+                "one build record per artifact — the uniform trigger (§4.3)", prefixes,
+                new[] { WriteOnceStore.Deny(buildRecords) }),
             new(requests,
                 "deploy requests: what may enter an environment (§6)",
                 // EMPTY ON PURPOSE. The request store is written by the DEPLOYER, never by GitHub —
                 // "GitHub writes build records; the deployer writes deploy requests. That separation
                 // is the whole trust boundary" (§4.3). A GitHub-assumable prefix here would hand
                 // GitHub admission control over prod, which is what this design exists to prevent.
-                Array.Empty<string>()),
+                Array.Empty<string>(),
+                new[] { WriteOnceStore.Deny(requests) }),
         };
 
         // WHAT CROSSES TO THIS ENVIRONMENT (DecoupledCd.md §6, MigrationPlan M5): its images, by

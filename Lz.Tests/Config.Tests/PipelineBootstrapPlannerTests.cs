@@ -211,6 +211,21 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void EveryStore_IsWriteOnce_ByItsOwnBucketPolicy()
+    {
+        // The request store too, though nothing writes it yet: §6 writes requests "under conditional writes", and a
+        // store made write-once only once its first writer exists would be write-once too late (DecoupledCd §14.3).
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));
+
+        Assert.All(plan.Stores, s =>
+        {
+            var statement = Assert.Single(s.PolicyStatements);
+            Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(WriteOnceStore.Deny(s.Name), statement),
+                $"{s.Name} does not carry the write-once statement for its own bucket: {statement.ToJsonString()}");
+        });
+    }
+
+    [Fact]
     public void TheRequestStoreHasNoGitHubWritablePrefix()
     {
         // "GitHub writes build records; the deployer writes deploy requests. That separation is the

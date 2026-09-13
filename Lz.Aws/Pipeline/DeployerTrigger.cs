@@ -420,13 +420,13 @@ public static class StartStep
         var planned = DeployerTrigger.ExecutionsFor(eventJson, settings);
         var location = planned[0].Record;
 
-        var json = await records.ReadAsync(location.Bucket, location.Key)
+        var stored = await records.ReadAsync(location.Bucket, location.Key)
             ?? throw new TriggerRefused($"there is no build record at s3://{location.Bucket}/{location.Key}, though its event arrived.");
 
         BuildRecord record;
         try
         {
-            record = BuildRecordFormat.Parse(json);
+            record = BuildRecordFormat.Parse(stored.Json);
         }
         catch (InvalidOperationException ex)
         {

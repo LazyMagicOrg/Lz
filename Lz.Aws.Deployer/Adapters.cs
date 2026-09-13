@@ -66,7 +66,7 @@ internal sealed class S3RecordStore(IAmazonS3 s3) : IRecordStore
     // A build record is a few hundred bytes. Anything this large is not one, and is not read.
     private const long MaxRecordBytes = 1024 * 1024;
 
-    public async Task<string?> ReadAsync(string bucket, string key)
+    public async Task<StoredRecord?> ReadAsync(string bucket, string key)
     {
         try
         {
@@ -76,7 +76,8 @@ internal sealed class S3RecordStore(IAmazonS3 s3) : IRecordStore
                     $"s3://{bucket}/{key} is {response.ContentLength} bytes; a build record is not that large.");
 
             using var reader = new StreamReader(response.ResponseStream);
-            return await reader.ReadToEndAsync();
+            // The version of the bytes just read, from the same response — never from a second call that could see another.
+            return new StoredRecord(await reader.ReadToEndAsync(), response.VersionId);
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {

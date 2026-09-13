@@ -113,6 +113,9 @@ public static class DeployerBootstrapper
 
         await EnsureEvidenceStoreAsync(s3, plan.EvidenceStore, region);
 
+        // WRITE-ONCE BEFORE ANY ROLE EXISTS THAT COULD WRITE EVIDENCE: the Record functions' roles, below.
+        await BucketPolicies.MergeAsync(s3, plan.EvidenceStore, plan.EvidenceStorePolicy);
+
         // THE REPOSITORIES BEFORE THE PERMISSION, so there is no moment at which the build account may
         // replicate into a repository this account has not hardened. Without ecr:CreateRepository in the
         // policy, replication into a missing repository fails rather than creating an unhardened one.
@@ -303,6 +306,8 @@ public static class DeployerBootstrapper
         Console.WriteLine($"  state machine: {plan.StateMachineName}  (Standard)");
         Console.WriteLine($"  role:          {plan.RoleName}  + an explicit self-rewrite Deny");
         Console.WriteLine($"  evidence:      {plan.EvidenceStore}");
+        if (plan.EvidenceStorePolicy.Any(p => p["Sid"]?.GetValue<string>() == WriteOnceStore.Sid))
+            Console.WriteLine($"                 write-once: bucket policy {WriteOnceStore.Sid} refuses any PutObject without If-None-Match, from anyone");
         Console.WriteLine($"  approval:      {(plan.ApprovalRequired ? "REQUIRED — a waitForTaskToken gate" : "not required (this environment deploys on its own)")}");
         Console.WriteLine();
         Console.WriteLine("  functions (each with its own role and the same Deny):");

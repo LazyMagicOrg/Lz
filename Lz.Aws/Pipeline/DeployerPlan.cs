@@ -39,6 +39,8 @@ public sealed record DeployerFunction(
 /// functions' included.
 /// </param>
 /// <param name="EvidenceStore">Versioned bucket the Record state writes to.</param>
+/// <param name="EvidenceStorePolicy">What that bucket's policy must hold, merged by Sid as soon as it exists: the
+/// write-once Deny (<see cref="WriteOnceStore"/>). Evidence is written once and never replaced.</param>
 /// <param name="Definition">The Amazon States Language document.</param>
 /// <param name="ApprovalRequired">Whether the machine contains a human gate at all.</param>
 /// <param name="Functions">The Lambda functions: the five the definition invokes, the signature hook, and — with the
@@ -59,6 +61,7 @@ public sealed record PipelineDeployer(
     string RolePolicy,
     string DenyPolicy,
     string EvidenceStore,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject> EvidenceStorePolicy,
     string Definition,
     bool ApprovalRequired,
     IReadOnlyList<DeployerFunction> Functions,
@@ -455,6 +458,7 @@ public static class DeployerPlanner
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null),
             DenyPolicy: DenyPolicyFor(),
             EvidenceStore: evidence,
+            EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn),
