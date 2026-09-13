@@ -610,6 +610,35 @@ public static class DeployerPlanner
     /// <summary>The build account's rule that forwards record events to this environment. Removed when the trigger is off.</summary>
     public static string ForwardRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-forward-build-records";
 
+    /// <summary>
+    /// Why <c>lz deploycontainer</c> must not build tenant service <paramref name="serviceName"/> in this environment, or null
+    /// when it may (DecoupledCd.md §8 item 4).
+    ///
+    /// <para>REFUSED WHERE THE IMAGE COULD NOT RUN, AND ONLY THERE — which is narrower than §8's "refuses under the block".
+    /// Under <c>Pipeline.EnforceSignatures</c> the service carries the signature hook, and the hook fails any deployment whose
+    /// image the pipeline did not sign — which a workstation build never is — so the build would be pushed and then rolled back
+    /// (measured twice on 2026-09-12). Keyed on the hook list the tenant service attaches (<see cref="SignatureHooksFor"/>), so
+    /// the refusal and the hook cannot disagree. With the flag off there is no hook, and this says nothing: a workstation image
+    /// still runs, and a new tenant's first deploy still needs one, because <c>deploytenant</c>'s image gate reads the
+    /// workstation repository.</para>
+    /// </summary>
+    public static string? RefusalForWorkstationImage(SystemConfig config, string serviceName)
+    {
+        if (SignatureHooksFor(config, serviceName) is not { Count: > 0 }) return null;
+
+        // The hook is attached only to a service the pipeline builds, so a repository entry names it.
+        var builtBy = config.Pipeline!.Repositories!.First(r =>
+            string.Equals(r.Class, "image", StringComparison.Ordinal)
+            && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal)).Repo;
+
+        return $"{config.SystemKey}/{config.Environment} enforces signatures on {serviceName} (Pipeline.EnforceSignatures): its " +
+               "signature hook rolls back any deployment of an image the pipeline did not sign, and a workstation build is never " +
+               $"signed, so this one would be pushed and then refused. Build {serviceName} with {builtBy}'s pipeline build " +
+               "workflow instead; the deployer rolls out what it signs. To deploy a workstation image anyway, turn " +
+               "Pipeline.EnforceSignatures off first, and for a service that is already running, run `lz deploytenant` to take " +
+               "the hook off before deploying the image.";
+    }
+
     /// <summary>The signature hook's function name — one definition for the planner and the service that attaches it.</summary>
     public static string SignatureHookFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-signature-hook";
 

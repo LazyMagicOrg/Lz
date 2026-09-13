@@ -846,6 +846,18 @@ class Program
                         Console.WriteLine($"=== {svcName} for tenant {tk} ===");
                         Console.ResetColor();
 
+                        // BEFORE THE BUILD, and before its host restore: an image the signature hook will roll back is not
+                        // worth building (DecoupledCd.md §8 item 4). Tenant services only — the hook is attached to nothing
+                        // else, so a system container is never refused.
+                        if (Lz.Aws.Pipeline.DeployerPlanner.RefusalForWorkstationImage(config, svcName) is { } tenantRefusal)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"  REFUSED: {tenantRefusal}");
+                            Console.ResetColor();
+                            Environment.ExitCode = 1;
+                            continue;
+                        }
+
                         await deployer.DeployAsync(
                             svcName, def,
                             tenantServiceConfig.ConfigDirectory,

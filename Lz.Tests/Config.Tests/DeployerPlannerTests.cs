@@ -842,6 +842,67 @@ public class DeployerPlannerTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  deploycontainer, refused where its image could not run (DecoupledCd §8 item 4)
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void AWorkstationImage_IsRefusedWhereTheHookWouldRollItBack()
+    {
+        var refusal = DeployerPlanner.RefusalForWorkstationImage(Enforcing(), "aiphost");
+
+        Assert.NotNull(refusal);
+        // It names the repository whose workflow ships the service instead, and the way back to a workstation image.
+        Assert.Contains("Scutara/ScutaraService's pipeline build workflow", refusal);
+        Assert.Contains("turn Pipeline.EnforceSignatures off first", refusal);
+        Assert.Contains("run `lz deploytenant` to take the hook off", refusal);
+    }
+
+    [Fact]
+    public void AWorkstationImage_IsNotRefusedWhereItCouldRun()
+    {
+        // ENFORCEMENT OFF, under an enabled block: no hook, so the image runs. Refusing here — §8's literal "under the
+        // block" — would also leave a new tenant no first deploy, because deploytenant's image gate reads the
+        // workstation repository.
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(Config(false), "aiphost"));
+
+        // Every system and service with no hook: the command is what it was before the block.
+        var noBlock = Enforcing(); noBlock.Pipeline = null;
+        var disabled = Enforcing(); disabled.Pipeline!.Enabled = false;
+        var noTarget = Enforcing(); noTarget.Pipeline!.TargetAccountId = null;
+        var noImages = Enforcing(); noImages.Pipeline!.Classes = new List<string> { "client" };
+
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(noBlock, "aiphost"));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(disabled, "aiphost"));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(noTarget, "aiphost"));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(noImages, "aiphost"));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationImage(Enforcing(), "worker"));
+    }
+
+    [Fact]
+    public void TheRefusal_IsExactlyWhereTheServiceCarriesTheHook()
+    {
+        // ONE DECISION, NOT TWO: a refusal keyed on anything else either outlives the hook — refusing an image that would
+        // run — or lets a build through that the hook then rolls back with no warning in front of it.
+        var noBlock = Enforcing(); noBlock.Pipeline = null;
+        var noTarget = Enforcing(); noTarget.Pipeline!.TargetAccountId = null;
+        var twoImageRepositories = Enforcing();
+        twoImageRepositories.Pipeline!.Repositories!.Add(
+            new PipelineRepositoryConfig { Repo = "Scutara/ScutaraWorkers", Class = "image", Artifacts = new List<string> { "worker" } });
+
+        foreach (var config in new[] { Enforcing(), Config(false), noBlock, noTarget, twoImageRepositories })
+        foreach (var service in new[] { "aiphost", "worker" })
+        {
+            Assert.Equal(
+                DeployerPlanner.SignatureHooksFor(config, service) is { Count: > 0 },
+                DeployerPlanner.RefusalForWorkstationImage(config, service) is not null);
+        }
+
+        // And the repository it names is the one that builds that service, not merely the first image entry.
+        Assert.Contains("Build worker with Scutara/ScutaraWorkers's", DeployerPlanner.RefusalForWorkstationImage(twoImageRepositories, "worker"));
+        Assert.Contains("Build aiphost with Scutara/ScutaraService's", DeployerPlanner.RefusalForWorkstationImage(twoImageRepositories, "aiphost"));
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  Taking the hook off — the removal Pulumi cannot make (measured 2026-09-13)
     // ---------------------------------------------------------------------------------------
 
