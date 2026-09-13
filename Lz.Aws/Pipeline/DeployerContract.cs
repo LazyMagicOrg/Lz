@@ -30,6 +30,15 @@ public sealed class DeployRefused : Exception
 /// <summary>The image scan has not finished. RETRIED by the definition, a bounded number of times.</summary>
 public sealed class ScanNotYetAvailable(string message) : Exception(message);
 
+/// <summary>
+/// The record passed every check, but its image is not in this account's registry yet. RETRIED by the definition,
+/// a bounded number of times (DecoupledCd.md §14.1 item 2): a record lands seconds after its push and replication
+/// takes six to seven seconds more, so an execution the record starts often looks before the replica exists.
+/// Thrown only after provenance, class, lane and the repository allowlist have passed — a record with no right to
+/// name an image is refused at once, never waited on.
+/// </summary>
+public sealed class ImageNotYetReplicated(string message) : Exception(message);
+
 /// <summary>The roll is under way. RETRIED by the definition; its retry limit is the rollout timeout.</summary>
 public sealed class RolloutStillRolling(string message) : Exception(message);
 

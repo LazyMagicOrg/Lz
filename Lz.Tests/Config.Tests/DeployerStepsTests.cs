@@ -55,11 +55,20 @@ public class DeployerStepsTests
         }
     }
 
-    private sealed class Services(ServiceSnapshot? service, IReadOnlyList<TaskSnapshot>? tasks = null) : IServices
+    private sealed class Services(
+        ServiceSnapshot? service, IReadOnlyList<TaskSnapshot>? tasks = null,
+        IReadOnlyList<ServiceDeploymentRecord>? records = null, Exception? recordsFail = null) : IServices
     {
+        public int RecordReads { get; private set; }
         public Task<ServiceSnapshot?> DescribeAsync(string cluster, string name) => Task.FromResult(service);
         public Task<IReadOnlyList<TaskSnapshot>> RunningTasksAsync(string cluster, string name)
             => Task.FromResult(tasks ?? (IReadOnlyList<TaskSnapshot>)Array.Empty<TaskSnapshot>());
+        public Task<IReadOnlyList<ServiceDeploymentRecord>> RecentDeploymentsAsync(string cluster, string name)
+        {
+            RecordReads++;
+            if (recordsFail != null) throw recordsFail;
+            return Task.FromResult(records ?? (IReadOnlyList<ServiceDeploymentRecord>)Array.Empty<ServiceDeploymentRecord>());
+        }
     }
 
     private static RegistryImage Scanned(string status = "COMPLETE", Dictionary<string, int>? counts = null)
@@ -152,12 +161,27 @@ public class DeployerStepsTests
     }
 
     [Fact]
-    public async Task AnImageNotInThisRegistry_IsRefused()
+    public async Task AnImageNotInThisRegistryYet_IsTheRetriedError_NotARefusal()
     {
-        var ex = await Assert.ThrowsAsync<DeployRefused>(() => VerifyStep.RunAsync(
+        // §14.1 item 2: the record lands seconds before its replica, and an execution the record starts often looks
+        // first. A DeployRefused here would end that execution for good; this is what the definition waits on.
+        var ex = await Assert.ThrowsAsync<ImageNotYetReplicated>(() => VerifyStep.RunAsync(
             State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(null), new Services(Service())));
 
-        Assert.Contains(ex.Refusals, r => r.Check == "identity");
+        Assert.Contains($"{Repository}@{Digest}", ex.Message);
+    }
+
+    [Fact]
+    public async Task AMissingImage_NeverTurnsARefusalIntoAWait()
+    {
+        // A record with no right to name the image is refused at once. Its image is never looked for, so the
+        // five-minute wait is not something a bad record can buy.
+        var registry = new Registry(null);
+
+        await Assert.ThrowsAsync<DeployRefused>(() => Verify(
+            State(key: "client/scutara/scutarasellerapp/20260912T171147Z-34707373278.json"), registry: registry));
+
+        Assert.Equal(0, registry.Calls);
     }
 
     [Theory]
@@ -439,6 +463,94 @@ public class DeployerStepsTests
         Assert.Contains("superseded", ex.Message);
     }
 
+    private const string HookRefusal =
+        "Service deployment rolled back because PRE_SCALE_UP lifecycle hook(s) failed. Lifecycle hook target " +
+        "arn:aws:lambda:us-west-2:503947800380:function:scu-dev-signature-hook returned FAILED status.";
+
+    // What ECS showed after the hook refused on 2026-09-12: the refused deployment already gone from the list,
+    // the previous one primary again.
+    private static ServiceSnapshot RolledBackOntoThePrevious() =>
+        new(CurrentTd, new[] { new DeploymentSnapshot("PRIMARY", CurrentTd, "IN_PROGRESS") });
+
+    [Fact]
+    public async Task AHookRefusal_IsNotDeployed_InEcssWords_NotSuperseded()
+    {
+        var services = new Services(RolledBackOntoThePrevious(), new[] { Running(OldDigest) }, records: new[]
+        {
+            new ServiceDeploymentRecord(CurrentTd, "SUCCESSFUL", null, DateTime.Parse("2026-09-12T20:42:14Z")),
+            new ServiceDeploymentRecord(NewTd, "ROLLBACK_SUCCESSFUL", HookRefusal, DateTime.Parse("2026-09-12T20:49:13Z")),
+        });
+
+        var ex = await Assert.ThrowsAsync<RolloutNotDeployed>(() => VerifyRolloutStep.RunAsync(
+            RolloutState(), "req-abc-1", services, DateTimeOffset.UtcNow));
+
+        Assert.Contains("ROLLBACK_SUCCESSFUL", ex.Message);
+        Assert.Contains("PRE_SCALE_UP lifecycle hook(s) failed", ex.Message);
+        Assert.DoesNotContain("superseded", ex.Message);
+    }
+
+    [Fact]
+    public async Task WhenTheRecordCannotBeRead_TheObservedReasonStands_AndSaysSo()
+    {
+        var services = new Services(RolledBackOntoThePrevious(), new[] { Running(OldDigest) },
+            recordsFail: new InvalidOperationException("AccessDenied"));
+
+        var ex = await Assert.ThrowsAsync<RolloutNotDeployed>(() => VerifyRolloutStep.RunAsync(
+            RolloutState(), "req-abc-1", services, DateTimeOffset.UtcNow));
+
+        Assert.Contains("superseded", ex.Message);
+        Assert.Contains("could not be read", ex.Message);
+    }
+
+    [Fact]
+    public async Task TheRecordIsNeverRead_OnTheWayToLandedOrStillRolling()
+    {
+        // A read that can fail must not sit on the success path: a landed roll recorded as failed because a
+        // diagnostic read was denied would be worse than the vague reason this replaces.
+        var failing = new InvalidOperationException("must not be called");
+
+        var landed = new Services(Rolling("COMPLETED"), new[] { Running(Digest) }, recordsFail: failing);
+        await VerifyRolloutStep.RunAsync(RolloutState(), "req-abc-1", landed, DateTimeOffset.UtcNow);
+        Assert.Equal(0, landed.RecordReads);
+
+        var rolling = new Services(Rolling("IN_PROGRESS"), new[] { Running(OldDigest), Running(Digest) }, recordsFail: failing);
+        await Assert.ThrowsAsync<RolloutStillRolling>(() => VerifyRolloutStep.RunAsync(RolloutState(), "req-abc-1", rolling, DateTimeOffset.UtcNow));
+        Assert.Equal(0, rolling.RecordReads);
+    }
+
+    [Fact]
+    public void TheReason_IsTheNewestRecordOfThisTaskDefinition_WhenItWasRolledBackOrStopped()
+    {
+        const string observed = "observed";
+        var older = DateTime.Parse("2026-09-12T20:00:00Z");
+        var newer = DateTime.Parse("2026-09-12T21:00:00Z");
+
+        // Another task definition's rollback says nothing about this one.
+        Assert.Equal(observed, VerifyRolloutStep.NotDeployedReason(
+            new[] { new ServiceDeploymentRecord(CurrentTd, "ROLLBACK_SUCCESSFUL", HookRefusal, newer) }, NewTd, observed));
+
+        // The newest of ours decides, whatever order the records arrive in.
+        Assert.Equal(observed, VerifyRolloutStep.NotDeployedReason(new[]
+        {
+            new ServiceDeploymentRecord(NewTd, "ROLLBACK_SUCCESSFUL", HookRefusal, older),
+            new ServiceDeploymentRecord(NewTd, "IN_PROGRESS", null, newer),
+        }, NewTd, observed));
+        Assert.Contains("ROLLBACK_SUCCESSFUL", VerifyRolloutStep.NotDeployedReason(new[]
+        {
+            new ServiceDeploymentRecord(NewTd, "IN_PROGRESS", null, older),
+            new ServiceDeploymentRecord(NewTd, "ROLLBACK_SUCCESSFUL", HookRefusal, newer),
+        }, NewTd, observed));
+
+        Assert.StartsWith("ECS reports this execution's deployment STOPPED: superseded by a newer deployment",
+            VerifyRolloutStep.NotDeployedReason(
+                new[] { new ServiceDeploymentRecord(NewTd, "STOPPED", "superseded by a newer deployment", newer) }, NewTd, observed));
+
+        Assert.Contains("gave no reason", VerifyRolloutStep.NotDeployedReason(
+            new[] { new ServiceDeploymentRecord(NewTd, "ROLLBACK_FAILED", " ", newer) }, NewTd, observed));
+
+        Assert.Equal(observed, VerifyRolloutStep.NotDeployedReason(null, NewTd, observed));
+    }
+
     [Fact]
     public async Task AServiceThatIsGone_IsNotDeployed()
     {
@@ -661,6 +773,7 @@ public class DeployerStepsTests
     [Theory]
     [InlineData(typeof(DeployRefused))]
     [InlineData(typeof(ScanNotYetAvailable))]
+    [InlineData(typeof(ImageNotYetReplicated))]
     [InlineData(typeof(RolloutStillRolling))]
     [InlineData(typeof(RolloutNotDeployed))]
     public void TheErrorsTheMachineBranchesOn_AreNotSuffixed(Type error)

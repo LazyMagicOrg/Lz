@@ -138,6 +138,13 @@ public static class DeployerPlanner
     public const int ScanRetryIntervalSeconds = 30;
     public const int ScanRetryMaxAttempts = 20;
 
+    /// <summary>
+    /// How long Verify waits for a replica to arrive: 15 s × 20 attempts, five minutes. Replication was measured at
+    /// six to seven seconds after the push (2026-09-12), so the bound is about fifty times what it needs.
+    /// </summary>
+    public const int ReplicationRetryIntervalSeconds = 15;
+    public const int ReplicationRetryMaxAttempts = 20;
+
     /// <summary>How long VerifyRollout waits for a roll: 30 s × 40 attempts, twenty minutes.</summary>
     public const int RolloutRetryIntervalSeconds = 30;
     public const int RolloutRetryMaxAttempts = 40;
@@ -758,6 +765,15 @@ public static class DeployerPlanner
             Action = new[] { "ecs:ListTasks", "ecs:DescribeTasks" },
             Resource = "*",
         },
+        new
+        {
+            // Read only when a roll did not land, to put ECS's reason — a lifecycle hook's refusal, the circuit
+            // breaker — into the failure evidence instead of "superseded" (VerifyRolloutStep.NotDeployedReason).
+            Sid = "ReadWhyARollDidNotLand",
+            Effect = "Allow",
+            Action = new[] { "ecs:ListServiceDeployments", "ecs:DescribeServiceRevisions" },
+            Resource = "*",
+        },
     };
 
     private static object[] RecordGrants(string evidence) => new object[]
@@ -937,6 +953,14 @@ public static class DeployerPlanner
                 ResultPath = "$.verified",
                 Retry = new[]
                 {
+                    // The replica first: the image must exist before its scan can.
+                    new
+                    {
+                        ErrorEquals = new[] { nameof(ImageNotYetReplicated) },
+                        IntervalSeconds = ReplicationRetryIntervalSeconds,
+                        MaxAttempts = ReplicationRetryMaxAttempts,
+                        BackoffRate = 1.0,
+                    },
                     new
                     {
                         ErrorEquals = new[] { nameof(ScanNotYetAvailable) },

@@ -185,6 +185,40 @@ internal sealed class EcsServices(IAmazonECS ecs) : IServices
             s.Deployments?.Select(d => new DeploymentSnapshot(d.Status, d.TaskDefinition, d.RolloutState?.Value)).ToList());
     }
 
+    public async Task<IReadOnlyList<ServiceDeploymentRecord>> RecentDeploymentsAsync(string cluster, string service)
+    {
+        // Newest first (measured). Ten spans far more than one execution's window; a record older than that
+        // cannot be this execution's.
+        var listed = await ecs.ListServiceDeploymentsAsync(new ListServiceDeploymentsRequest
+        {
+            Cluster = cluster,
+            Service = service,
+            MaxResults = 10,
+        });
+        var briefs = listed.ServiceDeployments ?? new List<ServiceDeploymentBrief>();
+
+        // A record names its target REVISION; the task definition that revision runs is one more read, batched.
+        var revisionArns = briefs.Select(b => b.TargetServiceRevisionArn)
+            .Where(arn => !string.IsNullOrEmpty(arn)).Distinct().ToList();
+        var taskDefinitionOf = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (revisionArns.Count > 0)
+        {
+            var described = await ecs.DescribeServiceRevisionsAsync(new DescribeServiceRevisionsRequest
+            {
+                ServiceRevisionArns = revisionArns,
+            });
+            foreach (var revision in described.ServiceRevisions ?? new List<ServiceRevision>())
+                taskDefinitionOf[revision.ServiceRevisionArn] = revision.TaskDefinition;
+        }
+
+        return briefs.Select(b => new ServiceDeploymentRecord(
+                b.TargetServiceRevisionArn is { } arn && taskDefinitionOf.TryGetValue(arn, out var td) ? td : null,
+                b.Status?.Value,
+                b.StatusReason,
+                b.CreatedAt))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<TaskSnapshot>> RunningTasksAsync(string cluster, string service)
     {
         var arns = new List<string>();

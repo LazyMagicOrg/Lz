@@ -547,11 +547,28 @@ public class DeployerPlannerTests
         }
 
         AssertRetry("Verify", typeof(ScanNotYetAvailable), DeployerPlanner.ScanRetryIntervalSeconds, DeployerPlanner.ScanRetryMaxAttempts);
+        AssertRetry("Verify", typeof(ImageNotYetReplicated), DeployerPlanner.ReplicationRetryIntervalSeconds, DeployerPlanner.ReplicationRetryMaxAttempts);
         AssertRetry("VerifyRollout", typeof(RolloutStillRolling), DeployerPlanner.RolloutRetryIntervalSeconds, DeployerPlanner.RolloutRetryMaxAttempts);
 
         // A REFUSAL IS NEVER RETRIED. Nothing about it changes by asking again.
         Assert.DoesNotContain(nameof(DeployRefused), Plan().Definition);
         Assert.DoesNotContain(nameof(RolloutNotDeployed), Plan().Definition);
+    }
+
+    [Fact]
+    public void VerifyRollout_MayReadWhyARollDidNotLand_AndChangeNothing()
+    {
+        // The deployment records NotDeployedReason reads: read-only, on top of watching the roll.
+        var actions = Statements(Function(Plan(), DeployerHandlers.VerifyRollout).Policy)
+            .Where(st => st.GetProperty("Effect").GetString() == "Allow")
+            .SelectMany(st => Strings(st.GetProperty("Action")))
+            .ToHashSet();
+
+        Assert.Contains("ecs:ListServiceDeployments", actions);
+        Assert.Contains("ecs:DescribeServiceRevisions", actions);
+        Assert.DoesNotContain(actions, a => a.StartsWith("ecs:Update", StringComparison.Ordinal)
+                                         || a.StartsWith("ecs:Register", StringComparison.Ordinal)
+                                         || a == "ecs:*");
     }
 
     [Fact]

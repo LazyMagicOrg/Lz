@@ -25,6 +25,12 @@ public sealed record DeploymentSnapshot(string? Status, string? TaskDefinitionAr
 public sealed record ServiceSnapshot(string TaskDefinitionArn, IReadOnlyList<DeploymentSnapshot>? Deployments);
 
 /// <summary>
+/// One of a service's deployments as ECS's service-deployment record keeps it — how it ended, and in ECS's words
+/// why — with the task definition its target revision runs (null when that revision could not be read).
+/// </summary>
+public sealed record ServiceDeploymentRecord(string? TaskDefinitionArn, string? Status, string? StatusReason, DateTime? CreatedAt);
+
+/// <summary>
 /// An image in this account's registry, with its scan state. <see cref="ScanStatus"/> is null when no
 /// scan of the image exists at all, which is a different thing from a scan that failed.
 /// </summary>
@@ -49,6 +55,12 @@ public interface IServices
 
     /// <summary>The service's tasks whose desired status is RUNNING.</summary>
     Task<IReadOnlyList<TaskSnapshot>> RunningTasksAsync(string cluster, string service);
+
+    /// <summary>
+    /// The service's recent deployment records. Read only to explain a roll that did not land, never to decide
+    /// that one did — see <see cref="VerifyRolloutStep"/>.
+    /// </summary>
+    Task<IReadOnlyList<ServiceDeploymentRecord>> RecentDeploymentsAsync(string cluster, string service);
 }
 
 public interface IEvidenceWriter
@@ -138,11 +150,16 @@ public static class VerifyStep
 
         // §4.4 step 3: the identity resolves in the LOCAL registry. The build account's copy is not
         // what this account's tasks pull, so it is not what is checked.
+        //
+        // NOT THERE YET IS WAITED ON, not refused (§14.1 item 2). Only now, with every check above passed, so a
+        // record that had no right to name the image never reaches this. When the definition's retries run
+        // out, this is the error the execution fails with — the same outcome a refusal had, five minutes later.
         var digest = record.Identity.Digest!;
         var image = await registry.DescribeAsync(input.Target.Repository, digest)
-            ?? throw new DeployRefused("identity",
-                $"{input.Target.Repository}@{digest} is not in this account's registry. Either " +
-                "replication has not delivered it yet, or the record names an image that was never pushed.");
+            ?? throw new ImageNotYetReplicated(
+                $"{input.Target.Repository}@{digest} is not in this account's registry yet. Either replication " +
+                "has not delivered it — it usually arrives within seconds of the record — or the record names an " +
+                "image that never replicated here.");
 
         var (verdict, reason) = DeployVerification.ScanFromStatus(
             image.ScanStatus, image.FindingCounts, settings.ScanBlockOn);
@@ -280,7 +297,7 @@ public static class VerifyRolloutStep
 
         var (rolloutState, problem) = DeploymentStateOf(service.Deployments, taskDefinition);
         if (problem != null)
-            throw new RolloutNotDeployed(problem);
+            throw new RolloutNotDeployed(await ExplainAsync(services, input.Target, taskDefinition, problem));
 
         var running = DeployVerification.RunningDigests(
             await services.RunningTasksAsync(input.Target.Cluster, input.Target.Service), input.Target.Container);
@@ -295,9 +312,9 @@ public static class VerifyRolloutStep
                     $"rollout {rolloutState ?? "state unknown"}; {onDigest} of {running.Count} running task(s) on {digest}.");
 
             case RolloutVerdict.NotDeployed:
-                throw new RolloutNotDeployed(
+                throw new RolloutNotDeployed(await ExplainAsync(services, input.Target, taskDefinition,
                     $"rollout {rolloutState ?? "state unknown"} with {onDigest} of {running.Count} running task(s) " +
-                    $"on {digest}. The deploy did not take — the service is running something else.");
+                    $"on {digest}. The deploy did not take — the service is running something else."));
         }
 
         return new JsonObject
@@ -352,6 +369,53 @@ public static class VerifyRolloutStep
         }
 
         return (ours.RolloutState, null);
+    }
+
+    /// <summary>
+    /// Why this execution's roll did not land: ECS's own words when its deployment record says the deployment was
+    /// rolled back or stopped, otherwise what was observed.
+    ///
+    /// <para><b>ONLY EVER ON THE WAY TO A FAILURE.</b> The record is read after the verdict is already
+    /// NotDeployed, so a read that fails — no permission, a throttle — cannot turn a landed roll into a failed
+    /// one; it only leaves the observed reason, and says the record could not be read.</para>
+    /// </summary>
+    private static async Task<string> ExplainAsync(IServices services, DeployTarget target, string taskDefinitionArn, string observed)
+    {
+        IReadOnlyList<ServiceDeploymentRecord> records;
+        try
+        {
+            records = await services.RecentDeploymentsAsync(target.Cluster, target.Service);
+        }
+        catch (Exception ex)
+        {
+            return $"{observed} (ECS's deployment record could not be read: {ex.GetType().Name}.)";
+        }
+
+        return NotDeployedReason(records, taskDefinitionArn, observed);
+    }
+
+    /// <summary>
+    /// THE REASON, as a pure function. The newest record whose target revision runs this execution's task
+    /// definition — Prepare registers a new one per execution, so there is one — decides: rolled back or stopped
+    /// gives ECS's status and statusReason; anything else, or no such record, keeps <paramref name="observed"/>.
+    ///
+    /// <para>WHY (DecoupledCd.md §14.2): a deployment ECS's signature hook refuses starts no task and leaves the
+    /// service's deployment list within seconds, so <see cref="DeploymentStateOf"/> finds it gone and could only
+    /// say "superseded". Measured 2026-09-12: the record said <c>ROLLBACK_SUCCESSFUL</c>, "Service deployment
+    /// rolled back because PRE_SCALE_UP lifecycle hook(s) failed. …" — which is what failure evidence should
+    /// carry.</para>
+    /// </summary>
+    public static string NotDeployedReason(IReadOnlyList<ServiceDeploymentRecord>? records, string taskDefinitionArn, string observed)
+    {
+        var ours = (records ?? Array.Empty<ServiceDeploymentRecord>())
+            .Where(r => string.Equals(r.TaskDefinitionArn, taskDefinitionArn, StringComparison.Ordinal))
+            .OrderByDescending(r => r.CreatedAt ?? DateTime.MinValue)
+            .FirstOrDefault();
+
+        return ours?.Status is "ROLLBACK_SUCCESSFUL" or "ROLLBACK_FAILED" or "STOPPED"
+            ? $"ECS reports this execution's deployment {ours.Status}: " +
+              (string.IsNullOrWhiteSpace(ours.StatusReason) ? "it gave no reason." : ours.StatusReason.Trim())
+            : observed;
     }
 
     private static string? Text(JsonObject o, string name)
