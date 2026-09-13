@@ -534,6 +534,42 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void WithTheTrigger_TheStartFunctionMayReadImageRecords_ButNotList()
+    {
+        // D2: it reads a record for its branch. The event names the key, so it gets GetObject and nothing else.
+        var config = Forwarding(on: true);
+        var grant = PipelineBootstrapPlanner.Plan(config, "147440642635").BuildRecordReadGrant!;
+
+        var read = grant.Single(s => s["Action"]!.GetValue<string>() == "s3:GetObject");
+        Assert.Equal(
+            new[]
+            {
+                $"arn:aws:iam::503947800380:role/{DeployerPlanner.VerifyRoleName(config)}",
+                $"arn:aws:iam::503947800380:role/{DeployerPlanner.StartFunctionRoleName(config)}",
+            },
+            read["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.AsArray().Select(n => n!.GetValue<string>()));
+
+        var list = grant.Single(s => s["Action"]!.GetValue<string>() == "s3:ListBucket");
+        Assert.Equal($"arn:aws:iam::503947800380:role/{DeployerPlanner.VerifyRoleName(config)}",
+            list["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>());
+
+        // And the role it names is the one the target account's planner creates.
+        var start = DeployerPlanner.Plan(config, "503947800380", new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }))
+            .Functions.Single(f => f.Handler == DeployerHandlers.Start);
+        Assert.Equal(DeployerPlanner.StartFunctionRoleName(config), start.RoleName);
+    }
+
+    [Fact]
+    public void WithTheTriggerOff_TheReadGrantIsWhatItWasBeforeTheTrigger()
+    {
+        var grant = PipelineBootstrapPlanner.Plan(Forwarding(on: false), "147440642635").BuildRecordReadGrant!;
+
+        Assert.All(grant, s => Assert.Equal(
+            $"arn:aws:iam::503947800380:role/{DeployerPlanner.VerifyRoleName(Forwarding(on: false))}",
+            s["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>()));
+    }
+
+    [Fact]
     public void WithTheTriggerOff_TheForwardingRuleIsPlannedForRemoval()
     {
         // A flag that could only create would keep forwarding records to an environment that turned the trigger off.

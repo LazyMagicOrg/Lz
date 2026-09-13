@@ -244,7 +244,7 @@ public class DeployerStepsTests
     private const string RegistryHost = "503947800380.dkr.ecr.us-west-2.amazonaws.com";
     private const string Secret = "not-a-real-secret-but-shaped-like-one";
 
-    private sealed class Definitions(Amazon.ECS.Model.TaskDefinition definition) : ITaskDefinitions
+    private sealed class Definitions(Amazon.ECS.Model.TaskDefinition definition, string? runningBuiltAt = null) : ITaskDefinitions
     {
         public List<string> Described { get; } = new();
         public List<Amazon.ECS.Model.RegisterTaskDefinitionRequest> Registered { get; } = new();
@@ -252,8 +252,9 @@ public class DeployerStepsTests
         public Task<(Amazon.ECS.Model.TaskDefinition Definition, List<Amazon.ECS.Model.Tag>? Tags)> DescribeAsync(string arn)
         {
             Described.Add(arn);
-            return Task.FromResult<(Amazon.ECS.Model.TaskDefinition, List<Amazon.ECS.Model.Tag>?)>(
-                (definition, new List<Amazon.ECS.Model.Tag> { new() { Key = "System", Value = "scu" } }));
+            var tags = new List<Amazon.ECS.Model.Tag> { new() { Key = "System", Value = "scu" } };
+            if (runningBuiltAt != null) tags.Add(new() { Key = DeployOrdering.BuiltAtTag, Value = runningBuiltAt });
+            return Task.FromResult<(Amazon.ECS.Model.TaskDefinition, List<Amazon.ECS.Model.Tag>?)>((definition, tags));
         }
 
         public Task<string> RegisterAsync(Amazon.ECS.Model.RegisterTaskDefinitionRequest request)
@@ -283,10 +284,12 @@ public class DeployerStepsTests
         },
     };
 
-    private static JsonObject PrepareState()
+    private const string BuiltAt = "2026-09-13T21:52:49Z";
+
+    private static JsonObject PrepareState(string builtAt = BuiltAt)
     {
         var s = State();
-        s["verified"] = new JsonObject { ["digest"] = Digest };
+        s["verified"] = new JsonObject { ["digest"] = Digest, ["builtAt"] = builtAt };
         return s;
     }
 
@@ -307,7 +310,9 @@ public class DeployerStepsTests
         Assert.Equal(Secret, request.ContainerDefinitions.Single(c => c.Name == "aiphost").Environment.Single().Value);
         Assert.Equal("scu-mp-aiphost", request.Family);
         Assert.Equal(CurrentDefinition().TaskRoleArn, request.TaskRoleArn);
-        Assert.Equal("scu", Assert.Single(request.Tags).Value);
+        Assert.Equal(
+            new[] { ("System", "scu"), (DeployOrdering.BuiltAtTag, BuiltAt) },
+            request.Tags.Select(t => (t.Key, t.Value)));
 
         Assert.Equal(NewTd, result["taskDefinitionArn"]!.GetValue<string>());
         Assert.Equal(CurrentTd, result["previousTaskDefinitionArn"]!.GetValue<string>());
@@ -322,7 +327,7 @@ public class DeployerStepsTests
             PrepareState(), RegistryHost, new Services(Service()), new Definitions(CurrentDefinition()));
 
         Assert.DoesNotContain(Secret, result.ToJsonString());
-        Assert.Equal(new[] { "taskDefinitionArn", "image", "previousTaskDefinitionArn", "previousImage" },
+        Assert.Equal(new[] { "taskDefinitionArn", "image", "previousTaskDefinitionArn", "previousImage", "ordering" },
             result.Select(p => p.Key));
     }
 
@@ -374,6 +379,140 @@ public class DeployerStepsTests
             PrepareStep.RunAsync(PrepareState(), "registry.example.com", new Services(Service()), definitions));
 
         Assert.Empty(definitions.Described);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  Prepare — never an older build over a newer one (P2 stage D2)
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Prepare_RefusesABuildOlderThanTheOneTheServiceRuns_AndRegistersNothing()
+    {
+        // The race this exists for: a newer build already rolled (its revision is the service's), and an older
+        // execution, held up at its scan, reaches Prepare afterwards.
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
+
+        var ex = await Assert.ThrowsAsync<DeploySuperseded>(() =>
+            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains("2026-09-13T22:05:10Z", ex.Message);
+        Assert.Contains(BuiltAt, ex.Message);
+        Assert.Contains("allowOlderBuild", ex.Message);
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Theory]
+    [InlineData("2026-09-13T21:40:00Z")] // the service runs an older build
+    [InlineData(BuiltAt)] // the same build, deployed again
+    [InlineData(null)] // a revision the deployer did not register carries no build time
+    public async Task Prepare_Proceeds_WhenTheRunningBuildIsOlder_TheSame_OrUnknown(string? runningBuiltAt)
+    {
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt);
+
+        var result = await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+
+        Assert.Single(definitions.Registered);
+        Assert.False(string.IsNullOrWhiteSpace(result["ordering"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task Prepare_TagsTheNewRevisionWithThisBuildsTime_ReplacingTheRunningOnes_AndKeepingTheRest()
+    {
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T21:40:00Z");
+
+        await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+
+        var tags = Assert.Single(definitions.Registered).Tags;
+        Assert.Equal(BuiltAt, Assert.Single(tags, t => t.Key == DeployOrdering.BuiltAtTag).Value);
+        Assert.Equal("scu", Assert.Single(tags, t => t.Key == "System").Value);
+    }
+
+    [Fact]
+    public async Task Prepare_DeploysAnOlderBuild_OnlyWhenTheInputSaysSo()
+    {
+        var state = PrepareState();
+        state["allowOlderBuild"] = true;
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
+
+        var result = await PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions);
+
+        Assert.Single(definitions.Registered);
+        Assert.Contains("allowOlderBuild", result["ordering"]!.GetValue<string>());
+
+        state["allowOlderBuild"] = false;
+        await Assert.ThrowsAsync<DeploySuperseded>(() =>
+            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), new Definitions(CurrentDefinition(), "2026-09-13T22:05:10Z")));
+    }
+
+    [Theory]
+    [InlineData("\"true\"")]
+    [InlineData("1")]
+    [InlineData("{}")]
+    public async Task Prepare_AnOverrideThatIsNotABoolean_IsRefused_NotGuessedAt(string value)
+    {
+        var state = PrepareState();
+        state["allowOlderBuild"] = JsonNode.Parse(value);
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "allowOlderBuild");
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Theory]
+    [InlineData("yesterday")]
+    [InlineData("2026-09-13T22:05:10")] // no zone: read in whatever zone the function runs in
+    public async Task Prepare_ABuildTimeTagItCannotRead_IsRefused_AndRegistersNothing(string tag)
+    {
+        var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: tag);
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains(ex.Refusals, r => r.Check == DeployOrdering.BuiltAtTag);
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Fact]
+    public async Task Prepare_WithoutAVerifiedBuildTime_RegistersNothing()
+    {
+        var state = State();
+        state["verified"] = new JsonObject { ["digest"] = Digest };
+        var definitions = new Definitions(CurrentDefinition());
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "verified");
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Fact]
+    public void TheOverride_IsOptionalInput_AndTheTriggerNeverWritesIt()
+    {
+        Assert.Contains("allowOlderBuild", DeployerInput.OptionalInputFields);
+        Assert.DoesNotContain("allowOlderBuild", DeployerInput.InputFields);
+        Assert.False(DeployerInput.AllowsOlderBuild(State()));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  Verify carries the branch into evidence
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Verify_CarriesTheRecordsRef_WhenItHasOne_AndInventsNoneWhenItDoesNot()
+    {
+        var withRef = JsonNode.Parse(BuildRecordFormatTests.WorkflowEmitted)!;
+        withRef["builtFrom"]!["ref"] = "refs/heads/main";
+
+        var result = await Verify(record: withRef.ToJsonString());
+        Assert.Equal("refs/heads/main", result["builtFrom"]!["ref"]!.GetValue<string>());
+
+        var without = await Verify();
+        Assert.Null(((JsonObject)without["builtFrom"]!)["ref"]);
+        Assert.False(((JsonObject)without["builtFrom"]!).ContainsKey("ref"));
     }
 
     // ---------------------------------------------------------------------------------------

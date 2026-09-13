@@ -271,7 +271,8 @@ public static class PipelineBootstrapPlanner
                 ? CrossAccount.ReplicationRule(region, target, imageRepositories)
                 : null,
             BuildRecordReadGrant: target != null
-                ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config))
+                ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
+                    p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null)
                 : null,
             RecordForwarding: forwarding,
             ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null);

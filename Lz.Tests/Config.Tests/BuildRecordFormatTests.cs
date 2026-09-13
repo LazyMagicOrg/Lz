@@ -47,6 +47,22 @@ public class BuildRecordFormatTests
     }
 
     [Fact]
+    public void TheRef_RoundTrips_AndARecordWithoutOneStillParses()
+    {
+        // builtFrom.ref (P2 stage D2) is the one optional field of schema 1: every record written before it exists
+        // lacks it, and a record is immutable, so absence is read as absence — never refused, never invented.
+        var withRef = Image() with { BuiltFrom = Image().BuiltFrom with { Ref = "refs/heads/main" } };
+        var json = BuildRecordFormat.Serialize(withRef);
+
+        Assert.Contains("\"ref\": \"refs/heads/main\"", json);
+        Assert.Equal("refs/heads/main", BuildRecordFormat.Parse(json).BuiltFrom.Ref);
+
+        Assert.DoesNotContain("\"ref\"", BuildRecordFormat.Serialize(Image()));
+        Assert.Null(BuildRecordFormat.Parse(BuildRecordFormat.Serialize(Image())).BuiltFrom.Ref);
+        Assert.Null(BuildRecordFormat.Parse(WorkflowEmitted).BuiltFrom.Ref);
+    }
+
+    [Fact]
     public void ABundleRecordRoundTrips()
     {
         var parsed = BuildRecordFormat.Parse(BuildRecordFormat.Serialize(Bundle()));

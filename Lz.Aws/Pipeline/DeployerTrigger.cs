@@ -26,14 +26,27 @@ public sealed record TriggerTarget(string TenantKey, DeployTarget Target);
 public sealed record TriggerRoute(string RecordPrefix, IReadOnlyList<TriggerTarget> Targets);
 
 /// <summary>What the start function is configured with. The planner writes it; the function reads it.</summary>
+/// <param name="AllowedRefs">The git refs whose records start a deploy — <c>refs/heads/main</c>. A record built from any
+/// other ref, or naming none, is skipped.</param>
 public sealed record TriggerSettings(
-    string ArtifactAccountId, string BuildRecordStore, string StateMachineArn, IReadOnlyList<TriggerRoute> Routes)
+    string ArtifactAccountId, string BuildRecordStore, string StateMachineArn, IReadOnlyList<TriggerRoute> Routes,
+    IReadOnlyList<string> AllowedRefs)
 {
-    public static TriggerSettings Read(Func<string, string?> env) => new(
-        DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactAccount),
-        DeployerEnvironment.Required(env, DeployerEnvironment.BuildRecordStore),
-        DeployerEnvironment.Required(env, DeployerEnvironment.StateMachine),
-        DeployerTrigger.DecodeRoutes(DeployerEnvironment.Required(env, DeployerEnvironment.TriggerRoutes)));
+    public static TriggerSettings Read(Func<string, string?> env)
+    {
+        var refs = DeployerEnvironment.List(env, DeployerEnvironment.TriggerRefs);
+        if (refs.Count == 0)
+            throw new InvalidOperationException(
+                $"environment variable {DeployerEnvironment.TriggerRefs} names no ref, so no record could ever start a deploy. " +
+                "Re-run `lz bootstrapdeployer --apply`, which is what sets it.");
+
+        return new TriggerSettings(
+            DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactAccount),
+            DeployerEnvironment.Required(env, DeployerEnvironment.BuildRecordStore),
+            DeployerEnvironment.Required(env, DeployerEnvironment.StateMachine),
+            DeployerTrigger.DecodeRoutes(DeployerEnvironment.Required(env, DeployerEnvironment.TriggerRoutes)),
+            refs);
+    }
 }
 
 /// <summary>
@@ -48,8 +61,8 @@ public sealed class TriggerRefused(string message) : Exception(message);
 /// </summary>
 public sealed class ExecutionConflict(string message) : Exception(message);
 
-/// <summary>One execution the trigger starts, exactly as <c>StartExecution</c> receives it.</summary>
-public sealed record TriggeredExecution(string Name, string Input);
+/// <summary>One execution the trigger starts, exactly as <c>StartExecution</c> receives it, and the record it deploys.</summary>
+public sealed record TriggeredExecution(string Name, string Input, RecordLocation Record);
 
 /// <summary>The trigger's decisions: which events start what, under which names.</summary>
 public static class DeployerTrigger
@@ -142,11 +155,41 @@ public static class DeployerTrigger
             throw new TriggerRefused(
                 $"'{key}' is not a build record's name ({{stamp}}-{{run id}}.json), so no execution name can be derived from it.");
 
+        var record = new RecordLocation(settings.BuildRecordStore, key);
         return route.Targets
             .Select(t => new TriggeredExecution(
                 DeployExecution.Name(RequestIdFor(file.Groups["stamp"].Value, file.Groups["run"].Value, t.TenantKey), 1),
-                InputFor(new RecordLocation(settings.BuildRecordStore, key), t.Target)))
+                InputFor(record, t.Target),
+                record))
             .ToList();
+    }
+
+    /// <summary>The refs whose records deploy on their own when the config names no other: main.</summary>
+    public static readonly IReadOnlyList<string> DefaultRefs = new[] { "refs/heads/main" };
+
+    /// <summary>
+    /// Whether a record's build starts a deploy: only when it names a ref, and the ref is one the trigger allows
+    /// (DecoupledCd.md §14.3, P2 stage D2).
+    ///
+    /// <para>A SKIP, NOT A REFUSAL. A build from a branch is an ordinary event — a person trying something — and not a
+    /// failure anyone needs to act on, so it is logged and dropped rather than sent to the dead-letter queue. The record
+    /// stays in the store and can be deployed by starting its execution by hand. A record naming no ref, written before
+    /// the field existed, is skipped the same way: absence may not pass a check that asks for a branch.</para>
+    /// </summary>
+    public static (bool Start, string Reason) ShouldStart(BuildRecord record, IReadOnlyList<string> allowedRefs)
+    {
+        var allowed = string.Join(", ", allowedRefs);
+
+        if (string.IsNullOrWhiteSpace(record.BuiltFrom.Ref))
+            return (false,
+                $"the record names no git ref (it predates builtFrom.ref); only builds from {allowed} deploy on their own. " +
+                "Start its execution by hand to deploy it.");
+
+        return allowedRefs.Contains(record.BuiltFrom.Ref, StringComparer.Ordinal)
+            ? (true, $"built from {record.BuiltFrom.Ref}.")
+            : (false,
+                $"built from {record.BuiltFrom.Ref}; only builds from {allowed} deploy on their own. Start its execution by hand " +
+                "to deploy it.");
     }
 
     /// <summary><c>{stamp}-{run id}-{tenant}</c>: the build, then the tenant whose service it rolls.</summary>
@@ -351,7 +394,12 @@ public interface IExecutions
 
 /// <summary>
 /// The start function: the executions an event implies, started — or, for a name already taken, confirmed to be the
-/// same deploy.
+/// same deploy. A record built from a ref the trigger does not allow starts nothing (<see cref="DeployerTrigger.ShouldStart"/>).
+///
+/// <para>THE RECORD IS READ, BUT NOT JUDGED. The event says only where a record is, and the branch is inside it; so the
+/// function reads the record for that one field, after the event has passed every check. Everything else about the
+/// record is Verify's to decide, and a record this function cannot parse is refused into the dead-letter queue, where
+/// Verify would have refused it too.</para>
 ///
 /// <para>A DUPLICATE AFTER THE FIRST EXECUTION FINISHED is the case StartExecution does not absorb: it answers
 /// <c>ExecutionAlreadyExists</c> for a closed execution even when the input matches. So the existing execution's
@@ -363,12 +411,38 @@ public interface IExecutions
 /// </summary>
 public static class StartStep
 {
-    public static async Task<JsonObject> RunAsync(string eventJson, TriggerSettings settings, IExecutions executions)
+    public static async Task<JsonObject> RunAsync(
+        string eventJson, TriggerSettings settings, IRecordStore records, IExecutions executions)
     {
         var started = new JsonArray();
         var duplicates = new JsonArray();
 
-        foreach (var execution in DeployerTrigger.ExecutionsFor(eventJson, settings))
+        var planned = DeployerTrigger.ExecutionsFor(eventJson, settings);
+        var location = planned[0].Record;
+
+        var json = await records.ReadAsync(location.Bucket, location.Key)
+            ?? throw new TriggerRefused($"there is no build record at s3://{location.Bucket}/{location.Key}, though its event arrived.");
+
+        BuildRecord record;
+        try
+        {
+            record = BuildRecordFormat.Parse(json);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new TriggerRefused($"s3://{location.Bucket}/{location.Key} cannot be read as a build record: {ex.Message}");
+        }
+
+        var (start, reason) = DeployerTrigger.ShouldStart(record, settings.AllowedRefs);
+        if (!start)
+            return new JsonObject
+            {
+                ["started"] = started,
+                ["duplicates"] = duplicates,
+                ["skipped"] = new JsonObject { ["record"] = location.Key, ["ref"] = record.BuiltFrom.Ref, ["reason"] = reason },
+            };
+
+        foreach (var execution in planned)
         {
             if (await executions.StartAsync(settings.StateMachineArn, execution.Name, execution.Input))
             {

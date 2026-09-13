@@ -1006,14 +1006,18 @@ public class DeployerPlannerTests
         Assert.Equal(
             new[]
             {
+                // D2: the record, for its branch — image records only, no list.
+                ("s3:GetObject", "arn:aws:s3:::scu-build-records-4df6-b9c6/image/*"),
                 ("states:StartExecution", "arn:aws:states:us-west-2:503947800380:stateMachine:scu-dev-deployer"),
                 ("states:DescribeExecution", "arn:aws:states:us-west-2:503947800380:execution:scu-dev-deployer:*"),
                 ("sqs:SendMessage", "arn:aws:sqs:us-west-2:503947800380:scu-dev-deployer-start-dlq"),
             },
             grants);
 
-        Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:{plan.StateMachineName}", grants[0].Resource);
-        Assert.Equal(plan.Trigger!.DeadLetterQueueArn, grants[2].Resource);
+        Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:{plan.StateMachineName}",
+            grants.Single(g => g.Actions == "states:StartExecution").Resource);
+        Assert.Equal(plan.Trigger!.DeadLetterQueueArn, grants.Single(g => g.Actions == "sqs:SendMessage").Resource);
+        Assert.Equal(DeployerPlanner.StartFunctionRoleName(Triggered()), start.RoleName);
         Assert.False(start.InvokedByStateMachine);
         Assert.DoesNotContain("Delete", start.Policy, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(Function(plan, DeployerHandlers.Start).RoleName, plan.Functions.Where(f => f != start).Select(f => f.RoleName));
@@ -1040,7 +1044,8 @@ public class DeployerPlannerTests
         Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:scu-dev-deployer", settings.StateMachineArn);
         Assert.Equal(plan.Trigger!.Routes.Single().RecordPrefix, settings.Routes.Single().RecordPrefix);
         Assert.Equal(plan.Trigger.Routes.Single().Targets, settings.Routes.Single().Targets);
-        Assert.Equal(4, env.Count);
+        Assert.Equal(new[] { "refs/heads/main" }, settings.AllowedRefs);
+        Assert.Equal(5, env.Count);
     }
 
     [Fact]

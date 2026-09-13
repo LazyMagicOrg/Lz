@@ -33,11 +33,18 @@ public sealed record BuildRecordIdentity(
 /// declared pins, because under CPM a bare Version is a floor and the gap is silent. REQUIRED, with
 /// an empty map meaning "this build consumed none"; absence is a fault.
 /// </param>
+/// <param name="Ref">
+/// The git ref the build ran on, <c>GITHUB_REF</c> — <c>refs/heads/main</c> for a push to main. OPTIONAL, and the
+/// one field of schema 1 that is: records written before 2026-09-13 carry none, and a record is immutable, so a
+/// reader tolerates its absence rather than refusing every earlier build. What absence may NOT do is pass a check
+/// that asks for a ref — the trigger starts only records whose ref it names (DecoupledCd.md §14.3, P2 stage D2).
+/// </param>
 public sealed record BuildRecordBuiltFrom(
     string Repo,
     string Commit,
     string Lane,
-    IReadOnlyDictionary<string, string> Packages);
+    IReadOnlyDictionary<string, string> Packages,
+    string? Ref = null);
 
 /// <summary>
 /// One build record: <em>this artifact exists, and here is its provenance</em>.

@@ -132,19 +132,34 @@ public static class CrossAccount
     /// pointing at a role that no longer exists, and Verify would fail with an access denial nothing
     /// explains. The condition matches by name and survives that.</para>
     /// </summary>
+    /// <param name="startRoleName">
+    /// With the trigger (P2 stage D2), the start function's role, which reads a record for its branch: it is added to the
+    /// read statement and to nothing else — the event names the key, so it has nothing to list. Null leaves the grant as
+    /// it has been since stage C, byte for byte.
+    /// </param>
     public static IReadOnlyList<JsonObject> BuildRecordReadGrant(
-        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName)
+        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
 
         JsonObject Principal() => new() { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" };
+        string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
         JsonObject OnlyVerify() => new()
         {
             ["ArnEquals"] = new JsonObject
             {
-                ["aws:PrincipalArn"] = $"arn:aws:iam::{targetAccountId}:role/{verifyRoleName}",
+                ["aws:PrincipalArn"] = RoleArn(verifyRoleName),
             },
         };
+        JsonObject Readers() => startRoleName is null
+            ? OnlyVerify()
+            : new JsonObject
+            {
+                ["ArnEquals"] = new JsonObject
+                {
+                    ["aws:PrincipalArn"] = new JsonArray(RoleArn(verifyRoleName), RoleArn(startRoleName)),
+                },
+            };
 
         return new[]
         {
@@ -155,7 +170,7 @@ public static class CrossAccount
                 ["Principal"] = Principal(),
                 ["Action"] = "s3:GetObject",
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/image/*",
-                ["Condition"] = OnlyVerify(),
+                ["Condition"] = Readers(),
             },
             new JsonObject
             {

@@ -46,6 +46,13 @@ public sealed class RolloutStillRolling(string message) : Exception(message);
 public sealed class RolloutNotDeployed(string message) : Exception(message);
 
 /// <summary>
+/// The service already runs a NEWER build than this record's, so deploying it would put an older build back
+/// (DecoupledCd.md P2 stage D2). Not retried: the newer build is not going to get older. Thrown by Prepare, before it
+/// registers anything, unless the execution input says <c>"allowOlderBuild": true</c>.
+/// </summary>
+public sealed class DeploySuperseded(string message) : Exception(message);
+
+/// <summary>
 /// An execution's name for one deploy request, shared by the planner and the start function that names the
 /// executions it starts (DecoupledCd.md §5.1).
 /// </summary>
@@ -115,6 +122,31 @@ public sealed record DeployerInput(RecordLocation Record, DeployTarget Target)
 {
     /// <summary>The top-level fields an execution's input carries. Everything else a state reads, a state wrote.</summary>
     public static readonly string[] InputFields = { "record", "target" };
+
+    /// <summary>
+    /// Fields an input MAY carry, and only a person starting an execution by hand would write: the trigger never does.
+    /// <c>allowOlderBuild</c> deploys a record older than the build the service runs (<see cref="DeploySuperseded"/>).
+    /// </summary>
+    public static readonly string[] OptionalInputFields = { "allowOlderBuild" };
+
+    /// <summary>
+    /// Whether the input asks to deploy an older build on purpose. Only a JSON <c>true</c> does; absent is false, and
+    /// anything else is refused rather than read as a yes or a no — a quoted "true" is exactly the kind of override
+    /// that should not be guessed at.
+    /// </summary>
+    public static bool AllowsOlderBuild(JsonObject state)
+    {
+        var node = state["allowOlderBuild"];
+        if (node is null) return false;
+
+        return node.GetValueKind() switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => throw new DeployRefused("allowOlderBuild",
+                $"allowOlderBuild is {node.ToJsonString()}; it must be the JSON boolean true or false."),
+        };
+    }
 
     /// <summary>
     /// Every Lambda state receives <c>{ "state": $, "executionName": $$.Execution.Name }</c>: the
@@ -198,6 +230,7 @@ public static class DeployerEnvironment
     public const string ArtifactAccount = "LZ_ARTIFACT_ACCOUNT";
     public const string StateMachine = "LZ_STATE_MACHINE";
     public const string TriggerRoutes = "LZ_TRIGGER_ROUTES";
+    public const string TriggerRefs = "LZ_TRIGGER_REFS";
 
     /// <summary>Encode a list. Refuses a value containing the separator rather than corrupting it.</summary>
     public static string Join(IEnumerable<string> values)

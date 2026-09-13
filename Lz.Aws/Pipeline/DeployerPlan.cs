@@ -239,7 +239,7 @@ public static class DeployerPlanner
         using var policy = JsonDocument.Parse(rolePolicy);
         var states = def.RootElement.GetProperty("States").EnumerateObject().ToList();
 
-        var produced = new HashSet<string>(DeployerInput.InputFields, StringComparer.Ordinal);
+        var produced = new HashSet<string>(DeployerInput.InputFields.Concat(DeployerInput.OptionalInputFields), StringComparer.Ordinal);
         foreach (var s in states)
         {
             if (s.Value.TryGetProperty("ResultPath", out var rp) && rp.GetString() is { } path)
@@ -553,15 +553,20 @@ public static class DeployerPlanner
             MaximumEventAgeSeconds: 3600,
             Routes: routes);
 
+        if (StartFunctionRoleName(config) != $"{function}-fn")
+            throw new InvalidOperationException("the start function's role name diverged from StartFunctionRoleName, which the build account's grant names.");
+
         var startFunction = new DeployerFunction(
-            function, DeployerHandlers.Start, $"{function}-fn",
-            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn)),
+            function, DeployerHandlers.Start, StartFunctionRoleName(config),
+            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore)),
             new Dictionary<string, string>
             {
                 [DeployerEnvironment.ArtifactAccount] = artifactAccount,
                 [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
                 [DeployerEnvironment.StateMachine] = stateMachineArn,
                 [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
+                // Main only (P2 stage D2). A build from any other branch is skipped, and can be deployed by hand.
+                [DeployerEnvironment.TriggerRefs] = DeployerEnvironment.Join(DeployerTrigger.DefaultRefs),
             },
             TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
 
@@ -589,6 +594,12 @@ public static class DeployerPlanner
 
     /// <summary>The function that names and starts executions.</summary>
     public static string StartFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-start";
+
+    /// <summary>
+    /// The start function's role. ONE DEFINITION FOR BOTH ACCOUNTS, like <see cref="VerifyRoleName"/>: this planner creates
+    /// it, and the build account's bucket policy lets it read image records to learn their branch.
+    /// </summary>
+    public static string StartFunctionRoleName(SystemConfig config) => $"{StartFunctionName(config)}-fn";
 
     /// <summary>
     /// The build account's role that puts forwarded record events on the trigger bus. ONE DEFINITION FOR BOTH ACCOUNTS:
@@ -942,11 +953,21 @@ public static class DeployerPlanner
     };
 
     /// <summary>
-    /// What the start function may do: start THIS deployer, read back an execution of it whose name is taken, and
-    /// dead-letter its own failures. It reads no build record — Verify does — and rolls nothing.
+    /// What the start function may do: read an image record for its branch, start THIS deployer, read back an execution
+    /// of it whose name is taken, and dead-letter its own failures. It judges nothing about the record but its ref —
+    /// Verify does the rest — and rolls nothing.
     /// </summary>
-    private static object[] StartGrants(string stateMachineArn, string queueArn) => new object[]
+    private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore) => new object[]
     {
+        new
+        {
+            // IMAGE RECORDS, READ ONLY, and no list: the event names the key, so there is nothing to find. The store's
+            // bucket policy in the build account is the other half of this grant.
+            Sid = "ReadTheRecordsBranch",
+            Effect = "Allow",
+            Action = new[] { "s3:GetObject" },
+            Resource = $"arn:aws:s3:::{buildRecordStore}/{DeployerTrigger.RecordClass}/*",
+        },
         new
         {
             Sid = "StartTheDeployer",

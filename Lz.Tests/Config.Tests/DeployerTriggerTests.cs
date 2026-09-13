@@ -23,7 +23,8 @@ public class DeployerTriggerTests
 
     private static TriggerSettings Settings(params TriggerTarget[] targets) => new(
         BuildAccount, Store, Machine,
-        new[] { new TriggerRoute("image/scutara/scutaraservice/", targets.Length == 0 ? new[] { Mp } : targets) });
+        new[] { new TriggerRoute("image/scutara/scutaraservice/", targets.Length == 0 ? new[] { Mp } : targets) },
+        DeployerTrigger.DefaultRefs);
 
     private static JsonObject Event() => new()
     {
@@ -283,6 +284,7 @@ public class DeployerTriggerTests
     [InlineData(DeployerEnvironment.BuildRecordStore)]
     [InlineData(DeployerEnvironment.StateMachine)]
     [InlineData(DeployerEnvironment.TriggerRoutes)]
+    [InlineData(DeployerEnvironment.TriggerRefs)]
     public void TheSettings_RequireEveryVariable(string missing)
     {
         var env = new Dictionary<string, string>
@@ -291,6 +293,7 @@ public class DeployerTriggerTests
             [DeployerEnvironment.BuildRecordStore] = Store,
             [DeployerEnvironment.StateMachine] = Machine,
             [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(Settings().Routes),
+            [DeployerEnvironment.TriggerRefs] = "refs/heads/main",
         };
         Assert.Equal(Settings().Routes.Single().RecordPrefix, TriggerSettings.Read(k => env.GetValueOrDefault(k)).Routes.Single().RecordPrefix);
 
@@ -359,7 +362,7 @@ public class DeployerTriggerTests
     {
         var executions = new Executions();
 
-        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), executions);
+        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), MainRecord(), executions);
 
         var start = Assert.Single(executions.Starts);
         Assert.Equal((Machine, "req-20260912T221318Z-34722020365-mp-1", ExpectedInput), start);
@@ -376,7 +379,7 @@ public class DeployerTriggerTests
         executions.Existing["req-20260912T221318Z-34722020365-mp-1"] =
             JsonNode.Parse(ExpectedInput)!.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
 
-        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), executions);
+        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), MainRecord(), executions);
 
         Assert.Empty(result["started"]!.AsArray());
         Assert.Equal("req-20260912T221318Z-34722020365-mp-1", result["duplicates"]!.AsArray().Single()!.GetValue<string>());
@@ -391,7 +394,7 @@ public class DeployerTriggerTests
         var executions = new Executions();
         executions.Existing["req-20260912T221318Z-34722020365-mp-1"] = ExpectedInput.Replace("scu-dev-cluster", "scu-cluster");
 
-        var ex = await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(), executions));
+        var ex = await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(), MainRecord(), executions));
 
         Assert.Contains("different input", ex.Message);
         Assert.Single(executions.Starts);
@@ -402,7 +405,7 @@ public class DeployerTriggerTests
     {
         var executions = new Executions { ExistsButUnreadable = true };
 
-        await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(), executions));
+        await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(), MainRecord(), executions));
     }
 
     [Fact]
@@ -412,7 +415,7 @@ public class DeployerTriggerTests
         var forged = Event();
         forged["account"] = DevAccount;
 
-        await Assert.ThrowsAsync<TriggerRefused>(() => StartStep.RunAsync(forged.ToJsonString(), Settings(), executions));
+        await Assert.ThrowsAsync<TriggerRefused>(() => StartStep.RunAsync(forged.ToJsonString(), Settings(), MainRecord(), executions));
 
         Assert.Empty(executions.Starts);
     }
@@ -424,15 +427,149 @@ public class DeployerTriggerTests
         var executions = new Executions();
         executions.Existing["req-20260912T221318Z-34722020365-zz-1"] = "{\"something\":\"else\"}";
 
-        await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(Mp, other), executions));
+        await Assert.ThrowsAsync<ExecutionConflict>(() => StartStep.RunAsync(Event().ToJsonString(), Settings(Mp, other), MainRecord(), executions));
         Assert.Contains("req-20260912T221318Z-34722020365-mp-1", executions.Existing.Keys);
 
         // The retry, once the conflicting execution is gone: mp answers as a duplicate, zz starts.
         executions.Existing.Remove("req-20260912T221318Z-34722020365-zz-1");
-        var retry = await StartStep.RunAsync(Event().ToJsonString(), Settings(Mp, other), executions);
+        var retry = await StartStep.RunAsync(Event().ToJsonString(), Settings(Mp, other), MainRecord(), executions);
 
         Assert.Equal("req-20260912T221318Z-34722020365-mp-1", retry["duplicates"]!.AsArray().Single()!.GetValue<string>());
         Assert.Equal("req-20260912T221318Z-34722020365-zz-1", retry["started"]!.AsArray().Single()!.GetValue<string>());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  Only main's builds start on their own (P2 stage D2)
+    // ---------------------------------------------------------------------------------------
+
+    private sealed class Records(string? body) : IRecordStore
+    {
+        public List<(string Bucket, string Key)> Reads { get; } = new();
+
+        public Task<string?> ReadAsync(string bucket, string key)
+        {
+            Reads.Add((bucket, key));
+            return Task.FromResult(body);
+        }
+    }
+
+    private static string RecordBody(string? gitRef) => BuildRecordFormat.Serialize(new BuildRecord(
+        BuildRecordFormat.CurrentSchema, "image",
+        new BuildRecordBuiltFrom("Scutara/ScutaraService", "a108a57c725e0c85c96ed1a6c0cdbbf5dad14b4f", "published",
+            new Dictionary<string, string> { ["LazyMagic.Shared"] = "3.0.26-alpha" }, gitRef),
+        new BuildRecordIdentity("image", Digest: "sha256:c889f5df73e1055c0c629b61be055c13a793b584dac3a3016565a18da58f3cde"),
+        "2026-09-12T22:13:18Z", "tmay", "34722020365"));
+
+    private static Records MainRecord() => new(RecordBody("refs/heads/main"));
+
+    [Fact]
+    public async Task ABuildFromMain_IsStarted_AfterItsRecordIsReadFromTheStore()
+    {
+        var records = MainRecord();
+        var executions = new Executions();
+
+        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), records, executions);
+
+        Assert.Equal((Store, Key), Assert.Single(records.Reads));
+        Assert.Single(executions.Starts);
+        Assert.Null(result["skipped"]);
+    }
+
+    [Theory]
+    [InlineData("refs/heads/feature/try-something")]
+    [InlineData("refs/heads/Main")]
+    [InlineData("refs/tags/v1.0.0")]
+    [InlineData(null)] // a record written before builtFrom.ref existed
+    public async Task ABuildFromAnyOtherRef_OrNone_IsSkipped_NotStarted_AndNotAFailure(string? gitRef)
+    {
+        var executions = new Executions();
+
+        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings(), new Records(RecordBody(gitRef)), executions);
+
+        Assert.Empty(executions.Starts);
+        Assert.Empty(result["started"]!.AsArray());
+        var skipped = (JsonObject)result["skipped"]!;
+        Assert.Equal(Key, skipped["record"]!.GetValue<string>());
+        Assert.Equal(gitRef, skipped["ref"]?.GetValue<string>());
+        Assert.Contains("refs/heads/main", skipped["reason"]!.GetValue<string>());
+        Assert.Contains("by hand", skipped["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task TheAllowedRefs_ComeFromTheSettings()
+    {
+        var settings = Settings() with { AllowedRefs = new[] { "refs/heads/main", "refs/heads/release" } };
+        var executions = new Executions();
+
+        await StartStep.RunAsync(Event().ToJsonString(), settings, new Records(RecordBody("refs/heads/release")), executions);
+
+        Assert.Single(executions.Starts);
+    }
+
+    [Fact]
+    public async Task ARecordThatIsNotThere_IsRefused_NotSkipped()
+    {
+        var executions = new Executions();
+
+        var ex = await Assert.ThrowsAsync<TriggerRefused>(() =>
+            StartStep.RunAsync(Event().ToJsonString(), Settings(), new Records(null), executions));
+
+        Assert.Contains("no build record", ex.Message);
+        Assert.Empty(executions.Starts);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"schema\": 2}")]
+    public async Task ARecordThatCannotBeParsed_IsRefused_NotSkipped(string body)
+    {
+        var executions = new Executions();
+
+        await Assert.ThrowsAsync<TriggerRefused>(() =>
+            StartStep.RunAsync(Event().ToJsonString(), Settings(), new Records(body), executions));
+
+        Assert.Empty(executions.Starts);
+    }
+
+    [Fact]
+    public async Task ARefusedEvent_NeverReadsTheStore()
+    {
+        var records = MainRecord();
+        var forged = Event();
+        forged["account"] = DevAccount;
+
+        await Assert.ThrowsAsync<TriggerRefused>(() => StartStep.RunAsync(forged.ToJsonString(), Settings(), records, new Executions()));
+
+        Assert.Empty(records.Reads);
+    }
+
+    [Fact]
+    public void ShouldStart_NamesTheRefItSawAndTheOnesItAllows()
+    {
+        var record = BuildRecordFormat.Parse(RecordBody("refs/heads/feature"));
+
+        var (start, reason) = DeployerTrigger.ShouldStart(record, DeployerTrigger.DefaultRefs);
+
+        Assert.False(start);
+        Assert.Contains("refs/heads/feature", reason);
+        Assert.Contains("refs/heads/main", reason);
+        Assert.True(DeployerTrigger.ShouldStart(BuildRecordFormat.Parse(RecordBody("refs/heads/main")), DeployerTrigger.DefaultRefs).Start);
+    }
+
+    [Fact]
+    public void TheSettings_RefuseAnEmptyRefList()
+    {
+        var env = new Dictionary<string, string>
+        {
+            [DeployerEnvironment.ArtifactAccount] = BuildAccount,
+            [DeployerEnvironment.BuildRecordStore] = Store,
+            [DeployerEnvironment.StateMachine] = Machine,
+            [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(Settings().Routes),
+            [DeployerEnvironment.TriggerRefs] = "",
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => TriggerSettings.Read(k => env.GetValueOrDefault(k)));
+        Assert.Contains(DeployerEnvironment.TriggerRefs, ex.Message);
     }
 
     // ---------------------------------------------------------------------------------------

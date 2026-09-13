@@ -182,19 +182,25 @@ public static class VerifyStep
 
         var shortCommit = record.BuiltFrom.Commit.Length > 12 ? record.BuiltFrom.Commit[..12] : record.BuiltFrom.Commit;
 
+        var builtFrom = new JsonObject
+        {
+            ["repo"] = record.BuiltFrom.Repo,
+            ["commit"] = record.BuiltFrom.Commit,
+            ["lane"] = record.BuiltFrom.Lane,
+            ["packages"] = new JsonObject(record.BuiltFrom.Packages
+                .OrderBy(p => p.Key, StringComparer.Ordinal)
+                .Select(p => KeyValuePair.Create(p.Key, (JsonNode?)JsonValue.Create(p.Value)))),
+        };
+        // The branch, when the record names one, so the evidence says which line was deployed. Absent from records
+        // written before it existed, and left absent rather than invented.
+        if (record.BuiltFrom.Ref is { } gitRef)
+            builtFrom["ref"] = gitRef;
+
         return new JsonObject
         {
             ["class"] = record.Class,
             ["digest"] = digest,
-            ["builtFrom"] = new JsonObject
-            {
-                ["repo"] = record.BuiltFrom.Repo,
-                ["commit"] = record.BuiltFrom.Commit,
-                ["lane"] = record.BuiltFrom.Lane,
-                ["packages"] = new JsonObject(record.BuiltFrom.Packages
-                    .OrderBy(p => p.Key, StringComparer.Ordinal)
-                    .Select(p => KeyValuePair.Create(p.Key, (JsonNode?)JsonValue.Create(p.Value)))),
-            },
+            ["builtFrom"] = builtFrom,
             ["builtAt"] = record.BuiltAt,
             ["workflowRunId"] = record.WorkflowRunId,
             ["scan"] = new JsonObject
@@ -247,12 +253,23 @@ public static class PrepareStep
 
         var (definition, tags) = await definitions.DescribeAsync(service.TaskDefinitionArn);
 
+        // NEVER AN OLDER BUILD OVER A NEWER ONE (DecoupledCd.md P2 stage D2). Judged against the revision the service
+        // is set to now — which an UpdateService changes at once, so a newer build still rolling counts — and before
+        // anything is registered, so a refusal leaves nothing behind.
+        var builtAt = (state["verified"] as JsonObject)?["builtAt"] is JsonValue b && b.TryGetValue<string>(out var at)
+            ? at
+            : throw new DeployRefused("verified", "the state has no verified builtAt; Prepare cannot run before Verify.");
+        var (verdict, ordering) = DeployOrdering.Judge(
+            builtAt, tags?.FirstOrDefault(t => t.Key == DeployOrdering.BuiltAtTag)?.Value, DeployerInput.AllowsOlderBuild(state));
+        if (verdict == DeployOrdering.Verdict.Superseded)
+            throw new DeploySuperseded(ordering);
+
         var container = Lz.Aws.Ops.TaskDefinitionRevision.SingleContainerNamed(definition, target.Container);
         var previousImage = container.Image;
         container.Image = image;
 
         var registered = await definitions.RegisterAsync(
-            Lz.Aws.Ops.TaskDefinitionRevision.RegisterRequestFor(definition, tags));
+            Lz.Aws.Ops.TaskDefinitionRevision.RegisterRequestFor(definition, DeployOrdering.TagsFor(tags, builtAt)));
 
         return new JsonObject
         {
@@ -260,8 +277,72 @@ public static class PrepareStep
             ["image"] = image,
             ["previousTaskDefinitionArn"] = service.TaskDefinitionArn,
             ["previousImage"] = previousImage,
+            ["ordering"] = ordering,
         };
     }
+}
+
+/// <summary>
+/// Which of two builds is newer, for Prepare (DecoupledCd.md P2 stage D2).
+///
+/// <para>THE BUILD TIME TRAVELS ON THE REVISION. Prepare tags every revision it registers with the record's
+/// <c>builtAt</c>, and reads that tag off the service's current revision before the next one: executions run
+/// independently, so an older build still waiting on its scan could otherwise finish after a newer one and put the
+/// older image back. What remains is the second between one execution's Prepare and its Deploy.</para>
+///
+/// <para>NO TAG IS NOT A REFUSAL. A revision registered outside the deployer — by <c>lz deploytenant</c>, or before this
+/// existed — carries none, and there is then nothing to compare. A tag that is not a time IS refused: only Prepare
+/// writes it, so a value it cannot read means something else did, and guessing which build is newer is the one
+/// thing this exists not to do.</para>
+/// </summary>
+public static class DeployOrdering
+{
+    /// <summary>The tag Prepare writes on the revisions it registers.</summary>
+    public const string BuiltAtTag = "lz:builtAt";
+
+    public enum Verdict { Proceed, Superseded }
+
+    public static (Verdict Verdict, string Reason) Judge(string recordBuiltAt, string? runningBuiltAt, bool allowOlderBuild)
+    {
+        var ours = Instant(recordBuiltAt)
+            ?? throw new DeployRefused("verified.builtAt",
+                $"the record's builtAt is '{recordBuiltAt}', which is not a UTC time; the build's age cannot be judged.");
+
+        if (runningBuiltAt is null)
+            return (Verdict.Proceed,
+                $"the service's current revision records no build time (it was not registered by the deployer), so this build ({recordBuiltAt}) is not compared.");
+
+        var running = Instant(runningBuiltAt)
+            ?? throw new DeployRefused(BuiltAtTag,
+                $"the service's current revision is tagged {BuiltAtTag}='{runningBuiltAt}', which is not a time. Only the " +
+                "deployer writes that tag; refusing rather than guessing which build is newer.");
+
+        if (running <= ours)
+            return (Verdict.Proceed, $"this build ({recordBuiltAt}) is not older than the one the service runs ({runningBuiltAt}).");
+
+        return allowOlderBuild
+            ? (Verdict.Proceed,
+                $"this build ({recordBuiltAt}) is older than the one the service runs ({runningBuiltAt}), and the input says allowOlderBuild.")
+            : (Verdict.Superseded,
+                $"the service already runs a newer build ({runningBuiltAt}) than this record's ({recordBuiltAt}); deploying it would " +
+                "put the older image back. Nothing was registered. To deploy an older build on purpose, start the execution with " +
+                "\"allowOlderBuild\": true.");
+    }
+
+    /// <summary>The current revision's tags with <see cref="BuiltAtTag"/> set to this build's time, every other tag kept.</summary>
+    public static List<Amazon.ECS.Model.Tag> TagsFor(List<Amazon.ECS.Model.Tag>? current, string recordBuiltAt)
+        => (current ?? new List<Amazon.ECS.Model.Tag>())
+            .Where(t => t.Key != BuiltAtTag)
+            .Append(new Amazon.ECS.Model.Tag { Key = BuiltAtTag, Value = recordBuiltAt })
+            .ToList();
+
+    // UTC only: a time without a zone would be read in whatever zone the function runs in.
+    private static DateTimeOffset? Instant(string value)
+        => value.EndsWith('Z')
+           && DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+               System.Globalization.DateTimeStyles.AdjustToUniversal, out var instant)
+            ? instant
+            : null;
 }
 
 /// <summary>

@@ -112,9 +112,12 @@ public sealed class StartFunction
         var result = await StartStep.RunAsync(
             await Io.ReadAsync(input),
             TriggerSettings.Read(Environment.GetEnvironmentVariable),
+            new S3RecordStore(Clients.S3.Value),
             new SfnExecutions(Clients.Sfn.Value));
 
-        context.Logger.LogInformation($"started {result["started"]!.ToJsonString()}; already started {result["duplicates"]!.ToJsonString()}");
+        context.Logger.LogInformation(result["skipped"] is JsonObject skipped
+            ? $"skipped {skipped["record"]}: {skipped["reason"]}"
+            : $"started {result["started"]!.ToJsonString()}; already started {result["duplicates"]!.ToJsonString()}");
         return Io.Write(result);
     }
 }
