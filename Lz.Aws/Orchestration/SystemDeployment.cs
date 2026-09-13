@@ -785,7 +785,12 @@ public class SystemDeployment
 
             // Extract short type name (e.g., "aws:ec2/vpc:Vpc" → "Vpc")
             var shortType = type.Contains(':') ? type.Split(':').Last() : type;
-            Console.WriteLine($"  {opName,-8} {shortType}: {name}");
+
+            // WHICH PROPERTIES CHANGED, by name only. Pulumi reports the keys with the step; the values are
+            // never printed, because a task definition's changed key is containerDefinitions, whose values
+            // hold secrets. Two updates of one resource for different reasons otherwise print the same line.
+            var changed = meta.Diffs is { IsDefaultOrEmpty: false } diffs ? $"  [{string.Join(", ", diffs)}]" : "";
+            Console.WriteLine($"  {opName,-8} {shortType}: {name}{changed}");
             Console.ResetColor();
         }
         else if (e.DiagnosticEvent is { } diag && diag.Severity == "error")
