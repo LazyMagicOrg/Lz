@@ -824,6 +824,54 @@ public class DeployerPlannerTests
         Assert.Null(DeployerPlanner.SignatureHooksFor(notBuilt, "worker"));
     }
 
+    // ---------------------------------------------------------------------------------------
+    //  Taking the hook off — the removal Pulumi cannot make (measured 2026-09-13)
+    // ---------------------------------------------------------------------------------------
+
+    private static readonly string OurHook = $"arn:aws:lambda:us-west-2:{TargetAccount}:function:scu-dev-signature-hook";
+    private const string ForeignHook = "arn:aws:lambda:us-west-2:111111111111:function:someone-elses-check";
+
+    [Fact]
+    public void TheHookArn_IsTheOneTheServiceAttaches()
+    {
+        Assert.Equal(DeployerPlanner.SignatureHookFor(Enforcing(), "aiphost")!.FunctionArn, DeployerPlanner.SignatureHookFunctionArn(Config(false)));
+        Assert.Equal(OurHook, DeployerPlanner.SignatureHookFunctionArn(Config(false)));
+
+        var noTarget = Config(false); noTarget.Pipeline!.TargetAccountId = null;
+        Assert.Null(DeployerPlanner.SignatureHookFunctionArn(noTarget));
+    }
+
+    [Fact]
+    public void AnUndeclaredHook_IsTakenOff_AndOnlyOurs()
+    {
+        var none = Array.Empty<SignatureHookAttachment>();
+
+        // The measured case: the flag deleted, lz's hook still attached — keep nothing.
+        var keepNothing = DeployerPlanner.HooksToKeepAfterRemoval(none, new[] { OurHook }, OurHook);
+        Assert.NotNull(keepNothing);
+        Assert.Empty(keepNothing);
+
+        // Someone else's hook survives, in its place.
+        Assert.Equal(new[] { 0, 2 }, DeployerPlanner.HooksToKeepAfterRemoval(none, new[] { ForeignHook, OurHook, ForeignHook }, OurHook)!.ToArray());
+    }
+
+    [Fact]
+    public void NothingIsRemoved_UnlessThePlanDeclaresNoneAndOursIsAttached()
+    {
+        var none = Array.Empty<SignatureHookAttachment>();
+        var declared = DeployerPlanner.SignatureHooksFor(Enforcing(), "aiphost");
+
+        // Enforcing: attaching is Pulumi's job, and removing the hook it just declared would be the defect's mirror.
+        Assert.Null(DeployerPlanner.HooksToKeepAfterRemoval(declared, new[] { OurHook }, OurHook));
+        // A service outside the pipeline is not lz's to change, whatever it has attached.
+        Assert.Null(DeployerPlanner.HooksToKeepAfterRemoval(null, new[] { OurHook }, OurHook));
+        // Nothing of ours attached: no call at all.
+        Assert.Null(DeployerPlanner.HooksToKeepAfterRemoval(none, Array.Empty<string?>(), OurHook));
+        Assert.Null(DeployerPlanner.HooksToKeepAfterRemoval(none, new[] { ForeignHook }, OurHook));
+        // No target account, so no ARN to recognise: touch nothing.
+        Assert.Null(DeployerPlanner.HooksToKeepAfterRemoval(none, new[] { OurHook }, null));
+    }
+
     [Fact]
     public void AVerifierlessHookPackage_IsRefusedOnlyWhereAServiceUsesIt()
     {

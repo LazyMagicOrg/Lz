@@ -475,8 +475,47 @@ public static class DeployerPlanner
         if (!EcrRepositoryNaming.PipelineBuildsImage(config, serviceName)) return null;
 
         return new SignatureHookAttachment(
-            $"arn:aws:lambda:{config.Region}:{p.TargetAccountId}:function:{SignatureHookFunctionName(config)}",
+            SignatureHookFunctionArn(config)!,
             $"arn:aws:iam::{p.TargetAccountId}:role/{SignatureHookInvokerRoleName(config)}");
+    }
+
+    /// <summary>
+    /// The signature hook function's ARN in the environment's account, or null without a
+    /// <c>TargetAccountId</c> — one definition for attaching the hook and for taking it off.
+    /// </summary>
+    public static string? SignatureHookFunctionArn(SystemConfig config)
+        => config.Pipeline is { TargetAccountId: { } account } && !string.IsNullOrWhiteSpace(account)
+            ? $"arn:aws:lambda:{config.Region}:{account}:function:{SignatureHookFunctionName(config)}"
+            : null;
+
+    /// <summary>
+    /// The attached lifecycle hooks to KEEP, by index, when a service's plan declares no signature hook but ECS still
+    /// has lz's — or null when there is nothing to take off.
+    ///
+    /// <para><b>THE REMOVAL PULUMI CANNOT MAKE.</b> Measured 2026-09-13 against dev, with the hook attached and
+    /// <see cref="SignatureHooksFor"/> declaring an explicit empty list: `lz deploytenant` applied
+    /// `update Service [deploymentConfiguration]` and exited 0, and the hook stayed. CloudTrail shows why. The
+    /// provider's UpdateService sent `{"strategy":"ROLLING","bakeTimeInMinutes":0}` with no `lifecycleHooks` key
+    /// at all — an empty list is dropped — and ECS keeps whatever a request leaves out. The circuit breaker,
+    /// alarms and percentages, also absent, were kept too.</para>
+    ///
+    /// <para>Null unless ALL of: the plan declares an EMPTY list (not null — a service outside the pipeline is not
+    /// lz's to change; not one hook — attaching is Pulumi's, and works); the hook's ARN is known; and lz's hook is
+    /// among those attached. Only lz's hook is removed: any other hook is kept, in order.</para>
+    /// </summary>
+    public static IReadOnlyList<int>? HooksToKeepAfterRemoval(
+        IReadOnlyList<SignatureHookAttachment>? declared, IReadOnlyList<string?> attachedTargets, string? signatureHookFunctionArn)
+    {
+        if (declared is not { Count: 0 } || signatureHookFunctionArn is null) return null;
+
+        var keep = new List<int>();
+        for (var i = 0; i < attachedTargets.Count; i++)
+        {
+            if (!string.Equals(attachedTargets[i], signatureHookFunctionArn, StringComparison.Ordinal))
+                keep.Add(i);
+        }
+
+        return keep.Count == attachedTargets.Count ? null : keep;
     }
 
     /// <summary>

@@ -89,6 +89,10 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
             var profile = _tenantConfig?.Profile ?? _config.Profile;
             var region = _tenantConfig?.Region ?? _config.Region;
 
+            // Before any skip below: turning Pipeline.EnforceSignatures off must take the hook off, and the Pulumi
+            // up this follows cannot (DeployerPlanner.HooksToKeepAfterRemoval says why).
+            await RemoveUndeclaredSignatureHookAsync(clusterName, prefix, serviceName);
+
             // Gate on the digest having actually been RESOLVED, not on config intent alone:
             // when no service and no :latest existed, ResolveImageDigestsAsync fell back to the
             // tag, the definition is not pinned, and the message below would be a lie. That
@@ -327,6 +331,78 @@ public class AwsEcsFargateCognitoDynamodbPostDeployAction : IPostDeployAction
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine($"  Apex DNS check failed (non-fatal): {ex.Message}");
+            Console.ResetColor();
+        }
+    }
+
+    /// <summary>
+    /// Take lz's signature hook off a service whose plan no longer declares it. The decision is
+    /// <see cref="Lz.Aws.Pipeline.DeployerPlanner.HooksToKeepAfterRemoval"/>; this reads the service, sends ECS the
+    /// hooks to keep (the SDK sends an empty list explicitly, which the Pulumi provider does not), and reads the
+    /// service back. Loud, not fatal, like the other steps here: a hook left attached refuses deploys rather than
+    /// admitting them, and the message says so.
+    /// </summary>
+    private async Task RemoveUndeclaredSignatureHookAsync(string clusterName, string ecsServiceName, string serviceName)
+    {
+        var declared = Lz.Aws.Pipeline.DeployerPlanner.SignatureHooksFor(_config, serviceName);
+        if (declared is not { Count: 0 }) return;
+
+        var hookArn = Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFunctionArn(_config);
+        try
+        {
+            var credentials = AwsCredentialsFactory.Resolve(_config.Profile);
+            var endpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+            using var ecs = credentials != null
+                ? new Amazon.ECS.AmazonECSClient(credentials, endpoint)
+                : new Amazon.ECS.AmazonECSClient(endpoint);
+
+            async Task<List<Amazon.ECS.Model.DeploymentLifecycleHook>> AttachedAsync()
+            {
+                var described = await ecs.DescribeServicesAsync(new Amazon.ECS.Model.DescribeServicesRequest
+                {
+                    Cluster = clusterName,
+                    Services = new List<string> { ecsServiceName },
+                });
+                // SDK v4: a collection with no members is null.
+                return described.Services?.FirstOrDefault()?.DeploymentConfiguration?.LifecycleHooks
+                       ?? new List<Amazon.ECS.Model.DeploymentLifecycleHook>();
+            }
+
+            var attached = await AttachedAsync();
+            var keep = Lz.Aws.Pipeline.DeployerPlanner.HooksToKeepAfterRemoval(
+                declared, attached.Select(h => (string?)h.HookTargetArn).ToList(), hookArn);
+            if (keep is null) return;
+
+            await ecs.UpdateServiceAsync(new Amazon.ECS.Model.UpdateServiceRequest
+            {
+                Cluster = clusterName,
+                Service = ecsServiceName,
+                DeploymentConfiguration = new Amazon.ECS.Model.DeploymentConfiguration
+                {
+                    LifecycleHooks = keep.Select(i => attached[i]).ToList(),
+                },
+            });
+
+            if ((await AttachedAsync()).Any(h => string.Equals(h.HookTargetArn, hookArn, StringComparison.Ordinal)))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(
+                    $"  {ecsServiceName}: the signature hook is STILL ATTACHED after removing it — ECS refuses every " +
+                    "unsigned image while Pipeline.EnforceSignatures says nothing is enforced.");
+                Console.ResetColor();
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  {ecsServiceName}: signature hook removed (Pipeline.EnforceSignatures is off).");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine(
+                $"  {ecsServiceName}: could not check or remove the signature hook: {ex.Message}. If it is attached, " +
+                "ECS still refuses every unsigned image.");
             Console.ResetColor();
         }
     }
