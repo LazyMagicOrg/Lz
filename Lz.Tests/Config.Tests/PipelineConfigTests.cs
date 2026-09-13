@@ -104,13 +104,18 @@ public class PipelineConfigTests
             // its only caller is a planner, and nothing that deploys anything calls it. It plans
             // resources that do not exist yet in an account the deploy path never touches.
             //
-            // NO LONGER TRUE OF ONE FUNCTION, from 2026-09-12 (C4c): SignatureHookFor is called by
+            // NO LONGER TRUE OF ONE FUNCTION, from 2026-09-12 (C4c): SignatureHooksFor is called by
             // AwsFargateTenantServiceComponent, and it is the first read of the block that MOVES A SERVICE'S
-            // PLAN — it attaches a lifecycle hook. It is null unless Pipeline.EnforceSignatures is on, its own
-            // flag, so enabling the block alone changes nothing. The absent path is pinned by
-            // DeployerPlannerTests.WithoutEnforceSignatures_NoServiceAttachesTheHook and measured as a plan:
-            // `lz previewtenant` against dev with the block enabled and EnforceSignatures off planned exactly
-            // what it planned before the change. The cross-workspace plan diff still has not been run.
+            // PLAN — it names the service's lifecycle hooks. For a service the pipeline does not build it is
+            // null and the plan never mentions them (DeployerPlannerTests.AServiceThePipelineDoesNotBuild_
+            // NeverMentionsHooks). For one it builds, the list is explicit: one hook under
+            // Pipeline.EnforceSignatures, none without. The empty case is not "nothing", deliberately. An unset
+            // list keeps whatever ECS has, and measured against dev with the hook attached, deleting the flag
+            // planned no change until the list became explicit; then it planned `update Service
+            // [deploymentConfiguration]`. What an empty list plans for a service the pipeline builds that NEVER had
+            // a hook has not been measured: dev's had one by then. Before C4c, with the block enabled and no hook
+            // code at all, `lz previewtenant` planned what it had planned before. The cross-workspace plan diff
+            // still has not been run.
             Path.Combine("Lz.Aws", "Pipeline", "DeployerPlan.cs"),
 
             // DeployerBootstrapper, 2026-09-12 (P2 stage B). Reads the block to refuse a system

@@ -176,7 +176,7 @@ public static class DeployerBootstrapper
               string.Join(", ", missingVerifierFiles) + ") and Pipeline.EnforceSignatures is on. Writing it " +
               "would replace the hook with one that answers FAILED to every deployment, so every deploy of " +
               "the service would roll back. Build Lz where Lz.Aws.Deployer/fetch-verifier.ps1 has run, or " +
-              "turn EnforceSignatures off and redeploy the tenant first."
+              "turn EnforceSignatures off and run `lz deploytenant`, which takes the hook off the service, first."
             : null;
 
     /// <summary>

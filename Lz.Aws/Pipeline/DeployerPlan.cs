@@ -458,8 +458,9 @@ public static class DeployerPlanner
 
     /// <summary>
     /// The signature hook a tenant service attaches, or null — and null is what every system without
-    /// <c>Pipeline.EnforceSignatures</c> gets, which the Fargate component answers by building exactly the
-    /// service it built before the hook existed.
+    /// <c>Pipeline.EnforceSignatures</c> gets. The Fargate component reads it through
+    /// <see cref="SignatureHooksFor"/>, which turns that null into an explicit empty list for a service the
+    /// pipeline builds, so that turning enforcement off also takes the hook off.
     ///
     /// <para><b>THE FIRST READ OF THE BLOCK THAT MOVES A SERVICE'S PLAN</b> (DecoupledCd.md §4.4.1, unverified 4).
     /// Null unless ALL of: the block is enabled; <c>EnforceSignatures</c> is on; <c>TargetAccountId</c> names the
@@ -476,6 +477,30 @@ public static class DeployerPlanner
         return new SignatureHookAttachment(
             $"arn:aws:lambda:{config.Region}:{p.TargetAccountId}:function:{SignatureHookFunctionName(config)}",
             $"arn:aws:iam::{p.TargetAccountId}:role/{SignatureHookInvokerRoleName(config)}");
+    }
+
+    /// <summary>
+    /// The lifecycle hooks a tenant service's plan NAMES — or null, when its plan must not mention them.
+    ///
+    /// <para><b>NULL</b> for every service the pipeline does not build: no enabled block, no
+    /// <c>TargetAccountId</c>, or not one of an image repository's artifacts. Those plans never set a
+    /// <c>DeploymentConfiguration</c>, exactly as before the hook existed.</para>
+    ///
+    /// <para><b>EMPTY, NOT NULL, WHEN <c>EnforceSignatures</c> IS OFF</b> for a service the pipeline does build.
+    /// A plan that leaves <c>DeploymentConfiguration</c> unset takes ECS's value for it. Measured
+    /// 2026-09-12: with the hook attached and the flag deleted from dev's config, <c>lz previewtenant</c>
+    /// planned NO CHANGES. Turning enforcement off would have left the hook refusing every workstation image,
+    /// while the config said nothing was enforced. An explicit empty list is what removes it.</para>
+    /// </summary>
+    public static IReadOnlyList<SignatureHookAttachment>? SignatureHooksFor(SystemConfig config, string serviceName)
+    {
+        if (config.Pipeline is not { Enabled: true } p) return null;
+        if (string.IsNullOrWhiteSpace(p.TargetAccountId)) return null;
+        if (!EcrRepositoryNaming.PipelineBuildsImage(config, serviceName)) return null;
+
+        return SignatureHookFor(config, serviceName) is { } hook
+            ? new[] { hook }
+            : Array.Empty<SignatureHookAttachment>();
     }
 
     /// <summary>

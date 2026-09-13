@@ -52,6 +52,19 @@ public class FargateConfigPlumbingTests
     }
 
     [Fact]
+    public void TheHookListIsExplicitForAServiceThePipelineBuilds()
+    {
+        // The defect, measured 2026-09-12: the component set DeploymentConfiguration only when there was a hook
+        // to attach, so deleting Pipeline.EnforceSignatures from dev's config planned NO CHANGE and would have
+        // left the hook refusing every workstation image. The list comes from SignatureHooksFor, which is empty
+        // rather than null for a service the pipeline builds — see DeployerPlannerTests.
+        var src = ComponentSource();
+
+        Assert.Contains("DeployerPlanner.SignatureHooksFor(systemConfig, serviceName) is { } signatureHooks", src);
+        Assert.DoesNotContain("DeployerPlanner.SignatureHookFor(systemConfig, serviceName)", src);
+    }
+
+    [Fact]
     public void DesiredCountComesFromConfigRatherThanBeingHardCoded()
     {
         // `DesiredCount = 1` made FargateConfig.DesiredCount a knob nothing read. Every config on

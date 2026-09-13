@@ -693,21 +693,28 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
 
         // THE SIGNATURE HOOK (DecoupledCd.md §4.4.1): an ECS PRE_SCALE_UP lifecycle hook that verifies the
         // new revision's image signatures before any task is scheduled, and rolls the deployment back when
-        // they do not verify. Only under Pipeline.EnforceSignatures, and assigned the same way as Alarms, so a
-        // service without it never has a DeploymentConfiguration at all and plans exactly as before.
-        if (Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(systemConfig, serviceName) is { } signatureHook)
+        // they do not verify. Assigned the same way as Alarms, so a service the pipeline does not build never
+        // has a DeploymentConfiguration and plans exactly as before.
+        //
+        // For a service the pipeline DOES build, the list is always explicit — one hook under
+        // Pipeline.EnforceSignatures, none otherwise. Leaving it unset would keep whatever ECS already has, so
+        // turning enforcement off would plan no change and leave the hook refusing deploys (measured).
+        if (Lz.Aws.Pipeline.DeployerPlanner.SignatureHooksFor(systemConfig, serviceName) is { } signatureHooks)
         {
+            var lifecycleHooks = new InputList<ServiceDeploymentConfigurationLifecycleHookArgs>();
+            foreach (var signatureHook in signatureHooks)
+            {
+                lifecycleHooks.Add(new ServiceDeploymentConfigurationLifecycleHookArgs
+                {
+                    HookTargetArn = signatureHook.FunctionArn,
+                    RoleArn = signatureHook.InvokerRoleArn,
+                    LifecycleStages = { Lz.Aws.Pipeline.SignatureHook.Stage },
+                });
+            }
+
             ecsServiceArgs.DeploymentConfiguration = new ServiceDeploymentConfigurationArgs
             {
-                LifecycleHooks =
-                {
-                    new ServiceDeploymentConfigurationLifecycleHookArgs
-                    {
-                        HookTargetArn = signatureHook.FunctionArn,
-                        RoleArn = signatureHook.InvokerRoleArn,
-                        LifecycleStages = { Lz.Aws.Pipeline.SignatureHook.Stage },
-                    },
-                },
+                LifecycleHooks = lifecycleHooks,
             };
         }
 

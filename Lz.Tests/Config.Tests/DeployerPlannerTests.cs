@@ -790,6 +790,41 @@ public class DeployerPlannerTests
     }
 
     [Fact]
+    public void AServiceThePipelineBuilds_NamesItsHooksExplicitly_EvenWhenThereAreNone()
+    {
+        var on = DeployerPlanner.SignatureHooksFor(Enforcing(), "aiphost");
+        Assert.NotNull(on);
+        Assert.Equal(DeployerPlanner.SignatureHookFor(Enforcing(), "aiphost"), Assert.Single(on));
+
+        // EMPTY, NEVER NULL, with enforcement off. Null leaves DeploymentConfiguration out of the plan, and Pulumi
+        // then keeps the hook ECS already has — measured 2026-09-12: deleting the flag from dev's config planned
+        // no change while the hook stayed attached.
+        var off = DeployerPlanner.SignatureHooksFor(Config(false), "aiphost");
+        Assert.NotNull(off);
+        Assert.Empty(off);
+    }
+
+    [Fact]
+    public void AServiceThePipelineDoesNotBuild_NeverMentionsHooks()
+    {
+        // THE ABSENT PATH for every other system and service: null, so the plan is what it was before the hook.
+        var noBlock = Enforcing(); noBlock.Pipeline = null;
+        var disabled = Enforcing(); disabled.Pipeline!.Enabled = false;
+        var noTarget = Enforcing(); noTarget.Pipeline!.TargetAccountId = null;
+        var noImages = Enforcing(); noImages.Pipeline!.Classes = new List<string> { "client" };
+
+        Assert.Null(DeployerPlanner.SignatureHooksFor(noBlock, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHooksFor(disabled, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHooksFor(noTarget, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHooksFor(noImages, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHooksFor(Enforcing(), "worker"));
+
+        // And without enforcement too: turning the flag off is not what makes these null.
+        var notBuilt = Config(false);
+        Assert.Null(DeployerPlanner.SignatureHooksFor(notBuilt, "worker"));
+    }
+
+    [Fact]
     public void AVerifierlessHookPackage_IsRefusedOnlyWhereAServiceUsesIt()
     {
         var missing = new[] { "notation", "trustpolicy.json" };
