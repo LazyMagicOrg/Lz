@@ -28,7 +28,8 @@ public enum UpdateOutcome
     UpToDate,
     /// <summary>Rolling redeploy requested (fire-and-forget; not verified).</summary>
     Deployed,
-    /// <summary>Rolling redeploy requested AND verified healthy (--wait).</summary>
+    /// <summary>Rolling redeploy requested AND verified (--wait): ECS reports the deployment this command
+    /// started SUCCESSFUL, and every running task runs the digest.</summary>
     Verified,
     /// <summary>--dry-run: a redeploy would have been triggered.</summary>
     WouldDeploy,
@@ -36,7 +37,9 @@ public enum UpdateOutcome
     NoEcrImage,
     /// <summary>Service has no running tasks — run 'lz deploytenant' to bring it up.</summary>
     NoRunningTasks,
-    /// <summary>Redeploy was triggered but the rollout failed / rolled back (--wait).</summary>
+    /// <summary>Redeploy was triggered but did not land (--wait): rolled back — by the circuit breaker, an
+    /// alarm or a lifecycle hook, with ECS's reason in the detail — stopped, finished running another
+    /// digest, or timed out.</summary>
     Failed,
 }
 
@@ -227,6 +230,10 @@ public class AwsContainerUpdater
 
         // 4. Deploy. DesiredCount is intentionally omitted throughout so ECS keeps the
         //    current count and rolls the task — no downtime either way.
+        //
+        //    The newest deployment is read FIRST, so the wait can tell the deployment this command starts
+        //    from every earlier one (see WaitForDeploymentAsync). Only when waiting: --no-wait reads nothing.
+        var baseline = wait ? (await NewestServiceDeploymentAsync(cluster, ecsService, ct))?.Arn : null;
         var currentImage = await GetServiceTaskDefinitionImageAsync(cluster, ecsService, sources, ct);
         var repositoryChanging = sources.PipelineSource != null
                                  && !string.Equals(ImagePinPolicy.RepositoryOf(currentImage), repository, StringComparison.Ordinal);
@@ -266,12 +273,139 @@ public class AwsContainerUpdater
                     $"rolling deploy requested (→ {Target(sources, repository, ecrDigest)})");
         }
 
-        // 5. Verify: block until the new task is healthy and the rollout
-        //    completes, or the circuit breaker rolls it back.
-        var (ok, reason) = await WaitForStableAsync(cluster, ecsService, ct);
+        // 5. Verify: follow the deployment this command started until ECS finishes it, and require every
+        //    running task to be on the digest — or report why ECS rolled it back.
+        var (ok, reason) = await WaitForDeploymentAsync(
+            baseline, ecrDigest,
+            token => NewestServiceDeploymentAsync(cluster, ecsService, token),
+            async token => await GetRunningImageDigestsAsync(cluster, ecsService, sources, token),
+            WaitTimeout, PollInterval, ct);
         return ok
             ? new(ecsService, UpdateOutcome.Verified, reason)
             : new(ecsService, UpdateOutcome.Failed, reason);
+    }
+
+    /// <summary>One look at a service's newest deployment, as ECS's service-deployment record has it.</summary>
+    public sealed record DeploymentLook(string Arn, string? Status, string? StatusReason);
+
+    /// <summary>What one look at the deployment this command started says.</summary>
+    public enum RolloutWait
+    {
+        /// <summary>Not finished, or finished while the previous task still drains: look again.</summary>
+        Waiting,
+
+        /// <summary>ECS finished the deployment and every running task runs the digest.</summary>
+        Landed,
+
+        /// <summary>It will not land: ECS rolled it back or stopped it, or finished it running something else.</summary>
+        NotLanded,
+    }
+
+    /// <summary>
+    /// THE VERDICT, as a pure function: whether the deployment this command started landed, from its
+    /// service-deployment status and the digests the service's running tasks report.
+    ///
+    /// <para><b>A COMPLETED DEPLOYMENT IS NOT PROOF.</b> The wait this replaced succeeded when the service had
+    /// one PRIMARY deployment in COMPLETED, and failed only if a poll caught a deployment in FAILED. It never
+    /// asked whether that PRIMARY was the deployment it had started. Under the ECS signature hook
+    /// (DecoupledCd.md §4.4.1), measured 2026-09-12 with `lz updatecontainer --digest` onto an unsigned image:
+    /// the deployment went ROLLBACK_SUCCESSFUL under five seconds after it began, and no task started. ECS
+    /// rolled back by making the previous deployment PRIMARY again, and it was COMPLETED seventeen seconds
+    /// later. Read inside those seventeen seconds, the service listed that deployment alone — the refused one
+    /// was already gone. So a refusal leaves a FAILED state that a 15-second poll can miss, followed by exactly
+    /// the completed single PRIMARY that the old wait called "verified". Here ECS's status for the
+    /// deployment this command started names the outcome, and even SUCCESSFUL counts only once the running
+    /// tasks agree.</para>
+    /// </summary>
+    /// <param name="status">The status of the deployment this command started, or null while ECS has not
+    /// recorded it yet.</param>
+    /// <param name="statusReason">ECS's own reason, e.g. "Service deployment rolled back because PRE_SCALE_UP
+    /// lifecycle hook(s) failed…".</param>
+    /// <param name="runningDigests">Distinct digests of the service container in RUNNING tasks. Read only
+    /// once the status is SUCCESSFUL; an empty list otherwise.</param>
+    public static (RolloutWait Verdict, string Reason) JudgeDeployment(
+        string? status, string? statusReason, IReadOnlyList<string> runningDigests, string targetDigest)
+    {
+        switch (status)
+        {
+            case null:
+                return (RolloutWait.Waiting, "ECS has not recorded the deployment yet");
+
+            case "SUCCESSFUL":
+                if (runningDigests.Count > 0 && runningDigests.All(d => string.Equals(d, targetDigest, StringComparison.Ordinal)))
+                    return (RolloutWait.Landed, $"deployment SUCCESSFUL; every running task runs {Short(targetDigest)}");
+
+                // Finished and NOTHING runs the digest: the service is healthy and running the wrong thing.
+                if (runningDigests.Count > 0 && !runningDigests.Contains(targetDigest, StringComparer.Ordinal))
+                    return (RolloutWait.NotLanded,
+                        $"ECS reports the deployment SUCCESSFUL, but no running task runs {Short(targetDigest)} " +
+                        $"(running {string.Join(", ", runningDigests.Select(Short))})");
+
+                // Old and new side by side, or none running yet: the previous task is still draining.
+                return (RolloutWait.Waiting, "deployment SUCCESSFUL; the previous task is still draining");
+
+            case "ROLLBACK_SUCCESSFUL":
+            case "ROLLBACK_FAILED":
+            case "STOPPED":
+                return (RolloutWait.NotLanded,
+                    $"deployment {status}: {(string.IsNullOrWhiteSpace(statusReason) ? "ECS gave no reason" : statusReason.Trim())}");
+
+            // PENDING, IN_PROGRESS, and the three on the way to a rollback or stop — waited out, so the
+            // verdict carries the final status (a ROLLBACK_FAILED leaves the service in a different state
+            // from a ROLLBACK_SUCCESSFUL) — and any status ECS adds later, which the timeout bounds.
+            default:
+                return (RolloutWait.Waiting, $"deployment {status}");
+        }
+    }
+
+    /// <summary>
+    /// Follow the deployment an <c>UpdateService</c> started until <see cref="JudgeDeployment"/> gives a
+    /// verdict, or the timeout does.
+    ///
+    /// <para>OURS IS THE NEWEST DEPLOYMENT THAT IS NOT <paramref name="baselineArn"/>, the newest one read
+    /// before the change. That needs no clock: a record ECS has not written yet is still the baseline, so it
+    /// is waited for. ECS lists service deployments newest first, measured with <c>--max-results 3</c> on a
+    /// service with more than three.</para>
+    ///
+    /// <para>Looks at least once, whatever the timeout. Public and static, with its AWS reads passed in, so the
+    /// loop itself is tested — the sequence ECS produced for a refused deploy included.</para>
+    /// </summary>
+    public static async Task<(bool Landed, string Reason)> WaitForDeploymentAsync(
+        string? baselineArn,
+        string targetDigest,
+        Func<CancellationToken, Task<DeploymentLook?>> newestDeployment,
+        Func<CancellationToken, Task<IReadOnlyList<string>>> runningDigests,
+        TimeSpan timeout, TimeSpan pollInterval, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.Add(timeout);
+        var last = "ECS has not recorded the deployment yet";
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var newest = await newestDeployment(ct);
+            var ours = newest != null && !string.Equals(newest.Arn, baselineArn, StringComparison.Ordinal) ? newest : null;
+
+            var running = string.Equals(ours?.Status, "SUCCESSFUL", StringComparison.Ordinal)
+                ? await runningDigests(ct)
+                : Array.Empty<string>();
+
+            var (verdict, reason) = JudgeDeployment(ours?.Status, ours?.StatusReason, running, targetDigest);
+            switch (verdict)
+            {
+                case RolloutWait.Landed: return (true, reason);
+                case RolloutWait.NotLanded: return (false, reason);
+            }
+
+            last = reason;
+            if (DateTime.UtcNow >= deadline)
+                return (false,
+                    $"timed out after {timeout.TotalMinutes:0} min waiting for the rollout ({last}) — the deploy " +
+                    "may still be in progress; check 'lz status'");
+
+            await Task.Delay(pollInterval, ct);
+        }
     }
 
     /// <summary>Short "family:revision" from a task-definition ARN, for log lines.</summary>
@@ -499,50 +633,27 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
-    /// Poll the service until exactly one PRIMARY deployment remains in the
-    /// COMPLETED rollout state with RunningCount == DesiredCount (success), or a
-    /// deployment enters the FAILED state — the circuit breaker rolled back
-    /// (failure). Times out after <see cref="WaitTimeout"/>.
+    /// The service's newest deployment record, or null when it has none. The first page is enough: ECS lists
+    /// service deployments newest first. The newest by <c>CreatedAt</c> is still picked, so the verdict never
+    /// rests on the order alone.
     /// </summary>
-    private async Task<(bool ok, string reason)> WaitForStableAsync(
-        string cluster, string ecsService, CancellationToken ct)
+    private async Task<DeploymentLook?> NewestServiceDeploymentAsync(string cluster, string ecsService, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow.Add(WaitTimeout);
-
-        while (DateTime.UtcNow < deadline)
+        var response = await _ecs.ListServiceDeploymentsAsync(new ListServiceDeploymentsRequest
         {
-            ct.ThrowIfCancellationRequested();
+            Cluster = cluster,
+            Service = ecsService,
+            MaxResults = 20,
+        }, ct);
 
-            var resp = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
-            {
-                Cluster = cluster,
-                Services = new List<string> { ecsService },
-            }, ct);
+        // SDK v4: a collection with no members is null.
+        var newest = response.ServiceDeployments?
+            .OrderByDescending(d => d.CreatedAt ?? DateTime.MinValue)
+            .FirstOrDefault();
 
-            var svc = resp.Services.FirstOrDefault();
-            if (svc != null)
-            {
-                // Circuit breaker tripped on any deployment → rolled back.
-                if (svc.Deployments.Any(d => d.RolloutState == DeploymentRolloutState.FAILED))
-                    return (false,
-                        "rollout FAILED — deployment circuit breaker rolled back to the previous image");
-
-                var primary = svc.Deployments.FirstOrDefault(d => d.Status == "PRIMARY");
-                if (svc.Deployments.Count == 1
-                    && primary != null
-                    && primary.RolloutState == DeploymentRolloutState.COMPLETED
-                    && primary.RunningCount == primary.DesiredCount)
-                {
-                    return (true, "new task healthy; rollout COMPLETED");
-                }
-            }
-
-            await Task.Delay(PollInterval, ct);
-        }
-
-        return (false,
-            $"timed out after {WaitTimeout.TotalMinutes:0} min waiting for the rollout to stabilize " +
-            "(deploy may still be in progress — check 'lz status')");
+        return newest is null
+            ? null
+            : new DeploymentLook(newest.ServiceDeploymentArn, newest.Status?.Value, newest.StatusReason);
     }
 
     /// <summary>
