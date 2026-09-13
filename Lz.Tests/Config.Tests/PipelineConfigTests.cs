@@ -112,10 +112,13 @@ public class PipelineConfigTests
             // Pipeline.EnforceSignatures, none without. The empty case is not "nothing", deliberately. An unset
             // list keeps whatever ECS has, and measured against dev with the hook attached, deleting the flag
             // planned no change until the list became explicit; then it planned `update Service
-            // [deploymentConfiguration]`. What an empty list plans for a service the pipeline builds that NEVER had
-            // a hook has not been measured: dev's had one by then. Before C4c, with the block enabled and no hook
-            // code at all, `lz previewtenant` planned what it had planned before. The cross-workspace plan diff
-            // still has not been run.
+            // [deploymentConfiguration]`. Applied, that update did not remove the hook (the provider drops an
+            // empty list), so the tenant post-deploy step removes it through the SDK. Measured 2026-09-13 as a
+            // round trip against dev: removed, then re-attached, with no ECS deployment either way. With the flag
+            // off and no hook attached, `lz previewtenant --refresh` planned NO CHANGES — the empty list is quiet on
+            // a service without a hook. Before C4c, with the block enabled and no hook code at all,
+            // `lz previewtenant` planned what it had planned before. The cross-workspace plan diff still has not
+            // been run.
             Path.Combine("Lz.Aws", "Pipeline", "DeployerPlan.cs"),
 
             // DeployerBootstrapper, 2026-09-12 (P2 stage B). Reads the block to refuse a system

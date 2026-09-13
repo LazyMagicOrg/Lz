@@ -698,7 +698,9 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         //
         // For a service the pipeline DOES build, the list is always explicit — one hook under
         // Pipeline.EnforceSignatures, none otherwise. Leaving it unset would keep whatever ECS already has, so
-        // turning enforcement off would plan no change and leave the hook refusing deploys (measured).
+        // turning enforcement off would plan no change and leave the hook refusing deploys (measured). The
+        // provider does not send ECS an EMPTY list, though (measured by CloudTrail), so taking the hook off is the
+        // tenant post-deploy step's job: AwsEcsFargateCognitoDynamodbPostDeployAction.RemoveUndeclaredSignatureHookAsync.
         if (Lz.Aws.Pipeline.DeployerPlanner.SignatureHooksFor(systemConfig, serviceName) is { } signatureHooks)
         {
             var lifecycleHooks = new InputList<ServiceDeploymentConfigurationLifecycleHookArgs>();

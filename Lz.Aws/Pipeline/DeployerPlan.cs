@@ -497,7 +497,9 @@ public static class DeployerPlanner
     /// `update Service [deploymentConfiguration]` and exited 0, and the hook stayed. CloudTrail shows why. The
     /// provider's UpdateService sent `{"strategy":"ROLLING","bakeTimeInMinutes":0}` with no `lifecycleHooks` key
     /// at all — an empty list is dropped — and ECS keeps whatever a request leaves out. The circuit breaker,
-    /// alarms and percentages, also absent, were kept too.</para>
+    /// alarms and percentages, also absent, were kept too. The SDK call this decides then sent
+    /// `{"lifecycleHooks":[]}` and the hook was gone. It was re-attached by the next deploy with the flag back,
+    /// and neither direction started an ECS deployment.</para>
     ///
     /// <para>Null unless ALL of: the plan declares an EMPTY list (not null — a service outside the pipeline is not
     /// lz's to change; not one hook — attaching is Pulumi's, and works); the hook's ARN is known; and lz's hook is
@@ -529,7 +531,9 @@ public static class DeployerPlanner
     /// A plan that leaves <c>DeploymentConfiguration</c> unset takes ECS's value for it. Measured
     /// 2026-09-12: with the hook attached and the flag deleted from dev's config, <c>lz previewtenant</c>
     /// planned NO CHANGES. Turning enforcement off would have left the hook refusing every workstation image,
-    /// while the config said nothing was enforced. An explicit empty list is what removes it.</para>
+    /// while the config said nothing was enforced. The explicit empty list makes the plan say so, but applying
+    /// it does not remove the hook — the provider drops an empty list from its request (2026-09-13, CloudTrail).
+    /// The tenant post-deploy step removes it, through <see cref="HooksToKeepAfterRemoval"/>.</para>
     /// </summary>
     public static IReadOnlyList<SignatureHookAttachment>? SignatureHooksFor(SystemConfig config, string serviceName)
     {
