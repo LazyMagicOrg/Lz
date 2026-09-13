@@ -57,6 +57,19 @@ public interface IEvidenceWriter
     Task<bool> PutOnceAsync(string bucket, string key, string body);
 }
 
+/// <summary>
+/// What Prepare reads and registers — through the SDK's own task-definition types rather than plain records,
+/// because the step copies a whole definition field by field and those types are exactly that shape.
+/// </summary>
+public interface ITaskDefinitions
+{
+    /// <summary>The definition with its tags, which come back empty unless they are asked for.</summary>
+    Task<(Amazon.ECS.Model.TaskDefinition Definition, List<Amazon.ECS.Model.Tag>? Tags)> DescribeAsync(string taskDefinitionArn);
+
+    /// <summary>Register a revision; the new revision's ARN.</summary>
+    Task<string> RegisterAsync(Amazon.ECS.Model.RegisterTaskDefinitionRequest request);
+}
+
 public interface IHookReads
 {
     /// <summary>The task definition a service revision runs, or null when the revision is unknown.</summary>
@@ -185,6 +198,56 @@ public static class VerifyStep
 }
 
 /// <summary>
+/// The Prepare state (§4.6): register a revision of the service's CURRENT task definition with one
+/// container's image pinned to <c>{registry}/{repository}@{digest}</c>. The only function that writes
+/// before Deploy.
+///
+/// <para>EXTRACTED FROM ITS HANDLER on 2026-09-12 (DecoupledCd.md §14.2): the only step that writes was the
+/// only one no test drove, and its return value lands in execution state and from there in kept evidence.</para>
+///
+/// <para>THE DEFINITION NEVER LEAVES THIS STEP. It carries a plaintext client secret; what goes back into
+/// state is the new revision's ARN and the two image references, and nothing copied from the definition.</para>
+/// </summary>
+public static class PrepareStep
+{
+    public static async Task<JsonObject> RunAsync(
+        JsonObject state, string registry, IServices services, ITaskDefinitions definitions)
+    {
+        var target = DeployerInput.From(state).Target;
+
+        // The digest Verify established — never one from the input, which names only where to deploy.
+        var digest = (state["verified"] as JsonObject)?["digest"] is JsonValue v && v.TryGetValue<string>(out var d)
+            ? d
+            : throw new DeployRefused("verified", "the state has no verified digest; Prepare cannot run before Verify.");
+
+        var image = Lz.Aws.Ops.TaskDefinitionRevision.PinnedImage(registry, target.Repository, digest);
+
+        // The service's CURRENT revision is the base, read now rather than at Verify: in prod an approval
+        // can take a day, and a revision cloned from a stale read would undo whatever changed in between.
+        var service = await services.DescribeAsync(target.Cluster, target.Service)
+            ?? throw new DeployRefused("target.service",
+                $"there is no ACTIVE service '{target.Service}' in cluster '{target.Cluster}'.");
+
+        var (definition, tags) = await definitions.DescribeAsync(service.TaskDefinitionArn);
+
+        var container = Lz.Aws.Ops.TaskDefinitionRevision.SingleContainerNamed(definition, target.Container);
+        var previousImage = container.Image;
+        container.Image = image;
+
+        var registered = await definitions.RegisterAsync(
+            Lz.Aws.Ops.TaskDefinitionRevision.RegisterRequestFor(definition, tags));
+
+        return new JsonObject
+        {
+            ["taskDefinitionArn"] = registered,
+            ["image"] = image,
+            ["previousTaskDefinitionArn"] = service.TaskDefinitionArn,
+            ["previousImage"] = previousImage,
+        };
+    }
+}
+
+/// <summary>
 /// The VerifyRollout state (§4.7): one look at the service, and a verdict. Waiting is the
 /// definition's job — a <see cref="RolloutStillRolling"/> is retried there, and the retry limit is
 /// what turns a roll that never converges into a failure.
@@ -289,6 +352,49 @@ public static class VerifyRolloutStep
         }
 
         return (ours.RolloutState, null);
+    }
+
+    private static string? Text(JsonObject o, string name)
+        => o[name] is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) ? s : null;
+}
+
+/// <summary>
+/// The Record state (§4.7): write this execution's deploy evidence, once.
+///
+/// <para>A FUNCTION, NOT THE SDK INTEGRATION IT REPLACED. Record was <c>aws-sdk:s3:putObject</c> with
+/// <c>IfNoneMatch: *</c> and neither Retry nor Catch (DecoupledCd.md §14.2): a transient S3 fault after a
+/// landed roll ended the execution with nothing written anywhere, and a retry would have met its own
+/// conditional write — a 412 that an SDK integration can only report as an error, which would have sent a
+/// landed deploy to RecordFailure. Here an object already at the key is success, exactly as for failures: the
+/// key names this execution, so the object was written by it.</para>
+/// </summary>
+public static class RecordStep
+{
+    public static async Task<JsonObject> RunAsync(
+        JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer)
+    {
+        var verified = state["verified"] as JsonObject
+            ?? throw new DeployRefused("verified", "the state has no Verify result; Record cannot run first.");
+        var evidence = (state["rollout"] as JsonObject)?["evidence"] as JsonObject
+            ?? throw new DeployRefused("rollout", "the state has no rollout evidence; Record cannot run before VerifyRollout.");
+
+        var cls = Text(verified, "class");
+        var repo = verified["builtFrom"] is JsonObject builtFrom ? Text(builtFrom, "repo") : null;
+        var body = Text(evidence, "body");
+        if (cls is null || repo is null || body is null)
+            throw new DeployRefused("state",
+                "the state is missing verified.class, verified.builtFrom.repo or rollout.evidence.body.");
+
+        // THE KEY IS RECOMPUTED, not taken from state. VerifyRollout derives it the same way, so a key that
+        // disagrees means the state is not what this machine wrote — and evidence is not put where no reader
+        // would look for it.
+        var key = DeployEvidence.DeployedKey(cls, repo, executionName);
+        if (!string.Equals(Text(evidence, "key"), key, StringComparison.Ordinal))
+            throw new DeployRefused("rollout.evidence.key",
+                $"the state's evidence key is '{Text(evidence, "key")}', not '{key}', which this execution's record implies.");
+
+        var written = await writer.PutOnceAsync(evidenceStore, key, body);
+        return new JsonObject { ["key"] = key, ["written"] = written };
     }
 
     private static string? Text(JsonObject o, string name)

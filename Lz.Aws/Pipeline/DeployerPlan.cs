@@ -41,7 +41,7 @@ public sealed record DeployerFunction(
 /// <param name="EvidenceStore">Versioned bucket the Record state writes to.</param>
 /// <param name="Definition">The Amazon States Language document.</param>
 /// <param name="ApprovalRequired">Whether the machine contains a human gate at all.</param>
-/// <param name="Functions">The Lambda functions: the four the definition invokes, and the signature hook.</param>
+/// <param name="Functions">The Lambda functions: the five the definition invokes, and the signature hook.</param>
 /// <param name="HookInvokerRoleName">
 /// The role ECS assumes to invoke the signature hook — the <c>roleArn</c> of a lifecycle hook.
 /// </param>
@@ -88,11 +88,12 @@ public static class DeployerHandlers
     public static readonly string Verify = For("VerifyFunction");
     public static readonly string Prepare = For("PrepareFunction");
     public static readonly string VerifyRollout = For("VerifyRolloutFunction");
+    public static readonly string Record = For("RecordFunction");
     public static readonly string RecordFailure = For("RecordFailureFunction");
     public static readonly string SignatureHook = For("SignatureHookFunction");
 
     /// <summary>Every handler, for the packaging test.</summary>
-    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, RecordFailure, SignatureHook };
+    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook };
 
     private static string For(string type) => $"{Assembly}::{Assembly}.{type}::HandleAsync";
 }
@@ -134,6 +135,21 @@ public static class DeployerPlanner
     /// <summary>How long VerifyRollout waits for a roll: 30 s × 40 attempts, twenty minutes.</summary>
     public const int RolloutRetryIntervalSeconds = 30;
     public const int RolloutRetryMaxAttempts = 40;
+
+    /// <summary>
+    /// The errors the Deploy state retries before its Catch: ECS's server-side faults and throttling.
+    ///
+    /// <para>NAMED FROM THE DOCUMENTATION, NOT YET SEEN IN AN EXECUTION. Step Functions names an AWS SDK
+    /// integration's error <c>{Service}.{Error}</c> and always with the <c>Exception</c> suffix, even where the
+    /// service's own reference omits it; ECS's prefix is <c>Ecs</c>. <c>ServerException</c> is UpdateService's
+    /// documented 500, and <c>ThrottlingException</c>, <c>InternalFailure</c> and <c>ServiceUnavailable</c> are
+    /// ECS's common errors. Nothing a caller did wrong is here: a missing service or an invalid revision is
+    /// not going to change by asking again.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> DeployTransientErrors = new[]
+    {
+        "Ecs.ServerException", "Ecs.ThrottlingException", "Ecs.InternalFailureException", "Ecs.ServiceUnavailableException",
+    };
 
     /// <summary>
     /// An execution name for one deploy request.
@@ -347,6 +363,7 @@ public static class DeployerPlanner
             throw new InvalidOperationException("the Verify role name diverged from VerifyRoleName, which the build account's grant names.");
         var prepare = $"{sk}-{env}-deployer-prepare";
         var rollout = $"{sk}-{env}-deployer-verify-rollout";
+        var record = $"{sk}-{env}-deployer-record";
         var failure = $"{sk}-{env}-deployer-record-failure";
         var hook = $"{sk}-{env}-signature-hook";
 
@@ -375,6 +392,11 @@ public static class DeployerPlanner
                 new Dictionary<string, string>(),
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
+            new(record, DeployerHandlers.Record, $"{record}-fn",
+                Combine(Logs(region, acct, record), RecordGrants(evidence)),
+                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
+
             new(failure, DeployerHandlers.RecordFailure, $"{failure}-fn",
                 Combine(Logs(region, acct, failure), FailureGrants(evidence)),
                 new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
@@ -397,12 +419,12 @@ public static class DeployerPlanner
         return new PipelineDeployer(
             StateMachineName: $"{sk}-{env}-deployer",
             RoleName: $"{sk}-{env}-deployer",
-            RolePolicy: RolePolicyFor(region, acct, sk, evidence, invoked,
+            RolePolicy: RolePolicyFor(region, acct, sk, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null),
             DenyPolicy: DenyPolicyFor(),
             EvidenceStore: evidence,
-            Definition: DefinitionFor(evidence, approvalRequired, FnArn(verify), FnArn(prepare),
-                                      FnArn(rollout), FnArn(failure),
+            Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
+                                      FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn),
             ApprovalRequired: approvalRequired,
             Functions: functions,
@@ -430,15 +452,16 @@ public static class DeployerPlanner
     public static string VerifyRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-verify-fn";
 
     /// <summary>
-    /// The state machine's role: invoke its four functions, roll the service, write deploy evidence,
-    /// and — only when approval is required — publish to the approval topic.
+    /// The state machine's role: invoke its functions, roll the service, and — only when approval is
+    /// required — publish to the approval topic. It writes no evidence: since 2026-09-12 the Record
+    /// function does, under its own role, as RecordFailure always did.
     ///
     /// <para><c>iam:PassRole</c> is the statement to read twice: it is scoped to the service's task
     /// and execution roles by name. Unscoped, it is privilege escalation — a principal that may pass
     /// any role can register a task definition running as any role in the account.</para>
     /// </summary>
     private static string RolePolicyFor(
-        string region, string accountId, string sk, string evidence,
+        string region, string accountId, string sk,
         IReadOnlyList<string> functionArns, string? approvalTopicArn)
     {
         var statements = new List<object>
@@ -463,14 +486,6 @@ public static class DeployerPlanner
                 // re-checks PassRole for the roles a revision names is not measured. It is scoped
                 // identically, so keeping it widens nothing.
                 "PassOnlyTheServicesOwnRoles"),
-            new
-            {
-                // Write-once evidence. No delete, exactly as the build roles hold none.
-                Sid = "WriteDeployEvidence",
-                Effect = "Allow",
-                Action = new[] { "s3:PutObject" },
-                Resource = $"arn:aws:s3:::{evidence}/deploys/*",
-            },
         };
 
         if (approvalTopicArn != null)
@@ -643,6 +658,18 @@ public static class DeployerPlanner
         },
     };
 
+    private static object[] RecordGrants(string evidence) => new object[]
+    {
+        new
+        {
+            // Write-once evidence. No delete, exactly as the build roles hold none.
+            Sid = "WriteDeployEvidence",
+            Effect = "Allow",
+            Action = new[] { "s3:PutObject" },
+            Resource = $"arn:aws:s3:::{evidence}/deploys/*",
+        },
+    };
+
     private static object[] FailureGrants(string evidence) => new object[]
     {
         new
@@ -744,11 +771,14 @@ public static class DeployerPlanner
     /// bills for sleeping.</para>
     ///
     /// <para>EVERY STATE CATCHES. A failure anywhere records what happened and ends in a Fail state
-    /// — an execution that died silently would leave a request that looks pending forever.</para>
+    /// — an execution that died silently would leave a request that looks pending forever. Record catches
+    /// too, since 2026-09-12: a deploy that landed and could not be recorded is still a failure, written
+    /// down as one with the rollout that landed. RecordFailure, with nowhere left to record, ends in its own
+    /// Fail state, so the execution's error says which of the two happened.</para>
     /// </summary>
     private static string DefinitionFor(
-        string evidence, bool approvalRequired, string verifyFn, string prepareFn, string rolloutFn,
-        string failureFn, int heartbeatSeconds, string? approvalTopicArn)
+        bool approvalRequired, string verifyFn, string prepareFn, string rolloutFn,
+        string recordFn, string failureFn, int heartbeatSeconds, string? approvalTopicArn)
     {
         var catchAll = new object[]
         {
@@ -769,6 +799,18 @@ public static class DeployerPlanner
                 "Lambda.ServiceException", "Lambda.AWSLambdaException",
                 "Lambda.SdkClientException", "Lambda.TooManyRequestsException",
             },
+            IntervalSeconds = 2,
+            MaxAttempts = 3,
+            BackoffRate = 2.0,
+        };
+
+        // An S3 fault inside a function that writes evidence, after the SDK's own retries. Safe to retry: the
+        // write is conditional and an object already there counts as written, so a retry after a write that
+        // landed changes nothing. The name is the exception's class name, which is what the .NET runtime
+        // reports as the error (measured on this deployer's own refusals).
+        object EvidenceWrite() => new
+        {
+            ErrorEquals = new[] { nameof(Amazon.S3.AmazonS3Exception) },
             IntervalSeconds = 2,
             MaxAttempts = 3,
             BackoffRate = 2.0,
@@ -838,6 +880,18 @@ public static class DeployerPlanner
                     ["taskDefinition.$"] = "$.Service.TaskDefinition",
                 },
                 ResultPath = "$.deployResult",
+                // Before the Catch, so a throttled or 5xx UpdateService does not fail a verified — in prod,
+                // approved — deploy outright (DecoupledCd.md §14.2). A retry names the same revision.
+                Retry = new[]
+                {
+                    new
+                    {
+                        ErrorEquals = DeployTransientErrors,
+                        IntervalSeconds = 2,
+                        MaxAttempts = 3,
+                        BackoffRate = 2.0,
+                    },
+                },
                 Next = "VerifyRollout",
                 Catch = catchAll,
             },
@@ -863,21 +917,17 @@ public static class DeployerPlanner
                 Next = "Record",
                 Catch = catchAll,
             },
+            // Writes the evidence VerifyRollout produced, once, under a conditional write. A function rather
+            // than aws-sdk:s3:putObject so that a retry after a write that landed is success (RecordStep).
             ["Record"] = new
             {
                 Type = "Task",
-                Resource = "arn:aws:states:::aws-sdk:s3:putObject",
-                Parameters = new Dictionary<string, object>
-                {
-                    ["Bucket"] = evidence,
-                    ["Key.$"] = "$.rollout.evidence.key",
-                    ["Body.$"] = "$.rollout.evidence.body",
-                    ["ContentType"] = "application/json",
-                    // Conditional write: evidence is written once and can never be replaced.
-                    ["IfNoneMatch"] = "*",
-                },
+                Resource = recordFn,
+                Parameters = payload,
                 ResultPath = "$.recorded",
+                Retry = new[] { Transient(), EvidenceWrite() },
                 End = true,
+                Catch = catchAll,
             },
             ["RecordFailure"] = new
             {
@@ -885,14 +935,29 @@ public static class DeployerPlanner
                 Resource = failureFn,
                 Parameters = payload,
                 ResultPath = "$.failure",
-                Retry = new[] { Transient() },
+                Retry = new[] { Transient(), EvidenceWrite() },
                 Next = "Failed",
+                Catch = new[]
+                {
+                    new
+                    {
+                        ErrorEquals = new[] { "States.ALL" },
+                        Next = "EvidenceNotWritten",
+                        ResultPath = "$.recordFailureError",
+                    },
+                },
             },
             ["Failed"] = new
             {
                 Type = "Fail",
                 Error = "DeployFailed",
                 Cause = "see the evidence bucket and this execution's history",
+            },
+            ["EvidenceNotWritten"] = new
+            {
+                Type = "Fail",
+                Error = "EvidenceNotWritten",
+                Cause = "the failure could not be written to the evidence bucket; this execution's history holds both errors",
             },
         };
 

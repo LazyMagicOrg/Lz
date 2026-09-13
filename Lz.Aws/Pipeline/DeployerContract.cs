@@ -301,7 +301,9 @@ public static class DeployEvidence
             },
         };
 
-        foreach (var field in new[] { "record", "target", "verified", "deploy", "deployResult" })
+        // "rollout" since 2026-09-12: when Record fails after a landed roll, the failure still says the roll
+        // landed — and carries, in rollout.evidence, the deploy evidence that could not be written.
+        foreach (var field in new[] { "record", "target", "verified", "deploy", "deployResult", "rollout" })
         {
             if (state[field] is JsonNode n) body[field] = n.DeepClone();
         }

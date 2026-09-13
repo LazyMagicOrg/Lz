@@ -214,6 +214,145 @@ public class DeployerStepsTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  Prepare — the one step that writes before Deploy
+    // ---------------------------------------------------------------------------------------
+
+    private const string RegistryHost = "503947800380.dkr.ecr.us-west-2.amazonaws.com";
+    private const string Secret = "not-a-real-secret-but-shaped-like-one";
+
+    private sealed class Definitions(Amazon.ECS.Model.TaskDefinition definition) : ITaskDefinitions
+    {
+        public List<string> Described { get; } = new();
+        public List<Amazon.ECS.Model.RegisterTaskDefinitionRequest> Registered { get; } = new();
+
+        public Task<(Amazon.ECS.Model.TaskDefinition Definition, List<Amazon.ECS.Model.Tag>? Tags)> DescribeAsync(string arn)
+        {
+            Described.Add(arn);
+            return Task.FromResult<(Amazon.ECS.Model.TaskDefinition, List<Amazon.ECS.Model.Tag>?)>(
+                (definition, new List<Amazon.ECS.Model.Tag> { new() { Key = "System", Value = "scu" } }));
+        }
+
+        public Task<string> RegisterAsync(Amazon.ECS.Model.RegisterTaskDefinitionRequest request)
+        {
+            Registered.Add(request);
+            return Task.FromResult(NewTd);
+        }
+    }
+
+    private static Amazon.ECS.Model.TaskDefinition CurrentDefinition() => new()
+    {
+        Family = "scu-mp-aiphost",
+        Revision = 41,
+        TaskRoleArn = "arn:aws:iam::503947800380:role/scu-mp-aiphost-task-0114517",
+        ExecutionRoleArn = "arn:aws:iam::503947800380:role/scu-mp-aiphost-exec-7a3f57c",
+        Cpu = "512",
+        Memory = "1024",
+        ContainerDefinitions = new List<Amazon.ECS.Model.ContainerDefinition>
+        {
+            new()
+            {
+                Name = "aiphost",
+                Image = $"{RegistryHost}/scu-4df6-b9c6-dev-mp-aiphost@{OldDigest}",
+                Environment = new List<Amazon.ECS.Model.KeyValuePair> { new() { Name = "LZ_BFF_CLIENT_SECRET", Value = Secret } },
+            },
+            new() { Name = "otel", Image = "public.ecr.aws/aws-observability/aws-otel-collector:latest" },
+        },
+    };
+
+    private static JsonObject PrepareState()
+    {
+        var s = State();
+        s["verified"] = new JsonObject { ["digest"] = Digest };
+        return s;
+    }
+
+    [Fact]
+    public async Task Prepare_RegistersTheServicesCurrentRevision_WithOnlyItsContainerRepinned()
+    {
+        var definitions = new Definitions(CurrentDefinition());
+
+        var result = await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+
+        // The base is what the service runs NOW, not what Verify saw.
+        Assert.Equal(new[] { CurrentTd }, definitions.Described);
+
+        var request = Assert.Single(definitions.Registered);
+        Assert.Equal($"{RegistryHost}/{Repository}@{Digest}", request.ContainerDefinitions.Single(c => c.Name == "aiphost").Image);
+        Assert.Equal("public.ecr.aws/aws-observability/aws-otel-collector:latest",
+            request.ContainerDefinitions.Single(c => c.Name == "otel").Image);
+        Assert.Equal(Secret, request.ContainerDefinitions.Single(c => c.Name == "aiphost").Environment.Single().Value);
+        Assert.Equal("scu-mp-aiphost", request.Family);
+        Assert.Equal(CurrentDefinition().TaskRoleArn, request.TaskRoleArn);
+        Assert.Equal("scu", Assert.Single(request.Tags).Value);
+
+        Assert.Equal(NewTd, result["taskDefinitionArn"]!.GetValue<string>());
+        Assert.Equal(CurrentTd, result["previousTaskDefinitionArn"]!.GetValue<string>());
+        Assert.Equal($"{RegistryHost}/scu-4df6-b9c6-dev-mp-aiphost@{OldDigest}", result["previousImage"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Prepare_ReturnsNothingCopiedFromTheDefinition_SoItsSecretStaysOutOfStateAndEvidence()
+    {
+        // What Prepare returns lands in execution state, and DeployEvidence.Deployed copies it into kept evidence.
+        var result = await PrepareStep.RunAsync(
+            PrepareState(), RegistryHost, new Services(Service()), new Definitions(CurrentDefinition()));
+
+        Assert.DoesNotContain(Secret, result.ToJsonString());
+        Assert.Equal(new[] { "taskDefinitionArn", "image", "previousTaskDefinitionArn", "previousImage" },
+            result.Select(p => p.Key));
+    }
+
+    [Fact]
+    public async Task Prepare_WithoutAVerifiedDigest_ReadsAndRegistersNothing()
+    {
+        var definitions = new Definitions(CurrentDefinition());
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            PrepareStep.RunAsync(State(), RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "verified");
+        Assert.Empty(definitions.Described);
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Fact]
+    public async Task Prepare_WithNoActiveService_RegistersNothing()
+    {
+        var definitions = new Definitions(CurrentDefinition());
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(null), definitions));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "target.service");
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Fact]
+    public async Task Prepare_AContainerTheDefinitionDoesNotHave_RegistersNothing()
+    {
+        var state = PrepareState();
+        state["target"]!["container"] = "worker";
+        var definitions = new Definitions(CurrentDefinition());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+
+        Assert.Contains("no container named 'worker'", ex.Message);
+        Assert.Empty(definitions.Registered);
+    }
+
+    [Fact]
+    public async Task Prepare_ARegistryThatIsNotAnEcrHost_IsRefusedBeforeAnyRead()
+    {
+        var definitions = new Definitions(CurrentDefinition());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            PrepareStep.RunAsync(PrepareState(), "registry.example.com", new Services(Service()), definitions));
+
+        Assert.Empty(definitions.Described);
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  VerifyRollout
     // ---------------------------------------------------------------------------------------
 
@@ -320,6 +459,79 @@ public class DeployerStepsTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  Record
+    // ---------------------------------------------------------------------------------------
+
+    private static JsonObject RecordState(string key = "deploys/image/scutara/scutaraservice/req-abc-1.json")
+    {
+        var s = RolloutState();
+        s["rollout"] = new JsonObject
+        {
+            ["verdict"] = "Landed",
+            ["evidence"] = new JsonObject { ["key"] = key, ["body"] = "{\"outcome\":\"deployed\"}" },
+        };
+        return s;
+    }
+
+    [Fact]
+    public async Task Record_WritesTheEvidenceOnce_AtTheKeyThisExecutionImplies()
+    {
+        var writer = new Evidence();
+
+        var result = await RecordStep.RunAsync(RecordState(), "req-abc-1", "scu-dev-deploy-evidence-4df6-b9c6", writer);
+
+        Assert.Equal(
+            ("scu-dev-deploy-evidence-4df6-b9c6", "deploys/image/scutara/scutaraservice/req-abc-1.json", "{\"outcome\":\"deployed\"}"),
+            Assert.Single(writer.Writes));
+        Assert.True(result["written"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Record_EvidenceThisExecutionAlreadyWrote_IsSuccess()
+    {
+        // THE RETRY THE SDK INTEGRATION COULD NOT SURVIVE: the write landed, its response was lost, and the
+        // retry met the conditional write. That is a recorded deploy, not a failed one.
+        var result = await RecordStep.RunAsync(RecordState(), "req-abc-1", "bucket", new Evidence(exists: true));
+
+        Assert.False(result["written"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Record_AKeyInStateThatTheRecordDoesNotImply_IsRefused_AndNothingIsWritten()
+    {
+        var writer = new Evidence();
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
+            RecordStep.RunAsync(RecordState("deploys/image/someone/else/req-abc-1.json"), "req-abc-1", "bucket", writer));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "rollout.evidence.key");
+        Assert.Empty(writer.Writes);
+    }
+
+    [Fact]
+    public async Task Record_BeforeVerifyRollout_IsRefused()
+    {
+        await Assert.ThrowsAsync<DeployRefused>(() => RecordStep.RunAsync(RolloutState(), "req-abc-1", "bucket", new Evidence()));
+    }
+
+    [Fact]
+    public async Task WhatVerifyRolloutProduces_IsExactlyWhatRecordWrites()
+    {
+        // The two steps derive the key separately; this is the pin that they agree.
+        var state = RolloutState();
+        state["rollout"] = await VerifyRolloutStep.RunAsync(
+            state, "req-abc-1", new Services(Rolling("COMPLETED"), new[] { Running(Digest) }),
+            DateTimeOffset.Parse("2026-09-12T19:00:00Z"));
+        var writer = new Evidence();
+
+        await RecordStep.RunAsync(state, "req-abc-1", "bucket", writer);
+
+        var write = Assert.Single(writer.Writes);
+        Assert.Equal(state["rollout"]!["evidence"]!["key"]!.GetValue<string>(), write.Key);
+        Assert.Equal(state["rollout"]!["evidence"]!["body"]!.GetValue<string>(), write.Body);
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  RecordFailure
     // ---------------------------------------------------------------------------------------
 
@@ -367,6 +579,17 @@ public class DeployerStepsTests
 
         Assert.DoesNotContain("hunter2", body);
         Assert.Contains("scu-mp-aiphost", body); // the target IS copied
+    }
+
+    [Fact]
+    public void FailureEvidence_CarriesTheRollout_SoARecordThatFailedAfterALandedRollSaysItLanded()
+    {
+        var state = RecordState();
+        state["error"] = new JsonObject { ["Error"] = "AmazonS3Exception", ["Cause"] = "{}" };
+
+        using var body = JsonDocument.Parse(DeployEvidence.Failed("req-abc-1", DateTimeOffset.UtcNow, state));
+
+        Assert.Equal("Landed", body.RootElement.GetProperty("rollout").GetProperty("verdict").GetString());
     }
 
     // ---------------------------------------------------------------------------------------

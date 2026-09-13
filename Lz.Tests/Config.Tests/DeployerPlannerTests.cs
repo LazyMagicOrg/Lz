@@ -274,13 +274,19 @@ public class DeployerPlannerTests
     }
 
     [Fact]
-    public void RecordFailureMayWriteOnlyFailures_AndTheMachineOnlyDeploys()
+    public void EvidenceIsWrittenOnlyByTheTwoRecordingFunctions_EachUnderItsOwnPrefix()
     {
+        // Record writes deploys/, RecordFailure writes failures/, and the state machine writes nothing — its
+        // S3 write moved into the Record function on 2026-09-12, so a write that landed retries as success.
         var plan = Plan();
+        var record = Function(plan, DeployerHandlers.Record).Policy;
+        var failure = Function(plan, DeployerHandlers.RecordFailure).Policy;
 
-        Assert.Contains($"{plan.EvidenceStore}/failures/*", Function(plan, DeployerHandlers.RecordFailure).Policy);
-        Assert.Contains($"{plan.EvidenceStore}/deploys/*", plan.RolePolicy);
-        Assert.DoesNotContain("/failures/", plan.RolePolicy);
+        Assert.Contains($"{plan.EvidenceStore}/deploys/*", record);
+        Assert.DoesNotContain("/failures/", record);
+        Assert.Contains($"{plan.EvidenceStore}/failures/*", failure);
+        Assert.DoesNotContain("/deploys/", failure);
+        Assert.DoesNotContain("s3:PutObject", plan.RolePolicy);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -363,13 +369,60 @@ public class DeployerPlannerTests
         // and the reconciler would keep finding it and starting it again.
         var states = Definition(true).GetProperty("States");
 
-        foreach (var name in new[] { "Verify", "Approve", "Prepare", "Deploy", "VerifyRollout" })
+        // Record is in the list since 2026-09-12. It had no Catch, so a deploy that landed and could not be
+        // recorded ended the execution with nothing written anywhere.
+        foreach (var name in new[] { "Verify", "Approve", "Prepare", "Deploy", "VerifyRollout", "Record" })
         {
             var s = states.GetProperty(name);
             Assert.True(s.TryGetProperty("Catch", out var c), $"{name} has no Catch");
             Assert.Equal("RecordFailure", c[0].GetProperty("Next").GetString());
         }
     }
+
+    [Fact]
+    public void EveryTaskState_Catches_WithNoneLeftOut()
+    {
+        // Enumerated from the definition rather than listed, so a state added later is held to it too.
+        foreach (var approval in new[] { false, true })
+        {
+            foreach (var state in Definition(approval).GetProperty("States").EnumerateObject()
+                         .Where(s => s.Value.GetProperty("Type").GetString() == "Task"))
+                Assert.True(state.Value.TryGetProperty("Catch", out _), $"{state.Name} has no Catch");
+        }
+    }
+
+    [Fact]
+    public void RecordFailure_WithNowhereLeftToRecord_EndsInItsOwnFailState()
+    {
+        var states = Definition(false).GetProperty("States");
+        var failure = states.GetProperty("RecordFailure");
+
+        var catcher = Assert.Single(failure.GetProperty("Catch").EnumerateArray());
+        Assert.Equal("EvidenceNotWritten", catcher.GetProperty("Next").GetString());
+        Assert.Equal("Fail", states.GetProperty("EvidenceNotWritten").GetProperty("Type").GetString());
+        Assert.Contains(failure.GetProperty("Retry").EnumerateArray(), RetriesEvidenceFaults);
+    }
+
+    [Fact]
+    public void DeployRetriesEcsServerFaultsAndThrottling_ButNothingACallerCaused()
+    {
+        var deploy = Definition(false).GetProperty("States").GetProperty("Deploy");
+        var retry = Assert.Single(deploy.GetProperty("Retry").EnumerateArray());
+        var errors = retry.GetProperty("ErrorEquals").EnumerateArray().Select(e => e.GetString()!).ToList();
+
+        Assert.Contains("Ecs.ServerException", errors);
+        Assert.Contains("Ecs.ThrottlingException", errors);
+        // Step Functions' naming rule for SDK integrations: the service prefix, and the Exception suffix always.
+        Assert.All(errors, e => Assert.Matches(@"^Ecs\.[A-Za-z]+Exception$", e));
+        Assert.DoesNotContain("States.ALL", errors);
+        Assert.DoesNotContain("Ecs.ClientException", errors);
+        Assert.DoesNotContain("Ecs.ServiceNotActiveException", errors);
+        Assert.InRange(retry.GetProperty("MaxAttempts").GetInt32(), 1, 5);
+        Assert.Equal("RecordFailure", deploy.GetProperty("Catch")[0].GetProperty("Next").GetString());
+    }
+
+    private static bool RetriesEvidenceFaults(JsonElement retry)
+        => retry.GetProperty("ErrorEquals").EnumerateArray().Any(e => e.GetString() == nameof(Amazon.S3.AmazonS3Exception));
 
     [Fact]
     public void WithoutApproval_ThereIsNoApprovalState_NotADeadOne()
@@ -441,14 +494,18 @@ public class DeployerPlannerTests
     }
 
     [Fact]
-    public void RecordWritesTheEvidenceVerifyRolloutProduced_UnderAConditionalWrite()
+    public void RecordIsTheRecordFunction_RetriedOnEvidenceFaults_AndTheLastState()
     {
-        var record = Definition(false).GetProperty("States").GetProperty("Record");
-        var parameters = record.GetProperty("Parameters");
+        // Was aws-sdk:s3:putObject with neither Retry nor Catch. The conditional write moved into RecordStep,
+        // where an object already at the key is success rather than a 412 the definition could only fail on.
+        var plan = Plan();
+        var record = JsonDocument.Parse(plan.Definition).RootElement.GetProperty("States").GetProperty("Record");
 
-        Assert.Equal("*", parameters.GetProperty("IfNoneMatch").GetString());
-        Assert.Equal("$.rollout.evidence.key", parameters.GetProperty("Key.$").GetString());
+        Assert.Equal($"arn:aws:lambda:us-west-2:{TargetAccount}:function:{Function(plan, DeployerHandlers.Record).Name}",
+            record.GetProperty("Resource").GetString());
+        Assert.Contains(record.GetProperty("Retry").EnumerateArray(), RetriesEvidenceFaults);
         Assert.True(record.GetProperty("End").GetBoolean());
+        Assert.DoesNotContain("aws-sdk:s3", plan.Definition);
     }
 
     [Fact]
@@ -467,7 +524,7 @@ public class DeployerPlannerTests
     {
         var states = Definition(true).GetProperty("States");
 
-        foreach (var name in new[] { "Verify", "Prepare", "VerifyRollout", "RecordFailure" })
+        foreach (var name in new[] { "Verify", "Prepare", "VerifyRollout", "Record", "RecordFailure" })
         {
             var p = states.GetProperty(name).GetProperty("Parameters");
             Assert.Equal("$", p.GetProperty("state.$").GetString());

@@ -1,9 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Amazon.ECS.Model;
 using Amazon.Lambda.Core;
-using Lz.Aws.Ops;
 using Lz.Aws.Pipeline;
 
 namespace Lz.Aws.Deployer;
@@ -40,54 +38,15 @@ public sealed class PrepareFunction
     public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
     {
         var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
-        var target = DeployerInput.From(state).Target;
 
-        var digest = (state["verified"] as JsonObject)?["digest"] is JsonValue v && v.TryGetValue<string>(out var d)
-            ? d
-            : throw new DeployRefused("verified", "the state has no verified digest; Prepare cannot run before Verify.");
-
-        var image = TaskDefinitionRevision.PinnedImage(
+        // The decisions and the sequence are PrepareStep's, where a test drives them.
+        var result = await PrepareStep.RunAsync(
+            state,
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.Registry),
-            target.Repository, digest);
+            new EcsServices(Clients.Ecs.Value),
+            new EcsTaskDefinitions(Clients.Ecs.Value));
 
-        var ecs = Clients.Ecs.Value;
-
-        // The service's CURRENT revision is the base, read now rather than at Verify: in prod an
-        // approval can take a day, and a revision cloned from a stale read would undo whatever changed
-        // in between.
-        var service = (await ecs.DescribeServicesAsync(new DescribeServicesRequest
-            {
-                Cluster = target.Cluster,
-                Services = new List<string> { target.Service },
-            })).Services?.FirstOrDefault(s => s.Status == "ACTIVE")
-            ?? throw new DeployRefused("target.service",
-                $"there is no ACTIVE service '{target.Service}' in cluster '{target.Cluster}'.");
-
-        var described = await ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
-        {
-            TaskDefinition = service.TaskDefinition,
-            // Without this the tags come back empty and the new revision would silently lose them.
-            Include = new List<string> { "TAGS" },
-        });
-
-        var container = TaskDefinitionRevision.SingleContainerNamed(described.TaskDefinition, target.Container);
-        var previousImage = container.Image;
-        container.Image = image;
-
-        // THE DEFINITION NEVER LEAVES THIS FUNCTION. It carries a plaintext client secret; only the new
-        // revision's ARN and the two image references are returned into execution state.
-        var registered = await ecs.RegisterTaskDefinitionAsync(
-            TaskDefinitionRevision.RegisterRequestFor(described.TaskDefinition, described.Tags));
-
-        var result = new JsonObject
-        {
-            ["taskDefinitionArn"] = registered.TaskDefinition.TaskDefinitionArn,
-            ["image"] = image,
-            ["previousTaskDefinitionArn"] = service.TaskDefinition,
-            ["previousImage"] = previousImage,
-        };
-
-        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {image}");
+        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}");
         return Io.Write(result);
     }
 }
@@ -102,6 +61,23 @@ public sealed class VerifyRolloutFunction
             state, executionName, new EcsServices(Clients.Ecs.Value), DateTimeOffset.UtcNow);
 
         context.Logger.LogInformation($"{executionName}: rollout {result["verdict"]}");
+        return Io.Write(result);
+    }
+}
+
+public sealed class RecordFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await RecordStep.RunAsync(
+            state,
+            executionName,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
+            new S3EvidenceWriter(Clients.S3.Value));
+
+        context.Logger.LogInformation($"{executionName}: deploy recorded at {result["key"]} (written: {result["written"]})");
         return Io.Write(result);
     }
 }

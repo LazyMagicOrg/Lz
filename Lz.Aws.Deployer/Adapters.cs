@@ -148,6 +148,23 @@ internal sealed class EcrImages(IAmazonECR ecr) : IRegistryImages
     }
 }
 
+internal sealed class EcsTaskDefinitions(IAmazonECS ecs) : ITaskDefinitions
+{
+    public async Task<(TaskDefinition Definition, List<Amazon.ECS.Model.Tag>? Tags)> DescribeAsync(string taskDefinitionArn)
+    {
+        var described = await ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
+        {
+            TaskDefinition = taskDefinitionArn,
+            // Without this the tags come back empty and the new revision would silently lose them.
+            Include = new List<string> { "TAGS" },
+        });
+        return (described.TaskDefinition, described.Tags);
+    }
+
+    public async Task<string> RegisterAsync(RegisterTaskDefinitionRequest request)
+        => (await ecs.RegisterTaskDefinitionAsync(request)).TaskDefinition.TaskDefinitionArn;
+}
+
 internal sealed class EcsServices(IAmazonECS ecs) : IServices
 {
     public async Task<ServiceSnapshot?> DescribeAsync(string cluster, string service)
