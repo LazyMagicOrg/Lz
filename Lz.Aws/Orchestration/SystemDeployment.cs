@@ -1131,8 +1131,15 @@ public class SystemDeployment
             // the revision we are reading.
             var ecsService = $"{_config.SystemKey}-{tenantKey}-{svc.Name}";
             var clusters = new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" };
+
+            // WHERE THE IMAGE MAY COME FROM. The pipeline source is null on every system without the
+            // Pipeline block, and with a null source the read below is the historic one exactly. Under
+            // the block it is what keeps a pipeline image the service runs (DecoupledCd.md §14.1).
+            var sources = new ServiceImageSources(
+                svc.Name, ecrName,
+                Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(_config, svc.Name, tenantKey, region));
             var service = await AwsContainerUpdater.ReadServiceImageAsync(
-                profile, region, clusters, ecsService, ecrName);
+                profile, region, clusters, ecsService, sources);
 
             if (service.State == ServiceImageState.Unreadable)
             {
@@ -1144,6 +1151,17 @@ public class SystemDeployment
                     "  Refusing to fall back to ECR :latest — on a rolled-back service that would silently " +
                     "roll it forward. Nothing has been changed; fix the read (SSO session, permissions, " +
                     "throttling) and retry.");
+                Console.ResetColor();
+            }
+
+            if (service.State == ServiceImageState.Unrecognized)
+            {
+                // Fail CLOSED here too, for the same reason: ChooseDigest throws, and this is the half an
+                // operator reads. Under the pipeline an image from neither repository is not replaced.
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  {svc.Name}: ECS service {ecsService} is not running an image this environment deploys — {service.Error}.");
+                Console.WriteLine(
+                    "  Refusing to replace it with ECR :latest or to keep it. Nothing has been changed.");
                 Console.ResetColor();
             }
 
@@ -1165,9 +1183,14 @@ public class SystemDeployment
             }
 
             tenantConfig.ResolvedImageDigests[svc.Name] = digest;
-            Console.WriteLine(service.State == ServiceImageState.DigestPinned
-                ? $"  {svc.Name}: pinning the digest the service currently runs, {digest}"
-                : $"  {svc.Name}: no pinned service yet — pinning ECR :latest, {digest}");
+            if (service.Repository is { } pipelineRepository)
+                tenantConfig.ResolvedImageRepositories[svc.Name] = pipelineRepository;
+
+            Console.WriteLine(service.State != ServiceImageState.DigestPinned
+                ? $"  {svc.Name}: no pinned service yet — pinning ECR :latest, {digest}"
+                : service.Repository is { } kept
+                    ? $"  {svc.Name}: keeping the pipeline image the service currently runs, {kept}@{digest}"
+                    : $"  {svc.Name}: pinning the digest the service currently runs, {digest}");
         }
     }
 

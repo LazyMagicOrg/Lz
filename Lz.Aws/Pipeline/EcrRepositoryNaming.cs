@@ -57,6 +57,35 @@ public static class EcrRepositoryNaming
         => $"{systemKey}-{suffix}-{environment}-{tenantKey}-{serviceName}";
 
     /// <summary>
+    /// The pipeline's repository for one tenant service, in this environment's registry — or null, which
+    /// every caller treats as "there is no pipeline here" and answers exactly as it did before the pipeline
+    /// existed.
+    ///
+    /// <para><b>THE DEPLOY PATH'S ONLY READ OF THE BLOCK.</b> <c>lz deploytenant</c> (through
+    /// <c>SystemDeployment.ResolveImageDigestsAsync</c>) and <c>lz updatecontainer</c> call this and nothing
+    /// else, so what they can learn from <c>Pipeline</c> is exactly this one value. Null unless ALL of: the
+    /// block is present and enabled; this environment accepts the <c>image</c> class; a repository entry of
+    /// class <c>image</c> names this service among its <c>Artifacts</c>; and <c>TargetAccountId</c> says
+    /// whose registry the image is replicated into — without it no pipeline image can be told from any
+    /// other, and <c>lz bootstrapdeployer</c> refuses to build one.</para>
+    /// </summary>
+    public static Lz.Aws.Compute.PipelineImageSource? PipelineImageSourceFor(
+        SystemConfig config, string serviceName, string tenantKey, string region)
+    {
+        if (config.Pipeline is not { Enabled: true } pipeline) return null;
+        if (string.IsNullOrWhiteSpace(pipeline.TargetAccountId)) return null;
+        if (pipeline.Classes?.Contains("image", StringComparer.Ordinal) != true) return null;
+
+        var built = (pipeline.Repositories ?? new List<PipelineRepositoryConfig>()).Any(r =>
+            string.Equals(r.Class, "image", StringComparison.Ordinal)
+            && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal));
+        if (!built) return null;
+
+        return new Lz.Aws.Compute.PipelineImageSource(
+            $"{pipeline.TargetAccountId}.dkr.ecr.{region}.amazonaws.com", For(config, serviceName, tenantKey));
+    }
+
+    /// <summary>
     /// True when this system has opted into neutral naming. DEFAULTS TO FALSE — an absent Pipeline
     /// block, or a Registry block that does not name a mode, keeps today's name, so nothing about
     /// an un-opted-in system moves.

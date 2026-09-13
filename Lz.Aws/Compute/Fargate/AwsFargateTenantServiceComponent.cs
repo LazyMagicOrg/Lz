@@ -98,9 +98,15 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         // an error path: nothing has been pushed yet on a new system.
         var imagePin = ImagePinPolicy.ForTenantService(_systemConfig?.Rollback);
         var resolvedDigest = tenantConfig.ResolvedImageDigests.GetValueOrDefault(serviceName);
+
+        // THE REPOSITORY IS THE SERVICE'S OWN unless the digest resolved is a pipeline image the service
+        // already runs, which lives elsewhere and must be kept (ImagePinPolicy.ImageRepository). Without
+        // the Pipeline block nothing sets ResolvedImageRepositories, so this is ecrName, as before.
+        var imageRepository = ImagePinPolicy.ImageRepository(
+            ecrName, tenantConfig.ResolvedImageRepositories.GetValueOrDefault(serviceName), resolvedDigest, imagePin);
         var imageUri = ecsIdentity.Apply(id =>
             ImagePinPolicy.ImageRef(
-                $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{ecrName}",
+                $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{imageRepository}",
                 "latest", resolvedDigest, imagePin));
 
         // Resolve effective Fargate settings — tenant's Fargate: block, then the system's, then

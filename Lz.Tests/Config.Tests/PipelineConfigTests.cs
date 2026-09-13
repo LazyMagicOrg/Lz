@@ -88,6 +88,16 @@ public class PipelineConfigTests
             // §8.5), and on the day it does, an opted-in system's emitted plan MOVES — a repository
             // rename is a create-and-orphan, not an edit. That caller needs the real absent-path
             // comparison and the cross-workspace plan diff, not an argument.
+            //
+            // THAT DAY WAS 2026-09-12 (DecoupledCd §14.1 item 3). `lz deploytenant`
+            // (SystemDeployment.ResolveImageDigestsAsync) and `lz updatecontainer` now call
+            // PipelineImageSourceFor, and it is the deploy path's ONLY read of the block: those two
+            // files still fail this test if they read Pipeline themselves. The absent-path
+            // comparison is ServiceImageSourcesTests.WithoutThePipelineBlock_* — the historic answer
+            // for each shape of task definition, written out as data rather than computed — plus
+            // EcrRepositoryNamingTests.WithNoPipelineBlock_ThereIsNoPipelineSource. Measured: an
+            // opted-in system whose service runs a workstation image (Scutara dev) previews as it did
+            // before. NOT done: the cross-workspace plan diff, which needs the sibling accounts.
             Path.Combine("Lz.Aws", "Pipeline", "EcrRepositoryNaming.cs"),
 
             // DeployerPlan, added 2026-09-12 (P2 stage A). Same terms again: it reads the block,

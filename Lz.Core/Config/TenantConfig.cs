@@ -64,6 +64,18 @@ public class TenantConfig
     public Dictionary<string, string> ResolvedImageDigests { get; } = new();
 
     /// <summary>
+    /// The repository a digest in <see cref="ResolvedImageDigests"/> lives in, keyed by service name —
+    /// set ONLY when that is not the repository <c>lz deploycontainer</c> pushes to: under the Pipeline
+    /// block, a pipeline image the service already runs, which the next tenant deploy must keep rather
+    /// than replace. Runtime-only, like the digests.
+    ///
+    /// <para>EMPTY ON EVERY SYSTEM WITHOUT THE BLOCK — nothing else ever populates it — so the image
+    /// reference is built from the service's own repository exactly as before.</para>
+    /// </summary>
+    [YamlDotNet.Serialization.YamlIgnore]
+    public Dictionary<string, string> ResolvedImageRepositories { get; } = new();
+
+    /// <summary>
     /// Optional override for the per-tenant media S3 bucket name. When unset,
     /// the name is derived by convention: {sk}-{tk}-{stk}-media--{suffix}.
     /// Backs the Smartstore.AmazonS3 media storage provider.

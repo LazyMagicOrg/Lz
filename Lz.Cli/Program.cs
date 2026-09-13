@@ -1483,10 +1483,17 @@ class Program
                         var ecrRepo =
                             $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
 
+                        // The pipeline source is null without the Pipeline block, which makes this the
+                        // historic repository-only update exactly. Under the block the service's container
+                        // is found by name and a --digest may be a pipeline image (DecoupledCd.md §14.1).
+                        var sources = new Lz.Aws.Compute.ServiceImageSources(
+                            svcName, ecrRepo,
+                            Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(config, svcName, tk, region));
+
                         try
                         {
                             var result = await updater.UpdateIfNewerAsync(
-                                cluster, ecsService, ecrRepo, tag, force, wait, dryRun, Cts.Token,
+                                cluster, ecsService, sources, tag, force, wait, dryRun, Cts.Token,
                                 ctx.ParseResult.GetValueForOption(digestOption));
                             PrintUpdateResult(result);
                             if (result.Outcome == UpdateOutcome.Failed)

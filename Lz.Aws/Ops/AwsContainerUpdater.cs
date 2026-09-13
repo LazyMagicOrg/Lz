@@ -89,14 +89,37 @@ public class AwsContainerUpdater
     /// (an explicit <c>--force</c> on an up-to-date service) a forced redeploy is the only
     /// thing that does anything at all, so it must NOT be turned into a pointless new
     /// revision.</para>
+    ///
+    /// <para><b>A CHANGE OF REPOSITORY NEEDS A REVISION TOO</b>, whatever the definition names: a
+    /// forced redeploy re-pulls the definition's own reference, never an image from another
+    /// repository. Only the pipeline moves an image between repositories, so without the block
+    /// <paramref name="repositoryChanging"/> is always false and this is the historic decision.</para>
     /// </summary>
-    public static ContainerUpdateStrategy DecideStrategy(string? taskDefinitionImage, bool imageChanging)
-        => imageChanging && ImagePinPolicy.IsDigestPinned(taskDefinitionImage)
+    public static ContainerUpdateStrategy DecideStrategy(
+        string? taskDefinitionImage, bool imageChanging, bool repositoryChanging = false)
+        => imageChanging && (ImagePinPolicy.IsDigestPinned(taskDefinitionImage) || repositoryChanging)
             ? ContainerUpdateStrategy.RegisterNewRevision
             : ContainerUpdateStrategy.ForceRedeploy;
+
+    /// <summary>
+    /// The image a new revision names. <b>Without the pipeline, exactly the historic
+    /// <see cref="TaskDefinitionRevision.RepinImage"/></b>: the container's current repository, re-pinned.
+    /// Under it, built from parts, because the digest may be in a DIFFERENT repository from the one the
+    /// container names now — re-pinning the current one would name a digest that repository does not
+    /// have, which ECS discovers only when the new tasks fail to start.
+    /// </summary>
+    public static string ImageToRegister(string currentImage, ServiceImageSources sources, string repository, string digest)
+        => sources.PipelineSource is { } pipeline
+            ? TaskDefinitionRevision.PinnedImage(pipeline.RegistryHost, repository, digest)
+            : TaskDefinitionRevision.RepinImage(currentImage, digest);
+
     private readonly string _profile;
     private readonly string _region;
     private readonly AmazonECSClient _ecs;
+
+    // Only the pipeline's --digest check reads ECR through the SDK, so the client is made on first use:
+    // a system without the block never creates one.
+    private Amazon.ECR.AmazonECRClient? _ecr;
 
     private static readonly TimeSpan WaitTimeout = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
@@ -134,26 +157,58 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
-    /// Compare-and-(maybe)-deploy a single tenant service.
+    /// Compare-and-(maybe)-deploy a single tenant service, knowing only its repository — the historic
+    /// signature, kept for callers outside Lz. It is the no-pipeline case exactly.
     /// </summary>
-    public async Task<ContainerUpdateResult> UpdateIfNewerAsync(
+    public Task<ContainerUpdateResult> UpdateIfNewerAsync(
         string cluster, string ecsService, string ecrRepo, string tag,
         bool force, bool wait, bool dryRun, CancellationToken ct,
         string? targetDigest = null)
+        => UpdateIfNewerAsync(cluster, ecsService, new ServiceImageSources("", ecrRepo, null),
+            tag, force, wait, dryRun, ct, targetDigest);
+
+    /// <summary>
+    /// Compare-and-(maybe)-deploy a single tenant service.
+    /// </summary>
+    public async Task<ContainerUpdateResult> UpdateIfNewerAsync(
+        string cluster, string ecsService, ServiceImageSources sources, string tag,
+        bool force, bool wait, bool dryRun, CancellationToken ct,
+        string? targetDigest = null)
     {
-        // 1. The digest to deploy. An explicit --digest is taken as given — that is the
-        //    rollback lever, and it necessarily names something a tag no longer points at,
-        //    so resolving a tag here would defeat it. Otherwise resolve from the tag.
-        var ecrDigest = !string.IsNullOrWhiteSpace(targetDigest)
-            ? targetDigest
-            : await EcrDeployer.GetImageDigestAsync(_profile, _region, ecrRepo, tag);
+        var ecrRepo = sources.WorkstationRepository;
+
+        // 1. The digest to deploy, and the repository it is deployed from. An explicit --digest is
+        //    taken as given — that is the rollback lever, and it necessarily names something a tag no
+        //    longer points at, so resolving a tag here would defeat it. Otherwise resolve from the tag.
+        //    Under the pipeline a --digest may be a pipeline image, so its repository is looked up.
+        var repository = ecrRepo;
+        string? ecrDigest;
+        if (!string.IsNullOrWhiteSpace(targetDigest))
+        {
+            ecrDigest = targetDigest;
+            if (sources.PipelineSource is { } pipeline)
+            {
+                var (found, refusal) = ImagePinPolicy.IsSha256Digest(targetDigest)
+                    ? ImagePinPolicy.RepositoryForDigest(targetDigest, sources,
+                        await DigestPresenceAsync(ecrRepo, targetDigest, ct),
+                        await DigestPresenceAsync(pipeline.Repository, targetDigest, ct))
+                    : ImagePinPolicy.RepositoryForDigest(targetDigest, sources, DigestPresence.Absent, DigestPresence.Absent);
+                if (refusal != null)
+                    return new(ecsService, UpdateOutcome.NoEcrImage, refusal);
+                repository = found!;
+            }
+        }
+        else
+        {
+            ecrDigest = await EcrDeployer.GetImageDigestAsync(_profile, _region, ecrRepo, tag);
+        }
 
         if (string.IsNullOrEmpty(ecrDigest))
             return new(ecsService, UpdateOutcome.NoEcrImage,
                 $"no '{tag}' image in ECR repo {ecrRepo} — run 'lz deploycontainer' first");
 
         // 2. Digest(s) of the image currently running in the service's task(s).
-        var running = await GetRunningImageDigestsAsync(cluster, ecsService, ecrRepo, ct);
+        var running = await GetRunningImageDigestsAsync(cluster, ecsService, sources, ct);
         if (running.Count == 0)
             return new(ecsService, UpdateOutcome.NoRunningTasks,
                 "no running tasks — run 'lz deploytenant' to bring the service up first");
@@ -172,8 +227,10 @@ public class AwsContainerUpdater
 
         // 4. Deploy. DesiredCount is intentionally omitted throughout so ECS keeps the
         //    current count and rolls the task — no downtime either way.
-        var currentImage = await GetServiceTaskDefinitionImageAsync(cluster, ecsService, ecrRepo, ct);
-        var strategy = DecideStrategy(currentImage, imageChanging: !alreadyCurrent);
+        var currentImage = await GetServiceTaskDefinitionImageAsync(cluster, ecsService, sources, ct);
+        var repositoryChanging = sources.PipelineSource != null
+                                 && !string.Equals(ImagePinPolicy.RepositoryOf(currentImage), repository, StringComparison.Ordinal);
+        var strategy = DecideStrategy(currentImage, imageChanging: !alreadyCurrent, repositoryChanging);
 
         if (strategy == ContainerUpdateStrategy.RegisterNewRevision)
         {
@@ -182,7 +239,7 @@ public class AwsContainerUpdater
             // and point the service at it — ONE UpdateService is one deployment, so
             // ForceNewDeployment is deliberately not also set here.
             var newArn = await RegisterRevisionWithImageAsync(
-                cluster, ecsService, ecrRepo, ecrDigest, ct);
+                cluster, ecsService, sources, repository, ecrDigest, ct);
 
             await _ecs.UpdateServiceAsync(new UpdateServiceRequest
             {
@@ -193,7 +250,7 @@ public class AwsContainerUpdater
 
             if (!wait)
                 return new(ecsService, UpdateOutcome.Deployed,
-                    $"rolling deploy requested via new revision {ShortArn(newArn)} (→ {Short(ecrDigest)})");
+                    $"rolling deploy requested via new revision {ShortArn(newArn)} (→ {Target(sources, repository, ecrDigest)})");
         }
         else
         {
@@ -206,7 +263,7 @@ public class AwsContainerUpdater
 
             if (!wait)
                 return new(ecsService, UpdateOutcome.Deployed,
-                    $"rolling deploy requested (→ {Short(ecrDigest)})");
+                    $"rolling deploy requested (→ {Target(sources, repository, ecrDigest)})");
         }
 
         // 5. Verify: block until the new task is healthy and the rollout
@@ -236,11 +293,12 @@ public class AwsContainerUpdater
     /// <see cref="ReadServiceImageAsync"/>, which keeps failure distinct from absence.</para>
     /// </summary>
     private async Task<string?> GetServiceTaskDefinitionImageAsync(
-        string cluster, string ecsService, string ecrRepo, CancellationToken ct)
+        string cluster, string ecsService, ServiceImageSources sources, CancellationToken ct)
     {
         try
         {
-            return (await ReadServiceTaskDefinitionImageAsync(cluster, ecsService, ecrRepo, ct)).Image;
+            var (_, containers) = await ReadServiceTaskDefinitionContainersAsync(cluster, ecsService, ct);
+            return ImagePinPolicy.SelectContainerImage(containers, sources);
         }
         catch
         {
@@ -258,8 +316,8 @@ public class AwsContainerUpdater
     /// <c>destroytenant</c> left DRAINING or INACTIVE, and reading ITS definition would make a
     /// recreated service inherit whatever the torn-down one last ran.</para>
     /// </summary>
-    private async Task<(bool ServiceActive, string? Image)> ReadServiceTaskDefinitionImageAsync(
-        string cluster, string ecsService, string ecrRepo, CancellationToken ct)
+    private async Task<(bool ServiceActive, IReadOnlyList<DefinedContainer> Containers)> ReadServiceTaskDefinitionContainersAsync(
+        string cluster, string ecsService, CancellationToken ct)
     {
         var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
         {
@@ -269,23 +327,24 @@ public class AwsContainerUpdater
 
         var service = svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE");
         var taskDefArn = service?.TaskDefinition;
-        if (string.IsNullOrEmpty(taskDefArn)) return (false, null);
+        if (string.IsNullOrEmpty(taskDefArn)) return (false, Array.Empty<DefinedContainer>());
 
         var td = await _ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
         {
             TaskDefinition = taskDefArn,
         }, ct);
 
-        var image = td.TaskDefinition?.ContainerDefinitions?
-            .FirstOrDefault(c => c.Image != null && c.Image.Contains(ecrRepo, StringComparison.Ordinal))?
-            .Image;
-        return (true, image);
+        // SDK v4: a collection with no members is null.
+        var containers = (td.TaskDefinition?.ContainerDefinitions ?? new List<ContainerDefinition>())
+            .Select(c => new DefinedContainer(c.Name, c.Image))
+            .ToList();
+        return (true, containers);
     }
 
     /// <summary>
     /// Register a NEW revision of the service's current task definition, identical except
-    /// that the container pulling from <paramref name="ecrRepo"/> names
-    /// <c>{repo}@{digest}</c>. Returns the new revision's ARN.
+    /// that the service's container names <paramref name="repository"/>@<paramref name="digest"/>
+    /// (<see cref="ImageToRegister"/>). Returns the new revision's ARN.
     ///
     /// <para><b>Every register-able field must be copied deliberately.</b> RegisterTaskDefinition
     /// does not inherit from the previous revision — anything omitted is silently dropped, so
@@ -297,7 +356,8 @@ public class AwsContainerUpdater
     /// client secret, so this must never be logged, serialized to a temp file, or echoed.</para>
     /// </summary>
     private async Task<string> RegisterRevisionWithImageAsync(
-        string cluster, string ecsService, string ecrRepo, string digest, CancellationToken ct)
+        string cluster, string ecsService, ServiceImageSources sources, string repository, string digest,
+        CancellationToken ct)
     {
         var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
         {
@@ -317,14 +377,18 @@ public class AwsContainerUpdater
 
         var td = described.TaskDefinition;
 
-        var target = td.ContainerDefinitions?
-            .FirstOrDefault(c => c.Image != null && c.Image.Contains(ecrRepo, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException(
-                $"no container in {ShortArn(currentArn)} pulls from {ecrRepo}");
+        // WITHOUT THE PIPELINE, the historic selection: the container whose image mentions the
+        // repository. Under it, by name — after a pipeline deploy no image mentions the workstation's.
+        var target = sources.PipelineSource is null
+            ? td.ContainerDefinitions?
+                  .FirstOrDefault(c => c.Image != null && c.Image.Contains(sources.WorkstationRepository, StringComparison.Ordinal))
+              ?? throw new InvalidOperationException(
+                  $"no container in {ShortArn(currentArn)} pulls from {sources.WorkstationRepository}")
+            : TaskDefinitionRevision.SingleContainerNamed(td, sources.ContainerName);
 
-        // The repository URI without whatever it is currently pinned to, so this works
-        // whether the definition names a tag or an existing digest.
-        target.Image = TaskDefinitionRevision.RepinImage(target.Image!, digest);
+        // Without the pipeline: the repository URI without whatever it is currently pinned to, so this
+        // works whether the definition names a tag or an existing digest.
+        target.Image = ImageToRegister(target.Image!, sources, repository, digest);
 
         // THE FIELD COPY IS SHARED with the decoupled-CD deployer's Prepare function — see
         // TaskDefinitionRevision for why it must not exist twice.
@@ -335,8 +399,8 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
-    /// What image the service's current task definition names for the container that pulls
-    /// from <paramref name="ecrRepo"/>, as a <see cref="ServiceImageRead"/>: the digest when
+    /// What image the service's current task definition names for the service's container
+    /// (<see cref="ImagePinPolicy.ClassifyServiceContainers"/>), as a <see cref="ServiceImageRead"/>: the digest when
     /// the definition is pinned, <see cref="ServiceImageState.NotDigestPinned"/> for a
     /// pre-pinning tag-form revision, <see cref="ServiceImageState.NoService"/> when no ACTIVE
     /// cluster or service exists — and <see cref="ServiceImageState.Unreadable"/> when the read
@@ -354,7 +418,7 @@ public class AwsContainerUpdater
     /// </summary>
     public static async Task<ServiceImageRead> ReadServiceImageAsync(
         string profile, string region, IReadOnlyList<string> clusterCandidates,
-        string ecsService, string ecrRepo)
+        string ecsService, ServiceImageSources sources)
     {
         try
         {
@@ -362,9 +426,9 @@ public class AwsContainerUpdater
             var cluster = await updater.ResolveClusterAsync(clusterCandidates, CancellationToken.None);
             if (cluster is null) return ServiceImageRead.NoService;
 
-            var (active, image) = await updater.ReadServiceTaskDefinitionImageAsync(
-                cluster, ecsService, ecrRepo, CancellationToken.None);
-            return ImagePinPolicy.ClassifyServiceImage(active, image);
+            var (active, containers) = await updater.ReadServiceTaskDefinitionContainersAsync(
+                cluster, ecsService, CancellationToken.None);
+            return ImagePinPolicy.ClassifyServiceContainers(active, containers, sources);
         }
         catch (Exception ex)
         {
@@ -392,7 +456,7 @@ public class AwsContainerUpdater
 
             var updater = new AwsContainerUpdater(profile, region);
             var running = await updater.GetRunningImageDigestsAsync(
-                cluster, ecsService, ecrRepo, CancellationToken.None);
+                cluster, ecsService, new ServiceImageSources("", ecrRepo, null), CancellationToken.None);
 
             return running.Count > 0 && running.All(d => d == ecrDigest);
         }
@@ -403,11 +467,11 @@ public class AwsContainerUpdater
     }
 
     /// <summary>
-    /// Distinct image digests of the RUNNING tasks' container that pulls from
-    /// the given ECR repo. Empty if the service has no running tasks.
+    /// Distinct image digests of the RUNNING tasks' container — the service's, by
+    /// <see cref="ImagePinPolicy.IsTheServicesContainer"/>. Empty if the service has no running tasks.
     /// </summary>
     private async Task<List<string>> GetRunningImageDigestsAsync(
-        string cluster, string ecsService, string ecrRepo, CancellationToken ct)
+        string cluster, string ecsService, ServiceImageSources sources, CancellationToken ct)
     {
         var list = await _ecs.ListTasksAsync(new ListTasksRequest
         {
@@ -428,7 +492,7 @@ public class AwsContainerUpdater
         return desc.Tasks
             .SelectMany(t => t.Containers)
             .Where(c => !string.IsNullOrEmpty(c.ImageDigest)
-                        && (c.Image?.Contains(ecrRepo) ?? false))
+                        && ImagePinPolicy.IsTheServicesContainer(c.Name, c.Image, sources))
             .Select(c => c.ImageDigest)
             .Distinct()
             .ToList();
@@ -481,10 +545,58 @@ public class AwsContainerUpdater
             "(deploy may still be in progress — check 'lz status')");
     }
 
+    /// <summary>
+    /// Whether <paramref name="repository"/> holds <paramref name="digest"/>, as a tri-state: a failed read
+    /// is never taken as absent.
+    /// </summary>
+    private async Task<DigestPresence> DigestPresenceAsync(string repository, string digest, CancellationToken ct)
+    {
+        try
+        {
+            _ecr ??= CreateEcrClient(_region, _profile);
+            var found = await _ecr.DescribeImagesAsync(new Amazon.ECR.Model.DescribeImagesRequest
+            {
+                RepositoryName = repository,
+                ImageIds = new List<Amazon.ECR.Model.ImageIdentifier> { new() { ImageDigest = digest } },
+            }, ct);
+
+            // SDK v4: a collection with no members is null.
+            return found.ImageDetails?.Any(d => string.Equals(d.ImageDigest, digest, StringComparison.Ordinal)) == true
+                ? DigestPresence.Present
+                : DigestPresence.Absent;
+        }
+        catch (Amazon.ECR.Model.ImageNotFoundException)
+        {
+            return DigestPresence.Absent;
+        }
+        catch (Amazon.ECR.Model.RepositoryNotFoundException)
+        {
+            return DigestPresence.Absent;
+        }
+        catch (Exception)
+        {
+            return DigestPresence.Unreadable;
+        }
+    }
+
+    /// <summary>What a log line says was deployed: the digest, and under the pipeline its repository too.</summary>
+    private static string Target(ServiceImageSources sources, string repository, string digest)
+        => sources.PipelineSource is null ? Short(digest) : $"{repository}@{Short(digest)}";
+
     private static string Short(string digest) =>
         digest.StartsWith("sha256:", StringComparison.Ordinal)
             ? digest.Substring(7, Math.Min(12, digest.Length - 7))
             : digest[..Math.Min(12, digest.Length)];
+
+    private static Amazon.ECR.AmazonECRClient CreateEcrClient(string region, string profile)
+    {
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+
+        return credentials != null
+            ? new Amazon.ECR.AmazonECRClient(credentials, endpoint)
+            : new Amazon.ECR.AmazonECRClient(endpoint);
+    }
 
     private static AmazonECSClient CreateEcsClient(string region, string profile)
     {
