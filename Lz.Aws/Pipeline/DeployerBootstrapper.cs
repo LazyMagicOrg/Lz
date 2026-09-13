@@ -56,6 +56,19 @@ public static class DeployerBootstrapper
 
         Print(config, plan, accountId, profile, apply, packages);
 
+        // A VERIFIER-LESS HOOK IS REFUSED WHERE IT WOULD BE USED (DecoupledCd.md §14.2). Checked before the
+        // dry-run return so a dry run says what the apply will do.
+        var hookRefusal = RefusalForHookPackage(
+            packages[DeployerPackages.SignatureHook].MissingVerifierFiles, config.Pipeline?.EnforceSignatures == true);
+        if (hookRefusal != null)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  REFUSED: {hookRefusal}");
+            Console.ResetColor();
+            if (apply)
+                throw new InvalidOperationException($"lz bootstrapdeployer refuses: {hookRefusal}");
+        }
+
         if (!apply)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
@@ -149,6 +162,24 @@ public static class DeployerBootstrapper
     }
 
     /// <summary>
+    /// Why an apply may not write the signature-hook package as built, or null when it may.
+    ///
+    /// <para>REFUSED ONLY WHERE THE HOOK IS USED. Every CI-built Lz carries a hook package without the
+    /// Notation verifier, which is fetched on a workstation and never committed; that hook answers FAILED to
+    /// every deployment. Harmless while no service attaches it, so it is only warned about then — but under
+    /// <c>Pipeline.EnforceSignatures</c> writing it would turn every deploy of the service into a rollback,
+    /// so the apply stops before it writes anything.</para>
+    /// </summary>
+    public static string? RefusalForHookPackage(IReadOnlyList<string> missingVerifierFiles, bool enforceSignatures)
+        => enforceSignatures && missingVerifierFiles.Count > 0
+            ? "the signature-hook package has no Notation verifier (missing " +
+              string.Join(", ", missingVerifierFiles) + ") and Pipeline.EnforceSignatures is on. Writing it " +
+              "would replace the hook with one that answers FAILED to every deployment, so every deploy of " +
+              "the service would roll back. Build Lz where Lz.Aws.Deployer/fetch-verifier.ps1 has run, or " +
+              "turn EnforceSignatures off and redeploy the tenant first."
+            : null;
+
+    /// <summary>
     /// The zips each function's code comes from, read into memory, or a refusal naming what is
     /// missing. Looked for next to Lz.Aws.dll, where the build puts them in every load scenario.
     /// </summary>
@@ -222,7 +253,9 @@ public static class DeployerBootstrapper
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("    WITHOUT THE VERIFIER — missing " + string.Join(", ", package.MissingVerifierFiles));
                 Console.WriteLine("    The hook will answer FAILED to every deployment until Notation is packaged.");
-                Console.WriteLine("    Harmless while it is attached to nothing; not usable until it is.");
+                Console.WriteLine(config.Pipeline?.EnforceSignatures == true
+                    ? "    Pipeline.EnforceSignatures is on, so the service uses it: the apply is refused."
+                    : "    Harmless while no service attaches it (Pipeline.EnforceSignatures is off).");
                 Console.ResetColor();
             }
         }

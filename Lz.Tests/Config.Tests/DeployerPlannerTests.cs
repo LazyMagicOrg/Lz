@@ -737,6 +737,69 @@ public class DeployerPlannerTests
         Assert.Null(DeployerPlanner.Plan(Config(false)).ReplicationPermission);
     }
 
+    // ---------------------------------------------------------------------------------------
+    //  The signature hook as a service attaches it (C4c)
+    // ---------------------------------------------------------------------------------------
+
+    private static SystemConfig Enforcing()
+    {
+        var c = Config(false);
+        c.Pipeline!.EnforceSignatures = true;
+        return c;
+    }
+
+    [Fact]
+    public void WithoutEnforceSignatures_NoServiceAttachesTheHook()
+    {
+        // THE ABSENT PATH, and it is the one every existing system takes: the block enabled, the hook
+        // created by bootstrapdeployer, and still nothing attached, because nobody asked for enforcement.
+        Assert.False(Config(false).Pipeline!.EnforceSignatures);
+        Assert.Null(DeployerPlanner.SignatureHookFor(Config(false), "aiphost"));
+
+        var noBlock = Config(false);
+        noBlock.Pipeline = null;
+        Assert.Null(DeployerPlanner.SignatureHookFor(noBlock, "aiphost"));
+    }
+
+    [Fact]
+    public void EachConditionAlone_KeepsTheHookOff()
+    {
+        var disabled = Enforcing(); disabled.Pipeline!.Enabled = false;
+        var noTarget = Enforcing(); noTarget.Pipeline!.TargetAccountId = null;
+        var noImages = Enforcing(); noImages.Pipeline!.Classes = new List<string> { "client" };
+
+        Assert.Null(DeployerPlanner.SignatureHookFor(disabled, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHookFor(noTarget, "aiphost"));
+        Assert.Null(DeployerPlanner.SignatureHookFor(noImages, "aiphost"));
+        // A service the pipeline does not build could never have a signed image to deploy.
+        Assert.Null(DeployerPlanner.SignatureHookFor(Enforcing(), "worker"));
+    }
+
+    [Fact]
+    public void TheServiceAttachesExactlyTheHookAndInvokerThePlanCreates()
+    {
+        var plan = DeployerPlanner.Plan(Enforcing(), TargetAccount);
+        var hook = DeployerPlanner.SignatureHookFor(Enforcing(), "aiphost")!;
+
+        Assert.Equal(
+            $"arn:aws:lambda:us-west-2:{TargetAccount}:function:{Function(plan, DeployerHandlers.SignatureHook).Name}",
+            hook.FunctionArn);
+        Assert.Equal($"arn:aws:iam::{TargetAccount}:role/{plan.HookInvokerRoleName}", hook.InvokerRoleArn);
+        // And the invoker's grant names that same function.
+        Assert.Contains(hook.FunctionArn, plan.HookInvokerPolicy);
+    }
+
+    [Fact]
+    public void AVerifierlessHookPackage_IsRefusedOnlyWhereAServiceUsesIt()
+    {
+        var missing = new[] { "notation", "trustpolicy.json" };
+
+        Assert.NotNull(DeployerBootstrapper.RefusalForHookPackage(missing, enforceSignatures: true));
+        Assert.Null(DeployerBootstrapper.RefusalForHookPackage(missing, enforceSignatures: false));
+        Assert.Null(DeployerBootstrapper.RefusalForHookPackage(Array.Empty<string>(), enforceSignatures: true));
+        Assert.Contains("EnforceSignatures", DeployerBootstrapper.RefusalForHookPackage(missing, true));
+    }
+
     [Fact]
     public void VerifyRoleName_IsTheVerifyFunctionsRole()
     {

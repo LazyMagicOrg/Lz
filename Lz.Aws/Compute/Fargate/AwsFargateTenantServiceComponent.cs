@@ -691,6 +691,26 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
             };
         }
 
+        // THE SIGNATURE HOOK (DecoupledCd.md §4.4.1): an ECS PRE_SCALE_UP lifecycle hook that verifies the
+        // new revision's image signatures before any task is scheduled, and rolls the deployment back when
+        // they do not verify. Only under Pipeline.EnforceSignatures, and assigned the same way as Alarms, so a
+        // service without it never has a DeploymentConfiguration at all and plans exactly as before.
+        if (Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(systemConfig, serviceName) is { } signatureHook)
+        {
+            ecsServiceArgs.DeploymentConfiguration = new ServiceDeploymentConfigurationArgs
+            {
+                LifecycleHooks =
+                {
+                    new ServiceDeploymentConfigurationLifecycleHookArgs
+                    {
+                        HookTargetArn = signatureHook.FunctionArn,
+                        RoleArn = signatureHook.InvokerRoleArn,
+                        LifecycleStages = { Lz.Aws.Pipeline.SignatureHook.Stage },
+                    },
+                },
+            };
+        }
+
         var ecsService = new Service($"{prefix}-service", ecsServiceArgs,
             new CustomResourceOptions { Parent = this });
 

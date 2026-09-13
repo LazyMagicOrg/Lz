@@ -103,6 +103,14 @@ public class PipelineConfigTests
             // DeployerPlan, added 2026-09-12 (P2 stage A). Same terms again: it reads the block,
             // its only caller is a planner, and nothing that deploys anything calls it. It plans
             // resources that do not exist yet in an account the deploy path never touches.
+            //
+            // NO LONGER TRUE OF ONE FUNCTION, from 2026-09-12 (C4c): SignatureHookFor is called by
+            // AwsFargateTenantServiceComponent, and it is the first read of the block that MOVES A SERVICE'S
+            // PLAN — it attaches a lifecycle hook. It is null unless Pipeline.EnforceSignatures is on, its own
+            // flag, so enabling the block alone changes nothing. The absent path is pinned by
+            // DeployerPlannerTests.WithoutEnforceSignatures_NoServiceAttachesTheHook and measured as a plan:
+            // `lz previewtenant` against dev with the block enabled and EnforceSignatures off planned exactly
+            // what it planned before the change. The cross-workspace plan diff still has not been run.
             Path.Combine("Lz.Aws", "Pipeline", "DeployerPlan.cs"),
 
             // DeployerBootstrapper, 2026-09-12 (P2 stage B). Reads the block to refuse a system
@@ -359,6 +367,37 @@ public class PipelineConfigTests
             () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
 
         Assert.Contains("runs no workload", ex.Message);
+    }
+
+    [Fact]
+    public void EnforceSignatures_IsOffUnlessSaid()
+    {
+        Assert.False(new PipelineConfig().EnforceSignatures);
+        ConfigValidator.Validate(WithPipeline(Enabled()), "test.yaml"); // no throw, and nothing attached
+    }
+
+    [Fact]
+    public void EnforceSignaturesWithoutATargetAccount_IsRefused()
+    {
+        // The hook is a function in the environment's account, attached by an ARN that names it.
+        var p = Enabled();
+        p.EnforceSignatures = true;
+        p.TargetAccountId = null;
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("EnforceSignatures", ex.Message);
+    }
+
+    [Fact]
+    public void EnforceSignaturesWithATargetAccount_Validates()
+    {
+        var p = Enabled();
+        p.EnforceSignatures = true;
+        p.TargetAccountId = "503947800380";
+
+        ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
     }
 
     [Fact]

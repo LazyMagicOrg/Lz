@@ -348,6 +348,15 @@ public static class ConfigValidator
                 "environment deploys into its own account. Name this environment's account.");
         }
 
+        // The hook is a function in this environment's account, and the service names it by ARN.
+        if (p.EnforceSignatures && string.IsNullOrWhiteSpace(p.TargetAccountId))
+        {
+            errors.Add(
+                "Pipeline.EnforceSignatures is on but Pipeline.TargetAccountId is not set. The signature " +
+                "hook is a function in this environment's account and the service attaches it by ARN, " +
+                "which names that account. Set TargetAccountId, or EnforceSignatures: false.");
+        }
+
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {
             if (!PipelineScanConfig.KnownSeverities.Contains(s))

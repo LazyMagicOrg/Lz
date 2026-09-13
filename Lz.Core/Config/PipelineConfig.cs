@@ -70,6 +70,24 @@ public class PipelineConfig
     public string? TargetAccountId { get; set; }
 
     /// <summary>
+    /// Attach the deployer's signature hook to every image service the pipeline builds, as an ECS
+    /// <c>PRE_SCALE_UP</c> lifecycle hook (DecoupledCd.md §4.4.1). Default <c>false</c>.
+    ///
+    /// <para>WHAT IT REFUSES, stated plainly because refusing is the point: with this on, ECS rolls back
+    /// every deployment of the service whose image is not a digest in one of this environment's pipeline
+    /// repositories, signed under the build account's image signing profiles. That includes
+    /// <c>lz deploycontainer</c> followed by <c>lz updatecontainer</c> — nothing signs a workstation
+    /// image — and <c>lz updatecontainer --digest</c> back to one.</para>
+    ///
+    /// <para>ITS OWN FLAG, NOT IMPLIED BY <see cref="Enabled"/>. Implied, a system with the block would
+    /// start refusing workstation images on its next routine tenant deploy because Lz was upgraded — one
+    /// setting silently gaining a second effect. <c>lz bootstrapdeployer</c> creates the hook either way;
+    /// this decides whether the service uses it, and <c>lz deploytenant</c> is what attaches or detaches
+    /// it. Requires <see cref="TargetAccountId"/>, the account the hook lives in.</para>
+    /// </summary>
+    public bool EnforceSignatures { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

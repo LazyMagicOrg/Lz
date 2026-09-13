@@ -64,6 +64,12 @@ public sealed record PipelineDeployer(
     IReadOnlyList<string> ImageRepositories,
     System.Text.Json.Nodes.JsonObject? ReplicationPermission);
 
+/// <summary>
+/// The signature hook as an ECS service attaches it: the function ECS invokes at <c>PRE_SCALE_UP</c>, and the
+/// role ECS assumes to invoke it. Both are created by <c>lz bootstrapdeployer</c>.
+/// </summary>
+public sealed record SignatureHookAttachment(string FunctionArn, string InvokerRoleArn);
+
 /// <summary>The deployment packages the functions are built from, shipped inside Lz.Aws.</summary>
 public static class DeployerPackages
 {
@@ -365,7 +371,7 @@ public static class DeployerPlanner
         var rollout = $"{sk}-{env}-deployer-verify-rollout";
         var record = $"{sk}-{env}-deployer-record";
         var failure = $"{sk}-{env}-deployer-record-failure";
-        var hook = $"{sk}-{env}-signature-hook";
+        var hook = SignatureHookFunctionName(config);
 
         string FnArn(string name) => $"arn:aws:lambda:{region}:{acct}:function:{name}";
 
@@ -428,7 +434,7 @@ public static class DeployerPlanner
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn),
             ApprovalRequired: approvalRequired,
             Functions: functions,
-            HookInvokerRoleName: $"{sk}-{env}-signature-hook-invoker",
+            HookInvokerRoleName: SignatureHookInvokerRoleName(config),
             HookInvokerPolicy: Policy(new
             {
                 Sid = "InvokeTheSignatureHookOnly",
@@ -442,6 +448,34 @@ public static class DeployerPlanner
             ReplicationPermission: accountId is null
                 ? null
                 : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories));
+    }
+
+    /// <summary>The signature hook's function name — one definition for the planner and the service that attaches it.</summary>
+    public static string SignatureHookFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-signature-hook";
+
+    /// <summary>The role ECS assumes to invoke the hook — one definition for the planner and the service.</summary>
+    public static string SignatureHookInvokerRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-signature-hook-invoker";
+
+    /// <summary>
+    /// The signature hook a tenant service attaches, or null — and null is what every system without
+    /// <c>Pipeline.EnforceSignatures</c> gets, which the Fargate component answers by building exactly the
+    /// service it built before the hook existed.
+    ///
+    /// <para><b>THE FIRST READ OF THE BLOCK THAT MOVES A SERVICE'S PLAN</b> (DecoupledCd.md §4.4.1, unverified 4).
+    /// Null unless ALL of: the block is enabled; <c>EnforceSignatures</c> is on; <c>TargetAccountId</c> names the
+    /// account the hook lives in; and the pipeline builds this service as an image
+    /// (<see cref="EcrRepositoryNaming.PipelineBuildsImage"/>). A service the pipeline does not build is not
+    /// refused images it could never get signed.</para>
+    /// </summary>
+    public static SignatureHookAttachment? SignatureHookFor(SystemConfig config, string serviceName)
+    {
+        if (config.Pipeline is not { Enabled: true, EnforceSignatures: true } p) return null;
+        if (string.IsNullOrWhiteSpace(p.TargetAccountId)) return null;
+        if (!EcrRepositoryNaming.PipelineBuildsImage(config, serviceName)) return null;
+
+        return new SignatureHookAttachment(
+            $"arn:aws:lambda:{config.Region}:{p.TargetAccountId}:function:{SignatureHookFunctionName(config)}",
+            $"arn:aws:iam::{p.TargetAccountId}:role/{SignatureHookInvokerRoleName(config)}");
     }
 
     /// <summary>

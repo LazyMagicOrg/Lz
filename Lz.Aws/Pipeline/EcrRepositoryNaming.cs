@@ -74,16 +74,24 @@ public static class EcrRepositoryNaming
     {
         if (config.Pipeline is not { Enabled: true } pipeline) return null;
         if (string.IsNullOrWhiteSpace(pipeline.TargetAccountId)) return null;
-        if (pipeline.Classes?.Contains("image", StringComparer.Ordinal) != true) return null;
-
-        var built = (pipeline.Repositories ?? new List<PipelineRepositoryConfig>()).Any(r =>
-            string.Equals(r.Class, "image", StringComparison.Ordinal)
-            && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal));
-        if (!built) return null;
+        if (!PipelineBuildsImage(config, serviceName)) return null;
 
         return new Lz.Aws.Compute.PipelineImageSource(
             $"{pipeline.TargetAccountId}.dkr.ecr.{region}.amazonaws.com", For(config, serviceName, tenantKey));
     }
+
+    /// <summary>
+    /// True when this environment's pipeline builds <paramref name="serviceName"/> as an image: the block is
+    /// enabled, it accepts the <c>image</c> class, and a repository entry of that class names the service
+    /// among its <c>Artifacts</c>. The one definition both the deploy path's image source and the signature
+    /// hook's attachment use.
+    /// </summary>
+    public static bool PipelineBuildsImage(SystemConfig config, string serviceName)
+        => config.Pipeline is { Enabled: true } pipeline
+           && pipeline.Classes?.Contains("image", StringComparer.Ordinal) == true
+           && (pipeline.Repositories ?? new List<PipelineRepositoryConfig>()).Any(r =>
+               string.Equals(r.Class, "image", StringComparison.Ordinal)
+               && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal));
 
     /// <summary>
     /// True when this system has opted into neutral naming. DEFAULTS TO FALSE — an absent Pipeline
