@@ -21,6 +21,44 @@ internal static class Clients
     public static readonly Lazy<IAmazonS3> S3 = new(() => new AmazonS3Client());
     public static readonly Lazy<IAmazonECR> Ecr = new(() => new AmazonECRClient());
     public static readonly Lazy<IAmazonECS> Ecs = new(() => new AmazonECSClient());
+    public static readonly Lazy<Amazon.StepFunctions.IAmazonStepFunctions> Sfn = new(() => new Amazon.StepFunctions.AmazonStepFunctionsClient());
+}
+
+/// <summary>The start function's two calls. "The name is taken" and "no such execution" are SDK exceptions; the step needs answers.</summary>
+internal sealed class SfnExecutions(Amazon.StepFunctions.IAmazonStepFunctions sfn) : IExecutions
+{
+    public async Task<bool> StartAsync(string stateMachineArn, string name, string input)
+    {
+        try
+        {
+            await sfn.StartExecutionAsync(new Amazon.StepFunctions.Model.StartExecutionRequest
+            {
+                StateMachineArn = stateMachineArn,
+                Name = name,
+                Input = input,
+            });
+            return true;
+        }
+        catch (Amazon.StepFunctions.Model.ExecutionAlreadyExistsException)
+        {
+            return false;
+        }
+    }
+
+    public async Task<string?> InputOfAsync(string executionArn)
+    {
+        try
+        {
+            return (await sfn.DescribeExecutionAsync(new Amazon.StepFunctions.Model.DescribeExecutionRequest
+            {
+                ExecutionArn = executionArn,
+            })).Input;
+        }
+        catch (Amazon.StepFunctions.Model.ExecutionDoesNotExistException)
+        {
+            return null;
+        }
+    }
 }
 
 internal sealed class S3RecordStore(IAmazonS3 s3) : IRecordStore

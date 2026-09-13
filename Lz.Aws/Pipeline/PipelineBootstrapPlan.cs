@@ -41,6 +41,10 @@ public sealed record PipelineRole(
 /// configuration at apply. Null without a target account or without image repositories.</param>
 /// <param name="BuildRecordReadGrant">This environment's statements in the build-record store's bucket
 /// policy, merged by Sid at apply. Null without a target account.</param>
+/// <param name="RecordForwarding">The trigger's build half (P2 stage D), when this environment deploys on every
+/// build record.</param>
+/// <param name="ForwardRuleToRemove">With a target account and the trigger off: the forwarding rule an earlier run may
+/// have created, which the apply removes.</param>
 public sealed record PipelineBootstrapPlan(
     string SystemKey,
     string Region,
@@ -53,7 +57,31 @@ public sealed record PipelineBootstrapPlan(
     string? TargetAccountId = null,
     string? BuildRecordStore = null,
     Amazon.ECR.Model.ReplicationRule? Replication = null,
-    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? BuildRecordReadGrant = null);
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? BuildRecordReadGrant = null,
+    RecordForwardingPlan? RecordForwarding = null,
+    string? ForwardRuleToRemove = null);
+
+/// <summary>
+/// The trigger's build-account half (DecoupledCd.md §4.3, P2 stage D): the record store sends its S3 events to the
+/// default bus, and a rule there forwards new image records to one environment's trigger bus.
+/// </summary>
+/// <param name="EventPattern"><see cref="DeployerTrigger.EventPattern"/>, the pattern the environment's rule uses too.</param>
+/// <param name="TargetBusArn">The environment's trigger bus. AWS requires a role on a rule that targets another
+/// account's bus, which is <paramref name="RoleName"/>.</param>
+/// <param name="DeadLetterQueueName">Where EventBridge puts an event it could not deliver.</param>
+public sealed record RecordForwardingPlan(
+    string RuleName,
+    string RuleArn,
+    string EventPattern,
+    string TargetBusArn,
+    string RoleName,
+    string RoleArn,
+    string RoleTrustPolicy,
+    string RolePermissionPolicy,
+    string DeadLetterQueueName,
+    string DeadLetterQueueArn,
+    string DeadLetterQueuePolicy,
+    string AlarmName);
 
 /// <summary>
 /// Decides what <c>lz bootstrappipeline</c> creates, as a pure function of config.
@@ -98,8 +126,23 @@ public static class PipelineBootstrapPlanner
         "states:UpdateStateMachine",
         "events:PutRule",
         "events:PutTargets",
+        // THE TRIGGER, since P2 stage D. A role that could remove its targets, disable or delete its rule, or change who
+        // may put events on its bus would decide what starts a deploy — or that nothing does.
+        "events:RemoveTargets",
+        "events:DeleteRule",
+        "events:DisableRule",
+        "events:PutPermission",
+        "events:RemovePermission",
         "scheduler:*",
         "iam:*Policy*",
+        // THE FUNCTIONS (DecoupledCd.md §14.3): new code or configuration for Verify, or a new invoker of the start
+        // function, rewrites the pipeline without touching the state machine.
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:PutFunctionEventInvokeConfig",
+        "lambda:UpdateFunctionEventInvokeConfig",
     };
 
     /// <summary>
@@ -187,6 +230,38 @@ public static class PipelineBootstrapPlanner
         var target = p.TargetAccountId;
         var imageRepositories = roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories).Distinct().ToList();
 
+        // THE TRIGGER'S BUILD HALF (P2 stage D), only for an environment that deploys on every build record. Without it,
+        // the rule's name is still planned so an apply takes away a rule an earlier run created: a flag that can only
+        // create would leave records flowing to an environment that turned the trigger off.
+        RecordForwardingPlan? forwarding = null;
+        if (target != null && p.DeployOnBuildRecord)
+        {
+            var buildAccount = p.ArtifactAccountId
+                ?? throw new InvalidOperationException(
+                    "lz bootstrappipeline refuses: Pipeline.DeployOnBuildRecord needs Pipeline.ArtifactAccountId, the account " +
+                    "whose events the environment's rule admits.");
+            var ruleName = DeployerPlanner.ForwardRuleName(config);
+            var ruleArn = $"arn:aws:events:{region}:{acct}:rule/{ruleName}";
+            var roleName = DeployerPlanner.RecordForwarderRoleName(config);
+            var busArn = DeployerPlanner.TriggerBusArn(region, target, config);
+            var queue = $"{ruleName}-dlq";
+            var queueArn = $"arn:aws:sqs:{region}:{acct}:{queue}";
+
+            forwarding = new RecordForwardingPlan(
+                RuleName: ruleName,
+                RuleArn: ruleArn,
+                EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords),
+                TargetBusArn: busArn,
+                RoleName: roleName,
+                RoleArn: $"arn:aws:iam::{acct}:role/{roleName}",
+                RoleTrustPolicy: CrossAccount.ForwarderTrustPolicy(buildAccount, ruleArn),
+                RolePermissionPolicy: CrossAccount.ForwarderPermissionPolicy(busArn),
+                DeadLetterQueueName: queue,
+                DeadLetterQueueArn: queueArn,
+                DeadLetterQueuePolicy: CrossAccount.DeadLetterQueuePolicy(queueArn, ruleArn),
+                AlarmName: $"{queue}-not-empty");
+        }
+
         return new PipelineBootstrapPlan(
             sk, region, p.ArtifactAccountId, stores, roles, ecrRepositories, OidcProvider,
             SelfRewriteDenied,
@@ -197,7 +272,9 @@ public static class PipelineBootstrapPlanner
                 : null,
             BuildRecordReadGrant: target != null
                 ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config))
-                : null);
+                : null,
+            RecordForwarding: forwarding,
+            ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null);
     }
 
     /// <summary>

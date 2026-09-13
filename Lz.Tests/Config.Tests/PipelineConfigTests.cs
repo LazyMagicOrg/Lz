@@ -408,6 +408,69 @@ public class PipelineConfigTests
         ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
     }
 
+    // ---------------------------------------------------------------------------------------
+    //  DeployOnBuildRecord — the trigger (P2 stage D)
+    // ---------------------------------------------------------------------------------------
+
+    private static PipelineConfig Triggering()
+    {
+        var p = Enabled();
+        p.DeployOnBuildRecord = true;
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        return p;
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_IsOffUnlessSaid()
+    {
+        Assert.False(new PipelineConfig().DeployOnBuildRecord);
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_WithBothAccountsAndTheImageClass_Validates()
+    {
+        ConfigValidator.Validate(WithPipeline(Triggering()), "test.yaml"); // no throw
+    }
+
+    [Theory]
+    [InlineData("ArtifactAccountId")]
+    [InlineData("TargetAccountId")]
+    public void DeployOnBuildRecord_WithoutEitherEnd_IsRefused(string missing)
+    {
+        var p = Triggering();
+        if (missing == "ArtifactAccountId") p.ArtifactAccountId = null; else p.TargetAccountId = null;
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("DeployOnBuildRecord", ex.Message);
+        Assert.Contains(missing, ex.Message);
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_WithoutTheImageClass_IsRefused()
+    {
+        // Every record the trigger started would be refused at Verify.
+        var p = Triggering();
+        p.Classes = new List<string> { "config" };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("image", ex.Message);
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_WithAnApprovalGate_IsRefused()
+    {
+        // An environment that needs a person admits a deploy request, not every build.
+        var p = Triggering();
+        p.Approval = new PipelineApprovalConfig { Required = true, NotifyTopicArn = "arn:aws:sns:us-west-2:1:deploys" };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("Approval.Required", ex.Message);
+    }
+
     [Fact]
     public void TheTargetAccount_IsNotRequiredByTheValidator()
     {

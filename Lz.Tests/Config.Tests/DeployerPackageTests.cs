@@ -25,6 +25,8 @@ public class DeployerPackageTests
     {
         "Lz.Aws.Deployer.dll", "Lz.Aws.Deployer.deps.json", "Lz.Aws.Deployer.runtimeconfig.json",
         "Amazon.Lambda.Core.dll", "AWSSDK.Core.dll", "AWSSDK.S3.dll", "AWSSDK.ECR.dll", "AWSSDK.ECS.dll",
+        // The start function (P2 stage D).
+        "AWSSDK.StepFunctions.dll",
     };
 
     [Theory]
@@ -126,6 +128,7 @@ public class DeployerPackageTests
                  {
                      "../Lz.Aws/Pipeline/BuildRecord.cs", "../Lz.Aws/Pipeline/DeployVerification.cs",
                      "../Lz.Aws/Pipeline/DeployerContract.cs", "../Lz.Aws/Pipeline/DeployerSteps.cs",
+                     "../Lz.Aws/Pipeline/DeployerTrigger.cs",
                      "../Lz.Aws/Pipeline/SignatureHook.cs", "../Lz.Aws/Ops/TaskDefinitionRevision.cs",
                  })
         {

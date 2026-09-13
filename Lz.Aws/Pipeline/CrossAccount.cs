@@ -177,6 +177,116 @@ public static class CrossAccount
 
     public static string BuildRecordListSid(string environment) => $"DeployerListsImageRecords{Suffix(environment)}";
 
+    public const string TriggerBusSid = "BuildAccountForwardsBuildRecords";
+
+    /// <summary>
+    /// The trigger bus's policy (P2 stage D): the build account's forwarding role may put events on this one bus.
+    ///
+    /// <para>THE WHOLE POLICY, not a statement merged into one: the bus exists for the trigger alone, so anything else in
+    /// its policy is not this command's and is replaced. The principal is the account narrowed by <c>aws:PrincipalArn</c>,
+    /// as in <see cref="BuildRecordReadGrant"/>, so a recreated role is still admitted by name.</para>
+    /// </summary>
+    public static string TriggerBusPolicy(string busArn, string artifactAccountId, string forwarderRoleName)
+    {
+        RequireAccount(artifactAccountId, nameof(artifactAccountId));
+
+        return new JsonObject
+        {
+            ["Version"] = "2012-10-17",
+            ["Statement"] = new JsonArray(new JsonObject
+            {
+                ["Sid"] = TriggerBusSid,
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{artifactAccountId}:root" },
+                ["Action"] = "events:PutEvents",
+                ["Resource"] = busArn,
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject
+                    {
+                        ["aws:PrincipalArn"] = $"arn:aws:iam::{artifactAccountId}:role/{forwarderRoleName}",
+                    },
+                },
+            }),
+        }.ToJsonString(PolicyJson);
+    }
+
+    public const string DeadLetterSid = "EventBridgeDeadLettersOneRule";
+
+    /// <summary>
+    /// A dead-letter queue's policy: EventBridge may send to it on behalf of one rule (AWS's documented DLQ permission,
+    /// <c>aws:SourceArn</c> naming the rule). Written whole — the queue exists for that rule.
+    /// </summary>
+    public static string DeadLetterQueuePolicy(string queueArn, string ruleArn) => new JsonObject
+    {
+        ["Version"] = "2012-10-17",
+        ["Statement"] = new JsonArray(new JsonObject
+        {
+            ["Sid"] = DeadLetterSid,
+            ["Effect"] = "Allow",
+            ["Principal"] = new JsonObject { ["Service"] = "events.amazonaws.com" },
+            ["Action"] = "sqs:SendMessage",
+            ["Resource"] = queueArn,
+            ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:SourceArn"] = ruleArn } },
+        }),
+    }.ToJsonString(PolicyJson);
+
+    /// <summary>
+    /// The forwarding role's trust: EventBridge, for the one rule that forwards records. <c>aws:SourceArn</c> must be the
+    /// rule's ARN for an event bus rule target, and <c>aws:SourceAccount</c> pins the account (EventBridge's
+    /// confused-deputy guidance).
+    /// </summary>
+    public static string ForwarderTrustPolicy(string artifactAccountId, string ruleArn)
+    {
+        RequireAccount(artifactAccountId, nameof(artifactAccountId));
+
+        return new JsonObject
+        {
+            ["Version"] = "2012-10-17",
+            ["Statement"] = new JsonArray(new JsonObject
+            {
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["Service"] = "events.amazonaws.com" },
+                ["Action"] = "sts:AssumeRole",
+                ["Condition"] = new JsonObject
+                {
+                    ["StringEquals"] = new JsonObject { ["aws:SourceAccount"] = artifactAccountId },
+                    ["ArnEquals"] = new JsonObject { ["aws:SourceArn"] = ruleArn },
+                },
+            }),
+        }.ToJsonString(PolicyJson);
+    }
+
+    /// <summary>What the forwarding role may do: put events on one environment's trigger bus, and nothing else.</summary>
+    public static string ForwarderPermissionPolicy(string busArn) => new JsonObject
+    {
+        ["Version"] = "2012-10-17",
+        ["Statement"] = new JsonArray(new JsonObject
+        {
+            ["Sid"] = "PutRecordEventsOnTheTriggerBus",
+            ["Effect"] = "Allow",
+            ["Action"] = "events:PutEvents",
+            ["Resource"] = busArn,
+        }),
+    }.ToJsonString(PolicyJson);
+
+    /// <summary>
+    /// Does a policy read back from AWS say what was written? Compared as JSON, because services return a policy in their
+    /// own formatting.
+    /// </summary>
+    public static bool SamePolicy(string? written, string? readBack)
+    {
+        if (written is null || readBack is null) return written is null && readBack is null;
+        try
+        {
+            return JsonNode.DeepEquals(JsonNode.Parse(written), JsonNode.Parse(readBack));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// The TARGET registry's permission for the build account to replicate into it.
     ///

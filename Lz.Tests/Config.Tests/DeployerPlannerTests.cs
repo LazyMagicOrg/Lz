@@ -905,4 +905,213 @@ public class DeployerPlannerTests
     {
         Assert.Equal(DeployerPlanner.VerifyRoleName(Config(false)), Function(Plan(), DeployerHandlers.Verify).RoleName);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The trigger (P2 stage D)
+    // ---------------------------------------------------------------------------------------
+
+    private static readonly DeployerTriggerInputs DevInputs = new("scu-dev-cluster", new[] { "mp" });
+
+    private static SystemConfig Triggered()
+    {
+        var c = Config(false);
+        c.Pipeline!.DeployOnBuildRecord = true;
+        return c;
+    }
+
+    private static DeployerTriggerPlan Trigger(SystemConfig? config = null)
+        => DeployerPlanner.Plan(config ?? Triggered(), TargetAccount, DevInputs).Trigger!;
+
+    [Fact]
+    public void WithoutDeployOnBuildRecord_ThereIsNoTrigger_NoStartFunction_AndNothingIsResolvedForOne()
+    {
+        var plan = DeployerPlanner.Plan(Config(false), TargetAccount, triggerInputs: null);
+
+        Assert.False(Config(false).Pipeline!.DeployOnBuildRecord);
+        Assert.False(DeployerPlanner.TriggerWanted(Config(false)));
+        Assert.Null(plan.Trigger);
+        Assert.DoesNotContain(plan.Functions, f => f.Handler == DeployerHandlers.Start);
+        Assert.Equal(6, plan.Functions.Count);
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_PlannedWithoutTheClusterAndTenants_IsRefused()
+    {
+        Assert.True(DeployerPlanner.TriggerWanted(Triggered()));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DeployerPlanner.Plan(Triggered(), TargetAccount));
+        Assert.Contains("bootstrapdeployer", ex.Message);
+    }
+
+    [Fact]
+    public void DeployOnBuildRecord_WithNoTenants_IsRefused()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            DeployerPlanner.Plan(Triggered(), TargetAccount, new DeployerTriggerInputs("scu-dev-cluster", Array.Empty<string>())));
+        Assert.Contains("tenant", ex.Message);
+    }
+
+    [Fact]
+    public void TheTrigger_RollsEachTenantsServiceFromItsImageRepositorysRecords_InARepositoryVerifyAccepts()
+    {
+        var plan = DeployerPlanner.Plan(Triggered(), TargetAccount, new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp", "zz" }));
+
+        // The client repository writes records too, and has no route: nothing deploys a bundle.
+        var route = Assert.Single(plan.Trigger!.Routes);
+        Assert.Equal("image/scutara/scutaraservice/", route.RecordPrefix);
+        Assert.Equal(
+            new[]
+            {
+                new TriggerTarget("mp", new DeployTarget("scu-dev-cluster", "scu-mp-aiphost", "aiphost", "scu-4df6-b9c6-aiphost")),
+                new TriggerTarget("zz", new DeployTarget("scu-dev-cluster", "scu-zz-aiphost", "aiphost", "scu-4df6-b9c6-aiphost")),
+            },
+            route.Targets);
+
+        // Verify refuses a target repository that is not one of this environment's pipeline repositories.
+        Assert.All(route.Targets, t => Assert.Contains(t.Target.Repository, plan.ImageRepositories));
+    }
+
+    [Fact]
+    public void TheTargets_AreTheOnesTheHandStartedExecutionsUsed()
+    {
+        // The first execution, started by hand on 2026-09-12, rolled exactly this service with this input.
+        var target = Trigger().Routes.Single().Targets.Single().Target;
+        Assert.Equal(new DeployTarget("scu-dev-cluster", "scu-mp-aiphost", "aiphost", "scu-4df6-b9c6-aiphost"), target);
+    }
+
+    [Fact]
+    public void AnImageRepositoryWithTwoArtifacts_IsRefusedOnlyWhenTheTriggerIsOn()
+    {
+        var two = Triggered();
+        two.Pipeline!.Repositories![0].Artifacts = new List<string> { "aiphost", "worker" };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DeployerPlanner.Plan(two, TargetAccount, DevInputs));
+        Assert.Contains("2 image artifacts", ex.Message);
+
+        two.Pipeline.DeployOnBuildRecord = false;
+        Assert.Null(DeployerPlanner.Plan(two, TargetAccount).Trigger);
+    }
+
+    [Fact]
+    public void TheStartFunction_MayStartOnlyThisDeployer_ReadOnlyItsExecutions_AndDeadLetterOnlyItsQueue()
+    {
+        var plan = DeployerPlanner.Plan(Triggered(), TargetAccount, DevInputs);
+        var start = Function(plan, DeployerHandlers.Start);
+
+        var grants = Statements(start.Policy)
+            .Where(s => !s.GetProperty("Sid").GetString()!.Contains("Log"))
+            .Select(s => (Actions: string.Join(",", Strings(s.GetProperty("Action"))), Resource: string.Join(",", Strings(s.GetProperty("Resource")))))
+            .ToList();
+
+        Assert.Equal(
+            new[]
+            {
+                ("states:StartExecution", "arn:aws:states:us-west-2:503947800380:stateMachine:scu-dev-deployer"),
+                ("states:DescribeExecution", "arn:aws:states:us-west-2:503947800380:execution:scu-dev-deployer:*"),
+                ("sqs:SendMessage", "arn:aws:sqs:us-west-2:503947800380:scu-dev-deployer-start-dlq"),
+            },
+            grants);
+
+        Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:{plan.StateMachineName}", grants[0].Resource);
+        Assert.Equal(plan.Trigger!.DeadLetterQueueArn, grants[2].Resource);
+        Assert.False(start.InvokedByStateMachine);
+        Assert.DoesNotContain("Delete", start.Policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Function(plan, DeployerHandlers.Start).RoleName, plan.Functions.Where(f => f != start).Select(f => f.RoleName));
+    }
+
+    [Fact]
+    public void TheStateMachineRole_CannotInvokeTheStartFunction()
+    {
+        // EventBridge invokes it; the machine it starts has no business starting itself.
+        var plan = DeployerPlanner.Plan(Triggered(), TargetAccount, DevInputs);
+        Assert.DoesNotContain(plan.Trigger!.StartFunctionName, plan.RolePolicy);
+    }
+
+    [Fact]
+    public void TheStartFunction_IsConfiguredWithExactlyWhatItReads()
+    {
+        var plan = DeployerPlanner.Plan(Triggered(), TargetAccount, DevInputs);
+        var env = Function(plan, DeployerHandlers.Start).Environment;
+
+        var settings = TriggerSettings.Read(k => env.GetValueOrDefault(k));
+
+        Assert.Equal(BuildAccount, settings.ArtifactAccountId);
+        Assert.Equal("scu-build-records-4df6-b9c6", settings.BuildRecordStore);
+        Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:scu-dev-deployer", settings.StateMachineArn);
+        Assert.Equal(plan.Trigger!.Routes.Single().RecordPrefix, settings.Routes.Single().RecordPrefix);
+        Assert.Equal(plan.Trigger.Routes.Single().Targets, settings.Routes.Single().Targets);
+        Assert.Equal(4, env.Count);
+    }
+
+    [Fact]
+    public void TheBus_AdmitsOnlyTheBuildAccountsForwardingRole_ByTheNameTheBuildSideCreates()
+    {
+        var config = Triggered();
+        var trigger = Trigger(config);
+        var build = PipelineBootstrapPlanner.Plan(config, BuildAccount).RecordForwarding!;
+
+        var statement = Statements(trigger.BusPolicy).Single();
+        Assert.Equal("Allow", statement.GetProperty("Effect").GetString());
+        Assert.Equal($"arn:aws:iam::{BuildAccount}:root", statement.GetProperty("Principal").GetProperty("AWS").GetString());
+        Assert.Equal("events:PutEvents", statement.GetProperty("Action").GetString());
+        Assert.Equal(trigger.BusArn, statement.GetProperty("Resource").GetString());
+        Assert.Equal(
+            $"arn:aws:iam::{BuildAccount}:role/{build.RoleName}",
+            statement.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:PrincipalArn").GetString());
+    }
+
+    [Fact]
+    public void BothRules_UseOnePattern_AndTheBuildSideTargetsThisBus()
+    {
+        var config = Triggered();
+        var trigger = Trigger(config);
+        var build = PipelineBootstrapPlanner.Plan(config, BuildAccount).RecordForwarding!;
+
+        Assert.Equal(trigger.EventPattern, build.EventPattern);
+        Assert.Equal(trigger.BusArn, build.TargetBusArn);
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:event-bus/scu-dev-deployer-trigger", trigger.BusArn);
+    }
+
+    [Fact]
+    public void TheRuleOnTheTriggerBus_CarriesTheBusInItsArn_AndTheQueueAdmitsOnlyThatRule()
+    {
+        var trigger = Trigger();
+
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:rule/scu-dev-deployer-trigger/scu-dev-deployer-start", trigger.RuleArn);
+
+        var statement = Statements(trigger.DeadLetterQueuePolicy).Single();
+        Assert.Equal("events.amazonaws.com", statement.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal("sqs:SendMessage", statement.GetProperty("Action").GetString());
+        Assert.Equal(trigger.DeadLetterQueueArn, statement.GetProperty("Resource").GetString());
+        Assert.Equal(trigger.RuleArn, statement.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+    }
+
+    [Fact]
+    public void AFailingEvent_IsRetriedTwiceWithinAnHour_ThenQueued_AndTheQueueHasAnAlarm()
+    {
+        var trigger = Trigger();
+
+        Assert.Equal(2, trigger.MaximumRetryAttempts);
+        Assert.Equal(3600, trigger.MaximumEventAgeSeconds);
+        Assert.Equal("scu-dev-deployer-start-dlq", trigger.DeadLetterQueueName);
+        Assert.Equal("scu-dev-deployer-start-dlq-not-empty", trigger.AlarmName);
+    }
+
+    [Fact]
+    public void TheSelfRewriteDeny_CoversTheTrigger_AndTheFunctions()
+    {
+        var actions = Strings(Statements(Plan().DenyPolicy).Single().GetProperty("Action")).ToList();
+
+        foreach (var action in new[]
+                 {
+                     "events:PutRule", "events:PutTargets", "events:RemoveTargets", "events:DeleteRule", "events:DisableRule",
+                     "events:PutPermission", "events:RemovePermission",
+                     "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:AddPermission",
+                     "lambda:RemovePermission", "lambda:PutFunctionEventInvokeConfig", "lambda:UpdateFunctionEventInvokeConfig",
+                 })
+            Assert.Contains(action, actions);
+
+        // Nothing a deployer role does is denied: invoking, starting, reading.
+        Assert.DoesNotContain(actions, a => a is "lambda:InvokeFunction" or "states:StartExecution" or "states:DescribeExecution");
+    }
 }

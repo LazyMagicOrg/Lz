@@ -39,6 +39,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\DeployVerification.cs" Link="Linked\Lz.Aws\Pipeline\DeployVerification.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerContract.cs" Link="Linked\Lz.Aws\Pipeline\DeployerContract.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerSteps.cs" Link="Linked\Lz.Aws\Pipeline\DeployerSteps.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
     <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
   </ItemGroup>
@@ -56,6 +57,8 @@
     <PackageReference Include="AWSSDK.ECR" Version="4.0.101.5" />
     <PackageReference Include="AWSSDK.ECS" Version="4.0.14" />
     <PackageReference Include="AWSSDK.S3" Version="4.0.103.2" />
+    <!-- The start function (P2 stage D) starts executions and reads a taken name back. -->
+    <PackageReference Include="AWSSDK.StepFunctions" Version="4.0.100.14" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

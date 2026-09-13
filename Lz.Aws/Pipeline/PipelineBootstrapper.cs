@@ -115,6 +115,26 @@ public static class PipelineBootstrapper
         if (plan.TargetAccountId is null)
             Console.WriteLine("  no Pipeline.TargetAccountId: nothing replicates and no deployer may read build records from this run.");
 
+        // THE TRIGGER'S BUILD HALF (P2 stage D): forward new image records to the environment, or take the forwarding
+        // rule away when the environment has turned the trigger off.
+        if (plan.RecordForwarding is { } forwarding && plan.BuildRecordStore is { } forwardedStore)
+        {
+            using var events = creds != null
+                ? new Amazon.EventBridge.AmazonEventBridgeClient(creds, endpoint) : new Amazon.EventBridge.AmazonEventBridgeClient(endpoint);
+            using var sqs = creds != null ? new Amazon.SQS.AmazonSQSClient(creds, endpoint) : new Amazon.SQS.AmazonSQSClient(endpoint);
+            using var cloudWatch = creds != null
+                ? new Amazon.CloudWatch.AmazonCloudWatchClient(creds, endpoint) : new Amazon.CloudWatch.AmazonCloudWatchClient(endpoint);
+
+            await TriggerApply.ForwardRecordsAsync(s3, iam, events, sqs, cloudWatch, forwardedStore, forwarding);
+        }
+        else if (plan.ForwardRuleToRemove is { } staleRule)
+        {
+            using var events = creds != null
+                ? new Amazon.EventBridge.AmazonEventBridgeClient(creds, endpoint) : new Amazon.EventBridge.AmazonEventBridgeClient(endpoint);
+
+            await TriggerApply.RemoveRuleAsync(events, eventBusName: null, staleRule, "Pipeline.DeployOnBuildRecord is off");
+        }
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("Pipeline bootstrap complete.");
@@ -183,6 +203,18 @@ public static class PipelineBootstrapper
             if (plan.BuildRecordReadGrant is { } grant)
                 foreach (var statement in grant)
                     Console.WriteLine($"    bucket policy {statement["Sid"]}: {statement["Action"]} on {statement["Resource"]}, only {statement["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]}");
+
+            if (plan.RecordForwarding is { } f)
+            {
+                Console.WriteLine($"    trigger (Pipeline.DeployOnBuildRecord): {plan.BuildRecordStore} sends its events to EventBridge;");
+                Console.WriteLine($"      rule {f.RuleName} forwards new image/ records to {f.TargetBusArn}");
+                Console.WriteLine($"      as role {f.RoleName} (events:PutEvents on that bus only; assumable by EventBridge for this rule only)");
+                Console.WriteLine($"      undeliverable events to queue {f.DeadLetterQueueName}, alarm {f.AlarmName}");
+            }
+            else if (plan.ForwardRuleToRemove is { } stale)
+            {
+                Console.WriteLine($"    trigger: off (Pipeline.DeployOnBuildRecord) — rule {stale} is removed if an earlier run created it");
+            }
         }
         Console.WriteLine();
     }

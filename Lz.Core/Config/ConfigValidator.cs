@@ -357,6 +357,38 @@ public static class ConfigValidator
                 "which names that account. Set TargetAccountId, or EnforceSignatures: false.");
         }
 
+        // THE TRIGGER NAMES BOTH ENDS: the build account's rule forwards to this account's bus, and this
+        // account's rule admits only the build account. Either id missing leaves one end pointing nowhere.
+        if (p.DeployOnBuildRecord)
+        {
+            if (string.IsNullOrWhiteSpace(p.ArtifactAccountId) || string.IsNullOrWhiteSpace(p.TargetAccountId))
+            {
+                errors.Add(
+                    "Pipeline.DeployOnBuildRecord is on but Pipeline.ArtifactAccountId or Pipeline.TargetAccountId " +
+                    "is not set. The build account forwards new build records to this environment's account, and " +
+                    "this account accepts them only from the build account, so both ids are needed. Set both, or " +
+                    "DeployOnBuildRecord: false.");
+            }
+
+            if (p.Classes?.Contains("image") != true)
+            {
+                errors.Add(
+                    "Pipeline.DeployOnBuildRecord is on but Pipeline.Classes does not accept 'image'. The deployer " +
+                    "rolls service images and nothing else, so every build record the trigger started would be " +
+                    "refused at Verify. Add image to Classes, or DeployOnBuildRecord: false.");
+            }
+
+            // An environment that needs a person admits a deploy REQUEST (DecoupledCd.md §6), which nothing
+            // builds yet. Starting its machine on every build would park an approval per build.
+            if (p.Approval is { Required: true })
+            {
+                errors.Add(
+                    "Pipeline.DeployOnBuildRecord is on and Pipeline.Approval.Required is true. An environment " +
+                    "with an approval gate admits a deploy request, not every build (DecoupledCd.md §6); starting " +
+                    "its deployer on each build record would leave an approval waiting per build. Turn one off.");
+            }
+        }
+
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {
             if (!PipelineScanConfig.KnownSeverities.Contains(s))

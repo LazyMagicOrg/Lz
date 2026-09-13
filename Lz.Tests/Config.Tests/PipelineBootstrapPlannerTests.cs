@@ -258,7 +258,14 @@ public class PipelineBootstrapPlannerTests
         var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));
 
         Assert.Equal(
-            new[] { "states:UpdateStateMachine", "events:PutRule", "events:PutTargets", "scheduler:*", "iam:*Policy*" },
+            new[]
+            {
+                "states:UpdateStateMachine", "events:PutRule", "events:PutTargets",
+                "events:RemoveTargets", "events:DeleteRule", "events:DisableRule", "events:PutPermission", "events:RemovePermission",
+                "scheduler:*", "iam:*Policy*",
+                "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:AddPermission", "lambda:RemovePermission",
+                "lambda:PutFunctionEventInvokeConfig", "lambda:UpdateFunctionEventInvokeConfig",
+            },
             plan.DeniedActions);
     }
 
@@ -463,5 +470,76 @@ public class PipelineBootstrapPlannerTests
         Assert.Null(plan.Replication);
         Assert.Null(plan.BuildRecordReadGrant);
         Assert.NotEmpty(plan.Roles);
+        Assert.Null(plan.RecordForwarding);
+        Assert.Null(plan.ForwardRuleToRemove);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    //  The trigger's build half (P2 stage D)
+    // ---------------------------------------------------------------------------------------
+
+    private static SystemConfig Forwarding(bool on)
+    {
+        var p = Enabled();
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        p.DeployOnBuildRecord = on;
+        return WithPipeline(p);
+    }
+
+    [Fact]
+    public void WithDeployOnBuildRecord_ImageRecordsAreForwardedToTheEnvironmentsTriggerBus()
+    {
+        var plan = PipelineBootstrapPlanner.Plan(Forwarding(on: true), "147440642635");
+        var f = plan.RecordForwarding!;
+
+        Assert.Equal("scu-dev-forward-build-records", f.RuleName);
+        // On the default bus, so no bus in the ARN.
+        Assert.Equal("arn:aws:events:us-west-2:147440642635:rule/scu-dev-forward-build-records", f.RuleArn);
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:event-bus/scu-dev-deployer-trigger", f.TargetBusArn);
+        Assert.Equal(DeployerTrigger.EventPattern("147440642635", "scu-build-records-abcd-1234"), f.EventPattern);
+        Assert.Null(plan.ForwardRuleToRemove);
+    }
+
+    [Fact]
+    public void TheForwardingRole_IsAssumableByEventBridgeForThisRuleOnly_AndMayOnlyPutEventsOnTheBus()
+    {
+        var f = PipelineBootstrapPlanner.Plan(Forwarding(on: true), "147440642635").RecordForwarding!;
+
+        using var trust = JsonDocument.Parse(f.RoleTrustPolicy);
+        var t = trust.RootElement.GetProperty("Statement").EnumerateArray().Single();
+        Assert.Equal("events.amazonaws.com", t.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal("sts:AssumeRole", t.GetProperty("Action").GetString());
+        Assert.Equal("147440642635", t.GetProperty("Condition").GetProperty("StringEquals").GetProperty("aws:SourceAccount").GetString());
+        Assert.Equal(f.RuleArn, t.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+
+        using var permission = JsonDocument.Parse(f.RolePermissionPolicy);
+        var p = permission.RootElement.GetProperty("Statement").EnumerateArray().Single();
+        Assert.Equal("events:PutEvents", p.GetProperty("Action").GetString());
+        Assert.Equal(f.TargetBusArn, p.GetProperty("Resource").GetString());
+    }
+
+    [Fact]
+    public void TheForwardingQueue_AdmitsEventBridgeForThisRuleOnly()
+    {
+        var f = PipelineBootstrapPlanner.Plan(Forwarding(on: true), "147440642635").RecordForwarding!;
+
+        using var policy = JsonDocument.Parse(f.DeadLetterQueuePolicy);
+        var s = policy.RootElement.GetProperty("Statement").EnumerateArray().Single();
+        Assert.Equal("arn:aws:sqs:us-west-2:147440642635:scu-dev-forward-build-records-dlq", f.DeadLetterQueueArn);
+        Assert.Equal(f.DeadLetterQueueArn, s.GetProperty("Resource").GetString());
+        Assert.Equal("sqs:SendMessage", s.GetProperty("Action").GetString());
+        Assert.Equal(f.RuleArn, s.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+        Assert.Equal("scu-dev-forward-build-records-dlq-not-empty", f.AlarmName);
+    }
+
+    [Fact]
+    public void WithTheTriggerOff_TheForwardingRuleIsPlannedForRemoval()
+    {
+        // A flag that could only create would keep forwarding records to an environment that turned the trigger off.
+        var plan = PipelineBootstrapPlanner.Plan(Forwarding(on: false), "147440642635");
+
+        Assert.Null(plan.RecordForwarding);
+        Assert.Equal("scu-dev-forward-build-records", plan.ForwardRuleToRemove);
     }
 }

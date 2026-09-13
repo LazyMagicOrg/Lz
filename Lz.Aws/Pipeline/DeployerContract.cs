@@ -45,6 +45,55 @@ public sealed class RolloutStillRolling(string message) : Exception(message);
 /// <summary>The roll finished or failed and the deployed digest is not what runs. Not retried.</summary>
 public sealed class RolloutNotDeployed(string message) : Exception(message);
 
+/// <summary>
+/// An execution's name for one deploy request, shared by the planner and the start function that names the
+/// executions it starts (DecoupledCd.md §5.1).
+/// </summary>
+public static class DeployExecution
+{
+    /// <summary>
+    /// <c>req-{request id}-{attempt}</c>.
+    ///
+    /// <para>THE NAME IS THE IDEMPOTENCY KEY, which is what absorbs S3's at-least-once, unordered
+    /// delivery: a duplicate event produces the same name and the same input, and
+    /// <c>StartExecution</c> is idempotent for a Standard workflow in exactly that case. A reused
+    /// name with DIFFERENT input returns <c>ExecutionAlreadyExists</c> instead — an error worth
+    /// getting, because it means two different things claimed one request id.</para>
+    ///
+    /// <para>Step Functions forbids <c>:</c> and <c>/</c> in execution names, which is why a raw
+    /// digest can never be one — <c>sha256:…</c> contains the first. This refuses rather than
+    /// sanitising: silently rewriting an id would break the idempotency the name exists to provide,
+    /// since two ids could sanitise to one name.</para>
+    /// </summary>
+    public static string Name(string requestId, int attempt)
+    {
+        if (string.IsNullOrWhiteSpace(requestId))
+            throw new InvalidOperationException("execution name needs a request id.");
+
+        if (attempt < 1)
+            throw new InvalidOperationException(
+                $"attempt must be 1 or greater; got {attempt}. Attempt 0 and attempt 1 would be two " +
+                "names for one try.");
+
+        foreach (var c in new[] { ':', '/', ' ', '\\', '?', '*', '<', '>', '|', '"', '#' })
+        {
+            if (requestId.Contains(c))
+                throw new InvalidOperationException(
+                    $"request id '{requestId}' contains '{c}', which Step Functions forbids in an " +
+                    "execution name. Refusing rather than sanitising: two ids that sanitised to one " +
+                    "name would collapse into a single execution and the second deploy would " +
+                    "silently never run.");
+        }
+
+        var name = $"req-{requestId}-{attempt}";
+        if (name.Length > 80)
+            throw new InvalidOperationException(
+                $"execution name '{name}' is {name.Length} characters; Step Functions allows 80.");
+
+        return name;
+    }
+}
+
 /// <summary>Where a build record is stored.</summary>
 public sealed record RecordLocation(string Bucket, string Key);
 
@@ -146,6 +195,9 @@ public static class DeployerEnvironment
     public const string EvidenceStore = "LZ_EVIDENCE_STORE";
     public const string TrustedProfiles = "LZ_TRUSTED_SIGNING_PROFILES";
     public const string RegistryScopes = "LZ_TRUST_REGISTRY_SCOPES";
+    public const string ArtifactAccount = "LZ_ARTIFACT_ACCOUNT";
+    public const string StateMachine = "LZ_STATE_MACHINE";
+    public const string TriggerRoutes = "LZ_TRIGGER_ROUTES";
 
     /// <summary>Encode a list. Refuses a value containing the separator rather than corrupting it.</summary>
     public static string Join(IEnumerable<string> values)

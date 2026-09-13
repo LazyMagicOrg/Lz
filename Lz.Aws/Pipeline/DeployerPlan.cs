@@ -41,7 +41,8 @@ public sealed record DeployerFunction(
 /// <param name="EvidenceStore">Versioned bucket the Record state writes to.</param>
 /// <param name="Definition">The Amazon States Language document.</param>
 /// <param name="ApprovalRequired">Whether the machine contains a human gate at all.</param>
-/// <param name="Functions">The Lambda functions: the five the definition invokes, and the signature hook.</param>
+/// <param name="Functions">The Lambda functions: the five the definition invokes, the signature hook, and — with the
+/// trigger — the start function.</param>
 /// <param name="HookInvokerRoleName">
 /// The role ECS assumes to invoke the signature hook — the <c>roleArn</c> of a lifecycle hook.
 /// </param>
@@ -50,6 +51,8 @@ public sealed record DeployerFunction(
 /// anything may replicate into them — same names as the build registry's, as replication requires.</param>
 /// <param name="ReplicationPermission">This registry's policy statement letting the build account
 /// replicate into exactly those repositories, merged by Sid at apply.</param>
+/// <param name="Trigger">The trigger (stage D), when <c>Pipeline.DeployOnBuildRecord</c> is on; null otherwise, and
+/// then the apply removes the start rule if an earlier run created it.</param>
 public sealed record PipelineDeployer(
     string StateMachineName,
     string RoleName,
@@ -62,7 +65,42 @@ public sealed record PipelineDeployer(
     string HookInvokerRoleName,
     string HookInvokerPolicy,
     IReadOnlyList<string> ImageRepositories,
-    System.Text.Json.Nodes.JsonObject? ReplicationPermission);
+    System.Text.Json.Nodes.JsonObject? ReplicationPermission,
+    DeployerTriggerPlan? Trigger = null);
+
+/// <summary>
+/// What the trigger's plan needs from the account and the workspace, which the planner cannot read: the ECS
+/// cluster that exists, and the tenants whose services a build rolls.
+/// </summary>
+public sealed record DeployerTriggerInputs(string Cluster, IReadOnlyList<string> TenantKeys);
+
+/// <summary>
+/// The trigger in the target account (DecoupledCd.md §4.3, P2 stage D): the bus the build account forwards record
+/// events to, the rule that invokes the start function, and the queue where what fails ends up.
+/// </summary>
+/// <param name="BusPolicy">The bus's whole policy: only the build account's forwarding role may put events on it.</param>
+/// <param name="EventPattern">The rule's pattern, <see cref="DeployerTrigger.EventPattern"/>.</param>
+/// <param name="StartFunctionName">Also in <see cref="PipelineDeployer.Functions"/>, which creates it.</param>
+/// <param name="DeadLetterQueuePolicy">Lets EventBridge dead-letter what the rule could not deliver. The function's own
+/// failures reach the same queue through its asynchronous-invocation destination, under its role.</param>
+/// <param name="MaximumRetryAttempts">Lambda's retries of a failed asynchronous invocation before the queue.</param>
+/// <param name="MaximumEventAgeSeconds">How long Lambda keeps retrying an event before the queue.</param>
+public sealed record DeployerTriggerPlan(
+    string BusName,
+    string BusArn,
+    string BusPolicy,
+    string RuleName,
+    string RuleArn,
+    string EventPattern,
+    string StartFunctionName,
+    string StartFunctionArn,
+    string DeadLetterQueueName,
+    string DeadLetterQueueArn,
+    string DeadLetterQueuePolicy,
+    string AlarmName,
+    int MaximumRetryAttempts,
+    int MaximumEventAgeSeconds,
+    IReadOnlyList<TriggerRoute> Routes);
 
 /// <summary>
 /// The signature hook as an ECS service attaches it: the function ECS invokes at <c>PRE_SCALE_UP</c>, and the
@@ -73,7 +111,7 @@ public sealed record SignatureHookAttachment(string FunctionArn, string InvokerR
 /// <summary>The deployment packages the functions are built from, shipped inside Lz.Aws.</summary>
 public static class DeployerPackages
 {
-    /// <summary>Verify, Prepare, VerifyRollout and RecordFailure: .NET code and the AWS SDK.</summary>
+    /// <summary>Verify, Prepare, VerifyRollout, Record, RecordFailure and Start: .NET code and the AWS SDK.</summary>
     public const string Deployer = "deployer";
 
     /// <summary>The signature hook: the same code, plus the Notation verifier when it has been packaged.</summary>
@@ -97,9 +135,10 @@ public static class DeployerHandlers
     public static readonly string Record = For("RecordFunction");
     public static readonly string RecordFailure = For("RecordFailureFunction");
     public static readonly string SignatureHook = For("SignatureHookFunction");
+    public static readonly string Start = For("StartFunction");
 
     /// <summary>Every handler, for the packaging test.</summary>
-    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook };
+    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start };
 
     private static string For(string type) => $"{Assembly}::{Assembly}.{type}::HandleAsync";
 }
@@ -165,46 +204,10 @@ public static class DeployerPlanner
     };
 
     /// <summary>
-    /// An execution name for one deploy request.
-    ///
-    /// <para>THE NAME IS THE IDEMPOTENCY KEY, which is what absorbs S3's at-least-once, unordered
-    /// delivery: a duplicate event produces the same name and the same input, and
-    /// <c>StartExecution</c> is idempotent for a Standard workflow in exactly that case. A reused
-    /// name with DIFFERENT input returns <c>ExecutionAlreadyExists</c> instead — an error worth
-    /// getting, because it means two different things claimed one request id.</para>
-    ///
-    /// <para>Step Functions forbids <c>:</c> and <c>/</c> in execution names, which is why a raw
-    /// digest can never be one — <c>sha256:…</c> contains the first. This refuses rather than
-    /// sanitising: silently rewriting an id would break the idempotency the name exists to provide,
-    /// since two ids could sanitise to one name.</para>
+    /// An execution name for one deploy request. The definition lives in <see cref="DeployExecution.Name"/>,
+    /// which the start function compiles too, so the name it gives an execution is the one pinned here.
     /// </summary>
-    public static string ExecutionName(string requestId, int attempt)
-    {
-        if (string.IsNullOrWhiteSpace(requestId))
-            throw new InvalidOperationException("execution name needs a request id.");
-
-        if (attempt < 1)
-            throw new InvalidOperationException(
-                $"attempt must be 1 or greater; got {attempt}. Attempt 0 and attempt 1 would be two " +
-                "names for one try.");
-
-        foreach (var c in new[] { ':', '/', ' ', '\\', '?', '*', '<', '>', '|', '"', '#' })
-        {
-            if (requestId.Contains(c))
-                throw new InvalidOperationException(
-                    $"request id '{requestId}' contains '{c}', which Step Functions forbids in an " +
-                    "execution name. Refusing rather than sanitising: two ids that sanitised to one " +
-                    "name would collapse into a single execution and the second deploy would " +
-                    "silently never run.");
-        }
-
-        var name = $"req-{requestId}-{attempt}";
-        if (name.Length > 80)
-            throw new InvalidOperationException(
-                $"execution name '{name}' is {name.Length} characters; Step Functions allows 80.");
-
-        return name;
-    }
+    public static string ExecutionName(string requestId, int attempt) => DeployExecution.Name(requestId, attempt);
 
     /// <summary>
     /// What a definition and the role that runs it cannot actually do — read from the two documents,
@@ -326,7 +329,9 @@ public static class DeployerPlanner
     }
 
     /// <summary>Build the deployer plan for one environment.</summary>
-    public static PipelineDeployer Plan(SystemConfig config, string? accountId = null)
+    /// <param name="triggerInputs">The cluster and tenants the trigger's routes name. Required when
+    /// <c>Pipeline.DeployOnBuildRecord</c> is on, and ignored otherwise.</param>
+    public static PipelineDeployer Plan(SystemConfig config, string? accountId = null, DeployerTriggerInputs? triggerInputs = null)
     {
         var p = config.Pipeline
             ?? throw new InvalidOperationException("no Pipeline block; nothing to plan.");
@@ -427,10 +432,24 @@ public static class DeployerPlanner
                 TimeoutSeconds: 120, MemoryMb: 1024, DeployerPackages.SignatureHook, InvokedByStateMachine: false),
         };
 
+        var machine = $"{sk}-{env}-deployer";
+
+        // THE TRIGGER, only when this environment deploys on every build record. Its function joins the list above,
+        // so it is created exactly as the others are: its own role, the same Deny.
+        DeployerTriggerPlan? trigger = null;
+        if (p.DeployOnBuildRecord)
+        {
+            var (triggerPlan, startFunction) = TriggerFor(
+                config, p, region, acct, artifactAccount, buildRecordStore,
+                $"arn:aws:states:{region}:{acct}:stateMachine:{machine}", triggerInputs);
+            trigger = triggerPlan;
+            functions.Add(startFunction);
+        }
+
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
 
         return new PipelineDeployer(
-            StateMachineName: $"{sk}-{env}-deployer",
+            StateMachineName: machine,
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null),
@@ -454,8 +473,131 @@ public static class DeployerPlanner
             // anyone could apply, and the applier always resolves the account first.
             ReplicationPermission: accountId is null
                 ? null
-                : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories));
+                : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories),
+            Trigger: trigger);
     }
+
+    /// <summary>
+    /// The trigger's resources and its start function (DecoupledCd.md §4.3, P2 stage D).
+    ///
+    /// <para>ONE ROUTE PER IMAGE REPOSITORY, ONE TARGET PER TENANT. A record's key says which repository wrote it,
+    /// and each tenant runs its own copy of the service, so a build rolls <c>{sk}-{tenant}-{artifact}</c> in every
+    /// tenant found. A repository with two artifacts is refused: a record names a digest, not the ECR repository it
+    /// was pushed to, so its image could not be matched to a service.</para>
+    /// </summary>
+    private static (DeployerTriggerPlan Plan, DeployerFunction Function) TriggerFor(
+        SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount,
+        string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs)
+    {
+        if (inputs is null)
+            throw new InvalidOperationException(
+                "Pipeline.DeployOnBuildRecord is on, but the deployer was planned without the ECS cluster and the tenants " +
+                "whose services a build rolls. `lz bootstrapdeployer` resolves both before it plans.");
+
+        if (string.IsNullOrWhiteSpace(p.TargetAccountId))
+            throw new InvalidOperationException(
+                "Pipeline.DeployOnBuildRecord needs Pipeline.TargetAccountId: the build account forwards records to a bus in that account.");
+
+        if (inputs.TenantKeys.Count == 0)
+            throw new InvalidOperationException(
+                $"Pipeline.DeployOnBuildRecord is on, but no tenant config was found for {config.SystemKey}/{config.Environment}, " +
+                "so a build would roll no service. Run from the workspace that holds the tenantconfig files.");
+
+        var sk = config.SystemKey;
+
+        var routes = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+            .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
+            .Select(r =>
+            {
+                var artifacts = r.Artifacts ?? new List<string>();
+                if (artifacts.Count != 1)
+                    throw new InvalidOperationException(
+                        $"Pipeline.Repositories entry '{r.Repo}' builds {artifacts.Count} image artifacts. A build record names a " +
+                        "digest, not the repository it was pushed to, so the trigger could not tell which service its image " +
+                        "belongs to. Give the repository one artifact, or turn Pipeline.DeployOnBuildRecord off.");
+
+                var artifact = artifacts[0];
+                return new TriggerRoute(
+                    BuildRecordFormat.PrefixFor(DeployerTrigger.RecordClass, r.Repo!),
+                    inputs.TenantKeys
+                        .Select(tk => new TriggerTarget(tk, new DeployTarget(
+                            inputs.Cluster, $"{sk}-{tk}-{artifact}", artifact, EcrRepositoryNaming.For(config, artifact))))
+                        .ToList());
+            })
+            .ToList();
+
+        var busName = TriggerBusName(config);
+        var busArn = TriggerBusArn(region, acct, config);
+        var ruleName = StartRuleName(config);
+        // A rule on a custom bus has the bus in its ARN.
+        var ruleArn = $"arn:aws:events:{region}:{acct}:rule/{busName}/{ruleName}";
+        var function = StartFunctionName(config);
+        var queue = $"{function}-dlq";
+        var queueArn = $"arn:aws:sqs:{region}:{acct}:{queue}";
+
+        var plan = new DeployerTriggerPlan(
+            BusName: busName,
+            BusArn: busArn,
+            BusPolicy: CrossAccount.TriggerBusPolicy(busArn, artifactAccount, RecordForwarderRoleName(config)),
+            RuleName: ruleName,
+            RuleArn: ruleArn,
+            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore),
+            StartFunctionName: function,
+            StartFunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
+            DeadLetterQueueName: queue,
+            DeadLetterQueueArn: queueArn,
+            DeadLetterQueuePolicy: CrossAccount.DeadLetterQueuePolicy(queueArn, ruleArn),
+            AlarmName: $"{queue}-not-empty",
+            // Lambda's own defaults, written down: two retries, and an hour before an event that keeps failing is queued.
+            MaximumRetryAttempts: 2,
+            MaximumEventAgeSeconds: 3600,
+            Routes: routes);
+
+        var startFunction = new DeployerFunction(
+            function, DeployerHandlers.Start, $"{function}-fn",
+            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn)),
+            new Dictionary<string, string>
+            {
+                [DeployerEnvironment.ArtifactAccount] = artifactAccount,
+                [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
+                [DeployerEnvironment.StateMachine] = stateMachineArn,
+                [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
+            },
+            TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
+
+        return (plan, startFunction);
+    }
+
+    /// <summary>
+    /// True when this environment deploys on every build record. The bootstrapper asks before resolving the cluster
+    /// and tenants the trigger needs, so an environment without the trigger never reads them.
+    /// </summary>
+    public static bool TriggerWanted(SystemConfig config) => config.Pipeline is { Enabled: true, DeployOnBuildRecord: true };
+
+    /// <summary>
+    /// The trigger bus's name. ONE DEFINITION FOR BOTH ACCOUNTS, like <see cref="VerifyRoleName"/>: this planner creates the
+    /// bus, and the build account's forwarding rule targets it by ARN.
+    /// </summary>
+    public static string TriggerBusName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-trigger";
+
+    /// <summary>The trigger bus's ARN, in <paramref name="targetAccountId"/>.</summary>
+    public static string TriggerBusArn(string region, string targetAccountId, SystemConfig config)
+        => $"arn:aws:events:{region}:{targetAccountId}:event-bus/{TriggerBusName(config)}";
+
+    /// <summary>The rule on the trigger bus that invokes the start function. The apply removes it when the trigger is off.</summary>
+    public static string StartRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-start";
+
+    /// <summary>The function that names and starts executions.</summary>
+    public static string StartFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-start";
+
+    /// <summary>
+    /// The build account's role that puts forwarded record events on the trigger bus. ONE DEFINITION FOR BOTH ACCOUNTS:
+    /// the build account creates it, and this account's bus policy admits it by name.
+    /// </summary>
+    public static string RecordForwarderRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-record-forwarder";
+
+    /// <summary>The build account's rule that forwards record events to this environment. Removed when the trigger is off.</summary>
+    public static string ForwardRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-forward-build-records";
 
     /// <summary>The signature hook's function name — one definition for the planner and the service that attaches it.</summary>
     public static string SignatureHookFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-signature-hook";
@@ -796,6 +938,38 @@ public static class DeployerPlanner
             Effect = "Allow",
             Action = new[] { "s3:PutObject" },
             Resource = $"arn:aws:s3:::{evidence}/failures/*",
+        },
+    };
+
+    /// <summary>
+    /// What the start function may do: start THIS deployer, read back an execution of it whose name is taken, and
+    /// dead-letter its own failures. It reads no build record — Verify does — and rolls nothing.
+    /// </summary>
+    private static object[] StartGrants(string stateMachineArn, string queueArn) => new object[]
+    {
+        new
+        {
+            Sid = "StartTheDeployer",
+            Effect = "Allow",
+            Action = new[] { "states:StartExecution" },
+            Resource = stateMachineArn,
+        },
+        new
+        {
+            // A duplicate that arrives after its execution finished gets ExecutionAlreadyExists; the input tells a
+            // duplicate from a conflict (StartStep).
+            Sid = "ReadAnExecutionWhoseNameIsTaken",
+            Effect = "Allow",
+            Action = new[] { "states:DescribeExecution" },
+            Resource = DeployerTrigger.ExecutionArn(stateMachineArn, "*"),
+        },
+        new
+        {
+            // Lambda sends a failed asynchronous invocation's record to its destination under the function's role.
+            Sid = "DeadLetterItsFailures",
+            Effect = "Allow",
+            Action = new[] { "sqs:SendMessage" },
+            Resource = queueArn,
         },
     };
 

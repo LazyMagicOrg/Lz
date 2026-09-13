@@ -2921,9 +2921,11 @@ class Program
         var cmd = new Command("bootstrappipeline",
             "Create the decoupled-CD pipeline's account-side resources in the build account: the " +
             "versioned artifact, build-record and deploy-request stores, the GitHub OIDC provider, " +
-            "one push-only role per building repository, and a signing profile per image role. " +
-            "PRINTS THE PLAN AND STOPS unless --apply is given. Idempotent: re-run to adopt a " +
-            "newly-added repository. Refuses a config with no Pipeline block.");
+            "one push-only role per building repository, and a signing profile per image role. For the " +
+            "environment whose config it is given: replication, the build-record read grant, and — with " +
+            "Pipeline.DeployOnBuildRecord — the rule that forwards new image records to that environment " +
+            "(removed when the flag is off). PRINTS THE PLAN AND STOPS unless --apply is given. Idempotent: " +
+            "re-run to adopt a newly-added repository. Refuses a config with no Pipeline block.");
 
         var applyOption = new Option<bool>("--apply",
             "Actually create the resources. Without it the plan is printed and nothing is created.");
@@ -2984,10 +2986,11 @@ class Program
     {
         var cmd = new Command("bootstrapdeployer",
             "Create the decoupled-CD deployer in a TARGET account: the Step Functions state " +
-            "machine, the deploy role with its explicit self-rewrite Deny, and the versioned " +
-            "evidence store. PRINTS THE PLAN AND STOPS unless --apply is given. Does NOT make the " +
-            "deployer live — no event rule, no reconciler schedule — because the state machine's " +
-            "Lambdas are a later step and a wired trigger would start executions that die.");
+            "machine, its functions, the deploy role with its explicit self-rewrite Deny, and the versioned " +
+            "evidence store. With Pipeline.DeployOnBuildRecord it also wires this account's half of the " +
+            "trigger — the bus the build account forwards record events to, its rule, and the function that " +
+            "starts the deployer — and without it removes that rule. PRINTS THE PLAN AND STOPS unless --apply " +
+            "is given. No reconciler schedule is created.");
 
         var applyOption = new Option<bool>("--apply",
             "Actually create the resources. Without it the plan is printed and nothing is created.");

@@ -48,7 +48,13 @@ public static class DeployerBootstrapper
         var region = config.Region;
 
         var accountId = await ResolveAccountAsync(profile, region);
-        var plan = DeployerPlanner.Plan(config, accountId);
+
+        // THE TRIGGER'S INPUTS ARE READ ONLY FOR AN ENVIRONMENT THAT HAS ONE: the cluster that exists here, and the tenants
+        // whose services a build rolls. Both are reads, so the dry run shows the real routes.
+        var triggerInputs = DeployerPlanner.TriggerWanted(config)
+            ? await ResolveTriggerInputsAsync(config, profile, region)
+            : null;
+        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs);
 
         // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
         // rather than half-way through an apply.
@@ -143,22 +149,89 @@ public static class DeployerBootstrapper
 
         await EnsureStateMachineAsync(sfn, plan, roleArn, accountId, region);
 
+        // THE TRIGGER, AFTER THE MACHINE IT STARTS (P2 stage D). Or, with the flag off, the start rule an earlier run
+        // created is taken away — a trigger that could only be switched on would keep deploying every build.
+        using (var events = creds != null
+                   ? new Amazon.EventBridge.AmazonEventBridgeClient(creds, endpoint) : new Amazon.EventBridge.AmazonEventBridgeClient(endpoint))
+        {
+            if (plan.Trigger is { } trigger)
+            {
+                using var sqs = creds != null ? new Amazon.SQS.AmazonSQSClient(creds, endpoint) : new Amazon.SQS.AmazonSQSClient(endpoint);
+                using var cloudWatch = creds != null
+                    ? new Amazon.CloudWatch.AmazonCloudWatchClient(creds, endpoint) : new Amazon.CloudWatch.AmazonCloudWatchClient(endpoint);
+
+                await TriggerApply.StartOnRecordsAsync(events, sqs, lambda, cloudWatch, trigger);
+            }
+            else
+            {
+                await TriggerApply.RemoveRuleAsync(events, DeployerPlanner.TriggerBusName(config), DeployerPlanner.StartRuleName(config),
+                    "Pipeline.DeployOnBuildRecord is off");
+            }
+        }
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("Deployer bootstrap complete.");
         Console.ResetColor();
 
         Console.WriteLine();
-        Console.WriteLine("THE DEPLOYER IS NOT LIVE, and nothing here made it so:");
-        Console.WriteLine("  - no EventBridge rule starts it when a build record lands (stage D)");
-        Console.WriteLine("  - no reconciler schedule enumerates the build-record store (stage D)");
-        Console.WriteLine("  - no artifact-without-a-record anomaly alarm (stage D)");
-        Console.WriteLine("  - the signature hook is attached to no ECS service (C4 wiring, which moves the deploy plan)");
+        Console.WriteLine(plan.Trigger is null
+            ? "NOTHING STARTS THE DEPLOYER: Pipeline.DeployOnBuildRecord is off, so executions are started by hand."
+            : $"THIS ACCOUNT'S HALF OF THE TRIGGER IS WIRED: a record event arriving on {plan.Trigger.BusName} starts the deployer.");
+        Console.WriteLine("Not built:");
+        Console.WriteLine("  - a reconciler: an event that ends in a dead-letter queue is retried by nothing; start that deploy by hand");
+        Console.WriteLine("  - the artifact-without-a-record anomaly alarm");
+        if (config.Pipeline?.EnforceSignatures != true)
+            Console.WriteLine("  - the signature hook's attachment: it is attached by `lz deploytenant` under Pipeline.EnforceSignatures, which is off");
         Console.WriteLine();
         var verifyRole = plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify).RoleName;
         Console.WriteLine("THE BUILD ACCOUNT'S HALF is a separate command, run with that account's profile:");
-        Console.WriteLine($"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*)");
+        Console.WriteLine(plan.Trigger is null
+            ? $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*)"
+            : $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*; forwards record events to {plan.Trigger.BusName})");
         Console.WriteLine("  Only images pushed AFTER it runs replicate here — ECR does not copy what is already there.");
+    }
+
+    /// <summary>
+    /// The cluster and tenants the trigger's routes name. The tenants are the workspace's tenant configs — the set
+    /// <c>lz updatecontainer</c> rolls — and the cluster is whichever of <c>updatecontainer</c>'s two naming conventions exists
+    /// and is ACTIVE here.
+    /// </summary>
+    private static async Task<DeployerTriggerInputs> ResolveTriggerInputsAsync(SystemConfig config, string? profile, string region)
+    {
+        List<(string TenantKey, TenantConfig Config)> tenants;
+        try
+        {
+            tenants = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment);
+        }
+        catch (FileNotFoundException)
+        {
+            // The planner refuses an empty list, naming what it looked for.
+            tenants = new List<(string, TenantConfig)>();
+        }
+
+        // THE DEPLOYER IS REGIONAL: a tenant deployed elsewhere is not a service this machine can roll.
+        foreach (var (tenantKey, tenant) in tenants)
+        {
+            if (tenant.Region is { } tenantRegion && !string.Equals(tenantRegion, region, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"lz bootstrapdeployer refuses: tenant {tenantKey} deploys to {tenantRegion}, but this deployer and its " +
+                    $"trigger are in {region}. A build could not roll that tenant's service from here.");
+        }
+
+        var creds = AwsCredentialsFactory.Resolve(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+        using var ecs = creds != null ? new Amazon.ECS.AmazonECSClient(creds, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+
+        var candidates = new List<string> { $"{config.SystemKey}-{config.Environment}-cluster", $"{config.SystemKey}-cluster" };
+        var found = await ecs.DescribeClustersAsync(new Amazon.ECS.Model.DescribeClustersRequest { Clusters = candidates });
+        var cluster = candidates.FirstOrDefault(name =>
+                (found.Clusters ?? new List<Amazon.ECS.Model.Cluster>()).Any(c => c.ClusterName == name && c.Status == "ACTIVE"))
+            ?? throw new InvalidOperationException(
+                $"lz bootstrapdeployer refuses: Pipeline.DeployOnBuildRecord is on, but neither {string.Join(" nor ", candidates)} is " +
+                "an ACTIVE ECS cluster in this account, so a build would have no service to roll. Deploy the system first.");
+
+        return new DeployerTriggerInputs(cluster, tenants.Select(t => t.TenantKey).OrderBy(k => k, StringComparer.Ordinal).ToList());
     }
 
     /// <summary>
@@ -243,6 +316,21 @@ public static class DeployerBootstrapper
         Console.WriteLine(target == accountId
             ? $"  target account: {accountId} matches Pipeline.TargetAccountId"
             : $"  target account: THIS PROFILE RESOLVES TO {accountId}, BUT Pipeline.TargetAccountId IS {target ?? "not set"}; apply will refuse");
+        Console.WriteLine();
+
+        if (plan.Trigger is { } trigger)
+        {
+            Console.WriteLine("  trigger (Pipeline.DeployOnBuildRecord):");
+            Console.WriteLine($"    bus {trigger.BusName}: only {config.Pipeline?.ArtifactAccountId}'s role {DeployerPlanner.RecordForwarderRoleName(config)} may put events");
+            Console.WriteLine($"    rule {trigger.RuleName}: record events from account {config.Pipeline?.ArtifactAccountId} only -> {trigger.StartFunctionName}");
+            foreach (var route in trigger.Routes)
+                Console.WriteLine($"    {route.RecordPrefix} rolls {string.Join(", ", route.Targets.Select(t => $"{t.Target.Service} in {t.Target.Cluster} as req-{{stamp}}-{{run id}}-{t.TenantKey}-1"))}");
+            Console.WriteLine($"    failures to queue {trigger.DeadLetterQueueName} after {trigger.MaximumRetryAttempts} retries; alarm {trigger.AlarmName}, notifying nobody");
+        }
+        else
+        {
+            Console.WriteLine($"  trigger: off (Pipeline.DeployOnBuildRecord) — rule {DeployerPlanner.StartRuleName(config)} is removed if an earlier run created it");
+        }
         Console.WriteLine();
 
         foreach (var (name, package) in packages.OrderBy(p => p.Key))

@@ -88,6 +88,26 @@ public class PipelineConfig
     public bool EnforceSignatures { get; set; }
 
     /// <summary>
+    /// Start this environment's deployer when a build record for an image lands in the build account's
+    /// record store (DecoupledCd.md §4.3, P2 stage D). Default <c>false</c>.
+    ///
+    /// <para>WHAT IT BUILDS, across both accounts. <c>lz bootstrappipeline</c> turns on the record store's
+    /// EventBridge delivery and adds a rule that forwards new <c>image/</c> records to this environment's
+    /// trigger bus, through a role that may put events on that one bus, with a dead-letter queue.
+    /// <c>lz bootstrapdeployer</c> creates the bus, a policy admitting only that role, a rule pinned to the
+    /// build account, and a function that names the execution and starts the deployer. A rule cannot name
+    /// an execution, and the name is what absorbs S3's duplicate deliveries (§5.1).</para>
+    ///
+    /// <para>ITS OWN FLAG, NOT IMPLIED BY <see cref="Enabled"/>: with it, every image build deploys to this
+    /// environment without anyone starting anything, which is a decision per environment rather than a
+    /// consequence of opting into the pipeline. Turning it off and re-running both commands removes the two
+    /// rules. Requires <see cref="ArtifactAccountId"/> and <see cref="TargetAccountId"/>, which name the two
+    /// ends; <c>image</c> in <see cref="Classes"/>, the only class with a deployer; and no approval gate,
+    /// because an environment that needs a person admits a deploy request (§6), not every build.</para>
+    /// </summary>
+    public bool DeployOnBuildRecord { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

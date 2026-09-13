@@ -191,6 +191,13 @@
     <!-- StepFunctions: the in-account deployer's state machine (§5.1). Standard workflows only —
          .waitForTaskToken, which the approval gate needs, does not exist on Express. -->
     <PackageReference Include="AWSSDK.StepFunctions" Version="4.*" />
+    <!-- EventBridge, SQS, CloudWatch: the deployer's trigger (DecoupledCd.md §4.3, P2 stage D) — the rules and bus that
+         carry a build record's event from the build account, the dead-letter queues, and their alarms. EXACT, not 4.*:
+         each was the newest release needing no AWSSDK.Core newer than the 4.0.102.4 this project already resolves, and
+         a floating version would fetch whatever is newest on the day of a restore. -->
+    <PackageReference Include="AWSSDK.EventBridge" Version="4.0.100.13" />
+    <PackageReference Include="AWSSDK.SQS" Version="4.0.1.11" />
+    <PackageReference Include="AWSSDK.CloudWatch" Version="4.0.104.3" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.*" />

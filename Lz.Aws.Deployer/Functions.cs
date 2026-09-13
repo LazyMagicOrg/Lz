@@ -100,6 +100,25 @@ public sealed class RecordFailureFunction
     }
 }
 
+/// <summary>
+/// The trigger (P2 stage D): EventBridge invokes this with a build record's forwarded S3 event, and it starts the
+/// deployer under the name the record implies. A refusal or conflict is thrown, so Lambda retries it and then puts it,
+/// with the message, in the dead-letter queue.
+/// </summary>
+public sealed class StartFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var result = await StartStep.RunAsync(
+            await Io.ReadAsync(input),
+            TriggerSettings.Read(Environment.GetEnvironmentVariable),
+            new SfnExecutions(Clients.Sfn.Value));
+
+        context.Logger.LogInformation($"started {result["started"]!.ToJsonString()}; already started {result["duplicates"]!.ToJsonString()}");
+        return Io.Write(result);
+    }
+}
+
 [System.Runtime.Versioning.SupportedOSPlatform("linux")]
 public sealed class SignatureHookFunction
 {
