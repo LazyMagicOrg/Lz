@@ -428,6 +428,34 @@ public class PipelineConfigTests
     }
 
     [Fact]
+    public void Alerts_AreOffUnlessSaid_AndValidateWithBothAccounts()
+    {
+        Assert.False(new PipelineConfig().Alerts);
+
+        var p = Enabled();
+        p.Alerts = true;
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
+    }
+
+    [Theory]
+    [InlineData("ArtifactAccountId")]
+    [InlineData("TargetAccountId")]
+    public void Alerts_WithoutEitherAccount_AreRefused(string missing)
+    {
+        var p = Enabled();
+        p.Alerts = true;
+        p.ArtifactAccountId = missing == "ArtifactAccountId" ? null : "147440642635";
+        p.TargetAccountId = missing == "TargetAccountId" ? null : "503947800380";
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("Pipeline.Alerts", ex.Message);
+        Assert.Contains(missing, ex.Message);
+    }
+
+    [Fact]
     public void DeployOnBuildRecord_WithBothAccountsAndTheImageClass_Validates()
     {
         ConfigValidator.Validate(WithPipeline(Triggering()), "test.yaml"); // no throw

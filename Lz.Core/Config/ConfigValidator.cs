@@ -389,6 +389,16 @@ public static class ConfigValidator
             }
         }
 
+        // THE ALERTS NAME BOTH ACCOUNTS: the topic lives in this environment's account, and the build account's
+        // forwarding alarm publishes to it, while the sweep reads that account's build records.
+        if (p.Alerts && (string.IsNullOrWhiteSpace(p.ArtifactAccountId) || string.IsNullOrWhiteSpace(p.TargetAccountId)))
+        {
+            errors.Add(
+                "Pipeline.Alerts is on but Pipeline.ArtifactAccountId or Pipeline.TargetAccountId is not set. The alerts " +
+                "topic lives in this environment's account, and the build account's alarm and build records feed it, so " +
+                "both ids are needed. Set both, or Alerts: false.");
+        }
+
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {
             if (!PipelineScanConfig.KnownSeverities.Contains(s))

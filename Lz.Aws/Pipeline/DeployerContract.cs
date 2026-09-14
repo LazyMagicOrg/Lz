@@ -231,6 +231,8 @@ public static class DeployerEnvironment
     public const string StateMachine = "LZ_STATE_MACHINE";
     public const string TriggerRoutes = "LZ_TRIGGER_ROUTES";
     public const string TriggerRefs = "LZ_TRIGGER_REFS";
+    public const string AlertsTopic = "LZ_ALERTS_TOPIC";
+    public const string CorroborateSources = "LZ_CORROBORATE_SOURCES";
 
     /// <summary>Encode a list. Refuses a value containing the separator rather than corrupting it.</summary>
     public static string Join(IEnumerable<string> values)

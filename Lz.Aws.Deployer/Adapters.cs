@@ -22,6 +22,89 @@ internal static class Clients
     public static readonly Lazy<IAmazonECR> Ecr = new(() => new AmazonECRClient());
     public static readonly Lazy<IAmazonECS> Ecs = new(() => new AmazonECSClient());
     public static readonly Lazy<Amazon.StepFunctions.IAmazonStepFunctions> Sfn = new(() => new Amazon.StepFunctions.AmazonStepFunctionsClient());
+    public static readonly Lazy<Amazon.SimpleNotificationService.IAmazonSimpleNotificationService> Sns =
+        new(() => new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient());
+}
+
+/// <summary>The sweep's view of a repository: every image and artifact, all pages.</summary>
+internal sealed class EcrRepositoryImages(IAmazonECR ecr) : IRepositoryImages
+{
+    public async Task<IReadOnlyList<RepositoryImage>> ListAsync(string repository)
+    {
+        var all = new List<RepositoryImage>();
+        string? token = null;
+        do
+        {
+            var page = await ecr.DescribeImagesAsync(new DescribeImagesRequest { RepositoryName = repository, NextToken = token });
+            foreach (var detail in page.ImageDetails ?? new List<ImageDetail>())
+            {
+                // No push time would leave the image out of every window, silently; it is a fault instead.
+                var pushedAt = detail.ImagePushedAt
+                    ?? throw new InvalidOperationException($"ECR listed {detail.ImageDigest} in {repository} with no push time.");
+                var utc = pushedAt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(pushedAt, DateTimeKind.Utc) : pushedAt.ToUniversalTime();
+
+                all.Add(new RepositoryImage(
+                    detail.ImageDigest, detail.ImageManifestMediaType, detail.ArtifactMediaType, new DateTimeOffset(utc),
+                    detail.ImageTags ?? new List<string>()));
+            }
+
+            token = page.NextToken;
+        } while (!string.IsNullOrEmpty(token));
+
+        return all;
+    }
+}
+
+/// <summary>Keys under a prefix, after a key, all pages.</summary>
+internal sealed class S3RecordKeys(IAmazonS3 s3) : IRecordKeys
+{
+    public async Task<IReadOnlyList<string>> ListAsync(string bucket, string prefix, string startAfter)
+    {
+        var keys = new List<string>();
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = bucket,
+                Prefix = prefix,
+                // S3 ignores StartAfter once a continuation token is given; it is sent on the first page only.
+                StartAfter = token is null ? startAfter : null,
+                ContinuationToken = token,
+            });
+            keys.AddRange((page.S3Objects ?? new List<S3Object>()).Select(o => o.Key));
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token != null);
+
+        return keys;
+    }
+}
+
+/// <summary>
+/// Whether an evidence object exists, BY LISTING ITS EXACT KEY rather than reading it. A read of a missing key answers 404
+/// only to a principal holding <c>s3:ListBucket</c>, and the sweep's list grant is conditioned on a prefix that a read
+/// request does not carry — so the read could answer 403 for "not there". A listing carries the prefix, and a denial
+/// throws rather than reading as absence.
+/// </summary>
+internal sealed class S3EvidenceProbe(IAmazonS3 s3) : IEvidenceProbe
+{
+    public async Task<bool> ExistsAsync(string bucket, string key)
+    {
+        var page = await s3.ListObjectsV2Async(new ListObjectsV2Request { BucketName = bucket, Prefix = key, MaxKeys = 1 });
+        return (page.S3Objects ?? new List<S3Object>()).Any(o => o.Key == key);
+    }
+}
+
+internal sealed class SnsAlerts(Amazon.SimpleNotificationService.IAmazonSimpleNotificationService sns) : IAlertPublisher
+{
+    // System's Task: Amazon.ECS.Model, imported above, has its own.
+    public System.Threading.Tasks.Task PublishAsync(string topicArn, string subject, string message)
+        => sns.PublishAsync(new Amazon.SimpleNotificationService.Model.PublishRequest
+        {
+            TopicArn = topicArn,
+            Subject = subject,
+            Message = message,
+        });
 }
 
 /// <summary>The start function's two calls. "The name is taken" and "no such execution" are SDK exceptions; the step needs answers.</summary>

@@ -108,6 +108,26 @@ public class PipelineConfig
     public bool DeployOnBuildRecord { get; set; }
 
     /// <summary>
+    /// Tell a person when the pipeline fails or sees something it should not (DecoupledCd.md §12, P2 stage D3). Default
+    /// <c>false</c>.
+    ///
+    /// <para>WHAT IT BUILDS. <c>lz bootstrapdeployer</c> creates an SNS topic in this environment's account, and sends it
+    /// three things: an execution of the deployer that ends FAILED, TIMED_OUT or ABORTED; the trigger's dead-letter
+    /// queue alarm, when <see cref="DeployOnBuildRecord"/> is on; and an image in this environment's pipeline repository
+    /// that no build record names, found by a function that sweeps the repository every fifteen minutes, records each
+    /// such image once in the evidence store and alerts on it once. <c>lz bootstrappipeline</c> points the build
+    /// account's forwarding-queue alarm at the same topic.</para>
+    ///
+    /// <para>NOBODY IS SUBSCRIBED BY lz. A subscription is a person, and an address is not config; each run reports the
+    /// topic's confirmed subscriptions and says how to add one. ITS OWN FLAG, NOT IMPLIED BY <see cref="Enabled"/>: it
+    /// adds a scheduled function and a topic to the account. Turning it off and re-running both commands removes the
+    /// rules, the alarm actions and the sweep's schedule; the topic stays, with whoever subscribed. Requires
+    /// <see cref="ArtifactAccountId"/>, whose alarm and records it reads, and <see cref="TargetAccountId"/>, where the
+    /// topic lives.</para>
+    /// </summary>
+    public bool Alerts { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

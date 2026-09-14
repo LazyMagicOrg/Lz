@@ -280,6 +280,8 @@ public class PipelineBootstrapPlannerTests
                 "scheduler:*", "iam:*Policy*",
                 "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:AddPermission", "lambda:RemovePermission",
                 "lambda:PutFunctionEventInvokeConfig", "lambda:UpdateFunctionEventInvokeConfig",
+                "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission", "sns:DeleteTopic", "sns:Unsubscribe",
+                "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:DisableAlarmActions",
             },
             plan.DeniedActions);
     }
@@ -500,6 +502,34 @@ public class PipelineBootstrapPlannerTests
         p.TargetAccountId = "503947800380";
         p.DeployOnBuildRecord = on;
         return WithPipeline(p);
+    }
+
+    [Fact]
+    public void WithAlerts_TheForwardingQueueAlarm_NotifiesTheEnvironmentsTopic_AndOtherwiseNobody()
+    {
+        // An alarm update replaces its actions, so the empty list is how turning alerts off reaches the alarm.
+        Assert.Empty(PipelineBootstrapPlanner.Plan(Forwarding(true), "147440642635").RecordForwarding!.AlarmActions);
+
+        var alerting = Forwarding(true);
+        alerting.Pipeline!.Alerts = true;
+        Assert.Equal(
+            new[] { "arn:aws:sns:us-west-2:503947800380:scu-dev-pipeline-alerts" },
+            PipelineBootstrapPlanner.Plan(alerting, "147440642635").RecordForwarding!.AlarmActions);
+    }
+
+    [Fact]
+    public void WithAlerts_TheSweepMayListAndReadImageRecords_AndWithoutThemItMayNot()
+    {
+        const string sweep = "arn:aws:iam::503947800380:role/scu-dev-deployer-corroborate-fn";
+
+        var alerting = Forwarding(false);
+        alerting.Pipeline!.Alerts = true;
+        var grant = PipelineBootstrapPlanner.Plan(alerting, "147440642635").BuildRecordReadGrant!;
+        Assert.Equal(2, grant.Count);
+        Assert.All(grant, s => Assert.Contains(sweep, s["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.ToJsonString()));
+
+        var without = PipelineBootstrapPlanner.Plan(Forwarding(false), "147440642635").BuildRecordReadGrant!;
+        Assert.All(without, s => Assert.DoesNotContain("corroborate", s.ToJsonString()));
     }
 
     [Fact]

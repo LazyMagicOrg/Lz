@@ -122,6 +122,31 @@ public sealed class StartFunction
     }
 }
 
+/// <summary>
+/// The sweep for images no build record names (P2 stage D3), run on a schedule. The schedule's event says only that it is
+/// time, so nothing in it is read; what the run found is logged and returned.
+/// </summary>
+public sealed class CorroborateFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var result = await CorroborateStep.RunAsync(
+            CorroborateSettings.Read(Environment.GetEnvironmentVariable),
+            new EcrRepositoryImages(Clients.Ecr.Value),
+            new S3RecordKeys(Clients.S3.Value),
+            new S3RecordStore(Clients.S3.Value),
+            new S3EvidenceProbe(Clients.S3.Value),
+            new S3EvidenceWriter(Clients.S3.Value),
+            new SnsAlerts(Clients.Sns.Value),
+            DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation(
+            $"corroborated {result["corroborated"]!.AsArray().Count}; anomalies {result["anomalies"]!.ToJsonString()}; " +
+            $"already recorded {result["alreadyRecorded"]!.AsArray().Count}; too new to judge {result["tooNew"]!.AsArray().Count}");
+        return Io.Write(result);
+    }
+}
+
 [System.Runtime.Versioning.SupportedOSPlatform("linux")]
 public sealed class SignatureHookFunction
 {

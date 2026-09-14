@@ -27,6 +27,8 @@ public class DeployerPackageTests
         "Amazon.Lambda.Core.dll", "AWSSDK.Core.dll", "AWSSDK.S3.dll", "AWSSDK.ECR.dll", "AWSSDK.ECS.dll",
         // The start function (P2 stage D).
         "AWSSDK.StepFunctions.dll",
+        // The sweep's alert (P2 stage D3).
+        "AWSSDK.SimpleNotificationService.dll",
     };
 
     [Theory]

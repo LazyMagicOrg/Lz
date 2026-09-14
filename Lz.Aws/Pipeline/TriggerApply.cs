@@ -50,7 +50,8 @@ internal static class TriggerApply
         RequireEqual("dead-letter queue ARN", plan.DeadLetterQueueArn, queueArn);
         await EnsureAlarmAsync(cloudWatch, plan.AlarmName, plan.DeadLetterQueueName,
             "A build record's event could not be forwarded to its environment's trigger bus. The message says why " +
-            "(ERROR_CODE, ERROR_MESSAGE); the build's deploy was not started.");
+            "(ERROR_CODE, ERROR_MESSAGE); the build's deploy was not started.",
+            plan.AlarmActions);
 
         var roleArn = await EnsureForwarderRoleAsync(iam, plan);
         RequireEqual("forwarding role ARN", plan.RoleArn, roleArn);
@@ -161,9 +162,10 @@ internal static class TriggerApply
         RequireEqual("dead-letter queue ARN", plan.DeadLetterQueueArn, queueArn);
         await EnsureAlarmAsync(cloudWatch, plan.AlarmName, plan.DeadLetterQueueName,
             "A build record reached this environment's trigger and no deploy was started: the start function refused or " +
-            "failed on it, or EventBridge could not invoke the function. The message says which.");
+            "failed on it, or EventBridge could not invoke the function. The message says which.",
+            plan.AlarmActions);
 
-        await EnsureInvokePermissionAsync(lambda, plan);
+        await EnsureInvokePermissionAsync(lambda, plan.StartFunctionName, InvokePermissionSid, plan.RuleName, plan.RuleArn);
         await EnsureFailureDestinationAsync(lambda, plan);
 
         await EnsureRuleAsync(events, plan.BusName, plan.RuleName, plan.RuleArn, plan.EventPattern,
@@ -236,43 +238,44 @@ internal static class TriggerApply
         Console.WriteLine("      bus policy written and read back: only the build account's forwarding role may put events.");
     }
 
-    private static async Task EnsureInvokePermissionAsync(IAmazonLambda lambda, DeployerTriggerPlan plan)
+    /// <summary>EventBridge may invoke <paramref name="functionName"/> for exactly one rule, under the statement <paramref name="sid"/>.</summary>
+    internal static async Task EnsureInvokePermissionAsync(IAmazonLambda lambda, string functionName, string sid, string ruleName, string ruleArn)
     {
         string? policy = null;
         try
         {
-            policy = (await lambda.GetPolicyAsync(new Amazon.Lambda.Model.GetPolicyRequest { FunctionName = plan.StartFunctionName })).Policy;
+            policy = (await lambda.GetPolicyAsync(new Amazon.Lambda.Model.GetPolicyRequest { FunctionName = functionName })).Policy;
         }
         catch (Amazon.Lambda.Model.ResourceNotFoundException)
         {
             // No policy yet.
         }
 
-        if (InvokePermissionIsFor(policy, plan.RuleArn))
+        if (InvokePermissionIsFor(policy, ruleArn, sid))
         {
-            Console.WriteLine($"  function '{plan.StartFunctionName}': invoke permission for {plan.RuleName} already present.");
+            Console.WriteLine($"  function '{functionName}': invoke permission for {ruleName} already present.");
             return;
         }
 
-        if (policy != null && policy.Contains($"\"{InvokePermissionSid}\"", StringComparison.Ordinal))
+        if (policy != null && policy.Contains($"\"{sid}\"", StringComparison.Ordinal))
             await lambda.RemovePermissionAsync(new Amazon.Lambda.Model.RemovePermissionRequest
             {
-                FunctionName = plan.StartFunctionName, StatementId = InvokePermissionSid,
+                FunctionName = functionName, StatementId = sid,
             });
 
         await lambda.AddPermissionAsync(new Amazon.Lambda.Model.AddPermissionRequest
         {
-            FunctionName = plan.StartFunctionName,
-            StatementId = InvokePermissionSid,
+            FunctionName = functionName,
+            StatementId = sid,
             Action = "lambda:InvokeFunction",
             Principal = "events.amazonaws.com",
-            SourceArn = plan.RuleArn,
+            SourceArn = ruleArn,
         });
-        Console.WriteLine($"  function '{plan.StartFunctionName}': EventBridge may invoke it for {plan.RuleName} only.");
+        Console.WriteLine($"  function '{functionName}': EventBridge may invoke it for {ruleName} only.");
     }
 
-    /// <summary>Does a function's resource policy hold our statement, allowing EventBridge for exactly this rule?</summary>
-    public static bool InvokePermissionIsFor(string? policy, string ruleArn)
+    /// <summary>Does a function's resource policy hold the statement <paramref name="sid"/>, allowing EventBridge for exactly this rule?</summary>
+    public static bool InvokePermissionIsFor(string? policy, string ruleArn, string sid = InvokePermissionSid)
     {
         if (string.IsNullOrWhiteSpace(policy)) return false;
 
@@ -293,7 +296,7 @@ internal static class TriggerApply
             _ => new List<JsonObject>(),
         };
 
-        var ours = statements.SingleOrDefault(s => s["Sid"]?.GetValue<string>() == InvokePermissionSid);
+        var ours = statements.SingleOrDefault(s => s["Sid"]?.GetValue<string>() == sid);
         if (ours is null) return false;
 
         var principal = ours["Principal"] is JsonObject p ? p["Service"]?.GetValue<string>() : null;
@@ -349,7 +352,7 @@ internal static class TriggerApply
     /// The rule with this pattern, enabled. <c>PutRule</c> creates or updates it; the ARN it returns is checked against the
     /// plan, since a rule on a custom bus carries the bus in its ARN and the queue and function policies name that ARN.
     /// </summary>
-    private static async Task EnsureRuleAsync(
+    internal static async Task EnsureRuleAsync(
         IAmazonEventBridge events, string? eventBusName, string name, string expectedArn, string pattern, string description)
     {
         var put = await events.PutRuleAsync(new PutRuleRequest
@@ -371,7 +374,7 @@ internal static class TriggerApply
     }
 
     /// <summary>The rule's one target, and no other: a target someone added by hand would receive every record event.</summary>
-    private static async Task EnsureOnlyTargetAsync(IAmazonEventBridge events, string? eventBusName, string rule, Target target)
+    internal static async Task EnsureOnlyTargetAsync(IAmazonEventBridge events, string? eventBusName, string rule, Target target)
     {
         var put = await events.PutTargetsAsync(new PutTargetsRequest
         {
@@ -432,7 +435,7 @@ internal static class TriggerApply
         }
         catch (Amazon.EventBridge.Model.ResourceNotFoundException)
         {
-            Console.WriteLine($"  trigger rule '{rule}': not present ({why}).");
+            Console.WriteLine($"  rule '{rule}': not present ({why}).");
             return;
         }
 
@@ -448,12 +451,12 @@ internal static class TriggerApply
         try
         {
             await events.DescribeRuleAsync(new DescribeRuleRequest { Name = rule, EventBusName = eventBusName });
-            throw new InvalidOperationException($"trigger rule '{rule}' was deleted but still reads back.");
+            throw new InvalidOperationException($"rule '{rule}' was deleted but still reads back.");
         }
         catch (Amazon.EventBridge.Model.ResourceNotFoundException)
         {
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"  trigger rule '{rule}' removed ({why}).");
+            Console.WriteLine($"  rule '{rule}' removed ({why}).");
             Console.ResetColor();
         }
     }
@@ -491,10 +494,12 @@ internal static class TriggerApply
     }
 
     /// <summary>
-    /// ALARM when the queue holds anything. It notifies nobody: no channel exists yet, and a CloudWatch alarm is where the
-    /// state is visible until one does (DecoupledCd.md §14, D3).
+    /// ALARM when the queue holds anything, notifying <paramref name="alarmActions"/> — the alerts topic under
+    /// <c>Pipeline.Alerts</c> (P2 stage D3), or nobody. An update replaces the alarm's whole definition, actions included, so
+    /// an empty list clears actions an earlier run set; both directions are read back.
     /// </summary>
-    private static async Task EnsureAlarmAsync(IAmazonCloudWatch cloudWatch, string alarm, string queue, string description)
+    private static async Task EnsureAlarmAsync(
+        IAmazonCloudWatch cloudWatch, string alarm, string queue, string description, IReadOnlyList<string> alarmActions)
     {
         await cloudWatch.PutMetricAlarmAsync(new PutMetricAlarmRequest
         {
@@ -510,11 +515,31 @@ internal static class TriggerApply
             ComparisonOperator = ComparisonOperator.GreaterThanOrEqualToThreshold,
             // An empty queue that has seen no traffic reports no data; that is not a failure.
             TreatMissingData = "notBreaching",
+            ActionsEnabled = true,
+            AlarmActions = alarmActions.ToList(),
         });
-        Console.WriteLine($"  alarm '{alarm}': in ALARM while {queue} holds a message.");
+
+        await RequireAlarmActionsAsync(cloudWatch, alarm, alarmActions);
+        Console.WriteLine(alarmActions.Count == 0
+            ? $"  alarm '{alarm}': in ALARM while {queue} holds a message; it notifies nobody."
+            : $"  alarm '{alarm}': in ALARM while {queue} holds a message; notifies {string.Join(", ", alarmActions)}.");
     }
 
-    private static void RequireEqual(string what, string expected, string? actual)
+    /// <summary>The alarm's actions, read back, are exactly the planned ones.</summary>
+    internal static async Task RequireAlarmActionsAsync(IAmazonCloudWatch cloudWatch, string alarm, IReadOnlyList<string> alarmActions)
+    {
+        var read = await cloudWatch.DescribeAlarmsAsync(new DescribeAlarmsRequest { AlarmNames = new List<string> { alarm } });
+        var metricAlarm = (read.MetricAlarms ?? new List<MetricAlarm>()).SingleOrDefault(a => a.AlarmName == alarm)
+            ?? throw new InvalidOperationException($"alarm '{alarm}' was written but does not read back.");
+
+        // SDK v4: a collection with no members is null.
+        var actions = metricAlarm.AlarmActions ?? new List<string>();
+        if (!actions.OrderBy(a => a, StringComparer.Ordinal).SequenceEqual(alarmActions.OrderBy(a => a, StringComparer.Ordinal), StringComparer.Ordinal))
+            throw new InvalidOperationException(
+                $"alarm '{alarm}' reads back notifying [{string.Join(", ", actions)}]; written [{string.Join(", ", alarmActions)}].");
+    }
+
+    internal static void RequireEqual(string what, string expected, string? actual)
     {
         if (!string.Equals(expected, actual, StringComparison.Ordinal))
             throw new InvalidOperationException($"{what} is {actual ?? "(none)"}; the plan expects {expected}.");

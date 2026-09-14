@@ -55,6 +55,8 @@ public sealed record DeployerFunction(
 /// replicate into exactly those repositories, merged by Sid at apply.</param>
 /// <param name="Trigger">The trigger (stage D), when <c>Pipeline.DeployOnBuildRecord</c> is on; null otherwise, and
 /// then the apply removes the start rule if an earlier run created it.</param>
+/// <param name="Alerts">The alerts (stage D3), when <c>Pipeline.Alerts</c> is on; null otherwise, and then the apply removes
+/// the failed-deploy rule, the sweep's schedule and its errors alarm if an earlier run created them.</param>
 public sealed record PipelineDeployer(
     string StateMachineName,
     string RoleName,
@@ -69,7 +71,8 @@ public sealed record PipelineDeployer(
     string HookInvokerPolicy,
     IReadOnlyList<string> ImageRepositories,
     System.Text.Json.Nodes.JsonObject? ReplicationPermission,
-    DeployerTriggerPlan? Trigger = null);
+    DeployerTriggerPlan? Trigger = null,
+    DeployerAlertsPlan? Alerts = null);
 
 /// <summary>
 /// What the trigger's plan needs from the account and the workspace, which the planner cannot read: the ECS
@@ -88,6 +91,8 @@ public sealed record DeployerTriggerInputs(string Cluster, IReadOnlyList<string>
 /// failures reach the same queue through its asynchronous-invocation destination, under its role.</param>
 /// <param name="MaximumRetryAttempts">Lambda's retries of a failed asynchronous invocation before the queue.</param>
 /// <param name="MaximumEventAgeSeconds">How long Lambda keeps retrying an event before the queue.</param>
+/// <param name="AlarmActions">What the queue's alarm notifies: the alerts topic under <c>Pipeline.Alerts</c>, and nothing
+/// otherwise — an alarm update replaces its actions, so an empty list is how turning alerts off reaches it.</param>
 public sealed record DeployerTriggerPlan(
     string BusName,
     string BusArn,
@@ -103,7 +108,33 @@ public sealed record DeployerTriggerPlan(
     string AlarmName,
     int MaximumRetryAttempts,
     int MaximumEventAgeSeconds,
-    IReadOnlyList<TriggerRoute> Routes);
+    IReadOnlyList<TriggerRoute> Routes,
+    IReadOnlyList<string> AlarmActions);
+
+/// <summary>
+/// The alerts in the target account (P2 stage D3): the topic a person subscribes to, the rule that sends it the deployer's
+/// failed executions, and the sweep that finds images no build record names, with the alarm that says the sweep failed.
+/// </summary>
+/// <param name="TopicPolicy">The topic's whole policy: EventBridge for the failed-deploy rule, and CloudWatch for this
+/// pipeline's alarms by ARN — the build account's forwarding alarm among them when the trigger is on. The sweep publishes
+/// under its own role.</param>
+/// <param name="FailedDeployPattern"><see cref="DeployerPlanner.FailedDeployPattern"/>.</param>
+/// <param name="CorroborateFunctionName">Also in <see cref="PipelineDeployer.Functions"/>, which creates it.</param>
+/// <param name="ScheduleExpression">How often the sweep runs.</param>
+/// <param name="CorroborateErrorsAlarmName">ALARM when a sweep fails, so a sweep that stopped working is itself an alert.</param>
+public sealed record DeployerAlertsPlan(
+    string TopicName,
+    string TopicArn,
+    string TopicPolicy,
+    string FailedDeployRuleName,
+    string FailedDeployRuleArn,
+    string FailedDeployPattern,
+    string CorroborateFunctionName,
+    string CorroborateFunctionArn,
+    string ScheduleRuleName,
+    string ScheduleRuleArn,
+    string ScheduleExpression,
+    string CorroborateErrorsAlarmName);
 
 /// <summary>
 /// The signature hook as an ECS service attaches it: the function ECS invokes at <c>PRE_SCALE_UP</c>, and the
@@ -139,9 +170,10 @@ public static class DeployerHandlers
     public static readonly string RecordFailure = For("RecordFailureFunction");
     public static readonly string SignatureHook = For("SignatureHookFunction");
     public static readonly string Start = For("StartFunction");
+    public static readonly string Corroborate = For("CorroborateFunction");
 
     /// <summary>Every handler, for the packaging test.</summary>
-    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start };
+    public static IReadOnlyList<string> All => new[] { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate };
 
     private static string For(string type) => $"{Assembly}::{Assembly}.{type}::HandleAsync";
 }
@@ -436,6 +468,10 @@ public static class DeployerPlanner
         };
 
         var machine = $"{sk}-{env}-deployer";
+        var machineArn = $"arn:aws:states:{region}:{acct}:stateMachine:{machine}";
+
+        // What an alarm of this pipeline notifies: the alerts topic when there is one, and nothing otherwise.
+        var alarmActions = p.Alerts ? new[] { AlertsTopicArn(region, acct, config) } : Array.Empty<string>();
 
         // THE TRIGGER, only when this environment deploys on every build record. Its function joins the list above,
         // so it is created exactly as the others are: its own role, the same Deny.
@@ -443,10 +479,19 @@ public static class DeployerPlanner
         if (p.DeployOnBuildRecord)
         {
             var (triggerPlan, startFunction) = TriggerFor(
-                config, p, region, acct, artifactAccount, buildRecordStore,
-                $"arn:aws:states:{region}:{acct}:stateMachine:{machine}", triggerInputs);
+                config, p, region, acct, artifactAccount, buildRecordStore, machineArn, triggerInputs, alarmActions);
             trigger = triggerPlan;
             functions.Add(startFunction);
+        }
+
+        // THE ALERTS (P2 stage D3), and the sweep's function with the others.
+        DeployerAlertsPlan? alerts = null;
+        if (p.Alerts)
+        {
+            var (alertsPlan, corroborate) = AlertsFor(
+                config, p, region, acct, artifactAccount, buildRecordStore, evidence, imageRepositories, machineArn, trigger);
+            alerts = alertsPlan;
+            functions.Add(corroborate);
         }
 
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
@@ -478,8 +523,88 @@ public static class DeployerPlanner
             ReplicationPermission: accountId is null
                 ? null
                 : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories),
-            Trigger: trigger);
+            Trigger: trigger,
+            Alerts: alerts);
     }
+
+    /// <summary>
+    /// The alerts' resources and the sweep's function (P2 stage D3).
+    ///
+    /// <para>ONE SOURCE PER IMAGE ARTIFACT: the repository its image replicates into here, and the prefix its repository's
+    /// records are written under — the same pairing the trigger routes on, read from the same config.</para>
+    /// </summary>
+    private static (DeployerAlertsPlan Plan, DeployerFunction Function) AlertsFor(
+        SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount, string buildRecordStore,
+        string evidence, IReadOnlyList<string> imageRepositories, string stateMachineArn, DeployerTriggerPlan? trigger)
+    {
+        var sources = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+            .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
+            .SelectMany(r => (r.Artifacts ?? new List<string>()).Select(artifact => new CorroborateSource(
+                EcrRepositoryNaming.For(config, artifact), BuildRecordFormat.PrefixFor(DeployerTrigger.RecordClass, r.Repo!))))
+            .ToList();
+
+        var topicArn = AlertsTopicArn(region, acct, config);
+        var failedRule = FailedDeployRuleName(config);
+        var failedRuleArn = $"arn:aws:events:{region}:{acct}:rule/{failedRule}";
+        var function = CorroborateFunctionName(config);
+        var schedule = CorroborateScheduleRuleName(config);
+        var errorsAlarm = CorroborateErrorsAlarmName(config);
+
+        string AlarmArn(string account, string alarm) => $"arn:aws:cloudwatch:{region}:{account}:alarm:{alarm}";
+
+        // THE ALARMS THAT MAY PUBLISH, BY ARN: this account's sweep and trigger queue, and the build account's forwarding
+        // queue — the last two only where the trigger exists.
+        var localAlarms = new List<string> { AlarmArn(acct, errorsAlarm) };
+        if (trigger != null)
+            localAlarms.Add(AlarmArn(acct, trigger.AlarmName));
+        var buildAlarm = trigger != null ? AlarmArn(artifactAccount, ForwardDeadLetterAlarmName(config)) : null;
+
+        var plan = new DeployerAlertsPlan(
+            TopicName: AlertsTopicName(config),
+            TopicArn: topicArn,
+            TopicPolicy: CrossAccount.AlertsTopicPolicy(topicArn, failedRuleArn, acct, localAlarms, artifactAccount, buildAlarm),
+            FailedDeployRuleName: failedRule,
+            FailedDeployRuleArn: failedRuleArn,
+            FailedDeployPattern: FailedDeployPattern(stateMachineArn),
+            CorroborateFunctionName: function,
+            CorroborateFunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
+            ScheduleRuleName: schedule,
+            ScheduleRuleArn: $"arn:aws:events:{region}:{acct}:rule/{schedule}",
+            // The sweep's period is its grace: an image is looked at by at least one run once it is old enough.
+            ScheduleExpression: $"rate({(int)DeployerAlerts.Grace.TotalMinutes} minutes)",
+            CorroborateErrorsAlarmName: errorsAlarm);
+
+        var corroborate = new DeployerFunction(
+            function, DeployerHandlers.Corroborate, CorroborateFunctionRoleName(config),
+            Combine(Logs(region, acct, function), CorroborateGrants(region, acct, buildRecordStore, evidence, topicArn, imageRepositories)),
+            new Dictionary<string, string>
+            {
+                [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
+                [DeployerEnvironment.EvidenceStore] = evidence,
+                [DeployerEnvironment.AlertsTopic] = topicArn,
+                [DeployerEnvironment.CorroborateSources] = DeployerAlerts.EncodeSources(sources),
+            },
+            TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
+
+        return (plan, corroborate);
+    }
+
+    /// <summary>
+    /// The event pattern for this deployer's executions that ended without deploying: FAILED — every refusal and error,
+    /// after RecordFailure — TIMED_OUT and ABORTED. Step Functions sends these to the default bus for a Standard workflow,
+    /// best effort.
+    /// </summary>
+    public static string FailedDeployPattern(string stateMachineArn)
+        => JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["source"] = new[] { "aws.states" },
+            ["detail-type"] = new[] { "Step Functions Execution Status Change" },
+            ["detail"] = new Dictionary<string, object>
+            {
+                ["status"] = new[] { "FAILED", "TIMED_OUT", "ABORTED" },
+                ["stateMachineArn"] = new[] { stateMachineArn },
+            },
+        });
 
     /// <summary>
     /// The trigger's resources and its start function (DecoupledCd.md §4.3, P2 stage D).
@@ -491,7 +616,7 @@ public static class DeployerPlanner
     /// </summary>
     private static (DeployerTriggerPlan Plan, DeployerFunction Function) TriggerFor(
         SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount,
-        string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs)
+        string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs, IReadOnlyList<string> alarmActions)
     {
         if (inputs is null)
             throw new InvalidOperationException(
@@ -551,11 +676,15 @@ public static class DeployerPlanner
             DeadLetterQueueName: queue,
             DeadLetterQueueArn: queueArn,
             DeadLetterQueuePolicy: CrossAccount.DeadLetterQueuePolicy(queueArn, ruleArn),
-            AlarmName: $"{queue}-not-empty",
+            AlarmName: StartDeadLetterAlarmName(config),
             // Lambda's own defaults, written down: two retries, and an hour before an event that keeps failing is queued.
             MaximumRetryAttempts: 2,
             MaximumEventAgeSeconds: 3600,
-            Routes: routes);
+            Routes: routes,
+            AlarmActions: alarmActions);
+
+        if (StartDeadLetterAlarmName(config) != $"{queue}-not-empty")
+            throw new InvalidOperationException("the start queue's alarm name diverged from StartDeadLetterAlarmName, which the alerts topic's policy names.");
 
         if (StartFunctionRoleName(config) != $"{function}-fn")
             throw new InvalidOperationException("the start function's role name diverged from StartFunctionRoleName, which the build account's grant names.");
@@ -604,6 +733,43 @@ public static class DeployerPlanner
     /// it, and the build account's bucket policy lets it read image records to learn their branch.
     /// </summary>
     public static string StartFunctionRoleName(SystemConfig config) => $"{StartFunctionName(config)}-fn";
+
+    /// <summary>The start queue's alarm, which the alerts topic's policy names.</summary>
+    public static string StartDeadLetterAlarmName(SystemConfig config) => $"{StartFunctionName(config)}-dlq-not-empty";
+
+    /// <summary>
+    /// The build account's forwarding-queue alarm. ONE DEFINITION FOR BOTH ACCOUNTS: the build account creates it, and this
+    /// account's alerts topic admits it by ARN.
+    /// </summary>
+    public static string ForwardDeadLetterAlarmName(SystemConfig config) => $"{ForwardRuleName(config)}-dlq-not-empty";
+
+    /// <summary>True when this environment's pipeline alerts a person (P2 stage D3).</summary>
+    public static bool AlertsWanted(SystemConfig config) => config.Pipeline is { Enabled: true, Alerts: true };
+
+    /// <summary>The alerts topic. ONE DEFINITION FOR BOTH ACCOUNTS: this planner creates it, and the build account's alarm targets it.</summary>
+    public static string AlertsTopicName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-pipeline-alerts";
+
+    /// <summary>The alerts topic's ARN, in <paramref name="targetAccountId"/>.</summary>
+    public static string AlertsTopicArn(string region, string targetAccountId, SystemConfig config)
+        => $"arn:aws:sns:{region}:{targetAccountId}:{AlertsTopicName(config)}";
+
+    /// <summary>The default-bus rule that sends this deployer's failed executions to the topic.</summary>
+    public static string FailedDeployRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-failed";
+
+    /// <summary>The sweep for images no build record names.</summary>
+    public static string CorroborateFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-corroborate";
+
+    /// <summary>
+    /// The sweep's role. ONE DEFINITION FOR BOTH ACCOUNTS, like <see cref="VerifyRoleName"/>: this planner creates it, and the
+    /// build account's bucket policy lets it list and read image records.
+    /// </summary>
+    public static string CorroborateFunctionRoleName(SystemConfig config) => $"{CorroborateFunctionName(config)}-fn";
+
+    /// <summary>The default-bus rule that runs the sweep on a schedule.</summary>
+    public static string CorroborateScheduleRuleName(SystemConfig config) => $"{CorroborateFunctionName(config)}-schedule";
+
+    /// <summary>ALARM when a sweep fails.</summary>
+    public static string CorroborateErrorsAlarmName(SystemConfig config) => $"{CorroborateFunctionName(config)}-errors";
 
     /// <summary>
     /// The build account's role that puts forwarded record events on the trigger bus. ONE DEFINITION FOR BOTH ACCOUNTS:
@@ -1026,6 +1192,71 @@ public static class DeployerPlanner
             Resource = queueArn,
         },
     };
+
+    /// <summary>
+    /// What the sweep may do (P2 stage D3): list this environment's pipeline images, find and read image records, record an
+    /// anomaly once, and publish to the alerts topic. It deploys nothing and changes no record.
+    /// </summary>
+    private static object[] CorroborateGrants(
+        string region, string accountId, string buildRecordStore, string evidence, string topicArn, IReadOnlyList<string> repositories)
+        => new object[]
+        {
+            new
+            {
+                Sid = "ListTheImagesThatArrived",
+                Effect = "Allow",
+                Action = new[] { "ecr:DescribeImages" },
+                Resource = RepositoryArns(region, accountId, repositories),
+            },
+            new
+            {
+                // The records are found by listing: a record's key carries its build time, not the digest it names. The
+                // store's bucket policy in the build account is the other half of both grants.
+                Sid = "FindImageRecords",
+                Effect = "Allow",
+                Action = new[] { "s3:ListBucket" },
+                Resource = $"arn:aws:s3:::{buildRecordStore}",
+                Condition = new Dictionary<string, object>
+                {
+                    ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = $"{DeployerTrigger.RecordClass}/*" },
+                },
+            },
+            new
+            {
+                Sid = "ReadImageRecords",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = $"arn:aws:s3:::{buildRecordStore}/{DeployerTrigger.RecordClass}/*",
+            },
+            new
+            {
+                // Write-once, and nothing outside anomalies/. No read: whether one is recorded is learned by listing below.
+                Sid = "RecordAnAnomalyOnce",
+                Effect = "Allow",
+                Action = new[] { "s3:PutObject" },
+                Resource = $"arn:aws:s3:::{evidence}/anomalies/*",
+            },
+            new
+            {
+                // Whether an anomaly is already recorded, by listing its exact key: the listing carries the prefix this
+                // condition names, where a read of a missing key could answer 403 instead of 404.
+                Sid = "FindRecordedAnomalies",
+                Effect = "Allow",
+                Action = new[] { "s3:ListBucket" },
+                Resource = $"arn:aws:s3:::{evidence}",
+                Condition = new Dictionary<string, object>
+                {
+                    ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "anomalies/*" },
+                },
+            },
+            new
+            {
+                Sid = "AlertAPerson",
+                Effect = "Allow",
+                Action = new[] { "sns:Publish" },
+                Resource = topicArn,
+            },
+        };
 
     /// <summary>
     /// What the signature hook reads. The ECS and ECR actions are the ones AWS's own admission

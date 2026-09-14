@@ -62,6 +62,10 @@ public static class DeployerBootstrapper
 
         Print(config, plan, accountId, profile, apply, packages);
 
+        // WHO WOULD BE TOLD, read in the dry run too: a topic nobody confirmed is alerts that reach no one.
+        if (plan.Alerts is { } plannedAlerts)
+            await ReportSubscriptionsAsync(profile, region, plannedAlerts, config);
+
         // A VERIFIER-LESS HOOK IS REFUSED WHERE IT WOULD BE USED (DecoupledCd.md §14.2). Checked before the
         // dry-run return so a dry run says what the apply will do.
         var hookRefusal = RefusalForHookPackage(
@@ -116,6 +120,13 @@ public static class DeployerBootstrapper
         // WRITE-ONCE BEFORE ANY ROLE EXISTS THAT COULD WRITE EVIDENCE: the Record functions' roles, below.
         await BucketPolicies.MergeAsync(s3, plan.EvidenceStore, plan.EvidenceStorePolicy);
 
+        // THE ALERTS TOPIC BEFORE ANYTHING THAT PUBLISHES TO IT (P2 stage D3): the alarms and the rule below name it.
+        using var sns = creds != null
+            ? new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(creds, endpoint)
+            : new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(endpoint);
+        if (plan.Alerts is { } alertsTopic)
+            await AlertsApply.EnsureTopicAsync(sns, alertsTopic);
+
         // THE REPOSITORIES BEFORE THE PERMISSION, so there is no moment at which the build account may
         // replicate into a repository this account has not hardened. Without ecr:CreateRepository in the
         // policy, replication into a missing repository fails rather than creating an unhardened one.
@@ -156,12 +167,12 @@ public static class DeployerBootstrapper
         // created is taken away — a trigger that could only be switched on would keep deploying every build.
         using (var events = creds != null
                    ? new Amazon.EventBridge.AmazonEventBridgeClient(creds, endpoint) : new Amazon.EventBridge.AmazonEventBridgeClient(endpoint))
+        using (var cloudWatch = creds != null
+                   ? new Amazon.CloudWatch.AmazonCloudWatchClient(creds, endpoint) : new Amazon.CloudWatch.AmazonCloudWatchClient(endpoint))
         {
             if (plan.Trigger is { } trigger)
             {
                 using var sqs = creds != null ? new Amazon.SQS.AmazonSQSClient(creds, endpoint) : new Amazon.SQS.AmazonSQSClient(endpoint);
-                using var cloudWatch = creds != null
-                    ? new Amazon.CloudWatch.AmazonCloudWatchClient(creds, endpoint) : new Amazon.CloudWatch.AmazonCloudWatchClient(endpoint);
 
                 await TriggerApply.StartOnRecordsAsync(events, sqs, lambda, cloudWatch, trigger);
             }
@@ -170,6 +181,14 @@ public static class DeployerBootstrapper
                 await TriggerApply.RemoveRuleAsync(events, DeployerPlanner.TriggerBusName(config), DeployerPlanner.StartRuleName(config),
                     "Pipeline.DeployOnBuildRecord is off");
             }
+
+            // THE ALERTS, AFTER THE MACHINE WHOSE FAILURES THEY REPORT AND THE FUNCTION THEY SCHEDULE (P2 stage D3). Or, with
+            // the flag off, the rules and alarm an earlier run created are taken away.
+            if (plan.Alerts is { } alerts)
+                await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts);
+            else
+                await AlertsApply.RemoveAsync(events, cloudWatch, DeployerPlanner.FailedDeployRuleName(config),
+                    DeployerPlanner.CorroborateScheduleRuleName(config), DeployerPlanner.CorroborateErrorsAlarmName(config));
         }
 
         Console.WriteLine();
@@ -181,9 +200,12 @@ public static class DeployerBootstrapper
         Console.WriteLine(plan.Trigger is null
             ? "NOTHING STARTS THE DEPLOYER: Pipeline.DeployOnBuildRecord is off, so executions are started by hand."
             : $"THIS ACCOUNT'S HALF OF THE TRIGGER IS WIRED: a record event arriving on {plan.Trigger.BusName} starts the deployer.");
+        if (plan.Alerts is { } wired)
+            await ReportSubscriptionsAsync(profile, region, wired, config);
         Console.WriteLine("Not built:");
         Console.WriteLine("  - a reconciler: an event that ends in a dead-letter queue is retried by nothing; start that deploy by hand");
-        Console.WriteLine("  - the artifact-without-a-record anomaly alarm");
+        if (plan.Alerts is null)
+            Console.WriteLine("  - alerts: Pipeline.Alerts is off, so failures and images without a record notify nobody");
         if (config.Pipeline?.EnforceSignatures != true)
             Console.WriteLine("  - the signature hook's attachment: it is attached by `lz deploytenant` under Pipeline.EnforceSignatures, which is off");
         Console.WriteLine();
@@ -193,6 +215,37 @@ public static class DeployerBootstrapper
             ? $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*)"
             : $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*; forwards record events to {plan.Trigger.BusName})");
         Console.WriteLine("  Only images pushed AFTER it runs replicate here — ECR does not copy what is already there.");
+    }
+
+    /// <summary>
+    /// How many people the alerts reach, and how to add one. lz never subscribes an address: a subscription is a person's to
+    /// make and to confirm.
+    /// </summary>
+    private static async Task ReportSubscriptionsAsync(string? profile, string region, DeployerAlertsPlan alerts, SystemConfig config)
+    {
+        var creds = AwsCredentialsFactory.Resolve(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+        using var sns = creds != null
+            ? new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(creds, endpoint)
+            : new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(endpoint);
+
+        var subscriptions = await AlertsApply.SubscriptionsAsync(sns, alerts.TopicArn);
+        if (subscriptions is { Confirmed: > 0 } found)
+        {
+            Console.WriteLine($"  alerts reach {found.Confirmed} confirmed subscription(s) of {alerts.TopicName}" +
+                              (found.Pending > 0 ? $" ({found.Pending} pending confirmation)." : "."));
+            return;
+        }
+
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine(subscriptions is null
+            ? $"  alerts topic {alerts.TopicName} does not exist yet; the apply creates it, and nobody is subscribed."
+            : $"  NOBODY RECEIVES THESE ALERTS: {alerts.TopicName} has no confirmed subscription" +
+              (subscriptions.Value.Pending > 0 ? $" ({subscriptions.Value.Pending} pending confirmation)." : "."));
+        Console.WriteLine("  To receive them, subscribe an address and click the confirmation link AWS sends it:");
+        Console.WriteLine($"    aws sns subscribe --topic-arn {alerts.TopicArn} --protocol email --notification-endpoint <address>" +
+                          $"{(string.IsNullOrEmpty(profile) ? "" : $" --profile {profile}")} --region {config.Region}");
+        Console.ResetColor();
     }
 
     /// <summary>
@@ -330,11 +383,28 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    rule {trigger.RuleName}: record events from account {config.Pipeline?.ArtifactAccountId} only -> {trigger.StartFunctionName}");
             foreach (var route in trigger.Routes)
                 Console.WriteLine($"    {route.RecordPrefix} rolls {string.Join(", ", route.Targets.Select(t => $"{t.Target.Service} in {t.Target.Cluster} as req-{{stamp}}-{{run id}}-{t.TenantKey}-1"))}");
-            Console.WriteLine($"    failures to queue {trigger.DeadLetterQueueName} after {trigger.MaximumRetryAttempts} retries; alarm {trigger.AlarmName}, notifying nobody");
+            Console.WriteLine($"    failures to queue {trigger.DeadLetterQueueName} after {trigger.MaximumRetryAttempts} retries; alarm {trigger.AlarmName}, " +
+                              (trigger.AlarmActions.Count == 0 ? "notifying nobody" : $"notifying {string.Join(", ", trigger.AlarmActions)}"));
         }
         else
         {
             Console.WriteLine($"  trigger: off (Pipeline.DeployOnBuildRecord) — rule {DeployerPlanner.StartRuleName(config)} is removed if an earlier run created it");
+        }
+        Console.WriteLine();
+
+        if (plan.Alerts is { } alerts)
+        {
+            Console.WriteLine("  alerts (Pipeline.Alerts):");
+            Console.WriteLine($"    topic {alerts.TopicName}: published to only by the rule below and this pipeline's alarms, by ARN");
+            Console.WriteLine($"    rule {alerts.FailedDeployRuleName}: executions of {plan.StateMachineName} that end FAILED, TIMED_OUT or ABORTED -> the topic");
+            Console.WriteLine($"    {alerts.CorroborateFunctionName} runs {alerts.ScheduleExpression}: an image in this environment's pipeline repository " +
+                              "that no build record names is recorded once under anomalies/ and alerted once");
+            Console.WriteLine($"    alarm {alerts.CorroborateErrorsAlarmName}: a sweep that fails -> the topic");
+        }
+        else
+        {
+            Console.WriteLine($"  alerts: off (Pipeline.Alerts) — rules {DeployerPlanner.FailedDeployRuleName(config)} and " +
+                              $"{DeployerPlanner.CorroborateScheduleRuleName(config)} are removed if an earlier run created them");
         }
         Console.WriteLine();
 

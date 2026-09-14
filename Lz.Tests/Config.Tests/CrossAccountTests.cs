@@ -198,6 +198,24 @@ public class CrossAccountTests
     }
 
     [Fact]
+    public void WithTheSweep_ItListsAndReads_WhileTheStartFunctionOnlyReads()
+    {
+        var grant = CrossAccount.BuildRecordReadGrant(
+            Store, "dev", Dev, "scu-dev-deployer-verify-fn", "scu-dev-deployer-start-fn", "scu-dev-deployer-corroborate-fn");
+
+        string[] Principals(string action) => grant.Single(s => s["Action"]!.GetValue<string>() == action)
+            ["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();
+
+        Assert.Equal(
+            new[] { $"arn:aws:iam::{Dev}:role/scu-dev-deployer-verify-fn", $"arn:aws:iam::{Dev}:role/scu-dev-deployer-start-fn",
+                    $"arn:aws:iam::{Dev}:role/scu-dev-deployer-corroborate-fn" },
+            Principals("s3:GetObject"));
+        Assert.Equal(
+            new[] { $"arn:aws:iam::{Dev}:role/scu-dev-deployer-verify-fn", $"arn:aws:iam::{Dev}:role/scu-dev-deployer-corroborate-fn" },
+            Principals("s3:ListBucket"));
+    }
+
+    [Fact]
     public void ThePrincipalIsTheAccount_SoRecreatingTheRoleDoesNotOrphanTheGrant()
     {
         // A role ARN in a resource policy is stored as that role's unique id: delete and recreate the

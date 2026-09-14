@@ -75,6 +75,8 @@ public sealed record PipelineBootstrapPlan(
 /// <param name="TargetBusArn">The environment's trigger bus. AWS requires a role on a rule that targets another
 /// account's bus, which is <paramref name="RoleName"/>.</param>
 /// <param name="DeadLetterQueueName">Where EventBridge puts an event it could not deliver.</param>
+/// <param name="AlarmActions">What the queue's alarm notifies: the environment's alerts topic under <c>Pipeline.Alerts</c>,
+/// and nothing otherwise — an alarm update replaces its actions, so an empty list is how turning alerts off reaches it.</param>
 public sealed record RecordForwardingPlan(
     string RuleName,
     string RuleArn,
@@ -87,7 +89,8 @@ public sealed record RecordForwardingPlan(
     string DeadLetterQueueName,
     string DeadLetterQueueArn,
     string DeadLetterQueuePolicy,
-    string AlarmName);
+    string AlarmName,
+    IReadOnlyList<string> AlarmActions);
 
 /// <summary>
 /// Decides what <c>lz bootstrappipeline</c> creates, as a pure function of config.
@@ -149,6 +152,16 @@ public static class PipelineBootstrapPlanner
         "lambda:RemovePermission",
         "lambda:PutFunctionEventInvokeConfig",
         "lambda:UpdateFunctionEventInvokeConfig",
+        // THE ALERTS, since P2 stage D3. A role that could change who may publish to the topic, unsubscribe its reader, or
+        // silence an alarm would decide what a person is told — or that nobody is.
+        "sns:SetTopicAttributes",
+        "sns:AddPermission",
+        "sns:RemovePermission",
+        "sns:DeleteTopic",
+        "sns:Unsubscribe",
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DisableAlarmActions",
     };
 
     /// <summary>
@@ -271,7 +284,12 @@ public static class PipelineBootstrapPlanner
                 DeadLetterQueueName: queue,
                 DeadLetterQueueArn: queueArn,
                 DeadLetterQueuePolicy: CrossAccount.DeadLetterQueuePolicy(queueArn, ruleArn),
-                AlarmName: $"{queue}-not-empty");
+                AlarmName: DeployerPlanner.ForwardDeadLetterAlarmName(config),
+                // THE ENVIRONMENT'S TOPIC, in the environment's account (P2 stage D3); its policy admits this alarm by ARN.
+                AlarmActions: p.Alerts ? new[] { DeployerPlanner.AlertsTopicArn(region, target, config) } : Array.Empty<string>());
+
+            if (forwarding.AlarmName != $"{queue}-not-empty")
+                throw new InvalidOperationException("the forwarding queue's alarm name diverged from ForwardDeadLetterAlarmName, which the alerts topic's policy names.");
         }
 
         return new PipelineBootstrapPlan(
@@ -284,7 +302,8 @@ public static class PipelineBootstrapPlanner
                 : null,
             BuildRecordReadGrant: target != null
                 ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
-                    p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null)
+                    p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
+                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
                 : null,
             RecordForwarding: forwarding,
             ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null);

@@ -1191,4 +1191,183 @@ public class DeployerPlannerTests
         // Nothing a deployer role does is denied: invoking, starting, reading.
         Assert.DoesNotContain(actions, a => a is "lambda:InvokeFunction" or "states:StartExecution" or "states:DescribeExecution");
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The alerts (P2 stage D3)
+    // ---------------------------------------------------------------------------------------
+
+    private const string AlertsTopic = "arn:aws:sns:us-west-2:503947800380:scu-dev-pipeline-alerts";
+
+    private static SystemConfig Alerting(bool trigger)
+    {
+        var c = trigger ? Triggered() : Config(false);
+        c.Pipeline!.Alerts = true;
+        return c;
+    }
+
+    private static PipelineDeployer AlertsPlan(bool trigger)
+        => DeployerPlanner.Plan(Alerting(trigger), TargetAccount, trigger ? DevInputs : null);
+
+    private static JsonElement BySid(IEnumerable<JsonElement> statements, string sid)
+        => statements.Single(s => s.GetProperty("Sid").GetString() == sid);
+
+    [Fact]
+    public void WithoutAlerts_ThereIsNoTopic_NoSweep_AndNoAlarmNotifiesAnyone()
+    {
+        var plan = DeployerPlanner.Plan(Triggered(), TargetAccount, DevInputs);
+
+        Assert.Null(plan.Alerts);
+        Assert.DoesNotContain(plan.Functions, f => f.Handler == DeployerHandlers.Corroborate);
+        Assert.Empty(plan.Trigger!.AlarmActions);
+        Assert.DoesNotContain(plan.Functions, f => f.Policy.Contains("sns:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WithAlerts_ThisMachinesFailedExecutions_GoToTheTopic()
+    {
+        var alerts = AlertsPlan(trigger: false).Alerts!;
+
+        Assert.Equal("scu-dev-pipeline-alerts", alerts.TopicName);
+        Assert.Equal(AlertsTopic, alerts.TopicArn);
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:rule/scu-dev-deployer-failed", alerts.FailedDeployRuleArn);
+
+        var pattern = JsonDocument.Parse(alerts.FailedDeployPattern).RootElement;
+        Assert.Equal(new[] { "aws.states" }, Strings(pattern.GetProperty("source")));
+        Assert.Equal(new[] { "Step Functions Execution Status Change" }, Strings(pattern.GetProperty("detail-type")));
+        Assert.Equal(new[] { "FAILED", "TIMED_OUT", "ABORTED" }, Strings(pattern.GetProperty("detail").GetProperty("status")));
+        Assert.Equal(
+            new[] { "arn:aws:states:us-west-2:503947800380:stateMachine:scu-dev-deployer" },
+            Strings(pattern.GetProperty("detail").GetProperty("stateMachineArn")));
+    }
+
+    [Fact]
+    public void TheTopic_AdmitsExactlyThisPipelinesPublishers()
+    {
+        // Without the trigger: the failed-deploy rule, and the sweep's errors alarm.
+        var alone = Statements(AlertsPlan(trigger: false).Alerts!.TopicPolicy).ToList();
+        Assert.Equal(2, alone.Count);
+
+        var rule = BySid(alone, CrossAccount.AlertsFailedDeploySid);
+        Assert.Equal("events.amazonaws.com", rule.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal("sns:Publish", rule.GetProperty("Action").GetString());
+        Assert.Equal(AlertsTopic, rule.GetProperty("Resource").GetString());
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:rule/scu-dev-deployer-failed",
+            rule.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+
+        var local = BySid(alone, CrossAccount.AlertsLocalAlarmsSid);
+        Assert.Equal("cloudwatch.amazonaws.com", local.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal(
+            new[] { "arn:aws:cloudwatch:us-west-2:503947800380:alarm:scu-dev-deployer-corroborate-errors" },
+            Strings(local.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn")));
+        Assert.Equal(TargetAccount, local.GetProperty("Condition").GetProperty("StringEquals").GetProperty("aws:SourceAccount").GetString());
+
+        // With it: the start queue's alarm here, and the build account's forwarding alarm, by ARN and by account.
+        var withTrigger = Statements(AlertsPlan(trigger: true).Alerts!.TopicPolicy).ToList();
+        Assert.Equal(3, withTrigger.Count);
+        Assert.Equal(
+            new[] { "arn:aws:cloudwatch:us-west-2:503947800380:alarm:scu-dev-deployer-corroborate-errors",
+                    "arn:aws:cloudwatch:us-west-2:503947800380:alarm:scu-dev-deployer-start-dlq-not-empty" },
+            Strings(BySid(withTrigger, CrossAccount.AlertsLocalAlarmsSid).GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn")));
+
+        var build = BySid(withTrigger, CrossAccount.AlertsBuildAlarmSid);
+        Assert.Equal("arn:aws:cloudwatch:us-west-2:147440642635:alarm:scu-dev-forward-build-records-dlq-not-empty",
+            build.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+        Assert.Equal(BuildAccount, build.GetProperty("Condition").GetProperty("StringEquals").GetProperty("aws:SourceAccount").GetString());
+
+        // Every statement names a service, never any principal at all.
+        Assert.All(withTrigger, s => Assert.Equal(JsonValueKind.Object, s.GetProperty("Principal").ValueKind));
+    }
+
+    [Fact]
+    public void TheBuildAccountsAlarm_IsTheOneItsPlanCreates_AndItNotifiesThisTopic()
+    {
+        // ONE DEFINITION: the alarm this topic admits is the alarm the build account's plan creates.
+        var forwarding = PipelineBootstrapPlanner.Plan(Alerting(trigger: true), BuildAccount).RecordForwarding!;
+
+        Assert.Equal(DeployerPlanner.ForwardDeadLetterAlarmName(Alerting(trigger: true)), forwarding.AlarmName);
+        Assert.Contains($":alarm:{forwarding.AlarmName}\"", AlertsPlan(trigger: true).Alerts!.TopicPolicy);
+        Assert.Equal(new[] { AlertsTopic }, forwarding.AlarmActions);
+    }
+
+    [Fact]
+    public void WithAlerts_TheTriggersQueueAlarm_NotifiesTheTopic()
+    {
+        Assert.Equal(new[] { AlertsTopic }, AlertsPlan(trigger: true).Trigger!.AlarmActions);
+    }
+
+    [Fact]
+    public void TheSweep_RunsEveryFifteenMinutes_AndItsFailuresAlarm()
+    {
+        var alerts = AlertsPlan(trigger: false).Alerts!;
+
+        Assert.Equal("rate(15 minutes)", alerts.ScheduleExpression);
+        Assert.Equal("arn:aws:events:us-west-2:503947800380:rule/scu-dev-deployer-corroborate-schedule", alerts.ScheduleRuleArn);
+        Assert.Equal("scu-dev-deployer-corroborate-errors", alerts.CorroborateErrorsAlarmName);
+        Assert.Equal("arn:aws:lambda:us-west-2:503947800380:function:scu-dev-deployer-corroborate", alerts.CorroborateFunctionArn);
+    }
+
+    [Fact]
+    public void TheSweep_IsConfiguredWithExactlyWhatItReads()
+    {
+        var fn = Function(AlertsPlan(trigger: false), DeployerHandlers.Corroborate);
+
+        Assert.Equal(DeployerPlanner.CorroborateFunctionRoleName(Config(false)), fn.RoleName);
+        Assert.False(fn.InvokedByStateMachine);
+        Assert.Equal(
+            new[] { DeployerEnvironment.AlertsTopic, DeployerEnvironment.BuildRecordStore, DeployerEnvironment.CorroborateSources,
+                    DeployerEnvironment.EvidenceStore },
+            fn.Environment.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal("scu-4df6-b9c6-aiphost=image/scutara/scutaraservice/", fn.Environment[DeployerEnvironment.CorroborateSources]);
+        Assert.Equal(AlertsTopic, fn.Environment[DeployerEnvironment.AlertsTopic]);
+
+        // What it is configured with is what it can read.
+        var settings = CorroborateSettings.Read(n => fn.Environment.GetValueOrDefault(n));
+        Assert.Equal(new[] { new CorroborateSource("scu-4df6-b9c6-aiphost", "image/scutara/scutaraservice/") }, settings.Sources);
+
+        // And the state machine may not invoke it.
+        Assert.DoesNotContain(fn.Name, AlertsPlan(trigger: false).RolePolicy);
+    }
+
+    [Fact]
+    public void TheSweep_MayReadImagesAndRecords_RecordAnAnomaly_AndAlert_AndNothingElse()
+    {
+        var plan = AlertsPlan(trigger: false);
+        var statements = Statements(Function(plan, DeployerHandlers.Corroborate).Policy)
+            .Where(s => !s.GetProperty("Sid").GetString()!.Contains("Log", StringComparison.Ordinal))
+            .ToList();
+
+        void Expect(string sid, string[] actions, string[] resources)
+        {
+            var s = BySid(statements, sid);
+            Assert.Equal(actions, Strings(s.GetProperty("Action")));
+            Assert.Equal(resources, Strings(s.GetProperty("Resource")));
+        }
+
+        Expect("ListTheImagesThatArrived", new[] { "ecr:DescribeImages" }, new[] { "arn:aws:ecr:us-west-2:503947800380:repository/scu-4df6-b9c6-aiphost" });
+        Expect("FindImageRecords", new[] { "s3:ListBucket" }, new[] { "arn:aws:s3:::scu-build-records-4df6-b9c6" });
+        Expect("ReadImageRecords", new[] { "s3:GetObject" }, new[] { "arn:aws:s3:::scu-build-records-4df6-b9c6/image/*" });
+        Expect("RecordAnAnomalyOnce", new[] { "s3:PutObject" }, new[] { $"arn:aws:s3:::{plan.EvidenceStore}/anomalies/*" });
+        Expect("FindRecordedAnomalies", new[] { "s3:ListBucket" }, new[] { $"arn:aws:s3:::{plan.EvidenceStore}" });
+        Expect("AlertAPerson", new[] { "sns:Publish" }, new[] { AlertsTopic });
+        Assert.Equal(6, statements.Count);
+
+        // Both lists stay under their prefix.
+        Assert.Equal("image/*", BySid(statements, "FindImageRecords").GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix").GetString());
+        Assert.Equal("anomalies/*", BySid(statements, "FindRecordedAnomalies").GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix").GetString());
+    }
+
+    [Fact]
+    public void TheSelfRewriteDeny_CoversTheAlerts_ButNotPublishing()
+    {
+        var actions = Strings(Statements(Plan().DenyPolicy).Single().GetProperty("Action")).ToList();
+
+        foreach (var action in new[]
+                 {
+                     "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission", "sns:DeleteTopic", "sns:Unsubscribe",
+                     "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:DisableAlarmActions",
+                 })
+            Assert.Contains(action, actions);
+
+        Assert.DoesNotContain("sns:Publish", actions);
+    }
 }

@@ -137,29 +137,37 @@ public static class CrossAccount
     /// read statement and to nothing else — the event names the key, so it has nothing to list. Null leaves the grant as
     /// it has been since stage C, byte for byte.
     /// </param>
+    /// <param name="corroborateRoleName">
+    /// With the alerts (P2 stage D3), the sweep's role, which lists image records and reads them to find the digests they
+    /// name: it is added to both statements. Null leaves both as they were.
+    /// </param>
     public static IReadOnlyList<JsonObject> BuildRecordReadGrant(
-        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null)
+        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null,
+        string? corroborateRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
 
         JsonObject Principal() => new() { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" };
         string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
-        JsonObject OnlyVerify() => new()
+
+        // ONE ROLE IS A STRING, SEVERAL AN ARRAY — so a grant with only Verify is byte for byte what it was before either
+        // later role existed.
+        JsonObject Roles(params string?[] roles)
         {
-            ["ArnEquals"] = new JsonObject
-            {
-                ["aws:PrincipalArn"] = RoleArn(verifyRoleName),
-            },
-        };
-        JsonObject Readers() => startRoleName is null
-            ? OnlyVerify()
-            : new JsonObject
+            var arns = roles.OfType<string>().Select(RoleArn).ToList();
+            return new JsonObject
             {
                 ["ArnEquals"] = new JsonObject
                 {
-                    ["aws:PrincipalArn"] = new JsonArray(RoleArn(verifyRoleName), RoleArn(startRoleName)),
+                    ["aws:PrincipalArn"] = arns.Count == 1
+                        ? JsonValue.Create(arns[0])
+                        : new JsonArray(arns.Select(a => (JsonNode?)JsonValue.Create(a)).ToArray()),
                 },
             };
+        }
+
+        JsonObject Readers() => Roles(verifyRoleName, startRoleName, corroborateRoleName);
+        JsonObject Listers() => Roles(verifyRoleName, corroborateRoleName);
 
         return new[]
         {
@@ -181,7 +189,7 @@ public static class CrossAccount
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}",
                 ["Condition"] = new JsonObject
                 {
-                    ["ArnEquals"] = OnlyVerify()["ArnEquals"]!.DeepClone(),
+                    ["ArnEquals"] = Listers()["ArnEquals"]!.DeepClone(),
                     ["StringLike"] = new JsonObject { ["s3:prefix"] = "image/*" },
                 },
             },
@@ -191,6 +199,68 @@ public static class CrossAccount
     public static string BuildRecordReadSid(string environment) => $"DeployerReadsImageRecords{Suffix(environment)}";
 
     public static string BuildRecordListSid(string environment) => $"DeployerListsImageRecords{Suffix(environment)}";
+
+    /// <summary>
+    /// The alerts topic's policy (P2 stage D3): who may publish to the topic a person subscribes to.
+    ///
+    /// <para>THE WHOLE POLICY, not merged: the topic exists for these alerts alone. Three statements, each naming its
+    /// publisher exactly. EventBridge, for the one rule that sends this deployer's failed executions. CloudWatch, for this
+    /// pipeline's alarms by ARN in this account. And CloudWatch for the build account's forwarding-queue alarm, by ARN and
+    /// source account — the form AWS documents for an alarm publishing to a topic in another account. The sweep publishes
+    /// under its own role, which an IAM grant in this account already admits. Same-account administrators keep their IAM
+    /// access to the topic: this policy only adds service principals.</para>
+    /// </summary>
+    /// <param name="buildAlarmArn">The build account's forwarding-queue alarm, or null when there is no trigger to forward.</param>
+    public static string AlertsTopicPolicy(
+        string topicArn, string failedDeployRuleArn, string targetAccountId, IReadOnlyList<string> localAlarmArns,
+        string artifactAccountId, string? buildAlarmArn)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        RequireAccount(artifactAccountId, nameof(artifactAccountId));
+        if (localAlarmArns.Count == 0)
+            throw new InvalidOperationException("the alerts topic's policy names no alarm of this pipeline; the sweep's errors alarm is always one.");
+
+        JsonObject Publish(string sid, string service, JsonObject condition) => new()
+        {
+            ["Sid"] = sid,
+            ["Effect"] = "Allow",
+            ["Principal"] = new JsonObject { ["Service"] = service },
+            ["Action"] = "sns:Publish",
+            ["Resource"] = topicArn,
+            ["Condition"] = condition,
+        };
+
+        var statements = new JsonArray
+        {
+            Publish(AlertsFailedDeploySid, "events.amazonaws.com", new JsonObject
+            {
+                ["ArnEquals"] = new JsonObject { ["aws:SourceArn"] = failedDeployRuleArn },
+            }),
+            Publish(AlertsLocalAlarmsSid, "cloudwatch.amazonaws.com", new JsonObject
+            {
+                ["ArnEquals"] = new JsonObject
+                {
+                    ["aws:SourceArn"] = new JsonArray(localAlarmArns.Select(a => (JsonNode?)JsonValue.Create(a)).ToArray()),
+                },
+                ["StringEquals"] = new JsonObject { ["aws:SourceAccount"] = targetAccountId },
+            }),
+        };
+
+        if (buildAlarmArn != null)
+        {
+            statements.Add(Publish(AlertsBuildAlarmSid, "cloudwatch.amazonaws.com", new JsonObject
+            {
+                ["ArnEquals"] = new JsonObject { ["aws:SourceArn"] = buildAlarmArn },
+                ["StringEquals"] = new JsonObject { ["aws:SourceAccount"] = artifactAccountId },
+            }));
+        }
+
+        return new JsonObject { ["Version"] = "2012-10-17", ["Statement"] = statements }.ToJsonString(PolicyJson);
+    }
+
+    public const string AlertsFailedDeploySid = "FailedDeploysOfThisDeployer";
+    public const string AlertsLocalAlarmsSid = "AlarmsOfThisPipeline";
+    public const string AlertsBuildAlarmSid = "TheBuildAccountsForwardingAlarm";
 
     public const string TriggerBusSid = "BuildAccountForwardsBuildRecords";
 

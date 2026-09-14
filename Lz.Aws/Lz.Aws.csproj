@@ -198,6 +198,9 @@
     <PackageReference Include="AWSSDK.EventBridge" Version="4.0.100.13" />
     <PackageReference Include="AWSSDK.SQS" Version="4.0.1.11" />
     <PackageReference Include="AWSSDK.CloudWatch" Version="4.0.104.3" />
+    <!-- SimpleNotificationService: the alerts topic (P2 stage D3). Exact for the same reason: the newest release needing no
+         AWSSDK.Core newer than 4.0.102.4. -->
+    <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.*" />

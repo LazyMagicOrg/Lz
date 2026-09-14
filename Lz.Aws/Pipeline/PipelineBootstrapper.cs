@@ -216,7 +216,8 @@ public static class PipelineBootstrapper
                 Console.WriteLine($"    trigger (Pipeline.DeployOnBuildRecord): {plan.BuildRecordStore} sends its events to EventBridge;");
                 Console.WriteLine($"      rule {f.RuleName} forwards new image/ records to {f.TargetBusArn}");
                 Console.WriteLine($"      as role {f.RoleName} (events:PutEvents on that bus only; assumable by EventBridge for this rule only)");
-                Console.WriteLine($"      undeliverable events to queue {f.DeadLetterQueueName}, alarm {f.AlarmName}");
+                Console.WriteLine($"      undeliverable events to queue {f.DeadLetterQueueName}, alarm {f.AlarmName}, " +
+                                  (f.AlarmActions.Count == 0 ? "notifying nobody" : $"notifying {string.Join(", ", f.AlarmActions)}"));
             }
             else if (plan.ForwardRuleToRemove is { } stale)
             {
