@@ -284,7 +284,7 @@ public static class PipelineBootstrapPlanner
             forwarding = new RecordForwardingPlan(
                 RuleName: ruleName,
                 RuleArn: ruleArn,
-                EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords),
+                EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords, DeployerPlanner.TriggerRecordClasses(config)),
                 TargetBusArn: busArn,
                 RoleName: roleName,
                 RoleArn: $"arn:aws:iam::{acct}:role/{roleName}",
@@ -313,7 +313,10 @@ public static class PipelineBootstrapPlanner
             : null;
         if (recordGrant != null && clientApps.Count > 0)
             recordGrant = recordGrant
-                .Concat(CrossAccount.ClientRecordReadGrant(buildRecords, config.Environment, target!, DeployerPlanner.VerifyRoleName(config)))
+                .Concat(CrossAccount.ClientRecordReadGrant(buildRecords, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
+                    // P4 stage D: the start function reads a client record for its branch, the sweep the record that could name a bundle.
+                    p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
+                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
                 .ToList();
 
         return new PipelineBootstrapPlan(
@@ -330,7 +333,9 @@ public static class PipelineBootstrapPlanner
             ArtifactStore: artifacts,
             ArtifactReadGrant: clientApps.Count > 0
                 ? CrossAccount.ClientBundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
-                    DeployerPlanner.DeployBundleRoleName(config))
+                    DeployerPlanner.DeployBundleRoleName(config),
+                    // P4 stage D: the sweep lists the bundles' versions.
+                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
                 : null);
     }
 

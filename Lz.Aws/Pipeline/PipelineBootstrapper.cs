@@ -127,8 +127,8 @@ public static class PipelineBootstrapper
         if (plan.TargetAccountId is null)
             Console.WriteLine("  no Pipeline.TargetAccountId: nothing replicates and no deployer may read build records from this run.");
 
-        // THE TRIGGER'S BUILD HALF (P2 stage D): forward new image records to the environment, or take the forwarding
-        // rule away when the environment has turned the trigger off.
+        // THE TRIGGER'S BUILD HALF (P2 stage D): forward new image records — and client records, where the environment deploys
+        // client bundles (P4 stage D) — to the environment, or take the forwarding rule away when it has turned the trigger off.
         if (plan.RecordForwarding is { } forwarding && plan.BuildRecordStore is { } forwardedStore)
         {
             using var events = creds != null
@@ -231,7 +231,7 @@ public static class PipelineBootstrapper
             if (plan.RecordForwarding is { } f)
             {
                 Console.WriteLine($"    trigger (Pipeline.DeployOnBuildRecord): {plan.BuildRecordStore} sends its events to EventBridge;");
-                Console.WriteLine($"      rule {f.RuleName} forwards new image/ records to {f.TargetBusArn}");
+                Console.WriteLine($"      rule {f.RuleName} forwards new {string.Join(" and ", DeployerTrigger.RecordPrefixesOf(f.EventPattern))} records to {f.TargetBusArn}");
                 Console.WriteLine($"      as role {f.RoleName} (events:PutEvents on that bus only; assumable by EventBridge for this rule only)");
                 Console.WriteLine($"      undeliverable events to queue {f.DeadLetterQueueName}, alarm {f.AlarmName}, " +
                                   (f.AlarmActions.Count == 0 ? "notifying nobody" : $"notifying {string.Join(", ", f.AlarmActions)}"));

@@ -295,6 +295,46 @@ internal sealed class EcrRepositoryImages(IAmazonECR ecr) : IRepositoryImages
     }
 }
 
+/// <summary>
+/// The sweep's view of the artifact store (P4 stage D): every version under a prefix, all pages. A delete marker is left out —
+/// it holds no bytes, so nothing could deploy it.
+/// </summary>
+internal sealed class S3ArtifactVersions(IAmazonS3 s3) : IArtifactVersions
+{
+    public async Task<IReadOnlyList<StoredVersion>> ListAsync(string bucket, string prefix)
+    {
+        var all = new List<StoredVersion>();
+        string? keyMarker = null;
+        string? versionMarker = null;
+        do
+        {
+            var page = await s3.ListVersionsAsync(new ListVersionsRequest
+            {
+                BucketName = bucket,
+                Prefix = prefix,
+                KeyMarker = keyMarker,
+                VersionIdMarker = versionMarker,
+            });
+
+            foreach (var version in page.Versions ?? new List<S3ObjectVersion>())
+            {
+                if (version.IsDeleteMarker == true) continue;
+
+                // No time would leave the version out of every window, silently; it is a fault instead.
+                var modified = version.LastModified
+                    ?? throw new InvalidOperationException($"S3 listed s3://{bucket}/{version.Key} version {version.VersionId} with no time.");
+                var utc = modified.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(modified, DateTimeKind.Utc) : modified.ToUniversalTime();
+
+                all.Add(new StoredVersion(version.Key, version.VersionId, new DateTimeOffset(utc)));
+            }
+
+            (keyMarker, versionMarker) = page.IsTruncated == true ? (page.NextKeyMarker, page.NextVersionIdMarker) : (null, null);
+        } while (keyMarker != null);
+
+        return all;
+    }
+}
+
 /// <summary>Keys under a prefix, after a key, all pages.</summary>
 internal sealed class S3RecordKeys(IAmazonS3 s3) : IRecordKeys
 {

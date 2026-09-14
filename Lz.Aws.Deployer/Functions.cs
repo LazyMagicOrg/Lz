@@ -176,6 +176,7 @@ public sealed class CorroborateFunction
         var result = await CorroborateStep.RunAsync(
             CorroborateSettings.Read(Environment.GetEnvironmentVariable),
             new EcrRepositoryImages(Clients.Ecr.Value),
+            new S3ArtifactVersions(Clients.S3.Value),
             new S3RecordKeys(Clients.S3.Value),
             new S3RecordStore(Clients.S3.Value),
             new S3EvidenceProbe(Clients.S3.Value),

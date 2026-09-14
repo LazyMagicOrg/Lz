@@ -574,7 +574,7 @@ public class PipelineBootstrapPlannerTests
         // On the default bus, so no bus in the ARN.
         Assert.Equal("arn:aws:events:us-west-2:147440642635:rule/scu-dev-forward-build-records", f.RuleArn);
         Assert.Equal("arn:aws:events:us-west-2:503947800380:event-bus/scu-dev-deployer-trigger", f.TargetBusArn);
-        Assert.Equal(DeployerTrigger.EventPattern("147440642635", "scu-build-records-abcd-1234"), f.EventPattern);
+        Assert.Equal(DeployerTrigger.EventPattern("147440642635", "scu-build-records-abcd-1234", new[] { "image" }), f.EventPattern);
         Assert.Null(plan.ForwardRuleToRemove);
     }
 

@@ -57,7 +57,7 @@ internal static class TriggerApply
         RequireEqual("forwarding role ARN", plan.RoleArn, roleArn);
 
         await EnsureRuleAsync(events, eventBusName: null, plan.RuleName, plan.RuleArn, plan.EventPattern,
-            "lz pipeline: forwards new image build records to one environment's deployer trigger bus.");
+            $"lz pipeline: forwards new {RecordClassesOf(plan.EventPattern, " and ")} build records to one environment's deployer trigger bus.");
 
         await EnsureOnlyTargetAsync(events, eventBusName: null, plan.RuleName, new Target
         {
@@ -169,7 +169,7 @@ internal static class TriggerApply
         await EnsureFailureDestinationAsync(lambda, plan);
 
         await EnsureRuleAsync(events, plan.BusName, plan.RuleName, plan.RuleArn, plan.EventPattern,
-            "lz pipeline: starts the deployer when the build account forwards a new image build record.");
+            $"lz pipeline: starts the deployer when the build account forwards a new {RecordClassesOf(plan.EventPattern, " or ")} build record.");
 
         await EnsureOnlyTargetAsync(events, plan.BusName, plan.RuleName, new Target
         {
@@ -181,8 +181,17 @@ internal static class TriggerApply
         Console.WriteLine($"  trigger: {plan.BusName} / {plan.RuleName} -> {plan.StartFunctionName}");
         foreach (var route in plan.Routes)
             Console.WriteLine($"      {route.RecordPrefix} rolls {string.Join(", ", route.Targets.Select(t => $"{t.Target.Service} ({t.Target.Cluster})"))}");
+        foreach (var route in plan.ClientRoutes ?? Array.Empty<ClientTriggerRoute>())
+            Console.WriteLine($"      {route.RecordPrefix} deploys into {route.Bucket} ({route.App})");
         Console.WriteLine($"      what fails goes to {plan.DeadLetterQueueName} (alarm {plan.AlarmName}).");
     }
+
+    /// <summary>
+    /// The classes a rule's pattern forwards, for its description: "image", or "image and client". Read from the pattern being
+    /// written, so an image-only rule keeps the description it was created with, word for word.
+    /// </summary>
+    internal static string RecordClassesOf(string eventPattern, string conjunction)
+        => string.Join(conjunction, DeployerTrigger.RecordPrefixesOf(eventPattern).Select(prefix => prefix.TrimEnd('/')));
 
     private static async Task<string> EnsureBusAsync(IAmazonEventBridge events, string name)
     {

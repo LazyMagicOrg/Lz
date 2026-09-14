@@ -86,8 +86,15 @@ public class DeployerAlertsTests
         }
     }
 
+    /// <summary>The artifact store, which a sweep configured with no bundle source must never list.</summary>
+    private sealed class NoBundles : IArtifactVersions
+    {
+        public Task<IReadOnlyList<StoredVersion>> ListAsync(string bucket, string prefix)
+            => throw new InvalidOperationException($"a sweep with no bundle source listed s3://{bucket}/{prefix}");
+    }
+
     private static Task<JsonObject> Sweep(Images images, Records records, Evidences evidence, Alerts alerts)
-        => CorroborateStep.RunAsync(Settings, images, records, records, evidence, evidence, alerts, Now);
+        => CorroborateStep.RunAsync(Settings, images, new NoBundles(), records, records, evidence, evidence, alerts, Now);
 
     private static string[] Digests(JsonObject result, string field)
         => result[field]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();

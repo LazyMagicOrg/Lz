@@ -962,6 +962,19 @@ class Program
                     return;
                 }
 
+                // The app's name, from its folder: the name the system bucket is built from below, and the one the refusal judges.
+                var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
+
+                // BEFORE ANY TENANT: an app the pipeline deploys from its client bundles has one writer, the deployer (DecoupledCd.md P-8).
+                if (Lz.Aws.Pipeline.DeployerPlanner.RefusalForWorkstationWebapp(config, webappName) is { } webappRefusal)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"REFUSED: {webappRefusal}");
+                    Console.ResetColor();
+                    Environment.ExitCode = 1;
+                    continue;
+                }
+
                 // Detect static site: folder has index.html but no {project}/{project}.csproj
                 var isStaticSite = File.Exists(Path.Combine(webappFolder, "index.html"))
                     && !File.Exists(Path.Combine(webappFolder, project, $"{project}.csproj"));
@@ -989,7 +1002,6 @@ class Program
                     var topology = Lz.Aws.Topologies.AwsTopologies.Get(config.Topology);
                     if (!topology.UsesCentralAuth)
                     {
-                        var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
                         // One definition with the pipeline's bundle deploy, whose grants name these buckets.
                         bucketName = Lz.Aws.Webapp.WebappSyncRules.SystemBucketName(config.SystemKey, webappName, config.SystemSuffix);
                     }

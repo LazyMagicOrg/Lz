@@ -302,6 +302,10 @@ public static class DeployerEnvironment
     public const string BucketVersioning = "LZ_BUCKET_VERSIONING";
     public const string NoncurrentExpirationDays = "LZ_NONCURRENT_EXPIRATION_DAYS";
 
+    // The trigger and the sweep for client bundles (P4 stage D).
+    public const string TriggerClientRoutes = "LZ_TRIGGER_CLIENT_ROUTES";
+    public const string CorroborateBundleSources = "LZ_CORROBORATE_BUNDLE_SOURCES";
+
     /// <summary>The region Lambda runs a function in, which it sets itself.</summary>
     public const string Region = "AWS_REGION";
 

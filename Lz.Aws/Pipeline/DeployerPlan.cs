@@ -130,7 +130,8 @@ public sealed record DeployerTriggerPlan(
     int MaximumRetryAttempts,
     int MaximumEventAgeSeconds,
     IReadOnlyList<TriggerRoute> Routes,
-    IReadOnlyList<string> AlarmActions);
+    IReadOnlyList<string> AlarmActions,
+    IReadOnlyList<ClientTriggerRoute>? ClientRoutes = null);
 
 /// <summary>
 /// The alerts in the target account (P2 stage D3): the topic a person subscribes to, the rule that sends it the deployer's
@@ -155,7 +156,8 @@ public sealed record DeployerAlertsPlan(
     string ScheduleRuleName,
     string ScheduleRuleArn,
     string ScheduleExpression,
-    string CorroborateErrorsAlarmName);
+    string CorroborateErrorsAlarmName,
+    IReadOnlyList<string>? BundlePrefixes = null);
 
 /// <summary>
 /// The signature hook as an ECS service attaches it: the function ECS invokes at <c>PRE_SCALE_UP</c>, and the
@@ -613,7 +615,7 @@ public static class DeployerPlanner
         if (p.DeployOnBuildRecord)
         {
             var (triggerPlan, startFunction) = TriggerFor(
-                config, p, region, acct, artifactAccount, buildRecordStore, machineArn, triggerInputs, alarmActions);
+                config, p, region, acct, artifactAccount, buildRecordStore, machineArn, triggerInputs, alarmActions, clientTargets, artifactStore);
             trigger = triggerPlan;
             functions.Add(startFunction);
         }
@@ -623,7 +625,7 @@ public static class DeployerPlanner
         if (p.Alerts)
         {
             var (alertsPlan, corroborate) = AlertsFor(
-                config, p, region, acct, artifactAccount, buildRecordStore, evidence, imageRepositories, machineArn, trigger);
+                config, p, region, acct, artifactAccount, buildRecordStore, evidence, imageRepositories, machineArn, trigger, clientTargets, artifactStore);
             alerts = alertsPlan;
             functions.Add(corroborate);
         }
@@ -802,15 +804,23 @@ public static class DeployerPlanner
     ///
     /// <para>ONE SOURCE PER IMAGE ARTIFACT: the repository its image replicates into here, and the prefix its repository's
     /// records are written under — the same pairing the trigger routes on, read from the same config.</para>
+    ///
+    /// <para>ONE BUNDLE SOURCE PER CLIENT TARGET (P4 stage D): the prefix its repository writes under in both stores. Only the
+    /// repositories whose bundles this environment deploys, which are the ones it could be asked to deploy.</para>
     /// </summary>
     private static (DeployerAlertsPlan Plan, DeployerFunction Function) AlertsFor(
         SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount, string buildRecordStore,
-        string evidence, IReadOnlyList<string> imageRepositories, string stateMachineArn, DeployerTriggerPlan? trigger)
+        string evidence, IReadOnlyList<string> imageRepositories, string stateMachineArn, DeployerTriggerPlan? trigger,
+        IReadOnlyList<ClientTarget> clientTargets, string artifactStore)
     {
         var sources = (p.Repositories ?? new List<PipelineRepositoryConfig>())
             .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
             .SelectMany(r => (r.Artifacts ?? new List<string>()).Select(artifact => new CorroborateSource(
                 EcrRepositoryNaming.For(config, artifact), BuildRecordFormat.PrefixFor(DeployerTrigger.RecordClass, r.Repo!))))
+            .ToList();
+
+        var bundlePrefixes = clientTargets
+            .Select(t => BuildRecordFormat.PrefixFor(DeployerTrigger.ClientRecordClass, t.Repo))
             .ToList();
 
         var topicArn = AlertsTopicArn(region, acct, config);
@@ -842,18 +852,28 @@ public static class DeployerPlanner
             ScheduleRuleArn: $"arn:aws:events:{region}:{acct}:rule/{schedule}",
             // The sweep's period is its grace: an image is looked at by at least one run once it is old enough.
             ScheduleExpression: $"rate({(int)DeployerAlerts.Grace.TotalMinutes} minutes)",
-            CorroborateErrorsAlarmName: errorsAlarm);
+            CorroborateErrorsAlarmName: errorsAlarm,
+            BundlePrefixes: bundlePrefixes);
+
+        var corroborateEnvironment = new Dictionary<string, string>
+        {
+            [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
+            [DeployerEnvironment.EvidenceStore] = evidence,
+            [DeployerEnvironment.AlertsTopic] = topicArn,
+            [DeployerEnvironment.CorroborateSources] = DeployerAlerts.EncodeSources(sources),
+        };
+        var corroborateGrants = CorroborateGrants(region, acct, buildRecordStore, evidence, topicArn, imageRepositories);
+        if (bundlePrefixes.Count > 0)
+        {
+            corroborateEnvironment[DeployerEnvironment.CorroborateBundleSources] = DeployerAlerts.EncodeBundleSources(bundlePrefixes);
+            corroborateEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
+            corroborateGrants = corroborateGrants.Concat(CorroborateBundleGrants(buildRecordStore, artifactStore)).ToArray();
+        }
 
         var corroborate = new DeployerFunction(
             function, DeployerHandlers.Corroborate, CorroborateFunctionRoleName(config),
-            Combine(Logs(region, acct, function), CorroborateGrants(region, acct, buildRecordStore, evidence, topicArn, imageRepositories)),
-            new Dictionary<string, string>
-            {
-                [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
-                [DeployerEnvironment.EvidenceStore] = evidence,
-                [DeployerEnvironment.AlertsTopic] = topicArn,
-                [DeployerEnvironment.CorroborateSources] = DeployerAlerts.EncodeSources(sources),
-            },
+            Combine(Logs(region, acct, function), corroborateGrants),
+            corroborateEnvironment,
             TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
 
         return (plan, corroborate);
@@ -883,10 +903,15 @@ public static class DeployerPlanner
     /// and each tenant runs its own copy of the service, so a build rolls <c>{sk}-{tenant}-{artifact}</c> in every
     /// tenant found. A repository with two artifacts is refused: a record names a digest, not the ECR repository it
     /// was pushed to, so its image could not be matched to a service.</para>
+    ///
+    /// <para>ONE CLIENT ROUTE PER CLIENT TARGET (P4 stage D): a client repository's records deploy into the one web app its
+    /// <c>Artifacts</c> names, the bucket Verify checks the input against. The rules then match <c>client/</c> too
+    /// (<see cref="TriggerRecordClasses"/>), and the start function reads client records with the artifact store.</para>
     /// </summary>
     private static (DeployerTriggerPlan Plan, DeployerFunction Function) TriggerFor(
         SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount,
-        string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs, IReadOnlyList<string> alarmActions)
+        string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs, IReadOnlyList<string> alarmActions,
+        IReadOnlyList<ClientTarget> clientTargets, string artifactStore)
     {
         if (inputs is null)
             throw new InvalidOperationException(
@@ -925,6 +950,11 @@ public static class DeployerPlanner
             })
             .ToList();
 
+        var clientRoutes = clientTargets
+            .Select(t => new ClientTriggerRoute(
+                BuildRecordFormat.PrefixFor(DeployerTrigger.ClientRecordClass, t.Repo), t.App.ToLowerInvariant(), t.Bucket))
+            .ToList();
+
         var busName = TriggerBusName(config);
         var busArn = TriggerBusArn(region, acct, config);
         var ruleName = StartRuleName(config);
@@ -940,7 +970,7 @@ public static class DeployerPlanner
             BusPolicy: CrossAccount.TriggerBusPolicy(busArn, artifactAccount, RecordForwarderRoleName(config)),
             RuleName: ruleName,
             RuleArn: ruleArn,
-            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore),
+            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore, TriggerRecordClasses(config)),
             StartFunctionName: function,
             StartFunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
             DeadLetterQueueName: queue,
@@ -951,7 +981,8 @@ public static class DeployerPlanner
             MaximumRetryAttempts: 2,
             MaximumEventAgeSeconds: 3600,
             Routes: routes,
-            AlarmActions: alarmActions);
+            AlarmActions: alarmActions,
+            ClientRoutes: clientRoutes);
 
         if (StartDeadLetterAlarmName(config) != $"{queue}-not-empty")
             throw new InvalidOperationException("the start queue's alarm name diverged from StartDeadLetterAlarmName, which the alerts topic's policy names.");
@@ -959,18 +990,34 @@ public static class DeployerPlanner
         if (StartFunctionRoleName(config) != $"{function}-fn")
             throw new InvalidOperationException("the start function's role name diverged from StartFunctionRoleName, which the build account's grant names.");
 
+        var startEnvironment = new Dictionary<string, string>
+        {
+            [DeployerEnvironment.ArtifactAccount] = artifactAccount,
+            [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
+            [DeployerEnvironment.StateMachine] = stateMachineArn,
+            [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
+            // Main only (P2 stage D2). A build from any other branch is skipped, and can be deployed by hand.
+            [DeployerEnvironment.TriggerRefs] = DeployerEnvironment.Join(DeployerTrigger.DefaultRefs),
+        };
+        if (clientRoutes.Count > 0)
+        {
+            startEnvironment[DeployerEnvironment.TriggerClientRoutes] = DeployerTrigger.EncodeClientRoutes(clientRoutes);
+            startEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
+
+            // ONE LIMIT FOR BOTH: Lambda holds four kilobytes of variables per function, and MaxRoutesLength is this planner's
+            // share of them, so the client routes count against the image routes' allowance rather than beside it.
+            var routesLength = startEnvironment[DeployerEnvironment.TriggerRoutes].Length + startEnvironment[DeployerEnvironment.TriggerClientRoutes].Length;
+            if (routesLength > DeployerTrigger.MaxRoutesLength)
+                throw new InvalidOperationException(
+                    $"the trigger's image and client routes are {routesLength} characters together; a function's environment holds " +
+                    $"{DeployerTrigger.MaxRoutesLength} of them here. That many tenant services and web apps need the routes somewhere " +
+                    "other than an environment variable.");
+        }
+
         var startFunction = new DeployerFunction(
             function, DeployerHandlers.Start, StartFunctionRoleName(config),
-            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore)),
-            new Dictionary<string, string>
-            {
-                [DeployerEnvironment.ArtifactAccount] = artifactAccount,
-                [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
-                [DeployerEnvironment.StateMachine] = stateMachineArn,
-                [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
-                // Main only (P2 stage D2). A build from any other branch is skipped, and can be deployed by hand.
-                [DeployerEnvironment.TriggerRefs] = DeployerEnvironment.Join(DeployerTrigger.DefaultRefs),
-            },
+            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore, clientRecords: clientRoutes.Count > 0)),
+            startEnvironment,
             TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
 
         return (plan, startFunction);
@@ -1103,6 +1150,61 @@ public static class DeployerPlanner
                "updateedge would publish them to LIVE around it, a second publisher of each function. Run " +
                "`lz deploytenant` instead. To use updateedge anyway, take config out of Pipeline.Classes first, which also " +
                "stops the deployer accepting config records.";
+    }
+
+    /// <summary>
+    /// The record classes the trigger forwards and routes (P4 stage D): <c>image</c>, and <c>client</c> where a client repository
+    /// names the web app it deploys as. ONE DEFINITION FOR BOTH ACCOUNTS: the build account's forwarding rule and this environment's
+    /// start rule share <see cref="DeployerTrigger.EventPattern"/>, and both take its classes from here.
+    /// </summary>
+    public static IReadOnlyList<string> TriggerRecordClasses(SystemConfig config)
+        => ClientApps(config).Count > 0
+            ? new[] { DeployerTrigger.RecordClass, DeployerTrigger.ClientRecordClass }
+            : new[] { DeployerTrigger.RecordClass };
+
+    /// <summary>
+    /// Why <c>lz deploywebapp</c> must not deploy the web app in <paramref name="webappName"/>'s folder for this environment, or
+    /// null when it may (DecoupledCd.md P-8).
+    ///
+    /// <para>AN APP THE PIPELINE DEPLOYS HAS ONE WRITER. The deployer mirrors a client bundle into the app's bucket under the lease
+    /// in <c>lz/deploy.json</c>, which also records the build the app serves; <c>deploywebapp</c> would write around both, and the
+    /// app would serve files no build record names until the next bundle deploy rewrote them. So, as <c>deploycontainer</c> is for
+    /// a signed service, the second path is closed for exactly the apps <see cref="ClientApps"/> names — matched by the bucket the
+    /// command derives from the folder's name, which is the bucket it would write.</para>
+    ///
+    /// <para>A CONFIG THE PIPELINE CANNOT READ IS REFUSED, not guessed at: which buckets it owns is then unknown. A central-auth
+    /// topology is the exception, because there <c>deploywebapp</c> writes a per-tenant bucket no client target ever names.</para>
+    /// </summary>
+    /// <param name="webappName">The web app's folder name, as the command takes it for the bucket name.</param>
+    public static string? RefusalForWorkstationWebapp(SystemConfig config, string webappName)
+    {
+        if (config.Pipeline is not { Enabled: true } p || p.Classes?.Contains(DeployerTrigger.ClientRecordClass) != true) return null;
+        if (Lz.Aws.Topologies.AwsTopologies.Get(config.Topology).UsesCentralAuth) return null;
+
+        IReadOnlyList<ClientApp> apps;
+        try
+        {
+            apps = ClientApps(config);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return $"{config.SystemKey}/{config.Environment}'s Pipeline.Repositories cannot be read for client bundles, so which web apps " +
+                   $"the pipeline deploys is unknown and none is assumed free: {ex.Message}";
+        }
+
+        var bucket = Lz.Aws.Webapp.WebappSyncRules.SystemBucketName(config.SystemKey, webappName, config.SystemSuffix);
+        var app = apps.FirstOrDefault(a => string.Equals(a.Bucket, bucket, StringComparison.Ordinal));
+        if (app is null) return null;
+
+        var howToDeploy = p.DeployOnBuildRecord
+            ? $"Push to {app.Repo}'s main instead: its build writes a bundle and a record, and the deployer deploys it."
+            : $"Run {app.Repo}'s build-bundle workflow instead, then start an execution naming its record.";
+
+        return $"{config.SystemKey}/{config.Environment} deploys web app {app.App} from {app.Repo}'s client bundles " +
+               $"(Pipeline.Repositories), so {app.Bucket} has one writer: the deployer, which mirrors a bundle under the lease in " +
+               $"{BundleMarker.Key} and records the build the app serves there. deploywebapp would write around both, and the app " +
+               $"would serve files no build record names until the next bundle deploy rewrote them. {howToDeploy} To deploy from a " +
+               $"workstation anyway, remove Artifacts from {app.Repo}'s entry first, which also takes the app out of the deployer's plan.";
     }
 
     /// <summary>The signature hook's function name — one definition for the planner and the service that attaches it.</summary>
@@ -1596,11 +1698,27 @@ public static class DeployerPlanner
             .Select(d => $"arn:aws:cloudfront::{accountId}:distribution/{d}").ToArray();
 
     /// <summary>
-    /// What the start function may do: read an image record for its branch, start THIS deployer, read back an execution
-    /// of it whose name is taken, and dead-letter its own failures. It judges nothing about the record but its ref —
-    /// Verify does the rest — and rolls nothing.
+    /// What the start function may do: read an image record for its branch — and a client record, where the environment deploys
+    /// client bundles (P4 stage D) — start THIS deployer, read back an execution of it whose name is taken, and dead-letter its
+    /// own failures. It judges nothing about the record but its ref — Verify does the rest — and rolls nothing.
     /// </summary>
-    private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore) => new object[]
+    private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore, bool clientRecords)
+    {
+        var grants = StartImageGrants(stateMachineArn, queueArn, buildRecordStore).ToList();
+        if (clientRecords)
+            grants.Insert(1, new
+            {
+                // CLIENT RECORDS, READ ONLY, and no list, as for images: the event names the key. A statement of its own, so the
+                // image statement above stays what an environment without a client target has.
+                Sid = "ReadClientRecordsBranch",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = $"arn:aws:s3:::{buildRecordStore}/{DeployerTrigger.ClientRecordClass}/*",
+            });
+        return grants.ToArray();
+    }
+
+    private static object[] StartImageGrants(string stateMachineArn, string queueArn, string buildRecordStore) => new object[]
     {
         new
         {
@@ -1701,6 +1819,46 @@ public static class DeployerPlanner
                 Resource = topicArn,
             },
         };
+
+    /// <summary>
+    /// What the sweep may also do where the environment deploys client bundles (P4 stage D): list the client bundles' versions,
+    /// and read the one record that could name each — never a bundle's bytes. Statements of their own, beside the image grants.
+    /// </summary>
+    private static object[] CorroborateBundleGrants(string buildRecordStore, string artifactStore) => new object[]
+    {
+        new
+        {
+            // Versions, not objects: a second version under a bundle's key is a write no build made. The artifact store's bucket
+            // policy in the build account is the other half of this grant.
+            Sid = "ListClientBundleVersions",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucketVersions" },
+            Resource = $"arn:aws:s3:::{artifactStore}",
+            Condition = new Dictionary<string, object>
+            {
+                ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = $"{DeployerTrigger.ClientRecordClass}/*" },
+            },
+        },
+        new
+        {
+            // So a bundle with no record reads as a 404 — an anomaly — rather than a denial that fails the whole run.
+            Sid = "TellAMissingClientRecordFromADeniedOne",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{buildRecordStore}",
+            Condition = new Dictionary<string, object>
+            {
+                ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = $"{DeployerTrigger.ClientRecordClass}/*" },
+            },
+        },
+        new
+        {
+            Sid = "ReadClientRecords",
+            Effect = "Allow",
+            Action = new[] { "s3:GetObject" },
+            Resource = $"arn:aws:s3:::{buildRecordStore}/{DeployerTrigger.ClientRecordClass}/*",
+        },
+    };
 
     /// <summary>
     /// What the signature hook reads. The ECS and ECR actions are the ones AWS's own admission

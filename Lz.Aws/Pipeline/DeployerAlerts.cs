@@ -6,7 +6,8 @@ using System.Text.Json.Nodes;
 namespace Lz.Aws.Pipeline;
 
 // ---------------------------------------------------------------------------------------------
-//  THE SWEEP (P2 stage D3): an image in this environment's pipeline repository that no build record names.
+//  THE SWEEP (P2 stage D3): an image in this environment's pipeline repository that no build record names — and,
+//  where the environment deploys client bundles (P4 stage D), a bundle version in the artifact store that none names.
 //  Linked into Lz.Aws.Deployer, like the steps it sits beside: plain C#, no config, no SDK.
 // ---------------------------------------------------------------------------------------------
 
@@ -42,18 +43,44 @@ public interface IAlertPublisher
     Task PublishAsync(string topicArn, string subject, string message);
 }
 
+/// <summary>One version of an object, as the artifact store lists it (P4 stage D). A delete marker is not one.</summary>
+public sealed record StoredVersion(string Key, string VersionId, DateTimeOffset LastModified);
+
+public interface IArtifactVersions
+{
+    /// <summary>Every object version under <paramref name="prefix"/>, all pages, with delete markers left out. A denial throws.</summary>
+    Task<IReadOnlyList<StoredVersion>> ListAsync(string bucket, string prefix);
+}
+
 /// <summary>What the corroborate function is configured with.</summary>
+/// <param name="ArtifactStore">The build account's artifact store, whose client bundles the sweep checks (P4 stage D). Null
+/// where the environment deploys none.</param>
+/// <param name="BundlePrefixes">The client repositories' prefixes, <c>client/{owner}/{name}/</c> — the same in both stores.</param>
 public sealed record CorroborateSettings(
-    string BuildRecordStore, string EvidenceStore, string AlertsTopicArn, IReadOnlyList<CorroborateSource> Sources)
+    string BuildRecordStore, string EvidenceStore, string AlertsTopicArn, IReadOnlyList<CorroborateSource> Sources,
+    string? ArtifactStore = null, IReadOnlyList<string>? BundlePrefixes = null)
 {
     public static CorroborateSettings Read(Func<string, string?> env)
     {
         var sources = DeployerAlerts.DecodeSources(DeployerEnvironment.Required(env, DeployerEnvironment.CorroborateSources));
+
+        // BUNDLE SOURCES ARE OPTIONAL, as the trigger's client routes are: absent where no client target is configured, and
+        // where present the artifact store is required with them, since the versions are listed there.
+        IReadOnlyList<string>? bundlePrefixes = null;
+        string? artifactStore = null;
+        if (env(DeployerEnvironment.CorroborateBundleSources) is { Length: > 0 } encodedBundles)
+        {
+            bundlePrefixes = DeployerAlerts.DecodeBundleSources(encodedBundles);
+            artifactStore = DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactStore);
+        }
+
         return new CorroborateSettings(
             DeployerEnvironment.Required(env, DeployerEnvironment.BuildRecordStore),
             DeployerEnvironment.Required(env, DeployerEnvironment.EvidenceStore),
             DeployerEnvironment.Required(env, DeployerEnvironment.AlertsTopic),
-            sources);
+            sources,
+            artifactStore,
+            bundlePrefixes);
     }
 }
 
@@ -136,6 +163,84 @@ public static class DeployerAlerts
 
     public static string AlertSubject(string repository) => $"lz pipeline: an image in {repository} has no build record";
 
+    /// <summary>The client repositories' prefixes, as the sweep's environment carries them (P4 stage D).</summary>
+    public static string EncodeBundleSources(IEnumerable<string> prefixes)
+    {
+        var list = prefixes.ToList();
+        foreach (var prefix in list)
+        {
+            if (!DeployerTrigger.IsClientRecordPrefix(prefix))
+                throw new InvalidOperationException($"'{prefix}' is not a client repository's prefix, client/{{owner}}/{{name}}/.");
+        }
+
+        return DeployerEnvironment.Join(list);
+    }
+
+    public static IReadOnlyList<string> DecodeBundleSources(string encoded)
+    {
+        var prefixes = encoded.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var prefix in prefixes)
+        {
+            if (!DeployerTrigger.IsClientRecordPrefix(prefix))
+                throw new InvalidOperationException(
+                    $"'{prefix}' in {DeployerEnvironment.CorroborateBundleSources} is not client/owner/name/. " +
+                    "Re-run `lz bootstrapdeployer --apply`, which is what sets it.");
+        }
+
+        // Written only where a client target exists, so an empty value is a variable that lost its sources, not "none".
+        if (prefixes.Length == 0)
+            throw new InvalidOperationException(
+                $"{DeployerEnvironment.CorroborateBundleSources} names no prefix, so the sweep would check no bundle and report that " +
+                "all is well. Re-run `lz bootstrapdeployer --apply`, which is what sets it.");
+        return prefixes;
+    }
+
+    /// <summary>
+    /// The key a bundle's record would have: the zip's stem with <c>.json</c> for <c>.zip</c>, as <see cref="BuildRecordFormat.KeyFor"/>
+    /// and <see cref="BuildRecordFormat.BundleKeyFor"/> give one build's two objects. Null for a key no bundle has.
+    /// </summary>
+    public static string? RecordKeyForBundle(string key)
+        => key.EndsWith(".zip", StringComparison.Ordinal) && key.Length > ".zip".Length ? key[..^".zip".Length] + ".json" : null;
+
+    /// <summary>How the sweep's result names a bundle version: its key and the version, which together are its identity.</summary>
+    public static string BundleName(StoredVersion version) => $"{version.Key}?versionId={version.VersionId}";
+
+    /// <summary>
+    /// Where a bundle anomaly is recorded, once: <c>anomalies/{key}/{version id}.json</c>. The version is escaped, so an id that
+    /// held a slash could not name a key outside its folder, and two ids cannot escape to one.
+    /// </summary>
+    public static string BundleAnomalyKey(string key, string versionId) => $"anomalies/{key}/{Uri.EscapeDataString(versionId)}.json";
+
+    public static string BundleAlertSubject(string artifactStore) => $"lz pipeline: a bundle in {artifactStore} has no build record";
+
+    public static string BundleAlertMessage(StoredVersion version, string artifactStore, string evidenceStore, string reason)
+        => string.Join("\n", new[]
+        {
+            $"s3://{artifactStore}/{version.Key} (version {version.VersionId}) was written at {version.LastModified.UtcDateTime:O}, " +
+            $"and no build record names it: {reason.TrimEnd('.')}.",
+            "",
+            "No execution deploys it: Verify reads a bundle only at the version its build record names, and compares S3's SHA-256 " +
+            "of that version with the record's.",
+            "",
+            $"Recorded at s3://{evidenceStore}/{BundleAnomalyKey(version.Key, version.VersionId)}. This alert is sent once for this version.",
+        });
+
+    public static string BundleAnomalyEvidence(
+        StoredVersion version, string artifactStore, string buildRecordStore, string? recordKey, string reason, DateTimeOffset recordedAt)
+        => JsonSerializer.Serialize(new JsonObject
+        {
+            ["schema"] = DeployEvidence.Schema,
+            ["outcome"] = "anomaly",
+            ["kind"] = "bundle-without-record",
+            ["recordedAt"] = recordedAt.ToString("O"),
+            ["store"] = artifactStore,
+            ["key"] = version.Key,
+            ["versionId"] = version.VersionId,
+            ["lastModified"] = version.LastModified.ToString("O"),
+            ["recordSearched"] = new JsonObject { ["store"] = buildRecordStore, ["key"] = recordKey },
+            ["reason"] = reason,
+        }, Json);
+
     public static string AlertMessage(
         RepositoryImage image, CorroborateSource source, string buildRecordStore, string evidenceStore, int recordsRead, int recordsUnreadable)
     {
@@ -192,11 +297,15 @@ public static class DeployerAlerts
 ///
 /// <para>ALERT, THEN RECORD. An anomaly already recorded is not alerted again. The alert is sent before the record is written,
 /// so a failure between the two repeats an alert on the next run rather than losing one.</para>
+///
+/// <para>A BUNDLE IS FOUND BY ITS RECORD'S KEY, NOT BY LISTING RECORDS (P4 stage D): one build writes its zip and its record under
+/// one stem, so the record that could name a zip is at exactly one key, and it names the zip only when it names that key and that
+/// version — the version is the identity, and a second version under one key is a write no build made.</para>
 /// </summary>
 public static class CorroborateStep
 {
     public static async Task<JsonObject> RunAsync(
-        CorroborateSettings settings, IRepositoryImages images, IRecordKeys keys, IRecordStore records,
+        CorroborateSettings settings, IRepositoryImages images, IArtifactVersions versions, IRecordKeys keys, IRecordStore records,
         IEvidenceProbe evidence, IEvidenceWriter writer, IAlertPublisher alerts, DateTimeOffset now)
     {
         var corroborated = new JsonArray();
@@ -271,6 +380,49 @@ public static class CorroborateStep
             }
         }
 
+        if (settings.BundlePrefixes is { Count: > 0 } bundlePrefixes)
+        {
+            var store = settings.ArtifactStore
+                ?? throw new InvalidOperationException("the sweep has bundle sources but no artifact store to list them in.");
+
+            foreach (var prefix in bundlePrefixes)
+            {
+                var listed = await versions.ListAsync(store, prefix);
+
+                foreach (var young in listed.Where(v => v.LastModified > now - DeployerAlerts.Grace))
+                    tooNew.Add(DeployerAlerts.BundleName(young));
+
+                foreach (var version in listed.Where(v => v.LastModified <= now - DeployerAlerts.Grace && v.LastModified >= now - DeployerAlerts.Window))
+                {
+                    var recordKey = DeployerAlerts.RecordKeyForBundle(version.Key);
+                    var reason = await UnnamedBecauseAsync(settings.BuildRecordStore, store, version, recordKey, records);
+                    if (reason is null)
+                    {
+                        corroborated.Add(DeployerAlerts.BundleName(version));
+                        continue;
+                    }
+
+                    var anomalyKey = DeployerAlerts.BundleAnomalyKey(version.Key, version.VersionId);
+                    if (await evidence.ExistsAsync(settings.EvidenceStore, anomalyKey))
+                    {
+                        alreadyRecorded.Add(DeployerAlerts.BundleName(version));
+                        continue;
+                    }
+
+                    await alerts.PublishAsync(
+                        settings.AlertsTopicArn,
+                        DeployerAlerts.BundleAlertSubject(store),
+                        DeployerAlerts.BundleAlertMessage(version, store, settings.EvidenceStore, reason));
+
+                    await writer.PutOnceAsync(
+                        settings.EvidenceStore, anomalyKey,
+                        DeployerAlerts.BundleAnomalyEvidence(version, store, settings.BuildRecordStore, recordKey, reason, now));
+
+                    anomalies.Add(DeployerAlerts.BundleName(version));
+                }
+            }
+        }
+
         return new JsonObject
         {
             ["corroborated"] = corroborated,
@@ -278,5 +430,36 @@ public static class CorroborateStep
             ["alreadyRecorded"] = alreadyRecorded,
             ["tooNew"] = tooNew,
         };
+    }
+
+    /// <summary>Why no build record names this bundle version, or null when its record does.</summary>
+    private static async Task<string?> UnnamedBecauseAsync(
+        string buildRecordStore, string artifactStore, StoredVersion version, string? recordKey, IRecordStore records)
+    {
+        if (recordKey is null)
+            return "its key does not end in .zip, so it is no build's bundle";
+
+        var stored = await records.ReadAsync(buildRecordStore, recordKey);
+        if (stored is null)
+            return $"there is no build record at s3://{buildRecordStore}/{recordKey}";
+
+        BuildRecord record;
+        try
+        {
+            // With the store: a record naming any other bucket, or a key that is not its own build's zip, does not parse.
+            record = BuildRecordFormat.Parse(stored.Json, artifactStore);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return $"the build record at s3://{buildRecordStore}/{recordKey} cannot be read: {ex.Message}";
+        }
+
+        var identity = record.Identity;
+        if (identity.Kind != "bundle")
+            return $"the build record at s3://{buildRecordStore}/{recordKey} names an image, {identity.Digest}";
+
+        return identity.Key == version.Key && identity.VersionId == version.VersionId
+            ? null
+            : $"the build record at s3://{buildRecordStore}/{recordKey} names s3://{identity.Bucket}/{identity.Key} version {identity.VersionId}";
     }
 }

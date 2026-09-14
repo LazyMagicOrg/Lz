@@ -205,11 +205,15 @@ public static class CrossAccount
     /// list under <c>client/</c> so a missing record is a 404. Statements of their own beside the image grant, which stays
     /// byte for byte what it was, and planned only where the environment has a client target.
     /// </summary>
+    /// <param name="startRoleName">With the trigger (P4 stage D), the start function's role, which reads a client record for its
+    /// branch: added to the read statement only, as in <see cref="BuildRecordReadGrant"/>. Null leaves the grant as stage C wrote it.</param>
+    /// <param name="corroborateRoleName">With the alerts (P4 stage D), the sweep's role, which reads the record that could name a
+    /// bundle and must see a missing one as missing: added to both statements. Null leaves both as stage C wrote them.</param>
     public static IReadOnlyList<JsonObject> ClientRecordReadGrant(
-        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName)
+        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null,
+        string? corroborateRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
-        var verify = $"arn:aws:iam::{targetAccountId}:role/{verifyRoleName}";
 
         return new[]
         {
@@ -220,7 +224,13 @@ public static class CrossAccount
                 ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
                 ["Action"] = "s3:GetObject",
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/client/*",
-                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = verify } },
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject
+                    {
+                        ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, startRoleName, corroborateRoleName),
+                    },
+                },
             },
             new JsonObject
             {
@@ -231,7 +241,7 @@ public static class CrossAccount
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}",
                 ["Condition"] = new JsonObject
                 {
-                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = verify },
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, corroborateRoleName) },
                     ["StringLike"] = new JsonObject { ["s3:prefix"] = "client/*" },
                 },
             },
@@ -239,12 +249,27 @@ public static class CrossAccount
     }
 
     /// <summary>
+    /// Roles by ARN for an <c>aws:PrincipalArn</c> condition, the absent ones left out. ONE ROLE IS A STRING, SEVERAL AN ARRAY, so a
+    /// statement naming one role is byte for byte what it was before a later role joined it.
+    /// </summary>
+    private static JsonNode RoleArns(string accountId, params string?[] roles)
+    {
+        var arns = roles.OfType<string>().Select(r => $"arn:aws:iam::{accountId}:role/{r}").ToList();
+        return arns.Count == 1
+            ? JsonValue.Create(arns[0])
+            : new JsonArray(arns.Select(a => (JsonNode?)JsonValue.Create(a)).ToArray());
+    }
+
+    /// <summary>
     /// The artifact store's grant to ONE environment (P4 stage C): its Verify function HEADs a client bundle by version and
     /// lists under <c>client/</c> to tell a missing version from a denied one; its DeployBundle function reads one by
     /// version. Nothing may read any other prefix, and nothing here writes.
     /// </summary>
+    /// <param name="corroborateRoleName">With the alerts (P4 stage D), the sweep's role, which lists the bundles' versions: added to
+    /// the list statement only, never to a read. Null leaves the grant as stage C wrote it.</param>
     public static IReadOnlyList<JsonObject> ClientBundleReadGrant(
-        string artifactStore, string environment, string targetAccountId, string verifyRoleName, string deployBundleRoleName)
+        string artifactStore, string environment, string targetAccountId, string verifyRoleName, string deployBundleRoleName,
+        string? corroborateRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
@@ -275,7 +300,7 @@ public static class CrossAccount
                 ["Resource"] = $"arn:aws:s3:::{artifactStore}",
                 ["Condition"] = new JsonObject
                 {
-                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArn(verifyRoleName) },
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, corroborateRoleName) },
                     ["StringLike"] = new JsonObject { ["s3:prefix"] = "client/*" },
                 },
             },

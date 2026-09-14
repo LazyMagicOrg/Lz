@@ -112,6 +112,23 @@ public class AlertsCallSiteTests
     }
 
     [Fact]
+    public void TheBundleVersionListing_LeavesDeleteMarkersOut_AndPagesByBothMarkers()
+    {
+        // A delete marker holds no bytes, so nothing could deploy it; judged as a version it would alert on every deletion.
+        // And a listing that paged by key alone would skip the versions that share a key across a page boundary.
+        var adapters = Source("Lz.Aws.Deployer", "Adapters.cs");
+        var adapter = adapters[At(adapters, "internal sealed class S3ArtifactVersions", "Adapters.cs")..];
+        adapter = adapter[..adapter.IndexOf("\n}", StringComparison.Ordinal)];
+
+        Assert.Contains("s3.ListVersionsAsync(", adapter);
+        Assert.Contains("if (version.IsDeleteMarker == true) continue;", adapter);
+        Assert.Contains("KeyMarker = keyMarker,", adapter);
+        Assert.Contains("VersionIdMarker = versionMarker,", adapter);
+        Assert.Contains("(page.NextKeyMarker, page.NextVersionIdMarker)", adapter);
+        Assert.DoesNotContain("GetObject", adapter);
+    }
+
+    [Fact]
     public void TheSweep_RunsTheStep_WithTheWriterThatWritesOnce()
     {
         var functions = Source("Lz.Aws.Deployer", "Functions.cs");
@@ -120,6 +137,8 @@ public class AlertsCallSiteTests
 
         Assert.Contains("CorroborateStep.RunAsync(", handler);
         Assert.Contains("new S3EvidenceWriter(Clients.S3.Value),", handler);
+        // The bundles' half of the sweep (P4 stage D) lists versions through the adapter that leaves delete markers out.
+        Assert.Contains("new S3ArtifactVersions(Clients.S3.Value),", handler);
         Assert.Contains("DateTimeOffset.UtcNow", handler);
     }
 }

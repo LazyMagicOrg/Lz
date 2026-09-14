@@ -481,6 +481,8 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    rule {trigger.RuleName}: record events from account {config.Pipeline?.ArtifactAccountId} only -> {trigger.StartFunctionName}");
             foreach (var route in trigger.Routes)
                 Console.WriteLine($"    {route.RecordPrefix} rolls {string.Join(", ", route.Targets.Select(t => $"{t.Target.Service} in {t.Target.Cluster} as req-{{stamp}}-{{run id}}-{t.TenantKey}-1"))}");
+            foreach (var route in trigger.ClientRoutes ?? Array.Empty<ClientTriggerRoute>())
+                Console.WriteLine($"    {route.RecordPrefix} deploys into {route.Bucket} as req-{{stamp}}-{{run id}}-{route.App}-1");
             Console.WriteLine($"    failures to queue {trigger.DeadLetterQueueName} after {trigger.MaximumRetryAttempts} retries; alarm {trigger.AlarmName}, " +
                               (trigger.AlarmActions.Count == 0 ? "notifying nobody" : $"notifying {string.Join(", ", trigger.AlarmActions)}"));
         }
@@ -497,6 +499,9 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    rule {alerts.FailedDeployRuleName}: executions of {plan.StateMachineName} that end FAILED, TIMED_OUT or ABORTED -> the topic");
             Console.WriteLine($"    {alerts.CorroborateFunctionName} runs {alerts.ScheduleExpression}: an image in this environment's pipeline repository " +
                               "that no build record names is recorded once under anomalies/ and alerted once");
+            if (alerts.BundlePrefixes is { Count: > 0 } bundlePrefixes)
+                Console.WriteLine($"      and a bundle version under {string.Join(", ", bundlePrefixes)} in {PipelineBootstrapPlanner.ArtifactStoreFor(config.SystemKey, config.SystemSuffix)} " +
+                                  "that its record does not name, the same way");
             Console.WriteLine($"    alarm {alerts.CorroborateErrorsAlarmName}: a sweep that fails -> the topic");
         }
         else
@@ -508,7 +513,9 @@ public static class DeployerBootstrapper
 
         if (plan.ClientTargets is { Count: > 0 } clientTargets)
         {
-            Console.WriteLine("  client bundles (class 2), started by hand — nothing forwards client records yet:");
+            Console.WriteLine(plan.Trigger is { ClientRoutes.Count: > 0 }
+                ? "  client bundles (class 2), started by the trigger above or by hand:"
+                : "  client bundles (class 2), started by hand — the trigger is off, so nothing forwards client records:");
             foreach (var t in clientTargets)
                 Console.WriteLine($"    {t.Repo} deploys as {t.App}: s3://{t.Bucket}/{t.KeyPrefix}, lease {BundleMarker.Key}, " +
                                   $"invalidates {t.InvalidationPath} on {string.Join(", ", t.Distributions)}");

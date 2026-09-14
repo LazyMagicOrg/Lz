@@ -198,7 +198,7 @@ public class DeployerTriggerTests
     [Fact]
     public void ThePattern_PinsTheBuildAccount_TheStore_ImageRecords_AndPutObject()
     {
-        var pattern = JsonNode.Parse(DeployerTrigger.EventPattern(BuildAccount, Store))!;
+        var pattern = JsonNode.Parse(DeployerTrigger.EventPattern(BuildAccount, Store, new[] { "image" }))!;
 
         Assert.Equal(BuildAccount, pattern["account"]!.AsArray().Single()!.GetValue<string>());
         Assert.Equal("aws.s3", pattern["source"]!.AsArray().Single()!.GetValue<string>());
@@ -227,7 +227,7 @@ public class DeployerTriggerTests
     [InlineData("not-an-account")]
     public void ThePattern_RefusesAnAccountThatIsNotTwelveDigits(string account)
     {
-        Assert.Throws<InvalidOperationException>(() => DeployerTrigger.EventPattern(account, Store));
+        Assert.Throws<InvalidOperationException>(() => DeployerTrigger.EventPattern(account, Store, new[] { "image" }));
     }
 
     // ---------------------------------------------------------------------------------------
