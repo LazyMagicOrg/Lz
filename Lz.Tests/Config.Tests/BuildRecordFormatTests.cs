@@ -463,4 +463,88 @@ public class BuildRecordFormatTests
             BuildRecordFormat.PrefixFor("image", "Scutara/ScutaraService"),
             BuildRecordFormat.KeyFor(r));
     }
+
+    /// <summary>
+    /// VERBATIM the first BUNDLE record ever written: ScutaraSellerApp's build-bundle run 34875215076, 2026-09-14, read
+    /// back from s3://scu-build-records-4df6-b9c6/ (DecoupledCd.md §12, P4 stage B). Real data for the reason
+    /// <see cref="WorkflowEmitted"/> is: the writer is a workflow in another repository, in Python and bash, and nothing
+    /// compiles the two together. S3's own SHA-256 of the zip it names matched identity.sha256 when read back.
+    /// </summary>
+    internal const string BundleWorkflowEmitted = """
+        {
+          "schema": 1,
+          "class": "client",
+          "builtFrom": {
+            "repo": "Scutara/ScutaraSellerApp",
+            "commit": "80646babd6088bf34e3f4e85234b1e07323ac876",
+            "lane": "published",
+            "packages": {
+              "AdminModuleClientInterface": "1.0.17",
+              "AdminSchema": "1.0.17",
+              "AipApi": "1.0.17",
+              "BaseApp.BlazorUI": "1.0.15",
+              "BaseApp.ViewModels": "1.0.15",
+              "BusinessModuleClientInterface": "1.0.17",
+              "BusinessSchema": "1.0.17",
+              "ConsumerModuleClientInterface": "1.0.17",
+              "ConsumerSchema": "1.0.17",
+              "LazyMagic.Blazor": "3.0.26-alpha",
+              "LazyMagic.Client.Base": "3.0.26-alpha",
+              "LazyMagic.Client.FactoryGenerator": "3.0.26-alpha",
+              "LazyMagic.Client.ModelGenerator": "3.0.26-alpha",
+              "LazyMagic.Client.ViewModels": "3.0.26-alpha",
+              "LazyMagic.MudBlazor": "3.0.26-alpha",
+              "LazyMagic.OIDC.Base": "3.0.26-alpha",
+              "LazyMagic.OIDC.WASM": "3.0.26-alpha",
+              "LazyMagic.OIDC.WASM.Bff": "3.0.26-alpha",
+              "LazyMagic.Shared": "3.0.26-alpha",
+              "MatchModuleClientInterface": "1.0.17",
+              "MatchSchema": "1.0.17",
+              "PartyModuleClientInterface": "1.0.17",
+              "PartySchema": "1.0.17",
+              "PublicModuleClientInterface": "1.0.17",
+              "PublicSchema": "1.0.17"
+            },
+            "ref": "refs/heads/main"
+          },
+          "identity": {
+            "kind": "bundle",
+            "bucket": "scu-artifacts-4df6-b9c6",
+            "key": "client/scutara/scutarasellerapp/20260914T173258Z-34875215076.zip",
+            "versionId": "7WtRS9NSXBeDbRQmd.gaFceR3JvLMali",
+            "sha256": "2d49aec564ad3d3be1320a697f290bbd3a58c2bde1beb7848a4babf4e63a5109"
+          },
+          "builtAt": "2026-09-14T17:32:58Z",
+          "builtBy": "tmay57",
+          "workflowRunId": "34875215076"
+        }
+        """;
+
+    [Fact]
+    public void TheBundleRecordTheWorkflowEmits_Parses()
+    {
+        var r = BuildRecordFormat.Parse(BundleWorkflowEmitted, "scu-artifacts-4df6-b9c6");
+
+        Assert.Equal("client", r.Class);
+        Assert.Equal("published", r.BuiltFrom.Lane);
+        Assert.Equal("refs/heads/main", r.BuiltFrom.Ref);
+        // 25 first-party packages, each at the pin the workflow checked it against.
+        Assert.Equal(25, r.BuiltFrom.Packages.Count);
+        Assert.Equal("1.0.17", r.BuiltFrom.Packages["AipApi"]);
+        Assert.Equal("1.0.15", r.BuiltFrom.Packages["BaseApp.BlazorUI"]);
+        Assert.Equal("bundle", r.Identity.Kind);
+        Assert.Equal("7WtRS9NSXBeDbRQmd.gaFceR3JvLMali", r.Identity.VersionId);
+    }
+
+    [Fact]
+    public void TheKeysTheBundleWorkflowComputes_MatchKeyForAndBundleKeyFor()
+    {
+        // The workflow builds both keys in bash from one stem, {prefix}{builtAt without ':' or '-'}-{run id}. If that
+        // line and these two functions ever disagree, the record lands where no reader looks, or names a zip Lz refuses.
+        var r = BuildRecordFormat.Parse(BundleWorkflowEmitted, "scu-artifacts-4df6-b9c6");
+
+        Assert.Equal("client/scutara/scutarasellerapp/20260914T173258Z-34875215076.json", BuildRecordFormat.KeyFor(r));
+        Assert.Equal("client/scutara/scutarasellerapp/20260914T173258Z-34875215076.zip", BuildRecordFormat.BundleKeyFor(r));
+        Assert.Equal(BuildRecordFormat.BundleKeyFor(r), r.Identity.Key);
+    }
 }
