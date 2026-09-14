@@ -243,7 +243,7 @@ public static class DeployerBootstrapper
             : $"  NOBODY RECEIVES THESE ALERTS: {alerts.TopicName} has no confirmed subscription" +
               (subscriptions.Value.Pending > 0 ? $" ({subscriptions.Value.Pending} pending confirmation)." : "."));
         Console.WriteLine("  To receive them, subscribe an address and click the confirmation link AWS sends it:");
-        Console.WriteLine($"    aws sns subscribe --topic-arn {alerts.TopicArn} --protocol email --notification-endpoint <address>" +
+        Console.WriteLine($"    aws sns subscribe --topic-arn {alerts.TopicArn} --protocol email --notification-endpoint YOUR_EMAIL_ADDRESS" +
                           $"{(string.IsNullOrEmpty(profile) ? "" : $" --profile {profile}")} --region {config.Region}");
         Console.ResetColor();
     }
