@@ -421,6 +421,37 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void AToolingRepository_GetsAnImageRole()
+    {
+        // CLASS 8 IS AN IMAGE. The record format names a tooling build by digest, so a bundle role — S3 writes, no
+        // registry, no signing profile — could never produce the artifact its own record must name (P4 stage A).
+        var p = Enabled();
+        p.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+        var tooling = plan.Roles.Single(r => r.Class == "tooling");
+
+        Assert.Equal("scu-build-ci-scutara", tooling.Name);
+        Assert.Equal("scu_build_ci_scutara", tooling.SigningProfile);
+        Assert.Equal(new[] { "scu-abcd-1234-tooling" }, tooling.EcrRepositories);
+        Assert.Contains("scu-abcd-1234-tooling", plan.EcrRepositories);
+        Assert.Contains("repository/scu-abcd-1234-tooling", tooling.PermissionPolicy);
+        Assert.Contains("tooling/scutara/scutara/", tooling.PermissionPolicy);
+    }
+
+    [Fact]
+    public void AToolingRepositoryWithNoArtifacts_IsRefused()
+    {
+        var p = Enabled();
+        p.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling" }); // no Artifacts
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635"));
+        Assert.Contains("'tooling'", ex.Message);
+        Assert.Contains("Artifacts", ex.Message);
+    }
+
+    [Fact]
     public void OnlyImageRolesCarryEcrRepositories()
     {
         var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");

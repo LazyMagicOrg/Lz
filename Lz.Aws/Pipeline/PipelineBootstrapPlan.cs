@@ -206,7 +206,7 @@ public static class PipelineBootstrapPlanner
 
         // Store names first: the roles' permission policies name the stores, so they cannot be
         // built until the names exist.
-        var artifacts = $"{sk}-artifacts-{suffix}";
+        var artifacts = ArtifactStoreFor(sk, suffix);
         var buildRecords = BuildRecordStoreFor(sk, suffix);
         var requests = $"{sk}-deploy-requests-{suffix}";
 
@@ -258,6 +258,8 @@ public static class PipelineBootstrapPlanner
         // the account — the build account cannot ask STS about dev, and a guessed id would replicate
         // artifacts somewhere nobody chose.
         var target = p.TargetAccountId;
+        // THE IMAGE CLASS ONLY, not every image-shaped role: whether a tooling image replicates to an environment is
+        // P3 stage B's to decide when it builds one, not a side effect of its role's shape (P4 stage A).
         var imageRepositories = roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories).Distinct().ToList();
 
         // THE TRIGGER'S BUILD HALF (P2 stage D), only for an environment that deploys on every build record. Without it,
@@ -331,6 +333,13 @@ public static class PipelineBootstrapPlanner
         => $"{systemKey}-build-records-{systemSuffix}";
 
     /// <summary>
+    /// The artifact store's name: one definition for the store the build side creates and the bucket a bundle
+    /// record's identity must name (<see cref="BuildRecordFormat.Parse"/>).
+    /// </summary>
+    public static string ArtifactStoreFor(string systemKey, string systemSuffix)
+        => $"{systemKey}-artifacts-{systemSuffix}";
+
+    /// <summary>
     /// A signing profile's UNVERSIONED ARN — the form a Notation trust policy names. Profiles live in
     /// the build account, beside the registry that signs at push.
     /// </summary>
@@ -355,23 +364,25 @@ public static class PipelineBootstrapPlanner
                 "matches on what GitHub puts in the token, so it needs GitHub's own spelling — " +
                 "note the repository name may differ from the workspace folder.");
 
-        // An IMAGE role pushes to ECR and its pushes are signed; every other class writes a bundle
-        // to S3 and gets no signing profile, because bundles carry no registry signature (§4.2).
-        var kind = cls == "image" ? "build" : "bundle";
+        // An IMAGE-SHAPED role pushes to ECR and its pushes are signed: `image`, and `tooling`, whose record names a
+        // digest too (BuildRecordFormat.IsImageClass). Every other class writes a bundle to S3 and gets no signing
+        // profile, because bundles carry no registry signature (§4.2).
+        var imageShaped = BuildRecordFormat.IsImageClass(cls);
+        var kind = imageShaped ? "build" : "bundle";
         var slug = SlugFor(repo);
-        var profile = cls == "image" ? $"{sk}_build_ci_{slug.Replace('-', '_')}" : null;
+        var profile = imageShaped ? $"{sk}_build_ci_{slug.Replace('-', '_')}" : null;
         var prefix = BuildRecordFormat.PrefixFor(cls, repo);
 
         // Naming the artifacts is what lets the ECR grant be exact instead of `{sk}-*`.
-        if (cls == "image" && r.Artifacts is not { Count: > 0 })
+        if (imageShaped && r.Artifacts is not { Count: > 0 })
             throw new InvalidOperationException(
-                $"Pipeline.Repositories entry '{repo}' builds class 'image' but names no "+
+                $"Pipeline.Repositories entry '{repo}' builds class '{cls}' but names no "+
                 "Artifacts. One ECR repository is created per artifact, and naming them is what "+
                 "scopes this role's push permission to the repositories it actually produces "+
                 "rather than to every repository the system will ever have. Add e.g. "+
                 "`Artifacts: [aiphost]`.");
 
-        var ecrRepos = cls == "image"
+        var ecrRepos = imageShaped
             ? r.Artifacts!.Select(a => EcrRepositoryNaming.For(config, a)).ToList()
             : new List<string>();
 

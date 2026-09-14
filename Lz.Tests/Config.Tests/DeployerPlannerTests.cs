@@ -322,6 +322,26 @@ public class DeployerPlannerTests
     }
 
     [Fact]
+    public void AToolingRole_WidensNothingTheServiceDeploysTrust()
+    {
+        // The tooling image gets a signing profile of its own (P4 stage A), and that must not make it deployable as the
+        // service: the hook admits the service's profile and repository alone, and Verify reads image records from the
+        // service's repository alone. The tooling image is verified by its own step (P-11), never by this hook.
+        var config = Config(false);
+        config.Pipeline!.Repositories!.Add(
+            new PipelineRepositoryConfig { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+        var plan = DeployerPlanner.Plan(config, TargetAccount);
+
+        var hook = HookSettings.Read(n => Function(plan, DeployerHandlers.SignatureHook).Environment.GetValueOrDefault(n));
+        var verify = VerifySettings.Read(n => Function(plan, DeployerHandlers.Verify).Environment.GetValueOrDefault(n));
+
+        Assert.Equal(new[] { $"arn:aws:signer:us-west-2:{BuildAccount}:/signing-profiles/scu_build_ci_scutaraservice" },
+            hook.TrustedProfiles);
+        Assert.Equal(new[] { $"{TargetAccount}.dkr.ecr.us-west-2.amazonaws.com/scu-4df6-b9c6-aiphost" }, hook.RegistryScopes);
+        Assert.Equal(new[] { "scu-4df6-b9c6-aiphost" }, verify.ImageRepositories);
+    }
+
+    [Fact]
     public void PreparesRegistry_IsThisAccounts()
     {
         Assert.Equal($"{TargetAccount}.dkr.ecr.us-west-2.amazonaws.com",

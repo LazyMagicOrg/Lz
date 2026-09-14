@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Lz.Aws.Pipeline;
 
@@ -94,6 +95,13 @@ public static class BuildRecordFormat
     /// <summary>Classes whose identity is an image digest; everything else is a bundle.</summary>
     private static readonly string[] ImageClasses = { "image", "tooling" };
 
+    /// <summary>
+    /// Whether a class's artifact is an image named by digest (<c>image</c>, <c>tooling</c>) rather than a bundle
+    /// named by object version. One definition for the format and for the build-side planner, which gives these
+    /// classes a registry, a signing profile and an ECR push role.
+    /// </summary>
+    public static bool IsImageClass(string cls) => ImageClasses.Contains(cls, StringComparer.Ordinal);
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -123,10 +131,31 @@ public static class BuildRecordFormat
         Require(record.BuiltAt, "builtAt");
         Require(record.WorkflowRunId, "workflowRunId");
 
+        return NameFor(record, ".json");
+    }
+
+    /// <summary>
+    /// The artifact store key for a bundle: <c>{class}/{repo}/{builtAt}-{runId}.zip</c>, the record's own key with
+    /// <c>.zip</c> for <c>.json</c> (DecoupledCd.md §12, P4 stage A). One stem for both objects of a build, under the
+    /// same <c>{class}/{repo}/</c> prefix the writer's role may write in each store, so the zip is found from its
+    /// record without a listing, and a record naming any other key is refused by <see cref="Parse"/>.
+    /// </summary>
+    public static string BundleKeyFor(BuildRecord record)
+    {
+        Require(record.Class, "class");
+        Require(record.BuiltFrom?.Repo, "builtFrom.repo");
+        Require(record.BuiltAt, "builtAt");
+        Require(record.WorkflowRunId, "workflowRunId");
+
+        return NameFor(record, ".zip");
+    }
+
+    private static string NameFor(BuildRecord record, string extension)
+    {
         // ':' is legal in an S3 key but awkward in URLs and shell quoting, and a timestamp is the
         // one field guaranteed to contain it.
         var stamp = record.BuiltAt.Replace(":", "").Replace("-", "");
-        return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}.json";
+        return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}{extension}";
     }
 
     /// <summary>
@@ -148,7 +177,12 @@ public static class BuildRecordFormat
     /// bundle identity with no version id deploying whatever the key currently points at, or a
     /// record from a future schema read with today's assumptions.</para>
     /// </summary>
-    public static BuildRecord Parse(string json)
+    /// <param name="json">The record as stored.</param>
+    /// <param name="artifactStore">
+    /// The artifact store's name (<c>PipelineBootstrapPlanner.ArtifactStoreFor</c>). Required to read a BUNDLE record,
+    /// whose identity must name that bucket; an image record needs none, so the readers of image records pass nothing.
+    /// </param>
+    public static BuildRecord Parse(string json, string? artifactStore = null)
     {
         BuildRecord? r;
         try
@@ -219,9 +253,55 @@ public static class BuildRecordFormat
             // avoid, one storage layer down.
             Require(r.Identity.VersionId, "identity.versionId");
             Require(r.Identity.Sha256, "identity.sha256");
+            RequireTrustworthyBundle(r, artifactStore);
         }
 
         return r;
+    }
+
+    private static readonly Regex LowercaseHexSha256 = new("^[0-9a-f]{64}$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// What a bundle identity must also be before anything acts on it (DecoupledCd.md §12, P4 stage A). Checked in the
+    /// parser, before the first bundle record exists, because a written record is immutable: a check added later has
+    /// to keep admitting every record written before it — the argument §4.3 made for <c>builtFrom</c>.
+    /// </summary>
+    private static void RequireTrustworthyBundle(BuildRecord r, string? artifactStore)
+    {
+        // THE ARTIFACT STORE, EXACTLY. A reader that cannot name it cannot tell a record naming it from one naming any
+        // other bucket it can read, the build-record store among them.
+        if (string.IsNullOrWhiteSpace(artifactStore))
+            throw new InvalidOperationException(
+                "a bundle record was read without the artifact store to check it against. Its identity names a bucket, " +
+                "and only the artifact store may hold a bundle, so a reader of bundle records must say which bucket " +
+                "that is (PipelineBootstrapPlanner.ArtifactStoreFor).");
+
+        if (!string.Equals(r.Identity.Bucket, artifactStore, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"identity.bucket is '{r.Identity.Bucket}', not the artifact store '{artifactStore}'. A bundle lives in " +
+                "the artifact store and nowhere else.");
+
+        // THE MIRRORED KEY, EXACTLY: under the record's own {class}/{repo}/ prefix, the one its writer's role may write,
+        // with the record's own stem. A key that were merely under the prefix could name another build's zip.
+        var expectedKey = BundleKeyFor(r);
+        if (!string.Equals(r.Identity.Key, expectedKey, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"identity.key is '{r.Identity.Key}'; a bundle's key mirrors its record's: '{expectedKey}'. Any other " +
+                "key names an object this build did not write under its own name, or one outside the prefix its role " +
+                "may write.");
+
+        // S3 reports the version of an object written without versioning as the string "null", and the next write to
+        // that key replaces the object: the mutable pointer again, dressed as a version id.
+        if (string.Equals(r.Identity.VersionId, "null", StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "identity.versionId is S3's \"null\", the version of an object written without versioning, which the " +
+                "next write to its key replaces. The artifact store is versioned, so a real bundle never has it.");
+
+        if (!LowercaseHexSha256.IsMatch(r.Identity.Sha256!))
+            throw new InvalidOperationException(
+                $"identity.sha256 is '{r.Identity.Sha256}', which is not 64 lowercase hex characters. The record states " +
+                "the zip's SHA-256 in one spelling, so a reader compares it as a string; S3's own checksum header is " +
+                "base64 and is not this field.");
     }
 
     private static void Require(string? value, string field)

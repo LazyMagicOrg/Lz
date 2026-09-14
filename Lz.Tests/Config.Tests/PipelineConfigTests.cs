@@ -243,6 +243,42 @@ public class PipelineConfigTests
     }
 
     [Fact]
+    public void ARepositoryBuildingAClassThisEnvironmentRefuses_IsRefused()
+    {
+        // Classes is the allowlist Verify applies. A repository building a class outside it gets a role and prefixes
+        // GitHub can use, and every record it ever writes is refused at Verify (P4 stage A).
+        var p = Enabled(); // accepts image and config
+        p.Repositories = new List<PipelineRepositoryConfig>
+        {
+            new() { Repo = "Scutara/ScutaraService", Class = "image", Artifacts = new List<string> { "aiphost" } },
+            new() { Repo = "Scutara/ScutaraSellerApp", Class = "client" },
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+
+        Assert.Contains("'Scutara/ScutaraSellerApp'", ex.Message);
+        Assert.Contains("'client'", ex.Message);
+        Assert.Contains("Pipeline.Classes does not accept", ex.Message);
+        Assert.DoesNotContain("'Scutara/ScutaraService'", ex.Message);
+    }
+
+    [Fact]
+    public void RepositoriesBuildingOnlyAcceptedClasses_Validate()
+    {
+        var p = Enabled();
+        p.Classes = new List<string> { "image", "client", "config" };
+        p.Repositories = new List<PipelineRepositoryConfig>
+        {
+            new() { Repo = "Scutara/ScutaraService", Class = "image", Artifacts = new List<string> { "aiphost" } },
+            new() { Repo = "Scutara/ScutaraSellerApp", Class = "client" },
+            new() { Repo = "Scutara/Scutara", Class = "config" },
+        };
+
+        ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
+    }
+
+    [Fact]
     public void AnUnknownClass_IsRefused_AndTheMessageNamesIt()
     {
         var p = Enabled();

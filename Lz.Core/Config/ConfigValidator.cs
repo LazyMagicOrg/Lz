@@ -282,8 +282,18 @@ public static class ConfigValidator
                 errors.Add(
                     $"Pipeline.Repositories entry '{r.Repo}' names class '{r.Class}'. Valid: " +
                     string.Join(", ", PipelineConfig.KnownClasses) + ". The class selects the ROLE " +
-                    "SHAPE — 'image' gets a push-only ECR role and a signing profile, everything " +
-                    "else gets an S3 role scoped to its own prefix.");
+                    "SHAPE — 'image' and 'tooling' get a push-only ECR role and a signing profile, " +
+                    "everything else gets an S3 role scoped to its own prefix.");
+            }
+            // A CLASS THIS ENVIRONMENT REFUSES (DecoupledCd.md §12, P4 stage A). Classes is the allowlist Verify
+            // applies, so such an entry is a role and prefixes GitHub can use, for records that are all refused.
+            else if (p.Classes is { Count: > 0 } classes && !classes.Contains(r.Class))
+            {
+                errors.Add(
+                    $"Pipeline.Repositories entry '{r.Repo}' builds class '{r.Class}', which Pipeline.Classes does " +
+                    $"not accept ({string.Join(", ", classes)}): every record it writes would be refused at Verify, " +
+                    "after lz bootstrappipeline had given it a role GitHub can assume. Add " +
+                    $"{r.Class} to Classes, or remove the entry.");
             }
         }
 
