@@ -683,6 +683,25 @@ public static class DeployerBootstrapper
     }
 
     /// <summary>
+    /// Whether <c>CreateFunction</c> refused because the function's role, created moments before, is not yet usable — which
+    /// time fixes — rather than because the role is wrong. IAM is eventually consistent, and Lambda reports that window
+    /// two ways:
+    /// <list type="bullet">
+    ///   <item>"The role defined for the function cannot be assumed by Lambda.";</item>
+    ///   <item>"Lambda was unable to configure access to your environment variables because the KMS key is invalid for
+    ///   CreateGrant. … KMS Exception: InvalidArnException KMS Message: ARN does not refer to a valid principal:
+    ///   arn:aws:sts::…:assumed-role/{role}/{function}" — measured 2026-09-14, creating
+    ///   <c>scu-dev-deployer-verify-bundle</c> seconds after its role (DecoupledCd.md P4 stage C). Only the first
+    ///   was retried then, so the apply stopped half-way, with the functions after it not updated.</item>
+    /// </list>
+    /// A KMS refusal of any other kind — a key the role may not use — is not this, and still fails at once.
+    /// </summary>
+    public static bool RoleNotYetUsableByLambda(string message)
+        => message.Contains("cannot be assumed", StringComparison.OrdinalIgnoreCase)
+           || (message.Contains("KMS key is invalid for CreateGrant", StringComparison.OrdinalIgnoreCase)
+               && message.Contains("does not refer to a valid principal", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
     /// Create the function, or bring an existing one to the plan: code first, then configuration,
     /// waiting for each update to settle — Lambda refuses a configuration change while a code update
     /// is still in progress.
@@ -708,9 +727,9 @@ public static class DeployerBootstrapper
 
         if (!exists)
         {
-            // A ROLE CREATED SECONDS AGO IS NOT YET ASSUMABLE BY LAMBDA — IAM is eventually consistent,
-            // and CreateFunction checks the role immediately. Retried on exactly that refusal and no
-            // other, so a genuinely bad role still fails at once.
+            // A ROLE CREATED SECONDS AGO IS NOT YET USABLE BY LAMBDA — IAM is eventually consistent,
+            // and CreateFunction checks the role immediately. Retried on exactly those refusals and no
+            // other (RoleNotYetUsableByLambda), so a genuinely bad role still fails within the minute.
             for (var attempt = 1; ; attempt++)
             {
                 try
@@ -732,7 +751,7 @@ public static class DeployerBootstrapper
                     break;
                 }
                 catch (InvalidParameterValueException ex)
-                    when (attempt < 10 && ex.Message.Contains("cannot be assumed", StringComparison.OrdinalIgnoreCase))
+                    when (attempt < 20 && RoleNotYetUsableByLambda(ex.Message))
                 {
                     await Task.Delay(TimeSpan.FromSeconds(3));
                 }
