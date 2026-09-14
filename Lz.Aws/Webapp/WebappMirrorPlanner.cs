@@ -133,9 +133,7 @@ public static class WebappMirrorPlanner
 
             string? reason = !byKey.TryGetValue(key, out var current) ? "absent"
                 : !string.Equals(current.Sha256Hex, file.Sha256Hex, StringComparison.Ordinal) ? "content"
-                : current.CacheControl != headers.CacheControl
-                  || current.ContentType != headers.ContentType
-                  || (current.ContentEncoding ?? "") != (headers.ContentEncoding ?? "") ? "headers"
+                : !WebappSyncRules.Carries(headers, current.CacheControl, current.ContentType, current.ContentEncoding) ? "headers"
                 : null;
 
             if (reason is null)

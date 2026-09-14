@@ -191,6 +191,37 @@ public static class WebappSyncRules
     };
 
     /// <summary>
+    /// Whether an object read back carries the headers a rule gives: the same content type and encoding, and the same
+    /// <c>Cache-Control</c> <em>directives</em> — their order is not compared.
+    ///
+    /// <para><b>MEASURED 2026-09-14, THE FIRST CLIENT DEPLOY.</b> S3 stored, and CloudFront served, the
+    /// <c>no-cache, must-revalidate</c> the deploy sent; the AWS .NET SDK read it back as <c>must-revalidate, no-cache</c>,
+    /// because it reads the header through .NET's <c>CacheControlHeaderValue</c>, which writes directives in its own order
+    /// (<c>public, max-age=…</c> and <c>…, immutable</c> keep theirs). VerifyBundle compared strings and failed a deploy
+    /// whose every byte S3's checksums had just confirmed. RFC 9111 gives directive order no meaning.</para>
+    /// </summary>
+    public static bool Carries(WebappObjectHeaders expected, string? cacheControl, string? contentType, string? contentEncoding)
+        => SameCacheControl(expected.CacheControl, cacheControl)
+           && string.Equals(expected.ContentType, contentType, StringComparison.Ordinal)
+           && string.Equals(expected.ContentEncoding ?? "", contentEncoding ?? "", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Two <c>Cache-Control</c> values with the same directives, in any order: names compared without case, arguments as
+    /// written. Null and "" are the same absence.
+    /// </summary>
+    public static bool SameCacheControl(string? a, string? b)
+    {
+        static string Canonical(string? value)
+            => string.Join(",", (value ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(d => d.IndexOf('=') is var eq and >= 0
+                    ? d[..eq].Trim().ToLowerInvariant() + "=" + d[(eq + 1)..].Trim()
+                    : d.ToLowerInvariant())
+                .OrderBy(d => d, StringComparer.Ordinal));
+
+        return string.Equals(Canonical(a), Canonical(b), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// <c>{sha256}  {path}\n</c> per file, sorted by the path's UTF-8 bytes: exactly the <c>manifest.txt</c> the bundle
     /// workflows print, so a deploy's manifest digest can be compared with the one in its build's log.
     /// </summary>

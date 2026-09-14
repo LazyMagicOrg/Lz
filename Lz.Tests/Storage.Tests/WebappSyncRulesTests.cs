@@ -162,6 +162,36 @@ public class WebappSyncRulesTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  Reading headers back
+    // ---------------------------------------------------------------------------------------
+
+    [Theory]
+    // MEASURED: what the first client deploy sent, and what the AWS .NET SDK read back from S3 (2026-09-14).
+    [InlineData("no-cache, must-revalidate", "must-revalidate, no-cache", true)]
+    [InlineData("public, max-age=31536000, immutable", "immutable,public,  max-age=31536000", true)]
+    [InlineData("public, max-age=3600", "PUBLIC, Max-Age=3600", true)]
+    [InlineData("public, max-age=3600", "public, max-age=31536000", false)]
+    [InlineData("no-cache, must-revalidate", "no-cache", false)]
+    [InlineData("no-cache, must-revalidate", null, false)]
+    [InlineData(null, "", true)]
+    public void CacheControl_IsItsDirectives_InAnyOrder(string? sent, string? readBack, bool same)
+        => Assert.Equal(same, WebappSyncRules.SameCacheControl(sent, readBack));
+
+    [Fact]
+    public void WhatDotNetReadsBack_CarriesTheHeadersTheRulesGive()
+    {
+        // The SDK reads Cache-Control through CacheControlHeaderValue: this is exactly the string it hands back.
+        var rules = new WebappHeaderRules("seller/", new[] { "seller/index.html" });
+        var expected = rules.For("seller/index.html");
+        var readBack = System.Net.Http.Headers.CacheControlHeaderValue.Parse(expected.CacheControl).ToString();
+
+        Assert.NotEqual(expected.CacheControl, readBack);   // the reordering this exists for
+        Assert.True(WebappSyncRules.Carries(expected, readBack, "text/html", null));
+        Assert.False(WebappSyncRules.Carries(expected, readBack, "text/plain", null));
+        Assert.False(WebappSyncRules.Carries(expected, readBack, "text/html", "br"));
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  Names shared with deploywebapp
     // ---------------------------------------------------------------------------------------
 

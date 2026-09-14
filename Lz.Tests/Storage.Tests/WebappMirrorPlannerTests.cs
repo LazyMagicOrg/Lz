@@ -58,6 +58,27 @@ public class WebappMirrorPlannerTests
     }
 
     [Fact]
+    public void AManifestReadBackWithItsDirectivesReordered_IsLeftAlone()
+    {
+        // The AWS .NET SDK reads no-cache, must-revalidate back as must-revalidate, no-cache. Taken as a change, every deploy
+        // would rewrite every manifest, and VerifyBundle would refuse every deploy (2026-09-14, the first client deploy).
+        var stored = Bundle.Select(b =>
+        {
+            var h = Rules(b.Path);
+            return Stored(b.Path, b.Sha256Hex, h with
+            {
+                CacheControl = System.Net.Http.Headers.CacheControlHeaderValue.Parse(h.CacheControl).ToString(),
+            });
+        }).ToList();
+
+        var plan = WebappMirrorPlanner.Plan(Bundle, stored, "seller/");
+
+        Assert.Empty(plan.Manifests);
+        Assert.Empty(plan.Assets);
+        Assert.Equal(4, plan.Unchanged);
+    }
+
+    [Fact]
     public void DifferentBytes_NoRecordedBytes_AndDifferentHeaders_AreEachWrittenAgain()
     {
         var stored = new[]

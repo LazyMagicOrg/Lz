@@ -656,9 +656,7 @@ public static class VerifyBundleStep
         var rules = new WebappHeaderRules(target.BasePath, paths);
         var wrongHeaders = objects
             .Select(o => (Object: o, Expected: rules.For(o.Key[WebappSyncRules.StoragePrefix.Length..])))
-            .Where(x => x.Object.CacheControl != x.Expected.CacheControl
-                        || x.Object.ContentType != x.Expected.ContentType
-                        || (x.Object.ContentEncoding ?? "") != (x.Expected.ContentEncoding ?? ""))
+            .Where(x => !WebappSyncRules.Carries(x.Expected, x.Object.CacheControl, x.Object.ContentType, x.Object.ContentEncoding))
             .ToList();
         if (wrongHeaders.Count > 0)
             problems.Add($"{wrongHeaders.Count} object(s) carry headers other than the bundle's rules give, e.g. " +

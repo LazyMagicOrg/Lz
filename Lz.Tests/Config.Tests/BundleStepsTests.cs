@@ -145,8 +145,17 @@ public sealed class BundleStepsTests : IDisposable
             return Task.FromResult<IReadOnlyList<string>>(Objects.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).Order(StringComparer.Ordinal).ToList());
         }
 
+        /// <summary>
+        /// As the adapter's HEAD returns it: through the AWS .NET SDK, which reads Cache-Control with .NET's
+        /// <c>CacheControlHeaderValue</c> and so hands back its own directive order (measured 2026-09-14).
+        /// </summary>
         public Task<StoredObject?> HeadAsync(string bucket, string key)
-            => Task.FromResult(Objects.TryGetValue(key, out var o) ? o.Head : null);
+            => Task.FromResult(Objects.TryGetValue(key, out var o)
+                ? o.Head with
+                {
+                    CacheControl = o.Head.CacheControl is { } cc ? System.Net.Http.Headers.CacheControlHeaderValue.Parse(cc).ToString() : null,
+                }
+                : null);
 
         public async Task PutAsync(string bucket, string key, string filePath, WebappObjectHeaders headers, string sha256Base64)
         {
