@@ -1370,4 +1370,123 @@ public class DeployerPlannerTests
 
         Assert.DoesNotContain("sns:Publish", actions);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The review's fix batch (DecoupledCd.md §14.3): the trusts, the ECS scope, the functions' logs
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void TheMachinesRole_TrustsStepFunctions_OnlyForAStateMachineInThisAccountAndRegion()
+    {
+        var plan = Plan();
+        var statement = Statements(plan.StateMachineTrustPolicy).Single();
+
+        Assert.Equal("Allow", statement.GetProperty("Effect").GetString());
+        Assert.Equal("states.amazonaws.com", statement.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal("sts:AssumeRole", statement.GetProperty("Action").GetString());
+
+        // The confused-deputy conditions, in the form Step Functions documents for a state machine's role.
+        var condition = statement.GetProperty("Condition");
+        var sourceArn = condition.GetProperty("ArnLike").GetProperty("aws:SourceArn").GetString()!;
+        Assert.Equal($"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:*", sourceArn);
+        Assert.Equal(TargetAccount, condition.GetProperty("StringEquals").GetProperty("aws:SourceAccount").GetString());
+
+        // The machine this plan creates is inside it; one in another account or region is not.
+        Assert.True(Matches(sourceArn, $"arn:aws:states:us-west-2:{TargetAccount}:stateMachine:{plan.StateMachineName}"));
+        Assert.False(Matches(sourceArn, $"arn:aws:states:us-west-2:111111111111:stateMachine:{plan.StateMachineName}"));
+        Assert.False(Matches(sourceArn, $"arn:aws:states:us-east-1:{TargetAccount}:stateMachine:{plan.StateMachineName}"));
+    }
+
+    [Fact]
+    public void TheFunctionsAndTheHookInvokersTrusts_KeepTheDocumentedForm()
+    {
+        // Neither Lambda's execution-role documentation nor ECS's lifecycle-hook role documentation shows a source
+        // condition, and a condition the service does not send would stop every function or every deployment.
+        var plan = Plan();
+
+        foreach (var (policy, principal) in new[]
+                 {
+                     (plan.FunctionTrustPolicy, "lambda.amazonaws.com"),
+                     (plan.HookInvokerTrustPolicy, "ecs.amazonaws.com"),
+                 })
+        {
+            var statement = Statements(policy).Single();
+            Assert.Equal(principal, statement.GetProperty("Principal").GetProperty("Service").GetString());
+            Assert.Equal("sts:AssumeRole", statement.GetProperty("Action").GetString());
+            Assert.False(statement.TryGetProperty("Condition", out _), $"{principal}'s trust has a condition");
+        }
+    }
+
+    [Fact]
+    public void EveryServiceGrant_ReachesOnlyThisSystemsServices_InThisEnvironmentsCluster()
+    {
+        var plan = Plan();
+        var serviceActions = new[] { "ecs:UpdateService", "ecs:DescribeServices" };
+
+        var grants = plan.Functions.Select(f => (f.Name, f.Policy)).Append((Name: plan.RoleName, Policy: plan.RolePolicy))
+            .SelectMany(p => Statements(p.Policy).Select(s => (p.Name, Statement: s)))
+            .Where(x => Strings(x.Statement.GetProperty("Action")).Any(serviceActions.Contains))
+            .ToList();
+
+        // The machine rolls the service; Verify, Prepare and VerifyRollout read it.
+        Assert.Equal(
+            new[] { "scu-dev-deployer", "scu-dev-deployer-prepare", "scu-dev-deployer-verify", "scu-dev-deployer-verify-rollout" },
+            grants.Select(g => g.Name).OrderBy(n => n, StringComparer.Ordinal));
+
+        foreach (var (name, statement) in grants)
+        {
+            var resources = Strings(statement.GetProperty("Resource")).ToList();
+            Assert.Equal(DeployerPlanner.ServiceArns("us-west-2", TargetAccount, "scu", "dev"), resources);
+
+            // The live service, by the ARN the hook's events carry in scu-dev ...
+            Assert.True(resources.Any(r => Matches(r, $"arn:aws:ecs:us-west-2:{TargetAccount}:service/scu-dev-cluster/scu-mp-aiphost")),
+                $"{name} cannot reach the live service");
+            // ... and under the legacy cluster name lz also deploys to.
+            Assert.True(resources.Any(r => Matches(r, $"arn:aws:ecs:us-west-2:{TargetAccount}:service/scu-cluster/scu-mp-aiphost")),
+                $"{name} cannot reach a service in the legacy cluster");
+
+            foreach (var foreign in new[]
+                     {
+                         $"arn:aws:ecs:us-west-2:{TargetAccount}:service/other-cluster/scu-mp-aiphost",
+                         $"arn:aws:ecs:us-west-2:{TargetAccount}:service/scu-prod-cluster/scu-mp-aiphost",
+                         $"arn:aws:ecs:us-west-2:{TargetAccount}:service/scu-dev-cluster/another-systems-service",
+                         $"arn:aws:ecs:us-east-1:{TargetAccount}:service/scu-dev-cluster/scu-mp-aiphost",
+                         $"arn:aws:ecs:us-west-2:111111111111:service/scu-dev-cluster/scu-mp-aiphost",
+                     })
+                Assert.False(resources.Any(r => Matches(r, foreign)), $"{name} may reach {foreign}");
+        }
+    }
+
+    [Fact]
+    public void VerifyMayReadTheRunningRevision_ToFindTheTargetContainer()
+    {
+        var statement = Statements(Function(Plan(), DeployerHandlers.Verify).Policy)
+            .Single(s => s.GetProperty("Sid").GetString() == "ConfirmTheTargetContainer");
+
+        Assert.Equal(new[] { "ecs:DescribeTaskDefinition" }, Strings(statement.GetProperty("Action")));
+    }
+
+    [Fact]
+    public void TheFunctionsLogRetention_IsHygieneLambdaLogRetentionDays()
+    {
+        Assert.Null(Plan().LogRetentionDays);
+
+        var config = Config(approvalRequired: false);
+        config.Hygiene = new HygieneConfig { LambdaLogRetentionDays = 14 };
+        Assert.Equal(14, DeployerPlanner.Plan(config, TargetAccount).LogRetentionDays);
+    }
+
+    [Fact]
+    public void TheSelfRewriteDeny_CoversTheFunctionsLogs()
+    {
+        // A role that could delete a log group, or shorten how long it keeps logs, could erase what a failure left.
+        var actions = Strings(Statements(Plan().DenyPolicy).Single().GetProperty("Action")).ToList();
+
+        foreach (var action in new[] { "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy" })
+            Assert.Contains(action, actions);
+
+        // Writing them is every function's job.
+        Assert.DoesNotContain("logs:PutLogEvents", actions);
+        Assert.DoesNotContain("logs:CreateLogStream", actions);
+    }
 }

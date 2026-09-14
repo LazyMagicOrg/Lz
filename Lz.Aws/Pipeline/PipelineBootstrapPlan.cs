@@ -162,6 +162,11 @@ public static class PipelineBootstrapPlanner
         "cloudwatch:PutMetricAlarm",
         "cloudwatch:DeleteAlarms",
         "cloudwatch:DisableAlarmActions",
+        // THE FUNCTIONS' LOGS (DecoupledCd.md §14.3): a role that could delete a log group or shorten its retention would
+        // erase what a failure left behind.
+        "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy",
     };
 
     /// <summary>

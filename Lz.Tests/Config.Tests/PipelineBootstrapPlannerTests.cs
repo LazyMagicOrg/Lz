@@ -282,6 +282,7 @@ public class PipelineBootstrapPlannerTests
                 "lambda:PutFunctionEventInvokeConfig", "lambda:UpdateFunctionEventInvokeConfig",
                 "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission", "sns:DeleteTopic", "sns:Unsubscribe",
                 "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:DisableAlarmActions",
+                "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy",
             },
             plan.DeniedActions);
     }

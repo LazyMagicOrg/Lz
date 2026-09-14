@@ -330,6 +330,84 @@ public class CrossAccountTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  The registry's signing rules — one configuration, a rule per signing profile
+    // ---------------------------------------------------------------------------------------
+
+    private const string OurProfile = "arn:aws:signer:us-west-2:147440642635:/signing-profiles/scu_4df6_b9c6_aiphost";
+    private const string OtherProfile = "arn:aws:signer:us-west-2:147440642635:/signing-profiles/scu_4df6_b9c6_other";
+
+    private static SigningRule Signing(string profile, params string[] repositories) => new()
+    {
+        SigningProfileArn = profile,
+        RepositoryFilters = repositories
+            .Select(r => new SigningRepositoryFilter { Filter = r, FilterType = SigningRepositoryFilterType.WILDCARD_MATCH })
+            .ToList(),
+    };
+
+    [Fact]
+    public void AnotherProfilesSigningRule_IsKept()
+    {
+        // The review's case: a prod config naming other image repositories than dev's would have dropped dev's rule.
+        var existing = new List<SigningRule> { Signing(OtherProfile, "scu-4df6-b9c6-other") };
+
+        var merged = CrossAccount.MergeSigning(existing, new[] { Signing(OurProfile, "scu-4df6-b9c6-aiphost") });
+
+        Assert.Equal(new[] { OtherProfile, OurProfile }, merged.Select(r => r.SigningProfileArn));
+        Assert.Equal("scu-4df6-b9c6-other", merged[0].RepositoryFilters.Single().Filter);
+    }
+
+    [Fact]
+    public void OurProfilesEarlierRule_IsReplaced_SoReRunningDoesNotAccumulate()
+    {
+        var once = CrossAccount.MergeSigning(null, new[] { Signing(OurProfile, "an-earlier-name") });
+        var twice = CrossAccount.MergeSigning(once, new[] { Signing(OurProfile, "scu-4df6-b9c6-aiphost") });
+
+        var rule = Assert.Single(twice);
+        Assert.Equal("scu-4df6-b9c6-aiphost", rule.RepositoryFilters.Single().Filter);
+    }
+
+    [Fact]
+    public void ARegistryWithNoSigningRules_IsNotACrash()
+    {
+        Assert.Single(CrossAccount.MergeSigning(null, new[] { Signing(OurProfile, "r") }));
+        Assert.Single(CrossAccount.MergeSigning(new List<SigningRule>(), new[] { Signing(OurProfile, "r") }));
+    }
+
+    [Fact]
+    public void TheRegistrysRules_AreNotMutatedByTheMerge()
+    {
+        var existing = new List<SigningRule> { Signing(OurProfile, "an-earlier-name"), Signing(OtherProfile, "x") };
+
+        CrossAccount.MergeSigning(existing, new[] { Signing(OurProfile, "scu-4df6-b9c6-aiphost") });
+
+        Assert.Equal(2, existing.Count);
+        Assert.Equal("an-earlier-name", existing[0].RepositoryFilters.Single().Filter);
+    }
+
+    [Fact]
+    public void TheReadBack_HoldsOurRule_InWhateverOrderTheRulesAndFiltersComeBack()
+    {
+        var ours = new[] { Signing(OurProfile, "a", "b") };
+
+        Assert.Empty(CrossAccount.SigningRulesNotHeld(new[] { Signing(OtherProfile, "x"), Signing(OurProfile, "b", "a") }, ours));
+    }
+
+    [Fact]
+    public void TheReadBack_NamesTheProfile_WhoseRuleIsMissingOrDifferent()
+    {
+        var ours = new[] { Signing(OurProfile, "a", "b") };
+
+        Assert.Equal(new[] { OurProfile }, CrossAccount.SigningRulesNotHeld(Array.Empty<SigningRule>(), ours));
+        Assert.Equal(new[] { OurProfile }, CrossAccount.SigningRulesNotHeld(new[] { Signing(OtherProfile, "a", "b") }, ours));
+        Assert.Equal(new[] { OurProfile }, CrossAccount.SigningRulesNotHeld(new[] { Signing(OurProfile, "a") }, ours));
+        Assert.Equal(new[] { OurProfile }, CrossAccount.SigningRulesNotHeld(new[] { Signing(OurProfile, "a", "b", "c") }, ours));
+
+        var otherType = Signing(OurProfile, "a", "b");
+        otherType.RepositoryFilters[1].FilterType = SigningRepositoryFilterType.FindValue("PREFIX_MATCH");
+        Assert.Equal(new[] { OurProfile }, CrossAccount.SigningRulesNotHeld(new[] { otherType }, ours));
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  The account a target-side command runs in
     // ---------------------------------------------------------------------------------------
 

@@ -65,16 +65,7 @@ public static class AwsStateBootstrapper
         Console.WriteLine($"  Creating S3 bucket '{bucketName}'...");
         Console.ResetColor();
 
-        var request = new PutBucketRequest
-        {
-            BucketName = bucketName,
-            BucketRegionName = region,
-        };
-        // us-east-1 must not set BucketRegionName (AWS quirk)
-        if (region == "us-east-1")
-            request.BucketRegionName = null;
-
-        await client.PutBucketAsync(request);
+        await client.PutBucketAsync(S3BucketRequests.Create(bucketName, region));
 
         // Enable versioning
         await client.PutBucketVersioningAsync(new PutBucketVersioningRequest

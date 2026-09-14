@@ -614,6 +614,12 @@ public class PipelineConfigTests
     /// namespace reported itself as a consumer — a false positive that would have made this test
     /// noise within a day of being useful. Namespace and using lines are excluded, and the match is
     /// a property access: <c>.Pipeline</c> followed by something that cannot continue an identifier.</para>
+    ///
+    /// <para>THE SECOND VERSION HAD THE OPPOSITE HOLE (the review, 2026-09-13): to pass a qualified name like
+    /// <c>Lz.Aws.Pipeline.DeployerPlanner</c> in code, it refused any <c>.Pipeline</c> followed by a dot — which also
+    /// passed <c>config.Pipeline.Enabled</c>, a read. Now the qualified names are removed first, and any
+    /// <c>.Pipeline</c> that remains is a read. <see cref="TheGuardsPredicate_TellsAReadFromAName"/> holds both
+    /// directions.</para>
     /// </summary>
     private static bool ReadsThePipelineProperty(string source) =>
         source.Split('\n')
@@ -631,7 +637,24 @@ public class PipelineConfigTests
             // declaration line, and narrowing the filter to match those keywords precisely would
             // add more surface than the case is worth. Recorded rather than unnoticed.
             .Select(l => l.Split("//", 2)[0])
-            .Any(l => Regex.IsMatch(l, @"\.Pipeline\b(?![\w.])"));
+            .Select(l => Regex.Replace(l, @"\bLz(?:\.\w+)*\.Pipeline\b", ""))
+            .Any(l => Regex.IsMatch(l, @"\.Pipeline\b"));
+
+    [Theory]
+    [InlineData("        if (config.Pipeline.Enabled)", true)]
+    [InlineData("        var alerts = config.Pipeline?.Alerts ?? false;", true)]
+    [InlineData("        var p = config.Pipeline!;", true)]
+    [InlineData("        Use(Lz.Aws.Pipeline.DeployerPlanner.Plan(config), config.Pipeline.Enabled);", true)]
+    [InlineData("        var plan = Lz.Aws.Pipeline.DeployerPlanner.Plan(config);", false)]
+    [InlineData("        var deny = global::Lz.Aws.Pipeline.WriteOnceStore.Deny(bucket);", false)]
+    [InlineData("using Lz.Aws.Pipeline;", false)]
+    [InlineData("namespace Lz.Aws.Pipeline;", false)]
+    [InlineData("        // config.Pipeline.Enabled is read by the planner, not here", false)]
+    [InlineData("        var store = plan.PipelineStore;", false)]
+    public void TheGuardsPredicate_TellsAReadFromAName(string line, bool reads)
+    {
+        Assert.Equal(reads, ReadsThePipelineProperty(line));
+    }
 
     /// <summary>Walk up from the test assembly to the directory holding Lz.slnx.</summary>
     private static string RepoRoot()

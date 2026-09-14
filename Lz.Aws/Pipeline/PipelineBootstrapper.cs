@@ -58,7 +58,7 @@ public static class PipelineBootstrapper
                 "Refusing: bootstrapping the pipeline into the wrong account creates roles GitHub " +
                 "can assume somewhere nobody intended. Check --profile.");
 
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
         using var s3 = creds != null ? new AmazonS3Client(creds, endpoint) : new AmazonS3Client(endpoint);
@@ -84,13 +84,15 @@ public static class PipelineBootstrapper
 
         var signingRules = new List<Amazon.ECR.Model.SigningRule>();
 
+        // SIGNING BEFORE ANYTHING CAN PUSH (DecoupledCd.md §14.2): the profiles and the hardened repositories first, then
+        // the registry's signing rules, and only then the roles GitHub assumes — so no moment exists at which a role could
+        // push to a repository whose images would not be signed. The first apply created the role and the repository and
+        // then failed at the signing call, leaving exactly that moment behind.
         foreach (var role in plan.Roles)
         {
             string? profileArn = null;
             if (role.SigningProfile is { } sp)
                 profileArn = await EnsureSigningProfileAsync(signer, sp);
-
-            await EnsureRoleAsync(iam, role, providerArn);
 
             foreach (var repo in role.EcrRepositories)
                 await EcrRepositoryHardening.EnsureAsync(ecr, repo, config.Hygiene?.EcrUntaggedImageRetentionDays ?? 14);
@@ -109,6 +111,9 @@ public static class PipelineBootstrapper
             await EcrRegistryScanning.ApplyAsync(ecr, plan.EcrRepositories);
 
         await ApplySigningConfigurationAsync(ecr, signingRules);
+
+        foreach (var role in plan.Roles)
+            await EnsureRoleAsync(iam, role, providerArn);
 
         // WHAT CROSSES TO THE ENVIRONMENT this run was given. Merged, never overwritten: the registry
         // has one replication configuration and the store one bucket policy, and another environment's
@@ -148,7 +153,9 @@ public static class PipelineBootstrapper
 
     private static async Task<string> ResolveAccountAsync(string? profile, string region)
     {
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        // A NAMED PROFILE THAT DOES NOT RESOLVE IS REFUSED (DecoupledCd.md §14.2): falling back to ambient credentials
+        // labelled the ambient account with the profile's name in the dry run.
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         using var sts = creds != null
             ? new AmazonSecurityTokenServiceClient(creds, endpoint)
@@ -162,6 +169,11 @@ public static class PipelineBootstrapper
     {
         Console.WriteLine($"=== Pipeline bootstrap: {plan.SystemKey} ===");
         Console.WriteLine($"  account:  {accountId}{(profile is null or "" ? " (ambient credentials)" : $" (profile {profile})")}");
+        // What the apply refuses on, said in the dry run too.
+        if (plan.ArtifactAccountId is { } expected)
+            Console.WriteLine(expected == accountId
+                ? $"  build account: {accountId} matches Pipeline.ArtifactAccountId"
+                : $"  build account: THIS PROFILE RESOLVES TO {accountId}, BUT Pipeline.ArtifactAccountId IS {expected}; apply will refuse");
         Console.WriteLine($"  region:   {plan.Region}");
         Console.WriteLine($"  mode:     {(apply ? "APPLY" : "dry run")}");
         Console.WriteLine();
@@ -323,11 +335,7 @@ public static class PipelineBootstrapper
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            await s3.PutBucketAsync(new PutBucketRequest
-            {
-                BucketName = store.Name,
-                BucketRegionName = region,
-            });
+            await s3.PutBucketAsync(S3BucketRequests.Create(store.Name, region));
             Console.WriteLine($"  store '{store.Name}' created.");
         }
 
@@ -359,6 +367,10 @@ public static class PipelineBootstrapper
     /// ECR managed signing: images are signed AS THEY ARE PUSHED, under the profile the pushing
     /// role holds <c>signer:SignPayload</c> on. Registry-wide configuration, so every rule is
     /// written in one call — which is why the rules are collected first rather than applied per role.
+    ///
+    /// <para>MERGED, NOT REPLACED (DecoupledCd.md §14.2): the registry has one signing configuration, and each environment's
+    /// run owns only its own profiles' rules — as it owns only its own replication rule and bucket-policy statements. A prod
+    /// config whose image repositories differ from dev's would otherwise drop dev's rule. Read back.</para>
     /// </summary>
     private static async Task ApplySigningConfigurationAsync(
         Amazon.ECR.IAmazonECR ecr, List<Amazon.ECR.Model.SigningRule> rules)
@@ -369,12 +381,35 @@ public static class PipelineBootstrapper
             return;
         }
 
+        var existing = await SigningRulesAsync(ecr);
+        var merged = CrossAccount.MergeSigning(existing, rules);
+
         await ecr.PutSigningConfigurationAsync(new Amazon.ECR.Model.PutSigningConfigurationRequest
         {
-            SigningConfiguration = new Amazon.ECR.Model.SigningConfiguration { Rules = rules },
+            SigningConfiguration = new Amazon.ECR.Model.SigningConfiguration { Rules = merged },
         });
 
-        Console.WriteLine($"  signing configuration written: {rules.Count} rule(s).");
+        var missing = CrossAccount.SigningRulesNotHeld(await SigningRulesAsync(ecr), rules);
+        if (missing.Count > 0)
+            throw new InvalidOperationException(
+                $"the registry's signing configuration was written but does not read back holding the rule for {string.Join(", ", missing)}.");
+
+        Console.WriteLine($"  signing configuration written and read back: {rules.Count} rule(s) of this run, {merged.Count - rules.Count} other(s) kept.");
+    }
+
+    /// <summary>The registry's signing rules, or none when it has no signing configuration.</summary>
+    private static async Task<IReadOnlyList<Amazon.ECR.Model.SigningRule>> SigningRulesAsync(Amazon.ECR.IAmazonECR ecr)
+    {
+        try
+        {
+            var response = await ecr.GetSigningConfigurationAsync(new Amazon.ECR.Model.GetSigningConfigurationRequest());
+            // SDK v4: a collection with no members is null.
+            return response.SigningConfiguration?.Rules ?? new List<Amazon.ECR.Model.SigningRule>();
+        }
+        catch (Amazon.ECR.Model.SigningConfigurationNotFoundException)
+        {
+            return new List<Amazon.ECR.Model.SigningRule>();
+        }
     }
 
     private static async Task<string> EnsureSigningProfileAsync(IAmazonSigner signer, string profileName)

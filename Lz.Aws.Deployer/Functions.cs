@@ -26,7 +26,8 @@ public sealed class VerifyFunction
             VerifySettings.Read(Environment.GetEnvironmentVariable),
             new S3RecordStore(Clients.S3.Value),
             new EcrImages(Clients.Ecr.Value),
-            new EcsServices(Clients.Ecs.Value));
+            new EcsServices(Clients.Ecs.Value),
+            new EcsTaskDefinitions(Clients.Ecs.Value));
 
         context.Logger.LogInformation($"{executionName}: verified {result["digest"]}; scan {result["scan"]?["verdict"]}");
         return Io.Write(result);

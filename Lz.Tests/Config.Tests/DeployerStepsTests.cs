@@ -24,13 +24,13 @@ public class DeployerStepsTests
     private static VerifySettings Settings(params string[] blockOn) =>
         new(new[] { "image" }, blockOn.Length == 0 ? new[] { "CRITICAL" } : blockOn, Store, new[] { Repository });
 
-    private static JsonObject State(string bucket = Store, string key = Key, string repository = Repository) => new()
+    private static JsonObject State(string bucket = Store, string key = Key, string repository = Repository, string container = "aiphost") => new()
     {
         ["record"] = new JsonObject { ["bucket"] = bucket, ["key"] = key },
         ["target"] = new JsonObject
         {
             ["cluster"] = "scu-dev-cluster", ["service"] = "scu-mp-aiphost",
-            ["container"] = "aiphost", ["repository"] = repository,
+            ["container"] = container, ["repository"] = repository,
         },
     };
 
@@ -85,11 +85,12 @@ public class DeployerStepsTests
 
     private static Task<JsonObject> Verify(
         JsonObject? state = null, string? record = BuildRecordFormatTests.WorkflowEmitted, RegistryImage? image = null,
-        ServiceSnapshot? service = null, VerifySettings? settings = null, Records? records = null, Registry? registry = null)
+        ServiceSnapshot? service = null, VerifySettings? settings = null, Records? records = null, Registry? registry = null,
+        Definitions? definitions = null)
         => VerifyStep.RunAsync(
             state ?? State(), settings ?? Settings(),
             records ?? new Records(record), registry ?? new Registry(image ?? Scanned()),
-            new Services(service ?? Service()));
+            new Services(service ?? Service()), definitions ?? new Definitions(CurrentDefinition()));
 
     // ---------------------------------------------------------------------------------------
     //  Verify
@@ -173,7 +174,8 @@ public class DeployerStepsTests
         // §14.1 item 2: the record lands seconds before its replica, and an execution the record starts often looks
         // first. A DeployRefused here would end that execution for good; this is what the definition waits on.
         var ex = await Assert.ThrowsAsync<ImageNotYetReplicated>(() => VerifyStep.RunAsync(
-            State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(null), new Services(Service())));
+            State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(null), new Services(Service()),
+            new Definitions(CurrentDefinition())));
 
         Assert.Contains($"{Repository}@{Digest}", ex.Message);
     }
@@ -227,10 +229,49 @@ public class DeployerStepsTests
     [Fact]
     public async Task AMissingService_IsRefused()
     {
+        var definitions = new Definitions(CurrentDefinition());
         var ex = await Assert.ThrowsAsync<DeployRefused>(() => VerifyStep.RunAsync(
-            State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(Scanned()), new Services(null)));
+            State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(Scanned()), new Services(null),
+            definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == "target.service");
+        // No service, so no revision to read.
+        Assert.Empty(definitions.Described);
+    }
+
+    [Fact]
+    public async Task TheContainer_IsLookedForInTheRevisionTheServiceRuns()
+    {
+        var definitions = new Definitions(CurrentDefinition());
+
+        var result = await Verify(definitions: definitions);
+
+        Assert.Equal(new[] { CurrentTd }, definitions.Described);
+        // THE DEFINITION CARRIES A SECRET, and nothing of it enters the result: only its name was judged.
+        Assert.DoesNotContain(Secret, result.ToJsonString());
+    }
+
+    [Fact]
+    public async Task AContainerTheRunningRevisionDoesNotHave_IsRefused_AtVerify()
+    {
+        // DecoupledCd.md §14.3: before any approval gate, not at Prepare after a person approved the deploy.
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Verify(State(container: "aiphostt")));
+
+        var refusal = Assert.Single(ex.Refusals);
+        Assert.Equal("target.container", refusal.Check);
+        Assert.Contains("no container named 'aiphostt'", refusal.Reason);
+        Assert.DoesNotContain(Secret, ex.Message);
+    }
+
+    [Fact]
+    public async Task TwoContainersWithTheTargetsName_AreRefused_AtVerify()
+    {
+        var definition = CurrentDefinition();
+        definition.ContainerDefinitions.Add(new Amazon.ECS.Model.ContainerDefinition { Name = "aiphost", Image = "x" });
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Verify(definitions: new Definitions(definition)));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "target.container" && r.Reason.Contains("ambiguous"));
     }
 
     [Fact]

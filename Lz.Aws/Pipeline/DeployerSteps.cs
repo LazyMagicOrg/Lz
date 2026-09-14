@@ -113,12 +113,14 @@ public interface INotation
 
 /// <summary>
 /// The Verify state (§4.4): read the record, check where it came from and what it claims, find the
-/// image in this account's registry, apply the scan policy, and confirm the target service exists.
+/// image in this account's registry, apply the scan policy, and confirm the target service exists and runs a revision
+/// with the target container.
 /// </summary>
 public static class VerifyStep
 {
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, VerifySettings settings, IRecordStore records, IRegistryImages registry, IServices services)
+        JsonObject state, VerifySettings settings, IRecordStore records, IRegistryImages registry, IServices services,
+        ITaskDefinitions definitions)
     {
         var input = DeployerInput.From(state);
 
@@ -191,6 +193,19 @@ public static class VerifyStep
         var service = await services.DescribeAsync(input.Target.Cluster, input.Target.Service)
             ?? throw new DeployRefused("target.service",
                 $"there is no ACTIVE service '{input.Target.Service}' in cluster '{input.Target.Cluster}'.");
+
+        // THE CONTAINER, BEFORE ANY GATE (DecoupledCd.md §14.3): a target naming a container the running revision does not
+        // have is refused here, not by Prepare after a person approved it. Only the name is judged; nothing of the
+        // definition — which carries a secret — enters the result.
+        var (running, _) = await definitions.DescribeAsync(service.TaskDefinitionArn);
+        try
+        {
+            Lz.Aws.Ops.TaskDefinitionRevision.SingleContainerNamed(running, input.Target.Container);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new DeployRefused("target.container", ex.Message);
+        }
 
         var shortCommit = record.BuiltFrom.Commit.Length > 12 ? record.BuiltFrom.Commit[..12] : record.BuiltFrom.Commit;
 

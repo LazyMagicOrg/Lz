@@ -471,6 +471,42 @@ public static class CrossAccount
     }
 
     /// <summary>
+    /// The registry's signing rules with this run's merged in, KEYED BY SIGNING PROFILE (DecoupledCd.md §14.2): a rule for a
+    /// profile this run plans is replaced by the planned one, and every other profile's rule is kept, in order. A profile
+    /// signs one build repository's pushes, so its rule is that repository's; nothing here removes a rule this run does
+    /// not plan.
+    /// </summary>
+    public static List<Amazon.ECR.Model.SigningRule> MergeSigning(
+        IReadOnlyList<Amazon.ECR.Model.SigningRule>? existing, IReadOnlyList<Amazon.ECR.Model.SigningRule> ours)
+    {
+        var owned = ours.Select(r => r.SigningProfileArn).ToHashSet(StringComparer.Ordinal);
+        var merged = (existing ?? Array.Empty<Amazon.ECR.Model.SigningRule>())
+            .Where(r => !owned.Contains(r.SigningProfileArn))
+            .ToList();
+        merged.AddRange(ours);
+        return merged;
+    }
+
+    /// <summary>
+    /// The signing profiles of <paramref name="ours"/> whose rule <paramref name="readBack"/> does not hold exactly — the same
+    /// profile with the same repository filters, in any order.
+    /// </summary>
+    public static IReadOnlyList<string> SigningRulesNotHeld(
+        IReadOnlyList<Amazon.ECR.Model.SigningRule> readBack, IReadOnlyList<Amazon.ECR.Model.SigningRule> ours)
+    {
+        static string Key(Amazon.ECR.Model.SigningRule r) => string.Join("|",
+            (r.RepositoryFilters ?? new List<Amazon.ECR.Model.SigningRepositoryFilter>())
+                .Select(f => $"{f.FilterType}:{f.Filter}")
+                .OrderBy(k => k, StringComparer.Ordinal));
+
+        return ours
+            .Where(o => !readBack.Any(r => string.Equals(r.SigningProfileArn, o.SigningProfileArn, StringComparison.Ordinal)
+                                          && Key(r) == Key(o)))
+            .Select(o => o.SigningProfileArn)
+            .ToList();
+    }
+
+    /// <summary>
     /// A command that runs in a TARGET account refuses a profile that resolves to any other account.
     /// Stronger than refusing only the build account: it also catches prod's profile pointed at dev's
     /// config, which would put dev's deployer — and dev's replication grant — into prod.

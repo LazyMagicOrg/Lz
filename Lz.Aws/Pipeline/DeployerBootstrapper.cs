@@ -102,7 +102,7 @@ public static class DeployerBootstrapper
         // would admit dev's replication into prod.
         CrossAccount.RequireTargetAccount(config.Pipeline?.TargetAccountId, accountId, "bootstrapdeployer");
 
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
 
         using var s3 = creds != null ? new AmazonS3Client(creds, endpoint) : new AmazonS3Client(endpoint);
@@ -114,6 +114,9 @@ public static class DeployerBootstrapper
             : new AmazonStepFunctionsClient(endpoint);
         using var lambda = creds != null
             ? new AmazonLambdaClient(creds, endpoint) : new AmazonLambdaClient(endpoint);
+        using var logs = creds != null
+            ? new Amazon.CloudWatchLogs.AmazonCloudWatchLogsClient(creds, endpoint)
+            : new Amazon.CloudWatchLogs.AmazonCloudWatchLogsClient(endpoint);
 
         await EnsureEvidenceStoreAsync(s3, plan.EvidenceStore, region);
 
@@ -144,20 +147,24 @@ public static class DeployerBootstrapper
                 ?? throw new InvalidOperationException("the plan has no replication permission; it was planned without an account."));
         }
 
-        var roleArn = await EnsureRoleAsync(iam, plan.RoleName, "states.amazonaws.com",
+        var roleArn = await EnsureRoleAsync(iam, plan.RoleName, plan.StateMachineTrustPolicy,
             "lz decoupled-CD deployer. Rolls the service image by digest.",
             ($"{plan.RoleName}-deploy", plan.RolePolicy), plan.DenyPolicy);
 
         foreach (var fn in plan.Functions)
         {
-            var fnRole = await EnsureRoleAsync(iam, fn.RoleName, "lambda.amazonaws.com",
+            // THE LOG GROUP BEFORE THE FUNCTION, so its first line lands where retention already applies.
+            if (plan.LogRetentionDays is int retention)
+                await EnsureLogGroupAsync(logs, $"/aws/lambda/{fn.Name}", retention);
+
+            var fnRole = await EnsureRoleAsync(iam, fn.RoleName, plan.FunctionTrustPolicy,
                 $"lz decoupled-CD deployer function {fn.Name}.",
                 ($"{fn.RoleName}-grant", fn.Policy), plan.DenyPolicy);
 
             await EnsureFunctionAsync(lambda, fn, fnRole, packages[fn.Package]);
         }
 
-        await EnsureRoleAsync(iam, plan.HookInvokerRoleName, "ecs.amazonaws.com",
+        await EnsureRoleAsync(iam, plan.HookInvokerRoleName, plan.HookInvokerTrustPolicy,
             "Lets ECS invoke the lz signature hook during a service deployment.",
             ($"{plan.HookInvokerRoleName}-invoke", plan.HookInvokerPolicy), plan.DenyPolicy);
 
@@ -218,12 +225,41 @@ public static class DeployerBootstrapper
     }
 
     /// <summary>
+    /// A function's log group, with its retention (DecoupledCd.md §14.3) — created here rather than by Lambda on the first
+    /// log line, which makes a group that never expires. Read back.
+    /// </summary>
+    private static async Task EnsureLogGroupAsync(Amazon.CloudWatchLogs.IAmazonCloudWatchLogs logs, string name, int retentionDays)
+    {
+        try
+        {
+            await logs.CreateLogGroupAsync(new Amazon.CloudWatchLogs.Model.CreateLogGroupRequest { LogGroupName = name });
+        }
+        catch (Amazon.CloudWatchLogs.Model.ResourceAlreadyExistsException)
+        {
+            // Lambda made it, or an earlier run did: only its retention is ours.
+        }
+
+        await logs.PutRetentionPolicyAsync(new Amazon.CloudWatchLogs.Model.PutRetentionPolicyRequest
+        {
+            LogGroupName = name,
+            RetentionInDays = retentionDays,
+        });
+
+        var groups = await logs.DescribeLogGroupsAsync(new Amazon.CloudWatchLogs.Model.DescribeLogGroupsRequest { LogGroupNamePrefix = name });
+        var group = (groups.LogGroups ?? new List<Amazon.CloudWatchLogs.Model.LogGroup>()).SingleOrDefault(g => g.LogGroupName == name);
+        if (group?.RetentionInDays != retentionDays)
+            throw new InvalidOperationException($"log group '{name}' reads back with retention {group?.RetentionInDays?.ToString() ?? "none"}; written {retentionDays} days.");
+
+        Console.WriteLine($"  log group '{name}': logs kept {retentionDays} days.");
+    }
+
+    /// <summary>
     /// How many people the alerts reach, and how to add one. lz never subscribes an address: a subscription is a person's to
     /// make and to confirm.
     /// </summary>
     private static async Task ReportSubscriptionsAsync(string? profile, string region, DeployerAlertsPlan alerts, SystemConfig config)
     {
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         using var sns = creds != null
             ? new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(creds, endpoint)
@@ -275,7 +311,7 @@ public static class DeployerBootstrapper
                     $"trigger are in {region}. A build could not roll that tenant's service from here.");
         }
 
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         using var ecs = creds != null ? new Amazon.ECS.AmazonECSClient(creds, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
 
@@ -338,7 +374,7 @@ public static class DeployerBootstrapper
 
     private static async Task<string> ResolveAccountAsync(string? profile, string region)
     {
-        var creds = AwsCredentialsFactory.Resolve(profile);
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
         using var sts = creds != null
             ? new AmazonSecurityTokenServiceClient(creds, endpoint)
@@ -363,7 +399,9 @@ public static class DeployerBootstrapper
             Console.WriteLine($"                 write-once: bucket policy {WriteOnceStore.Sid} refuses any PutObject without If-None-Match, from anyone");
         Console.WriteLine($"  approval:      {(plan.ApprovalRequired ? "REQUIRED — a waitForTaskToken gate" : "not required (this environment deploys on its own)")}");
         Console.WriteLine();
-        Console.WriteLine("  functions (each with its own role and the same Deny):");
+        Console.WriteLine(plan.LogRetentionDays is int days
+            ? $"  functions (each with its own role and the same Deny; logs kept {days} days, Hygiene.LambdaLogRetentionDays):"
+            : "  functions (each with its own role and the same Deny; logs never expire — Hygiene.LambdaLogRetentionDays is not set):");
         foreach (var fn in plan.Functions)
             Console.WriteLine($"    {fn.Name,-40} {fn.Package}.zip  {fn.TimeoutSeconds}s  {fn.MemoryMb} MB");
         Console.WriteLine($"  hook invoker:  {plan.HookInvokerRoleName}  (assumed by ECS; invokes the hook only)");
@@ -468,7 +506,7 @@ public static class DeployerBootstrapper
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            await s3.PutBucketAsync(new PutBucketRequest { BucketName = bucket, BucketRegionName = region });
+            await s3.PutBucketAsync(S3BucketRequests.Create(bucket, region));
             Console.WriteLine($"  evidence store '{bucket}' created.");
         }
 
@@ -498,23 +536,9 @@ public static class DeployerBootstrapper
     /// nobody connects to this decision (§5.5).</para>
     /// </summary>
     private static async Task<string> EnsureRoleAsync(
-        IAmazonIdentityManagementService iam, string roleName, string servicePrincipal, string description,
+        IAmazonIdentityManagementService iam, string roleName, string trust, string description,
         (string Name, string Document) grant, string denyPolicy)
     {
-        var trust = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            Version = "2012-10-17",
-            Statement = new[]
-            {
-                new
-                {
-                    Effect = "Allow",
-                    Principal = new { Service = servicePrincipal },
-                    Action = "sts:AssumeRole",
-                },
-            },
-        });
-
         string arn;
         try
         {
@@ -534,8 +558,10 @@ public static class DeployerBootstrapper
                 Description = description,
                 MaxSessionDuration = 3600,
             })).Role.Arn;
-            Console.WriteLine($"  role '{roleName}' created (trusted by {servicePrincipal}).");
+            Console.WriteLine($"  role '{roleName}' created.");
         }
+
+        await RequireTrustAsync(iam, roleName, trust);
 
         await iam.PutRolePolicyAsync(new PutRolePolicyRequest
         {
@@ -548,6 +574,38 @@ public static class DeployerBootstrapper
         Console.WriteLine("      grant + explicit self-rewrite Deny applied.");
 
         return arn;
+    }
+
+    /// <summary>
+    /// The role's trust policy, read back until it says what was written (DecoupledCd.md §14.3). IAM returns the document
+    /// URL-encoded, and is eventually consistent — a read straight after the write can still see the old document, or for a
+    /// new role no role at all — so the read is retried for about ten seconds before a difference is a failure.
+    /// </summary>
+    private static async Task RequireTrustAsync(IAmazonIdentityManagementService iam, string roleName, string trust)
+    {
+        const int attempts = 6;
+        string? stored = null;
+
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                var document = (await iam.GetRoleAsync(new GetRoleRequest { RoleName = roleName })).Role.AssumeRolePolicyDocument;
+                stored = document is null ? null : Uri.UnescapeDataString(document);
+                if (CrossAccount.SamePolicy(trust, stored))
+                    return;
+            }
+            catch (NoSuchEntityException) when (attempt < attempts)
+            {
+                // Created a moment ago, and not readable yet.
+            }
+
+            if (attempt < attempts)
+                await Task.Delay(TimeSpan.FromSeconds(2));
+        }
+
+        throw new InvalidOperationException(
+            $"role '{roleName}''s trust policy does not read back as written.\n  written:   {trust}\n  read back: {stored ?? "nothing"}");
     }
 
     /// <summary>

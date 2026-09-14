@@ -66,6 +66,9 @@ public class HygieneConfig
     /// group. The previously auto-created <c>/aws/lambda/{function}</c> group
     /// is not deleted (remove it manually once drained). Null = current
     /// behavior (auto-created group, no retention).
+    ///
+    /// <para>The decoupled-CD deployer's functions (<c>lz bootstrapdeployer</c>) take the same retention on their
+    /// <c>/aws/lambda/{function}</c> groups, set in place: they have no LoggingConfig to move.</para>
     /// </summary>
     public int? LambdaLogRetentionDays { get; set; }
 }

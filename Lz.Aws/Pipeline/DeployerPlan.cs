@@ -53,6 +53,12 @@ public sealed record DeployerFunction(
 /// anything may replicate into them — same names as the build registry's, as replication requires.</param>
 /// <param name="ReplicationPermission">This registry's policy statement letting the build account
 /// replicate into exactly those repositories, merged by Sid at apply.</param>
+/// <param name="StateMachineTrustPolicy">Who may assume the machine's role: Step Functions, for a state machine in this
+/// account and region (<see cref="DeployerPlanner.ServiceTrustPolicy"/>).</param>
+/// <param name="FunctionTrustPolicy">Who may assume a function's role: Lambda.</param>
+/// <param name="HookInvokerTrustPolicy">Who may assume the hook invoker's role: ECS.</param>
+/// <param name="LogRetentionDays">How long each function's log group keeps its logs — <c>Hygiene.LambdaLogRetentionDays</c>;
+/// null leaves the groups as Lambda creates them, never expiring.</param>
 /// <param name="Trigger">The trigger (stage D), when <c>Pipeline.DeployOnBuildRecord</c> is on; null otherwise, and
 /// then the apply removes the start rule if an earlier run created it.</param>
 /// <param name="Alerts">The alerts (stage D3), when <c>Pipeline.Alerts</c> is on; null otherwise, and then the apply removes
@@ -71,6 +77,10 @@ public sealed record PipelineDeployer(
     string HookInvokerPolicy,
     IReadOnlyList<string> ImageRepositories,
     System.Text.Json.Nodes.JsonObject? ReplicationPermission,
+    string StateMachineTrustPolicy,
+    string FunctionTrustPolicy,
+    string HookInvokerTrustPolicy,
+    int? LogRetentionDays,
     DeployerTriggerPlan? Trigger = null,
     DeployerAlertsPlan? Alerts = null);
 
@@ -425,7 +435,7 @@ public static class DeployerPlanner
         var functions = new List<DeployerFunction>
         {
             new(verify, DeployerHandlers.Verify, $"{verify}-fn",
-                Combine(Logs(region, acct, verify), VerifyGrants(region, acct, buildRecordStore, imageRepositories)),
+                Combine(Logs(region, acct, verify), VerifyGrants(region, acct, sk, env, buildRecordStore, imageRepositories)),
                 new Dictionary<string, string>
                 {
                     [DeployerEnvironment.Classes] = DeployerEnvironment.Join(p.Classes ?? new List<string>()),
@@ -436,12 +446,12 @@ public static class DeployerPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(prepare, DeployerHandlers.Prepare, $"{prepare}-fn",
-                Combine(Logs(region, acct, prepare), PrepareGrants(region, acct, sk)),
+                Combine(Logs(region, acct, prepare), PrepareGrants(region, acct, sk, env)),
                 new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(rollout, DeployerHandlers.VerifyRollout, $"{rollout}-fn",
-                Combine(Logs(region, acct, rollout), RolloutGrants(region, acct)),
+                Combine(Logs(region, acct, rollout), RolloutGrants(region, acct, sk, env)),
                 new Dictionary<string, string>(),
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
@@ -499,7 +509,7 @@ public static class DeployerPlanner
         return new PipelineDeployer(
             StateMachineName: machine,
             RoleName: $"{sk}-{env}-deployer",
-            RolePolicy: RolePolicyFor(region, acct, sk, invoked,
+            RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null),
             DenyPolicy: DenyPolicyFor(),
             EvidenceStore: evidence,
@@ -523,9 +533,63 @@ public static class DeployerPlanner
             ReplicationPermission: accountId is null
                 ? null
                 : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories),
+            // SOURCE CONDITIONS WHERE AWS DOCUMENTS THEM (DecoupledCd.md §14.3): Step Functions shows a trust policy with
+            // aws:SourceArn and aws:SourceAccount for a state machine's role. Lambda's execution-role and ECS's hook-role
+            // documentation show none, and a condition either service does not send would stop every function or every
+            // deployment — so those two keep the documented form.
+            StateMachineTrustPolicy: ServiceTrustPolicy("states.amazonaws.com", acct, $"arn:aws:states:{region}:{acct}:stateMachine:*"),
+            FunctionTrustPolicy: ServiceTrustPolicy("lambda.amazonaws.com"),
+            HookInvokerTrustPolicy: ServiceTrustPolicy("ecs.amazonaws.com"),
+            LogRetentionDays: config.Hygiene?.LambdaLogRetentionDays,
             Trigger: trigger,
             Alerts: alerts);
     }
+
+    /// <summary>
+    /// A role's trust policy for one AWS service principal, with the confused-deputy conditions when they are given: the
+    /// assuming service must act for a resource in <paramref name="sourceAccount"/> whose ARN matches
+    /// <paramref name="sourceArnLike"/>.
+    /// </summary>
+    public static string ServiceTrustPolicy(string servicePrincipal, string? sourceAccount = null, string? sourceArnLike = null)
+    {
+        var statement = new Dictionary<string, object>
+        {
+            ["Effect"] = "Allow",
+            ["Principal"] = new Dictionary<string, object> { ["Service"] = servicePrincipal },
+            ["Action"] = "sts:AssumeRole",
+        };
+
+        if (sourceAccount != null || sourceArnLike != null)
+        {
+            var condition = new Dictionary<string, object>();
+            if (sourceArnLike != null)
+                condition["ArnLike"] = new Dictionary<string, object> { ["aws:SourceArn"] = sourceArnLike };
+            if (sourceAccount != null)
+                condition["StringEquals"] = new Dictionary<string, object> { ["aws:SourceAccount"] = sourceAccount };
+            statement["Condition"] = condition;
+        }
+
+        return JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["Version"] = "2012-10-17",
+            ["Statement"] = new[] { statement },
+        }, Asl);
+    }
+
+    /// <summary>
+    /// The ECS services this deployer may describe and roll: this system's services — <c>{sk}-*</c> — in this environment's
+    /// cluster, under either name <c>lz updatecontainer</c> finds it by, <c>{sk}-{env}-cluster</c> or <c>{sk}-cluster</c>
+    /// (DecoupledCd.md §14.3). The target still comes from the execution input; this bounds what an input can name.
+    ///
+    /// <para>The legacy name carries no environment, so there the account is what separates one environment's services
+    /// from another's — as it does for every other grant here. Service ARNs in the long form, which names the cluster: the
+    /// form ECS issues today, and the one the hook's events carry in scu-dev.</para>
+    /// </summary>
+    public static string[] ServiceArns(string region, string accountId, string sk, string env) => new[]
+    {
+        $"arn:aws:ecs:{region}:{accountId}:service/{sk}-{env}-cluster/{sk}-*",
+        $"arn:aws:ecs:{region}:{accountId}:service/{sk}-cluster/{sk}-*",
+    };
 
     /// <summary>
     /// The alerts' resources and the sweep's function (P2 stage D3).
@@ -922,7 +986,7 @@ public static class DeployerPlanner
     /// any role can register a task definition running as any role in the account.</para>
     /// </summary>
     private static string RolePolicyFor(
-        string region, string accountId, string sk,
+        string region, string accountId, string sk, string env,
         IReadOnlyList<string> functionArns, string? approvalTopicArn)
     {
         var statements = new List<object>
@@ -940,7 +1004,7 @@ public static class DeployerPlanner
                 Sid = "RollTheService",
                 Effect = "Allow",
                 Action = new[] { "ecs:UpdateService" },
-                Resource = $"arn:aws:ecs:{region}:{accountId}:service/*",
+                Resource = ServiceArns(region, accountId, sk, env),
             },
             PassRoleStatement(accountId, sk,
                 // KEPT HERE as well as on Prepare, which registers the revision: whether UpdateService
@@ -1024,7 +1088,7 @@ public static class DeployerPlanner
     };
 
     private static object[] VerifyGrants(
-        string region, string accountId, string buildRecordStore, IReadOnlyList<string> repositories) => new object[]
+        string region, string accountId, string sk, string env, string buildRecordStore, IReadOnlyList<string> repositories) => new object[]
     {
         new
         {
@@ -1065,18 +1129,27 @@ public static class DeployerPlanner
             Sid = "ConfirmTheTargetService",
             Effect = "Allow",
             Action = new[] { "ecs:DescribeServices" },
-            Resource = $"arn:aws:ecs:{region}:{accountId}:service/*",
+            Resource = ServiceArns(region, accountId, sk, env),
+        },
+        new
+        {
+            // The target's container, in the revision the service runs — checked before any approval gate rather than by
+            // Prepare after one. On "*", as Prepare's read of the same revision is.
+            Sid = "ConfirmTheTargetContainer",
+            Effect = "Allow",
+            Action = new[] { "ecs:DescribeTaskDefinition" },
+            Resource = "*",
         },
     };
 
-    private static object[] PrepareGrants(string region, string accountId, string sk) => new object[]
+    private static object[] PrepareGrants(string region, string accountId, string sk, string env) => new object[]
     {
         new
         {
             Sid = "ReadTheCurrentRevision",
             Effect = "Allow",
             Action = new[] { "ecs:DescribeServices" },
-            Resource = $"arn:aws:ecs:{region}:{accountId}:service/*",
+            Resource = ServiceArns(region, accountId, sk, env),
         },
         new
         {
@@ -1101,14 +1174,14 @@ public static class DeployerPlanner
         PassRoleStatement(accountId, sk, "PassOnlyTheServicesOwnRoles"),
     };
 
-    private static object[] RolloutGrants(string region, string accountId) => new object[]
+    private static object[] RolloutGrants(string region, string accountId, string sk, string env) => new object[]
     {
         new
         {
             Sid = "WatchTheRoll",
             Effect = "Allow",
             Action = new[] { "ecs:DescribeServices" },
-            Resource = $"arn:aws:ecs:{region}:{accountId}:service/*",
+            Resource = ServiceArns(region, accountId, sk, env),
         },
         new
         {
