@@ -27,9 +27,51 @@ public sealed class VerifyFunction
             new S3RecordStore(Clients.S3.Value),
             new EcrImages(Clients.Ecr.Value),
             new EcsServices(Clients.Ecs.Value),
-            new EcsTaskDefinitions(Clients.Ecs.Value));
+            new EcsTaskDefinitions(Clients.Ecs.Value),
+            new S3ArtifactObjects(Clients.S3.Value));
 
-        context.Logger.LogInformation($"{executionName}: verified {result["digest"]}; scan {result["scan"]?["verdict"]}");
+        context.Logger.LogInformation(result["class"]?.GetValue<string>() == "client"
+            ? $"{executionName}: verified bundle {result["identity"]?["key"]} version {result["identity"]?["versionId"]} for {result["target"]?["bucket"]}"
+            : $"{executionName}: verified {result["digest"]}; scan {result["scan"]?["verdict"]}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>Class 2 (P4 stage C): mirror the verified bundle into its web app's bucket and invalidate the app's path.</summary>
+public sealed class DeployBundleFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await DeployBundleStep.RunAsync(
+            state,
+            executionName,
+            DeployBundleSettings.Read(Environment.GetEnvironmentVariable),
+            new S3ArtifactObjects(Clients.S3.Value),
+            new S3AppBucket(Clients.S3.Value),
+            new CloudFrontInvalidations(Clients.CloudFront.Value),
+            () => DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation(
+            $"{executionName}: mirrored into {result["bucket"]}/{result["keyPrefix"]}: put {result["put"]!.ToJsonString()}, " +
+            $"deleted {result["deleted"]}, unchanged {result["unchanged"]}; invalidations {result["invalidations"]!.ToJsonString()}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>Class 2 (P4 stage C): read the deployed bundle back, and hand Record its evidence.</summary>
+public sealed class VerifyBundleFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await VerifyBundleStep.RunAsync(
+            state, executionName, new S3AppBucket(Clients.S3.Value), new CloudFrontInvalidations(Clients.CloudFront.Value),
+            DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation($"{executionName}: bundle {result["verdict"]}, {result["objects"]} objects, manifest {result["manifestSha256"]}");
         return Io.Write(result);
     }
 }

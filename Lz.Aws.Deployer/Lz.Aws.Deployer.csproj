@@ -43,6 +43,11 @@
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
     <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
+    <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
+    <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
+    <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
+    <Compile Include="..\Lz.Aws\Webapp\WebappMirrorPlanner.cs" Link="Linked\Lz.Aws\Webapp\WebappMirrorPlanner.cs" />
+    <Compile Include="..\Lz.Aws\S3BucketRequests.cs" Link="Linked\Lz.Aws\S3BucketRequests.cs" />
   </ItemGroup>
 
   <!-- Versions are exact, and match what Lz.Aws resolves, so the deployed functions and the CLI run
@@ -62,6 +67,8 @@
     <PackageReference Include="AWSSDK.StepFunctions" Version="4.0.100.14" />
     <!-- The sweep (P2 stage D3) publishes an alert for an image no build record names. -->
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
+    <!-- The bundle deploy (P4 stage C) invalidates the app's path and waits for it. -->
+    <PackageReference Include="AWSSDK.CloudFront" Version="4.0.101.3" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

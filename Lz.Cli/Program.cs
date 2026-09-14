@@ -990,7 +990,8 @@ class Program
                     if (!topology.UsesCentralAuth)
                     {
                         var webappName = Path.GetFileName(webappFolder).ToLowerInvariant();
-                        bucketName = $"{config.SystemKey}---webapp-{webappName}-{config.SystemSuffix}";
+                        // One definition with the pipeline's bundle deploy, whose grants name these buckets.
+                        bucketName = Lz.Aws.Webapp.WebappSyncRules.SystemBucketName(config.SystemKey, webappName, config.SystemSuffix);
                     }
                     else
                     {

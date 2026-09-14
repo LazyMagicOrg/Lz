@@ -240,17 +240,8 @@ public class WebappDeployer
         return "";
     }
 
-    /// <summary>
-    /// The one CloudFront path a deploy clears: everything under the prefix it synced (DecoupledCd.md P-9). An app or
-    /// site at the root owns every path, so it clears "/*"; one under a path clears that path alone, never the
-    /// distribution's other apps. The wildcard follows the prefix with no slash because CFRequest serves "/seller" as
-    /// well as "/seller/...", rewriting both to the app's index.html.
-    /// </summary>
-    public static string InvalidationPath(string? syncedPrefix)
-    {
-        var prefix = (syncedPrefix ?? "").Trim().Trim('/');
-        return prefix.Length == 0 ? "/*" : $"/{prefix}*";
-    }
+    /// <summary><see cref="WebappSyncRules.InvalidationPath"/>, which the pipeline's bundle deploy shares.</summary>
+    public static string InvalidationPath(string? syncedPrefix) => WebappSyncRules.InvalidationPath(syncedPrefix);
 
     /// <summary>
     /// The path a Blazor publish output serves under: the folder holding <c>_framework</c>, relative to the publish
@@ -264,36 +255,9 @@ public class WebappDeployer
         return string.IsNullOrEmpty(rel) || rel == "." ? "" : rel + "/";
     }
 
-    /// <summary>
-    /// The files Pass 3 marks no-cache, relative to the bundle's base path: the fixed manifests, plus every
-    /// <c>appConfig.js</c> and <c>indexinit.js</c> wherever the bundle holds one. The apps keep <c>appConfig.js</c> in
-    /// their UI library, under <c>_content/BlazorUI/</c>, so the fixed root entry matched nothing and the file took the
-    /// one-hour baseline. Compressed siblings are not entries: the pass covers each entry's .br and .gz itself.
-    /// </summary>
+    /// <summary><see cref="WebappSyncRules.NoCacheFiles"/>, which the pipeline's bundle deploy shares.</summary>
     public static IReadOnlyList<(string Path, string ContentType)> NoCacheFiles(IEnumerable<string> bundleRelativeFiles)
-    {
-        var files = new List<(string Path, string ContentType)>
-        {
-            ("index.html",                       "text/html"),
-            ("authentication/login.html",        "text/html"),
-            ("_framework/blazor.boot.json",      "application/json"),
-            ("_framework/blazor.webassembly.js", "application/javascript"),
-            ("_framework/dotnet.js",             "application/javascript"),
-            ("service-worker.js",                "application/javascript"),
-            ("service-worker-assets.js",         "application/javascript"),
-            ("appConfig.js",                     "application/javascript"),
-            ("indexinit.js",                     "application/javascript"),
-        };
-
-        foreach (var file in bundleRelativeFiles.Select(f => f.Replace('\\', '/')).OrderBy(f => f, StringComparer.Ordinal))
-        {
-            var name = file[(file.LastIndexOf('/') + 1)..];
-            if ((name == "appConfig.js" || name == "indexinit.js") && !files.Any(f => f.Path == file))
-                files.Add((file, "application/javascript"));
-        }
-
-        return files;
-    }
+        => WebappSyncRules.NoCacheFiles(bundleRelativeFiles);
 
     /// <summary>
     /// Creates the invalidation, or says plainly that none was made. Non-fatal either way, as before: the files are
@@ -718,17 +682,8 @@ public class WebappDeployer
         var accountId = (await RunCaptureAsync("aws",
             $"sts get-caller-identity --query Account --output text --region {region} {profileArg}")).Trim();
 
-        var policy = $@"{{
-            ""Version"": ""2012-10-17"",
-            ""Statement"": [{{
-                ""Sid"": ""AllowCloudFrontRead"",
-                ""Effect"": ""Allow"",
-                ""Principal"": {{ ""Service"": ""cloudfront.amazonaws.com"" }},
-                ""Action"": ""s3:GetObject"",
-                ""Resource"": ""arn:aws:s3:::{bucketName}/*"",
-                ""Condition"": {{ ""StringEquals"": {{ ""AWS:SourceAccount"": ""{accountId}"" }} }}
-            }}]
-        }}";
+        // The same document the pipeline's bundle deploy writes (DecoupledCd.md P-7).
+        var policy = WebappSyncRules.CloudFrontReadPolicy(bucketName, accountId);
 
         // Write policy to temp file (avoids shell escaping issues)
         var tempFile = Path.GetTempFileName();

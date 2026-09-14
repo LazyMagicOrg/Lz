@@ -65,7 +65,9 @@ public sealed record PipelineBootstrapPlan(
     Amazon.ECR.Model.ReplicationRule? Replication = null,
     IReadOnlyList<System.Text.Json.Nodes.JsonObject>? BuildRecordReadGrant = null,
     RecordForwardingPlan? RecordForwarding = null,
-    string? ForwardRuleToRemove = null);
+    string? ForwardRuleToRemove = null,
+    string? ArtifactStore = null,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? ArtifactReadGrant = null);
 
 /// <summary>
 /// The trigger's build-account half (DecoupledCd.md §4.3, P2 stage D): the record store sends its S3 events to the
@@ -299,6 +301,21 @@ public static class PipelineBootstrapPlanner
                 throw new InvalidOperationException("the forwarding queue's alarm name diverged from ForwardDeadLetterAlarmName, which the alerts topic's policy names.");
         }
 
+        // CLIENT BUNDLES (P4 stage C): where the environment deploys any, its Verify function reads client records and HEADs
+        // client bundles, and its DeployBundle function reads them. Nothing is planned where it deploys none, so an
+        // environment without a client target keeps exactly the grants it had.
+        var clientApps = target != null ? DeployerPlanner.ClientApps(config) : Array.Empty<ClientApp>();
+
+        var recordGrant = target != null
+            ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
+                p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
+                p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
+            : null;
+        if (recordGrant != null && clientApps.Count > 0)
+            recordGrant = recordGrant
+                .Concat(CrossAccount.ClientRecordReadGrant(buildRecords, config.Environment, target!, DeployerPlanner.VerifyRoleName(config)))
+                .ToList();
+
         return new PipelineBootstrapPlan(
             sk, region, p.ArtifactAccountId, stores, roles, ecrRepositories, OidcProvider,
             SelfRewriteDenied,
@@ -307,13 +324,14 @@ public static class PipelineBootstrapPlanner
             Replication: target != null && imageRepositories.Count > 0
                 ? CrossAccount.ReplicationRule(region, target, imageRepositories)
                 : null,
-            BuildRecordReadGrant: target != null
-                ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
-                    p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
-                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
-                : null,
+            BuildRecordReadGrant: recordGrant,
             RecordForwarding: forwarding,
-            ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null);
+            ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null,
+            ArtifactStore: artifacts,
+            ArtifactReadGrant: clientApps.Count > 0
+                ? CrossAccount.ClientBundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
+                    DeployerPlanner.DeployBundleRoleName(config))
+                : null);
     }
 
     /// <summary>

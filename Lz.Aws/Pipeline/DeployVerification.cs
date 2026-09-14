@@ -201,6 +201,83 @@ public static class DeployVerification
     }
 
     /// <summary>
+    /// May this client bundle deploy into <paramref name="bucket"/> (P4 stage C)? Only into the web app its own repository
+    /// is configured to deploy as — never one the input merely names. Two repositories build this class, so a record's
+    /// right to a bucket comes from WHICH repository wrote it, and the record's location has already proved that.
+    /// </summary>
+    /// <returns>The configured target when the bucket is its own, and the refusals otherwise.</returns>
+    public static (ClientTarget? Target, IReadOnlyList<VerifyRefusal> Refusals) ClientTargetFor(
+        BuildRecord record, string bucket, IReadOnlyList<ClientTarget> targets)
+    {
+        if (!string.Equals(record.Class, "client", StringComparison.Ordinal))
+            return (null, new[] { new VerifyRefusal("class", $"a client target was asked for a '{record.Class}' record.") });
+
+        var target = targets.FirstOrDefault(t => string.Equals(t.Repo, record.BuiltFrom.Repo, StringComparison.Ordinal));
+        if (target is null)
+            return (null, new[]
+            {
+                new VerifyRefusal("target.bucket",
+                    $"{record.BuiltFrom.Repo} deploys into no web app here: its Pipeline.Repositories entry names none in Artifacts, " +
+                    "so none of its bundles is deployed by this environment."),
+            });
+
+        if (!string.Equals(target.Bucket, bucket, StringComparison.Ordinal))
+            return (null, new[]
+            {
+                new VerifyRefusal("target.bucket",
+                    $"the input names bucket '{bucket}', but {record.BuiltFrom.Repo}'s bundles deploy as web app '{target.App}', " +
+                    $"into '{target.Bucket}' only. The input names the target; the configuration decides which one a repository's " +
+                    "bundle may reach."),
+            });
+
+        return (target, Array.Empty<VerifyRefusal>());
+    }
+
+    /// <summary>
+    /// Is the object the store holds the bundle the record names (§4.4 step 3)? Its version, and S3's own SHA-256 of it,
+    /// read by a HEAD — nothing is downloaded to decide this.
+    ///
+    /// <para>S3'S CHECKSUM, NOT A HASH OF THE DOWNLOAD: the workflow wrote the zip with <c>--checksum-sha256</c>, so S3
+    /// checked the bytes against the value on the way in and keeps it. A <c>COMPOSITE</c> checksum is a checksum of
+    /// parts, which never equals the object's SHA-256, and is refused as what it is rather than as a mismatch.</para>
+    /// </summary>
+    /// <param name="head">The HEAD of the record's key at its version; null when S3 has no such version.</param>
+    public static IReadOnlyList<VerifyRefusal> BundleArtifact(BuildRecordIdentity identity, ArtifactHead? head, long maxBytes)
+    {
+        var at = $"s3://{identity.Bucket}/{identity.Key}";
+        if (head is null)
+            return new[] { new VerifyRefusal("identity.versionId", $"{at} has no version {identity.VersionId}.") };
+
+        var refusals = new List<VerifyRefusal>();
+
+        if (!string.Equals(head.VersionId, identity.VersionId, StringComparison.Ordinal))
+            refusals.Add(new("identity.versionId",
+                $"asked for version {identity.VersionId} of {at}, S3 answered for version '{head.VersionId}'."));
+
+        if (head.ChecksumSha256Base64 is null)
+            refusals.Add(new("identity.sha256",
+                $"S3 keeps no SHA-256 for {at} version {identity.VersionId}, so the record's checksum cannot be compared with " +
+                "the one S3 checked on write. A bundle is written with --checksum-sha256."));
+        else if (!string.Equals(head.ChecksumType, "FULL_OBJECT", StringComparison.Ordinal))
+            refusals.Add(new("identity.sha256",
+                $"S3's SHA-256 for {at} is a {head.ChecksumType ?? "typeless"} checksum, not the whole object's, so it cannot " +
+                "equal the record's."));
+        else if (!string.Equals(head.ChecksumSha256Base64, Sha256Base64(identity.Sha256!), StringComparison.Ordinal))
+            refusals.Add(new("identity.sha256",
+                $"S3's SHA-256 of {at} version {identity.VersionId} is not the record's {identity.Sha256}. The record does not " +
+                "name these bytes."));
+
+        if (head.ContentLength > maxBytes)
+            refusals.Add(new("identity.size",
+                $"{at} is {head.ContentLength} bytes; a bundle the deployer expands may be at most {maxBytes}."));
+
+        return refusals;
+    }
+
+    /// <summary>A lowercase-hex SHA-256 as S3 writes it in a checksum header: base64 of the 32 bytes.</summary>
+    public static string Sha256Base64(string hex) => Convert.ToBase64String(Convert.FromHexString(hex));
+
+    /// <summary>
     /// Turn ECR's scan status and counts into a verdict under this environment's policy.
     ///
     /// <para>ONLY <c>COMPLETE</c> IS A RESULT. <c>IN_PROGRESS</c> and <c>PENDING</c> are a wait; every

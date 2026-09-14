@@ -53,6 +53,26 @@ public sealed class RolloutNotDeployed(string message) : Exception(message);
 public sealed class DeploySuperseded(string message) : Exception(message);
 
 /// <summary>
+/// Another execution holds the app's deploy lease (<see cref="BundleMarker"/>), or took it between this one's read and
+/// its claim. RETRIED by the definition, for longer than a lease lasts: a deploy that died holding one is waited out.
+/// Thrown before this execution writes anything to the app's bucket.
+/// </summary>
+public sealed class BundleDeployInProgress(string message) : Exception(message);
+
+/// <summary>
+/// This execution's claim on the app's lease was gone when it came to release it: the lease expired mid-deploy and another
+/// execution took it, so both wrote to the bucket. Not retried — what the bucket holds is unknown, and the newer build's
+/// own deploy, or a new one, is what settles it.
+/// </summary>
+public sealed class BundleDeployRaced(string message) : Exception(message);
+
+/// <summary>A CloudFront invalidation this execution created has not completed. RETRIED by the definition, a bounded number of times.</summary>
+public sealed class BundleInvalidationInProgress(string message) : Exception(message);
+
+/// <summary>What the app's bucket holds is not the bundle this execution deployed. Not retried.</summary>
+public sealed class BundleNotDeployed(string message) : Exception(message);
+
+/// <summary>
 /// An execution's name for one deploy request, shared by the planner and the start function that names the
 /// executions it starts (DecoupledCd.md §5.1).
 /// </summary>
@@ -174,6 +194,47 @@ public sealed record DeployerInput(RecordLocation Record, DeployTarget Target)
         return (DeployEvidence.RequireSafeExecutionName(root["executionName"]!.GetValue<string>()), state);
     }
 
+    /// <summary>
+    /// Only the record's location, which every class's input names in the same shape. Verify reads the record before it
+    /// knows the class, and the class decides what the target must name (P4 stage C).
+    /// </summary>
+    public static RecordLocation RecordFrom(JsonObject state)
+    {
+        string? Field(string name)
+            => state["record"] is JsonObject o && o[name] is JsonValue v && v.GetValueKind() == JsonValueKind.String
+                ? v.GetValue<string>()
+                : null;
+
+        var bucket = Field("bucket");
+        var key = Field("key");
+        var missing = new[] { ("record.bucket", bucket), ("record.key", key) }
+            .Where(f => string.IsNullOrWhiteSpace(f.Item2)).Select(f => f.Item1).ToList();
+
+        if (missing.Count > 0)
+            throw new DeployRefused("input",
+                $"the execution input is missing {string.Join(", ", missing)}. A deploy names the record it deploys; nothing " +
+                "is defaulted.");
+
+        return new RecordLocation(bucket!, key!);
+    }
+
+    /// <summary>
+    /// A client bundle's target: the bucket it deploys into, <c>{"target": {"bucket": "…"}}</c>. Everything else about the
+    /// target — its base path, its distributions — is configuration, which Verify resolves and checks the bucket against.
+    /// </summary>
+    public static string BundleBucketFrom(JsonObject state)
+    {
+        var bucket = state["target"] is JsonObject o && o["bucket"] is JsonValue v && v.GetValueKind() == JsonValueKind.String
+            ? v.GetValue<string>()
+            : null;
+
+        return string.IsNullOrWhiteSpace(bucket)
+            ? throw new DeployRefused("input",
+                "the execution input is missing target.bucket. A client bundle's deploy names the web-app bucket it deploys " +
+                "into; nothing is defaulted.")
+            : bucket;
+    }
+
     /// <summary>Read the record location and target from an execution's state. Refuses anything missing.</summary>
     public static DeployerInput From(JsonObject state)
     {
@@ -234,6 +295,16 @@ public static class DeployerEnvironment
     public const string AlertsTopic = "LZ_ALERTS_TOPIC";
     public const string CorroborateSources = "LZ_CORROBORATE_SOURCES";
 
+    // Client bundles (P4 stage C).
+    public const string ArtifactStore = "LZ_ARTIFACT_STORE";
+    public const string ClientTargets = "LZ_CLIENT_TARGETS";
+    public const string TargetAccount = "LZ_TARGET_ACCOUNT";
+    public const string BucketVersioning = "LZ_BUCKET_VERSIONING";
+    public const string NoncurrentExpirationDays = "LZ_NONCURRENT_EXPIRATION_DAYS";
+
+    /// <summary>The region Lambda runs a function in, which it sets itself.</summary>
+    public const string Region = "AWS_REGION";
+
     /// <summary>Encode a list. Refuses a value containing the separator rather than corrupting it.</summary>
     public static string Join(IEnumerable<string> values)
     {
@@ -273,17 +344,30 @@ public static class DeployerEnvironment
 }
 
 /// <summary>What the Verify function is configured with.</summary>
+/// <param name="ArtifactStore">The store a bundle record's identity must name. Null where no client target is configured.</param>
+/// <param name="ClientTargets">The web apps a client bundle may deploy into, one per producing repository. Empty where
+/// none is configured.</param>
 public sealed record VerifySettings(
     IReadOnlyList<string> Classes,
     IReadOnlyList<string> ScanBlockOn,
     string BuildRecordStore,
-    IReadOnlyList<string> ImageRepositories)
+    IReadOnlyList<string> ImageRepositories,
+    string? ArtifactStore = null,
+    IReadOnlyList<ClientTarget>? ClientTargets = null)
 {
+    /// <summary>
+    /// The two client-bundle variables are the exception to "a missing variable is a fault", and safely: absent, the store
+    /// leaves every bundle record unparseable and the targets leave every client record without a target, so their
+    /// absence can only refuse. The planner writes them only where a client target is configured, which keeps a
+    /// class-1-only environment's functions as they were.
+    /// </summary>
     public static VerifySettings Read(Func<string, string?> env) => new(
         DeployerEnvironment.List(env, DeployerEnvironment.Classes),
         DeployerEnvironment.List(env, DeployerEnvironment.ScanBlockOn),
         DeployerEnvironment.Required(env, DeployerEnvironment.BuildRecordStore),
-        DeployerEnvironment.List(env, DeployerEnvironment.ImageRepositories));
+        DeployerEnvironment.List(env, DeployerEnvironment.ImageRepositories),
+        env(DeployerEnvironment.ArtifactStore) is { Length: > 0 } store ? store : null,
+        env(DeployerEnvironment.ClientTargets) is { Length: > 0 } targets ? Pipeline.ClientTargets.Decode(targets) : Array.Empty<ClientTarget>());
 
     /// <summary>The pipeline config C1's decisions take, rebuilt from what the planner wrote.</summary>
     public PipelineConfig AsPipeline() => new()
@@ -373,6 +457,27 @@ public static class DeployEvidence
             ["verified"] = verified.DeepClone(),
             ["deploy"] = deploy.DeepClone(),
             ["runningDigests"] = new JsonArray(runningDigests.Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
+        }, Json);
+
+    /// <summary>
+    /// The body of a client bundle's deploy evidence (P4 stage C): the record, the target Verify resolved, and the bundle's
+    /// version and checksum inside <c>verified.identity</c>; what DeployBundle wrote; and what VerifyBundle read back.
+    /// Copied from state, never re-derived, as <see cref="Deployed"/> is.
+    /// </summary>
+    public static string BundleDeployed(
+        string executionName, DateTimeOffset recordedAt, RecordLocation record, JsonObject verified, JsonObject deploy,
+        JsonObject verification)
+        => JsonSerializer.Serialize(new JsonObject
+        {
+            ["schema"] = Schema,
+            ["outcome"] = "deployed",
+            ["execution"] = executionName,
+            ["recordedAt"] = recordedAt.ToString("O"),
+            ["record"] = new JsonObject { ["bucket"] = record.Bucket, ["key"] = record.Key },
+            ["target"] = verified["target"]?.DeepClone(),
+            ["verified"] = verified.DeepClone(),
+            ["deploy"] = deploy.DeepClone(),
+            ["verification"] = verification.DeepClone(),
         }, Json);
 
     /// <summary>

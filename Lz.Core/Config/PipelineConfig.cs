@@ -219,7 +219,13 @@ public class PipelineRepositoryConfig
     /// <summary>
     /// For <c>image</c> repositories: the service names this repository builds images for, e.g.
     /// <c>aiphost</c>. One ECR repository is created per entry, named by
-    /// <c>EcrRepositoryNaming</c>. Ignored for bundle classes, which have no registry.
+    /// <c>EcrRepositoryNaming</c>.
+    ///
+    /// <para>For <c>client</c> repositories (DecoupledCd.md P4 stage C): the ONE web app the repository's
+    /// bundle deploys as, a <c>Behaviors.WebApps</c> <c>AppName</c> — which gives the path the bundle must be
+    /// built for and the system-scoped bucket it mirrors into. Naming it gives the deployer a client target
+    /// and scopes the bundle-deploy role to that bucket; without it the repository's bundles are built and
+    /// never deployed. Ignored for the other bundle classes.</para>
     ///
     /// <para>NAMING THEM NARROWS THE GRANT, which is the reason it is not optional for images. A
     /// build role whose ECR permissions read <c>{sk}-*</c> may push to every repository this system

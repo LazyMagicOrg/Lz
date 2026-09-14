@@ -78,6 +78,15 @@ public class DeployerStepsTests
         }
     }
 
+    /// <summary>The artifact store an IMAGE deploy must never read: any call fails the test.</summary>
+    private sealed class NoArtifacts : IArtifactObjects
+    {
+        public Task<ArtifactHead?> HeadAsync(string bucket, string key, string versionId)
+            => throw new InvalidOperationException("an image deploy read the artifact store");
+        public Task<(string? VersionId, long Bytes)> DownloadAsync(string bucket, string key, string versionId, string path)
+            => throw new InvalidOperationException("an image deploy read the artifact store");
+    }
+
     private static RegistryImage Scanned(string status = "COMPLETE", Dictionary<string, int>? counts = null)
         => new(Digest, status, counts);
 
@@ -90,7 +99,7 @@ public class DeployerStepsTests
         => VerifyStep.RunAsync(
             state ?? State(), settings ?? Settings(),
             records ?? new Records(record), registry ?? new Registry(image ?? Scanned()),
-            new Services(service ?? Service()), definitions ?? new Definitions(CurrentDefinition()));
+            new Services(service ?? Service()), definitions ?? new Definitions(CurrentDefinition()), new NoArtifacts());
 
     // ---------------------------------------------------------------------------------------
     //  Verify
@@ -175,7 +184,7 @@ public class DeployerStepsTests
         // first. A DeployRefused here would end that execution for good; this is what the definition waits on.
         var ex = await Assert.ThrowsAsync<ImageNotYetReplicated>(() => VerifyStep.RunAsync(
             State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(null), new Services(Service()),
-            new Definitions(CurrentDefinition())));
+            new Definitions(CurrentDefinition()), new NoArtifacts()));
 
         Assert.Contains($"{Repository}@{Digest}", ex.Message);
     }
@@ -232,7 +241,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
         var ex = await Assert.ThrowsAsync<DeployRefused>(() => VerifyStep.RunAsync(
             State(), Settings(), new Records(BuildRecordFormatTests.WorkflowEmitted), new Registry(Scanned()), new Services(null),
-            definitions));
+            definitions, new NoArtifacts()));
 
         Assert.Contains(ex.Refusals, r => r.Check == "target.service");
         // No service, so no revision to read.

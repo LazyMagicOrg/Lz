@@ -84,7 +84,8 @@ public class BootstrapHardeningCallSiteTests
 
     [Theory]
     [InlineData("PipelineBootstrapper.cs", 2)]
-    [InlineData("DeployerBootstrapper.cs", 4)]
+    // Five since P4 stage C: the client targets' distributions are read with the same credentials.
+    [InlineData("DeployerBootstrapper.cs", 5)]
     public void ANamedProfileThatDoesNotResolve_IsRefused_NotReplacedByAmbientCredentials(string file, int resolutions)
     {
         // Falling back labelled the ambient account with the profile's name in the dry run, and applied there.
@@ -102,6 +103,17 @@ public class BootstrapHardeningCallSiteTests
         var src = Source("Lz.Aws", "Pipeline", file);
 
         At(src, call, file);
+        Assert.Equal(1, Count(src, "PutBucketAsync("));
+        Assert.DoesNotContain("new PutBucketRequest", src);
+    }
+
+    [Fact]
+    public void AWebAppBucket_TheBundleDeployCreates_IsAskedForThroughTheSameHelper()
+    {
+        // P-7: the deployer's DeployBundle function creates a client app's bucket, in whatever region the system runs.
+        var src = Source("Lz.Aws.Deployer", "Adapters.cs");
+
+        At(src, "await s3.PutBucketAsync(Lz.Aws.S3BucketRequests.Create(bucket, region));", "Adapters.cs");
         Assert.Equal(1, Count(src, "PutBucketAsync("));
         Assert.DoesNotContain("new PutBucketRequest", src);
     }

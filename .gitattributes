@@ -1,2 +1,5 @@
 # Lambda deployment package - treat as binary (no line-ending conversion, no diff)
 Lz.Aws/Lambda/gate-checker.zip binary
+
+# Bundle fixtures stay as a Linux build wrote them (P4 stage C): a manifest's digest is over LF lines.
+Lz.Tests/Storage.Tests/testdata/bundles/* text eol=lf

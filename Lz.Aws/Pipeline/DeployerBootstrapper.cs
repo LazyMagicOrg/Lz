@@ -54,7 +54,11 @@ public static class DeployerBootstrapper
         var triggerInputs = DeployerPlanner.TriggerWanted(config)
             ? await ResolveTriggerInputsAsync(config, profile, region)
             : null;
-        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs);
+        // THE DISTRIBUTIONS A CLIENT DEPLOY INVALIDATES, read only where a client repository names its web app (P4 stage C).
+        var clientInputs = DeployerPlanner.ClientApps(config).Count > 0
+            ? await ResolveClientInputsAsync(config, profile)
+            : null;
+        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs);
 
         // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
         // rather than half-way through an apply.
@@ -221,6 +225,9 @@ public static class DeployerBootstrapper
         Console.WriteLine(plan.Trigger is null
             ? $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*)"
             : $"  lz bootstrappipeline --apply   (replicates into this account; lets {verifyRole} read image/*; forwards record events to {plan.Trigger.BusName})");
+        if (plan.ClientTargets is { Count: > 0 })
+            Console.WriteLine($"    and, for client bundles, lets {verifyRole} read client/* records and HEAD client/* bundles, and " +
+                              $"{DeployerPlanner.DeployBundleRoleName(config)} read client/* bundles");
         Console.WriteLine("  Only images pushed AFTER it runs replicate here — ECR does not copy what is already there.");
     }
 
@@ -324,6 +331,59 @@ public static class DeployerBootstrapper
                 "an ACTIVE ECS cluster in this account, so a build would have no service to roll. Deploy the system first.");
 
         return new DeployerTriggerInputs(cluster, tenants.Select(t => t.TenantKey).OrderBy(k => k, StringComparer.Ordinal).ToList());
+    }
+
+    /// <summary>
+    /// The CloudFront distributions that serve this environment's tenants: the ones <c>lz deploywebapp</c> invalidates, found
+    /// the way it finds them — by the tenant's root domain among a distribution's aliases. A tenant with none is refused,
+    /// since a client deploy there could clear no cached copy.
+    /// </summary>
+    private static async Task<DeployerClientInputs> ResolveClientInputsAsync(SystemConfig config, string? profile)
+    {
+        List<(string TenantKey, TenantConfig Config)> tenants;
+        try
+        {
+            tenants = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment);
+        }
+        catch (FileNotFoundException)
+        {
+            tenants = new List<(string, TenantConfig)>();
+        }
+
+        if (tenants.Count == 0)
+            throw new InvalidOperationException(
+                $"lz bootstrapdeployer refuses: client bundles deploy here, but no tenant config was found for {config.SystemKey}/" +
+                $"{config.Environment}, so the distributions serving the apps are unknown. Run from the workspace that holds the " +
+                "tenantconfig files.");
+
+        var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
+        // CloudFront is global; its API is reached through us-east-1 whatever the system's region.
+        using var cloudFront = creds != null
+            ? new Amazon.CloudFront.AmazonCloudFrontClient(creds, Amazon.RegionEndpoint.USEast1)
+            : new Amazon.CloudFront.AmazonCloudFrontClient(Amazon.RegionEndpoint.USEast1);
+
+        var distributions = new List<Amazon.CloudFront.Model.DistributionSummary>();
+        string? marker = null;
+        do
+        {
+            var page = await cloudFront.ListDistributionsAsync(new Amazon.CloudFront.Model.ListDistributionsRequest { Marker = marker });
+            distributions.AddRange(page.DistributionList?.Items ?? new List<Amazon.CloudFront.Model.DistributionSummary>());
+            marker = page.DistributionList?.IsTruncated == true ? page.DistributionList.NextMarker : null;
+        }
+        while (marker != null);
+
+        var ids = new List<string>();
+        foreach (var (tenantKey, tenant) in tenants)
+        {
+            var domain = tenant.RootDomain;
+            var id = distributions.FirstOrDefault(d => d.Aliases?.Items?.Contains(domain, StringComparer.OrdinalIgnoreCase) == true)?.Id
+                ?? throw new InvalidOperationException(
+                    $"lz bootstrapdeployer refuses: client bundles deploy here, but no CloudFront distribution in this account serves " +
+                    $"tenant {tenantKey}'s root domain '{domain}', so a deploy could not clear its cached copies. Deploy the tenant first.");
+            ids.Add(id);
+        }
+
+        return new DeployerClientInputs(ids.Distinct(StringComparer.Ordinal).OrderBy(i => i, StringComparer.Ordinal).ToList());
     }
 
     /// <summary>
@@ -443,6 +503,20 @@ public static class DeployerBootstrapper
         {
             Console.WriteLine($"  alerts: off (Pipeline.Alerts) — rules {DeployerPlanner.FailedDeployRuleName(config)} and " +
                               $"{DeployerPlanner.CorroborateScheduleRuleName(config)} are removed if an earlier run created them");
+        }
+        Console.WriteLine();
+
+        if (plan.ClientTargets is { Count: > 0 } clientTargets)
+        {
+            Console.WriteLine("  client bundles (class 2), started by hand — nothing forwards client records yet:");
+            foreach (var t in clientTargets)
+                Console.WriteLine($"    {t.Repo} deploys as {t.App}: s3://{t.Bucket}/{t.KeyPrefix}, lease {BundleMarker.Key}, " +
+                                  $"invalidates {t.InvalidationPath} on {string.Join(", ", t.Distributions)}");
+            Console.WriteLine($"    the machine branches on the verified class after Verify{(plan.ApprovalRequired ? " and Approve" : "")}");
+        }
+        else
+        {
+            Console.WriteLine("  client bundles: none (no client repository names the web app it deploys as in Artifacts)");
         }
         Console.WriteLine();
 

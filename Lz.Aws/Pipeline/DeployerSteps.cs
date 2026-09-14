@@ -112,28 +112,30 @@ public interface INotation
 }
 
 /// <summary>
-/// The Verify state (§4.4): read the record, check where it came from and what it claims, find the
-/// image in this account's registry, apply the scan policy, and confirm the target service exists and runs a revision
-/// with the target container.
+/// The Verify state (§4.4): read the record, check where it came from and what it claims, then, by its class — for an
+/// image, find it in this account's registry, apply the scan policy, and confirm the target service exists and runs a
+/// revision with the target container; for a client bundle (P4 stage C), confirm the bucket is its repository's web app
+/// and that the store holds the version and checksum the record names.
 /// </summary>
 public static class VerifyStep
 {
     public static async Task<JsonObject> RunAsync(
         JsonObject state, VerifySettings settings, IRecordStore records, IRegistryImages registry, IServices services,
-        ITaskDefinitions definitions)
+        ITaskDefinitions definitions, IArtifactObjects artifacts)
     {
-        var input = DeployerInput.From(state);
+        // The record's location only: what the target must name depends on the class, which the record says.
+        var location = DeployerInput.RecordFrom(state);
 
         // BEFORE ANY READ. A record outside the build-record store has no authority, so it is not
         // fetched and then judged — it is never fetched.
-        if (!string.Equals(input.Record.Bucket, settings.BuildRecordStore, StringComparison.Ordinal))
+        if (!string.Equals(location.Bucket, settings.BuildRecordStore, StringComparison.Ordinal))
             throw new DeployRefused("record.bucket",
-                $"the input names a record in '{input.Record.Bucket}', not the build-record store " +
+                $"the input names a record in '{location.Bucket}', not the build-record store " +
                 $"'{settings.BuildRecordStore}'. Records have authority only there.");
 
-        var stored = await records.ReadAsync(input.Record.Bucket, input.Record.Key)
+        var stored = await records.ReadAsync(location.Bucket, location.Key)
             ?? throw new DeployRefused("record",
-                $"there is no build record at s3://{input.Record.Bucket}/{input.Record.Key}.");
+                $"there is no build record at s3://{location.Bucket}/{location.Key}.");
 
         // THE VERSION READ IS THE RECORD'S IDENTITY (§14.3), carried into the evidence: a key can gain a second version,
         // after a delete, and the evidence must say which one this deploy was judged on. A store that serves no version
@@ -141,23 +143,42 @@ public static class VerifyStep
         // so that is refused, not recorded as unknown.
         if (string.IsNullOrEmpty(stored.VersionId) || stored.VersionId == "null")
             throw new DeployRefused("record",
-                $"s3://{input.Record.Bucket}/{input.Record.Key} was served without an object version, so the evidence could " +
+                $"s3://{location.Bucket}/{location.Key} was served without an object version, so the evidence could " +
                 "not name the record this deploy acted on. The build-record store must keep versioning on.");
 
         BuildRecord record;
         try
         {
-            record = BuildRecordFormat.Parse(stored.Json);
+            // With the artifact store, which a bundle record's identity must name exactly (P4 stage A). Without one — an
+            // environment with no client target — every bundle record is refused here.
+            record = BuildRecordFormat.Parse(stored.Json, settings.ArtifactStore);
         }
         catch (InvalidOperationException ex)
         {
             throw new DeployRefused("record", ex.Message);
         }
 
-        // ALL THREE, and every refusal reported — the evidence should show everything that was wrong.
+        // EVERY CHECK, and every refusal reported — the evidence should show everything that was wrong.
         var refusals = new List<VerifyRefusal>();
-        refusals.AddRange(DeployVerification.Provenance(record, input.Record, settings.BuildRecordStore));
+        refusals.AddRange(DeployVerification.Provenance(record, location, settings.BuildRecordStore));
         refusals.AddRange(DeployVerification.Verify(record, settings.AsPipeline()).Refusals);
+
+        switch (record.Class)
+        {
+            case "image":
+                break;
+
+            case "client":
+                return await ClientAsync(state, settings, artifacts, record, stored, refusals);
+
+            default:
+                refusals.Add(new VerifyRefusal("class",
+                    $"this deployer deploys class 'image' (DecoupledCd.md P2) and class 'client' (P4 stage C); the record is " +
+                    $"'{record.Class}'. Other classes are not modelled here rather than modelled badly."));
+                throw new DeployRefused(refusals);
+        }
+
+        var input = DeployerInput.From(state);
         refusals.AddRange(DeployVerification.Target(record, input.Target, settings.ImageRepositories));
         if (refusals.Count > 0)
             throw new DeployRefused(refusals);
@@ -207,28 +228,14 @@ public static class VerifyStep
             throw new DeployRefused("target.container", ex.Message);
         }
 
-        var shortCommit = record.BuiltFrom.Commit.Length > 12 ? record.BuiltFrom.Commit[..12] : record.BuiltFrom.Commit;
-
-        var builtFrom = new JsonObject
-        {
-            ["repo"] = record.BuiltFrom.Repo,
-            ["commit"] = record.BuiltFrom.Commit,
-            ["lane"] = record.BuiltFrom.Lane,
-            ["packages"] = new JsonObject(record.BuiltFrom.Packages
-                .OrderBy(p => p.Key, StringComparer.Ordinal)
-                .Select(p => KeyValuePair.Create(p.Key, (JsonNode?)JsonValue.Create(p.Value)))),
-        };
-        // The branch, when the record names one, so the evidence says which line was deployed. Absent from records
-        // written before it existed, and left absent rather than invented.
-        if (record.BuiltFrom.Ref is { } gitRef)
-            builtFrom["ref"] = gitRef;
+        var shortCommit = ShortCommit(record);
 
         return new JsonObject
         {
             ["class"] = record.Class,
             ["digest"] = digest,
             ["recordVersionId"] = stored.VersionId,
-            ["builtFrom"] = builtFrom,
+            ["builtFrom"] = BuiltFrom(record),
             ["builtAt"] = record.BuiltAt,
             ["workflowRunId"] = record.WorkflowRunId,
             ["scan"] = new JsonObject
@@ -245,6 +252,74 @@ public static class VerifyStep
                 $"on the {record.BuiltFrom.Lane} lane, workflow run {record.WorkflowRunId}. Scan: {reason}. " +
                 $"Replaces {service.TaskDefinitionArn}.",
         };
+    }
+
+    /// <summary>
+    /// A client bundle (P4 stage C): its repository's web app, and the zip the record names, by version and S3's checksum.
+    /// Nothing is downloaded, and nothing is written.
+    /// </summary>
+    private static async Task<JsonObject> ClientAsync(
+        JsonObject state, VerifySettings settings, IArtifactObjects artifacts, BuildRecord record, StoredRecord stored,
+        List<VerifyRefusal> refusals)
+    {
+        var (target, targetRefusals) = DeployVerification.ClientTargetFor(
+            record, DeployerInput.BundleBucketFrom(state), settings.ClientTargets ?? Array.Empty<ClientTarget>());
+        refusals.AddRange(targetRefusals);
+        if (refusals.Count > 0)
+            throw new DeployRefused(refusals);
+
+        // ONLY NOW is the artifact looked up: a record with no right to this bucket never has its zip asked about.
+        var identity = record.Identity;
+        var head = await artifacts.HeadAsync(identity.Bucket!, identity.Key!, identity.VersionId!);
+        var artifactRefusals = DeployVerification.BundleArtifact(identity, head, BundleArchive.MaxZipBytes);
+        if (artifactRefusals.Count > 0)
+            throw new DeployRefused(artifactRefusals);
+
+        var app = target!;
+        return new JsonObject
+        {
+            ["class"] = record.Class,
+            ["identity"] = new JsonObject
+            {
+                ["bucket"] = identity.Bucket,
+                ["key"] = identity.Key,
+                ["versionId"] = identity.VersionId,
+                ["sha256"] = identity.Sha256,
+                ["bytes"] = head!.ContentLength,
+            },
+            ["target"] = ClientTargets.ToJson(app),
+            ["recordVersionId"] = stored.VersionId,
+            ["builtFrom"] = BuiltFrom(record),
+            ["builtAt"] = record.BuiltAt,
+            ["workflowRunId"] = record.WorkflowRunId,
+            // What an approver reads (§4.5). Identities, not prose about them.
+            ["summary"] =
+                $"Deploy bundle s3://{identity.Bucket}/{identity.Key} version {identity.VersionId} (sha256 {identity.Sha256}) as " +
+                $"web app {app.App} into s3://{app.Bucket}/{app.KeyPrefix}, invalidating {app.InvalidationPath} on " +
+                $"{string.Join(", ", app.Distributions)}. Built from {record.BuiltFrom.Repo} {ShortCommit(record)} on the " +
+                $"{record.BuiltFrom.Lane} lane, workflow run {record.WorkflowRunId}.",
+        };
+    }
+
+    private static string ShortCommit(BuildRecord record)
+        => record.BuiltFrom.Commit.Length > 12 ? record.BuiltFrom.Commit[..12] : record.BuiltFrom.Commit;
+
+    private static JsonObject BuiltFrom(BuildRecord record)
+    {
+        var builtFrom = new JsonObject
+        {
+            ["repo"] = record.BuiltFrom.Repo,
+            ["commit"] = record.BuiltFrom.Commit,
+            ["lane"] = record.BuiltFrom.Lane,
+            ["packages"] = new JsonObject(record.BuiltFrom.Packages
+                .OrderBy(p => p.Key, StringComparer.Ordinal)
+                .Select(p => KeyValuePair.Create(p.Key, (JsonNode?)JsonValue.Create(p.Value)))),
+        };
+        // The branch, when the record names one, so the evidence says which line was deployed. Absent from records
+        // written before it existed, and left absent rather than invented.
+        if (record.BuiltFrom.Ref is { } gitRef)
+            builtFrom["ref"] = gitRef;
+        return builtFrom;
     }
 }
 
@@ -363,6 +438,9 @@ public static class DeployOrdering
             .Where(t => t.Key != BuiltAtTag)
             .Append(new Amazon.ECS.Model.Tag { Key = BuiltAtTag, Value = recordBuiltAt })
             .ToList();
+
+    /// <summary>A build time as the records and the bundle marker write it, UTC only; null for anything else.</summary>
+    internal static DateTimeOffset? ParseUtc(string value) => Instant(value);
 
     // UTC only: a time without a zone would be read in whatever zone the function runs in.
     private static DateTimeOffset? Instant(string value)

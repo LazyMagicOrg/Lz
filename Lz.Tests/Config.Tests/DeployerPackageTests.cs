@@ -29,6 +29,8 @@ public class DeployerPackageTests
         "AWSSDK.StepFunctions.dll",
         // The sweep's alert (P2 stage D3).
         "AWSSDK.SimpleNotificationService.dll",
+        // The bundle deploy's invalidation (P4 stage C).
+        "AWSSDK.CloudFront.dll",
     };
 
     [Theory]

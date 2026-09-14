@@ -24,6 +24,246 @@ internal static class Clients
     public static readonly Lazy<Amazon.StepFunctions.IAmazonStepFunctions> Sfn = new(() => new Amazon.StepFunctions.AmazonStepFunctionsClient());
     public static readonly Lazy<Amazon.SimpleNotificationService.IAmazonSimpleNotificationService> Sns =
         new(() => new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient());
+    // CloudFront is global; its API is reached through us-east-1, as lz's CLI reaches it.
+    public static readonly Lazy<Amazon.CloudFront.IAmazonCloudFront> CloudFront =
+        new(() => new Amazon.CloudFront.AmazonCloudFrontClient(Amazon.RegionEndpoint.USEast1));
+}
+
+/// <summary>The artifact store in the build account, read by version (P4 stage C).</summary>
+internal sealed class S3ArtifactObjects(IAmazonS3 s3) : IArtifactObjects
+{
+    public async Task<ArtifactHead?> HeadAsync(string bucket, string key, string versionId)
+    {
+        try
+        {
+            var head = await s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = bucket,
+                Key = key,
+                VersionId = versionId,
+                // Without it S3 returns no checksum at all.
+                ChecksumMode = ChecksumMode.ENABLED,
+            });
+            return new ArtifactHead(head.VersionId, head.ChecksumSHA256, head.ChecksumType?.Value, head.ContentLength);
+        }
+        // NO SUCH VERSION arrives as either: a 404, or the 400 S3 answers for a version id it never issued (measured
+        // 2026-09-14). A 403 is a grant that is missing, not a version that is, and it throws.
+        catch (AmazonS3Exception ex) when (ex.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.BadRequest)
+        {
+            return null;
+        }
+    }
+
+    public async Task<(string? VersionId, long Bytes)> DownloadAsync(string bucket, string key, string versionId, string path)
+    {
+        using var response = await s3.GetObjectAsync(new GetObjectRequest
+        {
+            BucketName = bucket,
+            Key = key,
+            VersionId = versionId,
+            ChecksumMode = ChecksumMode.ENABLED,
+        });
+
+        await using (var file = File.Create(path))
+            await response.ResponseStream.CopyToAsync(file);
+
+        return (response.VersionId, new FileInfo(path).Length);
+    }
+}
+
+/// <summary>A web app's bucket in this account (P4 stage C, P-7).</summary>
+internal sealed class S3AppBucket(IAmazonS3 s3) : IAppBucket
+{
+    // A marker is a few hundred bytes. Anything this large is not one, and is not read.
+    private const long MaxMarkerBytes = 64 * 1024;
+
+    public async System.Threading.Tasks.Task EnsureAsync(string bucket, string region, string policyJson, bool versioning, int? noncurrentExpirationDays)
+    {
+        bool exists;
+        try
+        {
+            await s3.HeadBucketAsync(new HeadBucketRequest { BucketName = bucket });
+            exists = true;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            exists = false;
+        }
+
+        if (!exists)
+            await s3.PutBucketAsync(Lz.Aws.S3BucketRequests.Create(bucket, region));
+
+        // EVERY RUN, not only on creation: the deploy owns its bucket's hardening (P-7), and a write that fails throws —
+        // deploywebapp swallows a failed policy write, which is what DecoupledCd.md's survey found.
+        await s3.PutPublicAccessBlockAsync(new PutPublicAccessBlockRequest
+        {
+            BucketName = bucket,
+            PublicAccessBlockConfiguration = new PublicAccessBlockConfiguration
+            {
+                BlockPublicAcls = true, IgnorePublicAcls = true, BlockPublicPolicy = true, RestrictPublicBuckets = true,
+            },
+        });
+        await s3.PutBucketPolicyAsync(new PutBucketPolicyRequest { BucketName = bucket, Policy = policyJson });
+
+        // THE DURABILITY DECISION, as BucketDurabilityEnsurer applies it for deploywebapp.
+        if (!versioning) return;
+        await s3.PutBucketVersioningAsync(new PutBucketVersioningRequest
+        {
+            BucketName = bucket,
+            VersioningConfig = new S3BucketVersioningConfig { Status = VersionStatus.Enabled },
+        });
+        if (noncurrentExpirationDays is int days)
+            await s3.PutLifecycleConfigurationAsync(new PutLifecycleConfigurationRequest
+            {
+                BucketName = bucket,
+                Configuration = new LifecycleConfiguration
+                {
+                    Rules = new List<LifecycleRule>
+                    {
+                        new()
+                        {
+                            Id = DeployBundleSettings.NoncurrentExpiryRuleId,
+                            Status = LifecycleRuleStatus.Enabled,
+                            Filter = new LifecycleFilter(),
+                            NoncurrentVersionExpiration = new LifecycleRuleNoncurrentVersionExpiration { NoncurrentDays = days },
+                        },
+                    },
+                },
+            });
+    }
+
+    public async Task<MarkerRead?> ReadMarkerAsync(string bucket, string key)
+    {
+        try
+        {
+            using var response = await s3.GetObjectAsync(new GetObjectRequest { BucketName = bucket, Key = key });
+            if (response.ContentLength > MaxMarkerBytes)
+                throw new DeployRefused("marker", $"s3://{bucket}/{key} is {response.ContentLength} bytes; a deploy marker is not that large.");
+
+            using var reader = new StreamReader(response.ResponseStream);
+            return new MarkerRead(await reader.ReadToEndAsync(), response.ETag);
+        }
+        // No such key, or no such bucket yet: nothing has been deployed there. A denial throws.
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async Task<string?> WriteMarkerAsync(string bucket, string key, string json, string? ifMatchETag)
+    {
+        try
+        {
+            var request = new PutObjectRequest { BucketName = bucket, Key = key, ContentBody = json, ContentType = "application/json" };
+            if (ifMatchETag is null) request.IfNoneMatch = "*";
+            else request.IfMatch = ifMatchETag;
+
+            return (await s3.PutObjectAsync(request)).ETag;
+        }
+        // 412: the marker is no longer what was read. 409: another conditional write to it was in flight at the same moment.
+        catch (AmazonS3Exception ex) when (ex.StatusCode is System.Net.HttpStatusCode.PreconditionFailed or System.Net.HttpStatusCode.Conflict)
+        {
+            return null;
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> ListAsync(string bucket, string prefix)
+    {
+        var keys = new List<string>();
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request { BucketName = bucket, Prefix = prefix, ContinuationToken = token });
+            keys.AddRange((page.S3Objects ?? new List<S3Object>()).Select(o => o.Key));
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token != null);
+
+        return keys;
+    }
+
+    public async Task<Lz.Aws.Webapp.StoredObject?> HeadAsync(string bucket, string key)
+    {
+        try
+        {
+            var head = await s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = bucket,
+                Key = key,
+                ChecksumMode = ChecksumMode.ENABLED,
+            });
+
+            // S3's SHA-256 counts only when it is the whole object's.
+            var sha256 = head.ChecksumSHA256 is { } b64 && head.ChecksumType?.Value == "FULL_OBJECT"
+                ? Convert.ToHexStringLower(Convert.FromBase64String(b64))
+                : null;
+
+            return new Lz.Aws.Webapp.StoredObject(key, sha256, head.Headers.CacheControl, head.Headers.ContentType, head.Headers.ContentEncoding);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async System.Threading.Tasks.Task PutAsync(string bucket, string key, string filePath, Lz.Aws.Webapp.WebappObjectHeaders headers, string sha256Base64)
+    {
+        var request = new PutObjectRequest
+        {
+            BucketName = bucket,
+            Key = key,
+            FilePath = filePath,
+            ContentType = headers.ContentType,
+            // The SHA-256 S3 checks the bytes against and keeps, which the next deploy and VerifyBundle compare.
+            ChecksumSHA256 = sha256Base64,
+        };
+        request.Headers.CacheControl = headers.CacheControl;
+        if (headers.ContentEncoding is { } encoding)
+            request.Headers.ContentEncoding = encoding;
+
+        await s3.PutObjectAsync(request);
+    }
+
+    public async System.Threading.Tasks.Task DeleteAsync(string bucket, IReadOnlyList<string> keys)
+    {
+        foreach (var chunk in keys.Chunk(1000))
+        {
+            var response = await s3.DeleteObjectsAsync(new DeleteObjectsRequest
+            {
+                BucketName = bucket,
+                Objects = chunk.Select(k => new KeyVersion { Key = k }).ToList(),
+                Quiet = true,
+            });
+
+            if (response.DeleteErrors is { Count: > 0 } errors)
+                throw new InvalidOperationException(
+                    $"{errors.Count} of {chunk.Length} deletes from {bucket} failed, e.g. {errors[0].Key}: {errors[0].Code}.");
+        }
+    }
+}
+
+/// <summary>CloudFront invalidations (P4 stage C).</summary>
+internal sealed class CloudFrontInvalidations(Amazon.CloudFront.IAmazonCloudFront cloudFront) : IInvalidations
+{
+    public async Task<string> CreateAsync(string distributionId, string path, string callerReference)
+    {
+        var response = await cloudFront.CreateInvalidationAsync(new Amazon.CloudFront.Model.CreateInvalidationRequest
+        {
+            DistributionId = distributionId,
+            InvalidationBatch = new Amazon.CloudFront.Model.InvalidationBatch
+            {
+                CallerReference = callerReference,
+                Paths = new Amazon.CloudFront.Model.Paths { Quantity = 1, Items = new List<string> { path } },
+            },
+        });
+        return response.Invalidation.Id;
+    }
+
+    public async Task<string?> StatusAsync(string distributionId, string invalidationId)
+        => (await cloudFront.GetInvalidationAsync(new Amazon.CloudFront.Model.GetInvalidationRequest
+        {
+            DistributionId = distributionId,
+            Id = invalidationId,
+        })).Invalidation?.Status;
 }
 
 /// <summary>The sweep's view of a repository: every image and artifact, all pages.</summary>

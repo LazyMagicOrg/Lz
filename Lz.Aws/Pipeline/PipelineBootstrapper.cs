@@ -122,6 +122,8 @@ public static class PipelineBootstrapper
             await ApplyReplicationAsync(ecr, rule);
         if (plan.BuildRecordReadGrant is { } grant && plan.BuildRecordStore is { } recordStore)
             await BucketPolicies.MergeAsync(s3, recordStore, grant);
+        if (plan.ArtifactReadGrant is { } bundleGrant && plan.ArtifactStore is { } artifactStore)
+            await BucketPolicies.MergeAsync(s3, artifactStore, bundleGrant);
         if (plan.TargetAccountId is null)
             Console.WriteLine("  no Pipeline.TargetAccountId: nothing replicates and no deployer may read build records from this run.");
 
@@ -222,6 +224,9 @@ public static class PipelineBootstrapper
             if (plan.BuildRecordReadGrant is { } grant)
                 foreach (var statement in grant)
                     Console.WriteLine($"    bucket policy {statement["Sid"]}: {statement["Action"]} on {statement["Resource"]}, only {statement["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]}");
+            if (plan.ArtifactReadGrant is { } bundleGrant)
+                foreach (var statement in bundleGrant)
+                    Console.WriteLine($"    {plan.ArtifactStore} bucket policy {statement["Sid"]}: {statement["Action"]!.ToJsonString()} on {statement["Resource"]}, only {statement["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.ToJsonString()}");
 
             if (plan.RecordForwarding is { } f)
             {
