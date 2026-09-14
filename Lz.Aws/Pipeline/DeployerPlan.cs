@@ -873,6 +873,32 @@ public static class DeployerPlanner
                "the hook off before deploying the image.";
     }
 
+    /// <summary>
+    /// Why <c>lz updateedge</c> must not publish for this environment, or null when it may (DecoupledCd.md P-14).
+    ///
+    /// <para>UNDER THE BLOCK A CLOUDFRONT FUNCTION HAS ONE PUBLISHER. <c>updateedge</c> publishes <c>CloudFront/*.js</c>
+    /// straight to LIVE through the SDK; <c>lz deploytenant</c> publishes the same files through Pulumi, refreshing from
+    /// AWS first. Where <see cref="PipelineConfig.Classes"/> lists <c>config</c>, the class that carries the edge
+    /// functions, the second path is closed, as <c>deploycontainer</c>'s is for a signed service, and
+    /// <c>deploytenant</c> is the path that remains until the config bundle deploys them (P3 stage E).</para>
+    ///
+    /// <para>Keyed on the class, not the topology. <c>updateedge</c> exists to avoid the interruption a
+    /// <c>deploytenant</c> causes on ecs-fargate-keycloak, whose tenant service Pulumi sets to zero tasks, and it is
+    /// refused there too under the block, because two publishers of one function is what the entry closes. A system
+    /// with no block, a disabled one, or no config class keeps the command as it was.</para>
+    /// </summary>
+    public static string? RefusalForWorkstationEdge(SystemConfig config)
+    {
+        if (config.Pipeline is not { Enabled: true } p) return null;
+        if (p.Classes is not { } classes || !classes.Contains("config", StringComparer.Ordinal)) return null;
+
+        return $"{config.SystemKey}/{config.Environment} lists config in Pipeline.Classes, so its CloudFront functions have one " +
+               "publisher: `lz deploytenant`, whose Pulumi program refreshes from AWS before it publishes CloudFront/*.js. " +
+               "updateedge would publish them to LIVE around it, a second publisher of each function. Run " +
+               "`lz deploytenant` instead. To use updateedge anyway, take config out of Pipeline.Classes first, which also " +
+               "stops the deployer accepting config records.";
+    }
+
     /// <summary>The signature hook's function name — one definition for the planner and the service that attaches it.</summary>
     public static string SignatureHookFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-signature-hook";
 

@@ -49,10 +49,13 @@ public record EdgeFunctionResult(
 /// source), so there is no drift.
 ///
 /// Why this exists: <c>deploytenant</c> picks up CloudFront-function edits, but
-/// only by running a full Pulumi up that scales ECS services to 0 first — a
-/// service-interruption window. A CloudFront Function code change is natively
-/// in-place (UpdateFunction → PublishFunction), so <c>lz updateedge</c> applies
-/// it with zero downtime and no container restart.
+/// only by running a full Pulumi up, which on ecs-fargate-keycloak sets the tenant
+/// service to zero tasks first — a service-interruption window. (On
+/// ecs-fargate-cognito-dynamodb the service keeps its configured count, so there the
+/// full deploy is only slower.) A CloudFront Function code change is natively
+/// in-place (UpdateFunction → PublishFunction), so <c>lz updateedge</c> applies it
+/// without that window. The CLI refuses it where Pipeline.Classes lists config
+/// (<c>DeployerPlanner.RefusalForWorkstationEdge</c>): two publishers of one function.
 ///
 /// The three functions and how their code is prepared — byte-identical to
 /// AwsCloudFrontKvsComponent so the published result matches a full deploy:

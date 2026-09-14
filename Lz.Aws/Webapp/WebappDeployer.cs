@@ -5,7 +5,7 @@ namespace Lz.Aws.Webapp;
 
 /// <summary>
 /// Builds a Blazor WASM application, syncs the publish output to S3,
-/// and optionally invalidates the CloudFront cache.
+/// and invalidates the CloudFront path it serves under, in every environment.
 /// </summary>
 public class WebappDeployer
 {
@@ -126,36 +126,11 @@ public class WebappDeployer
         Console.WriteLine($"  Synced to s3://{bucketName}/wwwroot");
         Console.ResetColor();
 
-        // 5. CloudFront invalidation (skip for dev — no caching)
-        if (!environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!string.IsNullOrEmpty(distributionId))
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("Invalidating CloudFront cache...");
-                Console.ResetColor();
-
-                try
-                {
-                    await RunAsync("aws",
-                        $"cloudfront create-invalidation --distribution-id {distributionId} --paths \"/*\" --region {region} {profileArg}");
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("  CloudFront invalidation created");
-                    Console.ResetColor();
-                }
-                catch (Exception ex)
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"  WARNING: CloudFront invalidation failed (non-fatal): {ex.Message}");
-                    Console.ResetColor();
-                }
-            }
-        }
-        else
-        {
-            Console.WriteLine("  Skipping CloudFront invalidation (dev environment)");
-        }
+        // 6. CloudFront invalidation of the path this bundle serves under, in every environment (DecoupledCd.md P-9).
+        //    It skipped dev as having "no caching", which is true of the Keycloak topology's CDN component and not of the
+        //    KVS component, whose cache policy applies in dev too; elsewhere it cleared "/*", every app on the
+        //    distribution.
+        await InvalidateAsync(distributionId, InvalidationPath(BundleBasePath(publishPath)), region, profileArg);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Successfully deployed {projectName} to {bucketName}");
@@ -225,36 +200,9 @@ public class WebappDeployer
             : $"  Synced to s3://{bucketName}/wwwroot/{normalizedPrefix}");
         Console.ResetColor();
 
-        // CloudFront invalidation (skip for dev)
-        if (!environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!string.IsNullOrEmpty(distributionId))
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("Invalidating CloudFront cache...");
-                Console.ResetColor();
-
-                try
-                {
-                    await RunAsync("aws",
-                        $"cloudfront create-invalidation --distribution-id {distributionId} --paths \"/*\" --region {region} {profileArg}");
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("  CloudFront invalidation created");
-                    Console.ResetColor();
-                }
-                catch (Exception ex)
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"  WARNING: CloudFront invalidation failed (non-fatal): {ex.Message}");
-                    Console.ResetColor();
-                }
-            }
-        }
-        else
-        {
-            Console.WriteLine("  Skipping CloudFront invalidation (dev environment)");
-        }
+        // CloudFront invalidation of the prefix this site was synced under, in every environment (see DeployAsync).
+        // The environment parameter no longer decides anything here; it stays so no caller's arguments shift.
+        await InvalidateAsync(distributionId, InvalidationPath(normalizedPrefix), region, profileArg);
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Successfully deployed static site to {bucketName}");
@@ -290,6 +238,97 @@ public class WebappDeployer
         }
 
         return "";
+    }
+
+    /// <summary>
+    /// The one CloudFront path a deploy clears: everything under the prefix it synced (DecoupledCd.md P-9). An app or
+    /// site at the root owns every path, so it clears "/*"; one under a path clears that path alone, never the
+    /// distribution's other apps. The wildcard follows the prefix with no slash because CFRequest serves "/seller" as
+    /// well as "/seller/...", rewriting both to the app's index.html.
+    /// </summary>
+    public static string InvalidationPath(string? syncedPrefix)
+    {
+        var prefix = (syncedPrefix ?? "").Trim().Trim('/');
+        return prefix.Length == 0 ? "/*" : $"/{prefix}*";
+    }
+
+    /// <summary>
+    /// The path a Blazor publish output serves under: the folder holding <c>_framework</c>, relative to the publish
+    /// root, with a trailing slash ("seller/"); "" for an app at the root, or for a folder with no framework at all.
+    /// </summary>
+    public static string BundleBasePath(string publishRoot)
+    {
+        var fwDirs = Directory.GetDirectories(publishRoot, "_framework", SearchOption.AllDirectories);
+        if (fwDirs.Length == 0) return "";
+        var rel = Path.GetRelativePath(publishRoot, Path.GetDirectoryName(fwDirs[0])!).Replace('\\', '/');
+        return string.IsNullOrEmpty(rel) || rel == "." ? "" : rel + "/";
+    }
+
+    /// <summary>
+    /// The files Pass 3 marks no-cache, relative to the bundle's base path: the fixed manifests, plus every
+    /// <c>appConfig.js</c> and <c>indexinit.js</c> wherever the bundle holds one. The apps keep <c>appConfig.js</c> in
+    /// their UI library, under <c>_content/BlazorUI/</c>, so the fixed root entry matched nothing and the file took the
+    /// one-hour baseline. Compressed siblings are not entries: the pass covers each entry's .br and .gz itself.
+    /// </summary>
+    public static IReadOnlyList<(string Path, string ContentType)> NoCacheFiles(IEnumerable<string> bundleRelativeFiles)
+    {
+        var files = new List<(string Path, string ContentType)>
+        {
+            ("index.html",                       "text/html"),
+            ("authentication/login.html",        "text/html"),
+            ("_framework/blazor.boot.json",      "application/json"),
+            ("_framework/blazor.webassembly.js", "application/javascript"),
+            ("_framework/dotnet.js",             "application/javascript"),
+            ("service-worker.js",                "application/javascript"),
+            ("service-worker-assets.js",         "application/javascript"),
+            ("appConfig.js",                     "application/javascript"),
+            ("indexinit.js",                     "application/javascript"),
+        };
+
+        foreach (var file in bundleRelativeFiles.Select(f => f.Replace('\\', '/')).OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = file[(file.LastIndexOf('/') + 1)..];
+            if ((name == "appConfig.js" || name == "indexinit.js") && !files.Any(f => f.Path == file))
+                files.Add((file, "application/javascript"));
+        }
+
+        return files;
+    }
+
+    /// <summary>
+    /// Creates the invalidation, or says plainly that none was made. Non-fatal either way, as before: the files are
+    /// already synced, and a cached copy that is not cleared expires on its own max-age.
+    /// </summary>
+    private static async Task InvalidateAsync(string distributionId, string path, string region, string profileArg)
+    {
+        if (string.IsNullOrEmpty(distributionId))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  WARNING: no CloudFront distribution was found, so {path} was not invalidated; " +
+                              "cached copies expire on their own max-age.");
+            Console.ResetColor();
+            return;
+        }
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"Invalidating {path} on CloudFront distribution {distributionId}...");
+        Console.ResetColor();
+
+        try
+        {
+            await RunAsync("aws",
+                $"cloudfront create-invalidation --distribution-id {distributionId} --paths \"{path}\" --region {region} {profileArg}");
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("  CloudFront invalidation created");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  WARNING: CloudFront invalidation failed (non-fatal): {ex.Message}");
+            Console.ResetColor();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -398,14 +437,7 @@ public class WebappDeployer
         // wwwroot/_framework/ (nonexistent for base-path apps) and silently
         // no-op'd, leaving framework assets on the Pass-1 baseline (max-age=3600,
         // NO Content-Encoding) — which defeated brotli + immutable caching.
-        var assetBase = "";
-        var fwDirs = Directory.GetDirectories(sourcePath, "_framework", SearchOption.AllDirectories);
-        if (fwDirs.Length > 0)
-        {
-            var rel = Path.GetRelativePath(sourcePath, Path.GetDirectoryName(fwDirs[0])!)
-                .Replace('\\', '/');
-            if (!string.IsNullOrEmpty(rel) && rel != ".") assetBase = rel + "/";
-        }
+        var assetBase = BundleBasePath(sourcePath);
 
         string frameworkRoot = $"\"{s3Root}/{assetBase}_framework/\" \"{s3Root}/{assetBase}_framework/\"";
         string immutableCache = "--cache-control \"public, max-age=31536000, immutable\"";
@@ -473,18 +505,14 @@ public class WebappDeployer
         // the user ended up loading a new dotnet.runtime.<hash>.js paired with
         // an old dotnet.js, producing the MONO_WASM "version mismatch" warning
         // and an "Could not find 'checkIfLoaded'" boot failure. Adding it here.
-        var manifests = new (string Path, string ContentType)[]
-        {
-            ("index.html",                       "text/html"),
-            ("authentication/login.html",        "text/html"),
-            ("_framework/blazor.boot.json",      "application/json"),
-            ("_framework/blazor.webassembly.js", "application/javascript"),
-            ("_framework/dotnet.js",             "application/javascript"),
-            ("service-worker.js",                "application/javascript"),
-            ("service-worker-assets.js",         "application/javascript"),
-            ("appConfig.js",                     "application/javascript"),
-            ("indexinit.js",                     "application/javascript"),
-        };
+        // The list is NoCacheFiles', which also finds appConfig.js and indexinit.js below the base path.
+        var bundleRoot = Path.Combine(sourcePath, assetBase);
+        var bundleFiles = Directory.Exists(bundleRoot)
+            ? Directory.EnumerateFiles(bundleRoot, "*", SearchOption.AllDirectories)
+                .Select(f => Path.GetRelativePath(bundleRoot, f).Replace('\\', '/'))
+                .ToList()
+            : new List<string>();
+        var manifests = NoCacheFiles(bundleFiles);
 
         foreach (var (path, contentType) in manifests)
         {

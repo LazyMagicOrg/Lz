@@ -14,6 +14,14 @@ namespace Lz.Aws.Interfaces;
 public interface IAwsPlatformFactory : IPlatformFactory
 {
     /// <summary>
+    /// True when this topology's tenant deploy writes the tenant's tenantconfig YAML to SSM at
+    /// <c>/{sk}/{tk}/{env}/tenantconfig</c> — ecs-fargate-keycloak's, through <c>AwsServicesPostDeployAction</c>.
+    /// <c>lz updateconfig</c> writes the same parameter out of band, and refuses where this is false: no deploy writes it
+    /// there and no service reads it, so the value would reach nothing.
+    /// </summary>
+    bool PublishesTenantConfigParameter => false;
+
+    /// <summary>
     /// Create a Tailscale subnet-router component (EC2 ASG).
     /// Returns null if VPN is not configured for this topology.
     /// </summary>

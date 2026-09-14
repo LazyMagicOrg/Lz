@@ -999,13 +999,10 @@ class Program
                     var profile = tenantConfig.Profile ?? config.Profile;
                     var region = tenantConfig.Region ?? config.Region ?? "us-west-2";
 
-                    // Look up CloudFront distribution ID from AWS (for cache invalidation)
-                    var distributionId = "";
-                    if (!config.Environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
-                    {
-                        distributionId = await WebappDeployer.FindDistributionIdAsync(
-                            tenantConfig.RootDomain, profile, region);
-                    }
+                    // Look up the CloudFront distribution in every environment: the deploy invalidates the app's own
+                    // path wherever the distribution caches, and dev's does (DecoupledCd.md P-9).
+                    var distributionId = await WebappDeployer.FindDistributionIdAsync(
+                        tenantConfig.RootDomain, profile, region);
 
                     var deployer = new WebappDeployer();
                     if (isStaticSite)
@@ -1145,13 +1142,9 @@ class Program
                     {
                         var bucketName = $"{config.SystemKey}-{tk}-{stk}-webapp-{appName}-{suffix}";
 
-                        // Look up CloudFront distribution ID for non-dev (cache invalidation)
-                        var distributionId = "";
-                        if (!config.Environment.Equals("dev", StringComparison.OrdinalIgnoreCase))
-                        {
-                            distributionId = await WebappDeployer.FindDistributionIdAsync(
-                                tenantConfig.RootDomain, profile, region);
-                        }
+                        // Look up the distribution in every environment, as deploywebapp does (DecoupledCd.md P-9).
+                        var distributionId = await WebappDeployer.FindDistributionIdAsync(
+                            tenantConfig.RootDomain, profile, region);
 
                         Console.ForegroundColor = ConsoleColor.Cyan;
                         Console.WriteLine(
@@ -1556,15 +1549,14 @@ class Program
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
         var cmd = new Command("updateedge",
-            "In-place update of a tenant's CloudFront Functions (viewer-request, " +
-            "viewer-response, explore-rewrite) from the repo's CloudFront/*.js files. " +
-            "Zero downtime — no Pulumi, no container restart. Run after editing a " +
-            "CFViewerRequest.js etc. Skips functions whose live code already matches.");
+            "Publish a tenant's CloudFront Functions from the working tree's CloudFront/*.js straight to LIVE, " +
+            "without Pulumi. Skips functions whose live code already matches. Refused where Pipeline.Classes " +
+            "lists config: lz deploytenant is then the functions' only publisher.");
 
         var tenantKeyOption = new Option<string?>("--tenantkey",
             "Tenant key (updates all tenants if not specified — matches deploytenant)");
         var functionOption = new Option<string?>("--function",
-            "Which function to update: viewer-request | viewer-response | explore-rewrite " +
+            $"Which function to update: {string.Join(" | ", AwsEdgeUpdater.FunctionTypes)} " +
             "(all present functions if not specified)");
         var dryRunOption = new Option<bool>("--dry-run",
             "Report what would change without publishing any function");
@@ -1590,6 +1582,16 @@ class Program
 
             foreach (var config in configs)
             {
+                // BEFORE ANY TENANT, dry runs included: under the block the command is closed, not merely careful.
+                if (Lz.Aws.Pipeline.DeployerPlanner.RefusalForWorkstationEdge(config) is { } edgeRefusal)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"REFUSED: {edgeRefusal}");
+                    Console.ResetColor();
+                    anyFailure = true;
+                    continue;
+                }
+
                 var tenants = ConfigResolver.ResolveTenantConfigs(
                     config.SystemKey, config.Environment, tenantKey);
 
@@ -1667,10 +1669,10 @@ class Program
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
         var cmd = new Command("updateconfig",
-            "Publish a tenant's runtime config (tenantconfig.*.yaml) to SSM Parameter Store " +
-            "without a full deploytenant. The AppHost's refreshing config provider picks it up " +
-            "within its poll interval (~60s) — no container restart. Pass --invalidate to also " +
-            "invalidate the /config CloudFront path (only needed if /config is cached).");
+            "Write a tenant's tenantconfig.*.yaml to SSM Parameter Store at /{sk}/{tk}/{env}/tenantconfig, the " +
+            "parameter the ecs-fargate-keycloak deploy writes, without a full deploytenant. It restarts nothing: a " +
+            "running service sees the value only if it reloads that parameter. Refused on topologies whose deploy never " +
+            "writes it. Pass --invalidate to also invalidate the /config CloudFront path (only needed if /config is cached).");
 
         var tenantKeyOption = new Option<string?>("--tenantkey",
             "Tenant key (updates all tenants if not specified — matches deploytenant)");
@@ -1700,6 +1702,17 @@ class Program
 
             foreach (var config in configs)
             {
+                // BEFORE ANY TENANT, dry runs included: where no deploy writes the parameter, no service reads it.
+                var platform = Lz.Aws.Topologies.AwsTopologies.Get(config.Topology).CreateFactory(config);
+                if (AwsTenantConfigPublisher.RefusalFor(config, platform) is { } configRefusal)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"REFUSED: {configRefusal}");
+                    Console.ResetColor();
+                    anyFailure = true;
+                    continue;
+                }
+
                 var monorepoRoot = ConfigLoader.DiscoverMonorepoRoot(
                     config.SystemKey, config.Environment);
                 if (monorepoRoot == null)
@@ -3887,7 +3900,7 @@ class Program
     /// inside this directory tree. A recursive scan finds its <c>Deploy.csproj</c> and, since sync
     /// edits TRACKED files, would write into another session's working tree on a branch this
     /// workspace is not on. Caught on the first real run, when the file list showed
-    /// <c>.claude\worktreesusy-hermann-987d37\Deploy\Deploy.csproj</c> next to the six real
+    /// <c>.claude\worktrees\busy-hermann-987d37\Deploy\Deploy.csproj</c> next to the six real
     /// ones.</para>
     ///
     /// <para>Excluded by path rather than by asking git, because the rule wanted here is "files this

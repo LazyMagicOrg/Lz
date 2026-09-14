@@ -914,6 +914,45 @@ public class DeployerPlannerTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  updateedge, refused where the pipeline lists the config classes (DecoupledCd P-14)
+    // ---------------------------------------------------------------------------------------
+
+    private static SystemConfig ListingConfig()
+    {
+        var c = Config(false);
+        c.Pipeline!.Classes = new List<string> { "image", "client", "site", "assets", "config" };
+        return c;
+    }
+
+    [Fact]
+    public void UpdateEdge_IsRefusedWhereThePipelineListsConfig()
+    {
+        var refusal = DeployerPlanner.RefusalForWorkstationEdge(ListingConfig());
+
+        Assert.NotNull(refusal);
+        // It names the one publisher that remains, and the way back to updateedge with what that costs.
+        Assert.Contains("scu/dev lists config in Pipeline.Classes", refusal);
+        Assert.Contains("Run `lz deploytenant` instead", refusal);
+        Assert.Contains("take config out of Pipeline.Classes first, which also stops the deployer accepting config records", refusal);
+    }
+
+    [Fact]
+    public void UpdateEdge_RunsWhereThePipelineDoesNotListConfig()
+    {
+        // Every system with no block, a disabled one, or classes without config: the command is what it was before.
+        var noBlock = ListingConfig(); noBlock.Pipeline = null;
+        var disabled = ListingConfig(); disabled.Pipeline!.Enabled = false;
+        var noClasses = ListingConfig(); noClasses.Pipeline!.Classes = null;
+        var withoutConfig = ListingConfig(); withoutConfig.Pipeline!.Classes = new List<string> { "image", "client", "site", "assets" };
+
+        Assert.Null(DeployerPlanner.RefusalForWorkstationEdge(noBlock));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationEdge(disabled));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationEdge(noClasses));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationEdge(withoutConfig));
+        Assert.Null(DeployerPlanner.RefusalForWorkstationEdge(Config(false)));
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  Taking the hook off — the removal Pulumi cannot make (measured 2026-09-13)
     // ---------------------------------------------------------------------------------------
 

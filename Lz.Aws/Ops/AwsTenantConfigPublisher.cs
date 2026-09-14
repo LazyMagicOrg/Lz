@@ -21,15 +21,16 @@ using Lz.Aws.Interfaces.Outputs;
 namespace Lz.Aws.Ops;
 
 /// <summary>
-/// Publishes a tenant's runtime configuration to SSM Parameter Store
+/// Publishes a tenant's tenantconfig YAML to SSM Parameter Store
 /// (<c>/{sk}/{tk}/{env}/tenantconfig</c>) out-of-band — i.e. without a full
-/// <c>deploytenant</c>. The AppHost's SSM-backed refreshing configuration
-/// provider picks up the change within its poll interval (~60s), so config
-/// edits propagate with no container restart. See Service/Docs/DynamicConfig.md.
+/// <c>deploytenant</c>. It restarts nothing and checks nothing: a running service sees
+/// the new value only if it reloads that parameter, which lz cannot observe.
 ///
 /// This mirrors the SSM upload that <c>AwsServicesPostDeployAction</c> performs
-/// during <c>deploytenant</c> (same file, same placeholder substitution), so the
-/// out-of-band path stays byte-identical to a full deploy.
+/// during <c>deploytenant</c> on ecs-fargate-keycloak (same file, same placeholder
+/// substitution), so the out-of-band path stays byte-identical to a full deploy. No
+/// other topology's deploy writes the parameter, and <see cref="RefusalFor"/> refuses
+/// there.
 ///
 /// The <c>/config</c> CloudFront behavior is currently <c>CachingDisabled</c>, so
 /// an invalidation is not required for clients to see new values on their next
@@ -38,6 +39,23 @@ namespace Lz.Aws.Ops;
 /// </summary>
 public static class AwsTenantConfigPublisher
 {
+    /// <summary>
+    /// Why <c>lz updateconfig</c> must not run for this system, or null when it may. Where the topology's deploy never
+    /// writes <c>/{sk}/{tk}/{env}/tenantconfig</c> (<see cref="IAwsPlatformFactory.PublishesTenantConfigParameter"/>),
+    /// no service reads it either — on ecs-fargate-cognito-dynamodb the tenant service's role may read only
+    /// <c>/{sk}/{env}/*</c> — so the command wrote a parameter nothing would see, and reported success.
+    /// </summary>
+    public static string? RefusalFor(SystemConfig config, IAwsPlatformFactory platform)
+    {
+        if (platform.PublishesTenantConfigParameter) return null;
+
+        var sk = config.SystemKey;
+        var env = config.Environment;
+        return $"{config.Topology} never publishes /{sk}/{{tenant}}/{env}/tenantconfig: no deploy on this topology writes that " +
+               $"parameter and no service reads it (the tenant service's role may read only /{sk}/{env}/*), so updateconfig " +
+               $"would write a value nothing sees. The service loads its runtime configuration from /{sk}/{env}/.";
+    }
+
     public static async Task<bool> PublishAsync(
         string monorepoRoot,
         SystemConfig config,
@@ -93,8 +111,8 @@ public static class AwsTenantConfigPublisher
             description: $"Tenant config for {sk}/{tenantKey}/{env}");
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  Wrote {paramName} ({yamlContent.Length} bytes). " +
-                          "AppHost will pick it up within its poll interval (~60s).");
+        Console.WriteLine($"  Wrote {paramName} ({yamlContent.Length} bytes). Nothing was restarted; " +
+                          "a running service sees it only if it reloads that parameter.");
         Console.ResetColor();
 
         if (invalidate)

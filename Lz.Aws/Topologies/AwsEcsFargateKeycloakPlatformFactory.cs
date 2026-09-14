@@ -143,6 +143,9 @@ public class AwsEcsFargateKeycloakPlatformFactory : IAwsPlatformFactory
         TenantConfig? tenantConfig = null)
         => new AwsServicesPostDeployAction(_config, system, services, tenantKey, tenantConfig);
 
+    /// <summary>The tenant deploy action above uploads <c>/{sk}/{tk}/{env}/tenantconfig</c>, so <c>lz updateconfig</c> may run.</summary>
+    public virtual bool PublishesTenantConfigParameter => true;
+
     public virtual IConfigInitRunner? GetConfigInitRunner()
         => new AwsLambdaConfigInitRunner(_config);
 
