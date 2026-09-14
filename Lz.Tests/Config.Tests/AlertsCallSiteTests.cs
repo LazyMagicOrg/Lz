@@ -99,9 +99,9 @@ public class AlertsCallSiteTests
     [Fact]
     public void ARecordedAnomaly_IsFoundByListingItsKey_NotByReadingIt()
     {
-        // A read of a missing key answers 404 only to a principal holding s3:ListBucket, and the sweep's list grant is
-        // conditioned on a prefix a read request does not carry: the read could answer 403 for "not recorded yet", on the
-        // one path — an image without a record — that the sweep exists for.
+        // The sweep's grant holds no read of anomalies/ — only a list scoped to that prefix — so a probe that read the key
+        // would be refused on the one path, an image without a record, that the sweep exists for, and no live run of a
+        // clean repository would ever reach it to notice.
         var adapters = Source("Lz.Aws.Deployer", "Adapters.cs");
         var probe = adapters[At(adapters, "internal sealed class S3EvidenceProbe", "Adapters.cs")..];
         probe = probe[..probe.IndexOf("\n}", StringComparison.Ordinal)];

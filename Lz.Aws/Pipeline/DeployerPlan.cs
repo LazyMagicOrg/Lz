@@ -1238,8 +1238,8 @@ public static class DeployerPlanner
             },
             new
             {
-                // Whether an anomaly is already recorded, by listing its exact key: the listing carries the prefix this
-                // condition names, where a read of a missing key could answer 403 instead of 404.
+                // Whether an anomaly is already recorded, by listing its exact key — which is why the write above needs no
+                // read beside it.
                 Sid = "FindRecordedAnomalies",
                 Effect = "Allow",
                 Action = new[] { "s3:ListBucket" },

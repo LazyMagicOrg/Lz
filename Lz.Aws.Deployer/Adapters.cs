@@ -81,10 +81,8 @@ internal sealed class S3RecordKeys(IAmazonS3 s3) : IRecordKeys
 }
 
 /// <summary>
-/// Whether an evidence object exists, BY LISTING ITS EXACT KEY rather than reading it. A read of a missing key answers 404
-/// only to a principal holding <c>s3:ListBucket</c>, and the sweep's list grant is conditioned on a prefix that a read
-/// request does not carry — so the read could answer 403 for "not there". A listing carries the prefix, and a denial
-/// throws rather than reading as absence.
+/// Whether an evidence object exists, BY LISTING ITS EXACT KEY rather than reading it, so the sweep needs no read of
+/// <c>anomalies/</c> at all — only the list grant scoped to that prefix. A denial throws rather than reading as absence.
 /// </summary>
 internal sealed class S3EvidenceProbe(IAmazonS3 s3) : IEvidenceProbe
 {
