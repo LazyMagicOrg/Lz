@@ -83,6 +83,16 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     public bool IncludeDevCallbackUrls { get; set; } = false;
 
     /// <summary>
+    /// Localhost base paths registered after the built-in root, <c>store/</c>, <c>admin/</c> and <c>app/</c>
+    /// (<see cref="Lz.Aws.Auth.CognitoDevCallbacks"/>), on the pool's public client and the clients that reuse its
+    /// callback list. A local Blazor WASM app mounted at <c>https://localhost:7218/seller/</c> needs <c>seller/</c>
+    /// here, or Cognito refuses its redirect. Each entry is a relative path ending in <c>/</c>. Used only with
+    /// <see cref="IncludeDevCallbackUrls"/>. Null (default) registers the built-in paths alone, so the plan is
+    /// unchanged.
+    /// </summary>
+    public List<string>? DevCallbackBasePaths { get; set; }
+
+    /// <summary>
     /// When true, end users can self-register via Cognito Hosted UI's
     /// "Sign up" link. Translates to <c>AllowAdminCreateUserOnly = false</c>
     /// on the user pool's <c>AdminCreateUserConfig</c>. Default <c>false</c>

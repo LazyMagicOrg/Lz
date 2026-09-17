@@ -382,11 +382,13 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 // returns redirect_mismatch. The bare-root entries cover an app
                 // served at "/"; the per-app sub-paths (/store/,/admin/,/app/)
                 // cover apps whose WASMApp.csproj StaticWebAssetBasePath mounts the
-                // dev app under the same path as the cloud. Cognito has no wildcard
-                // support, so each must be enumerated. Dev-only (IncludeDevCallbackUrls).
+                // dev app under the same path as the cloud, and a pool's
+                // DevCallbackBasePaths adds its own apps' paths after them. Cognito has
+                // no wildcard support, so each must be enumerated. Dev-only
+                // (IncludeDevCallbackUrls).
                 callbackUrls.Add("https://localhost:5001/authentication/login-callback");
                 logoutUrls.Add("https://localhost:5001/authentication/logout-callback");
-                foreach (var basePath in new[] { "", "store/", "admin/", "app/" })
+                foreach (var basePath in CognitoDevCallbacks.BasePaths(poolConfig.DevCallbackBasePaths))
                 {
                     callbackUrls.Add($"https://localhost:7218/{basePath}authentication/login-callback");
                     logoutUrls.Add($"https://localhost:7218/{basePath}authentication/logout-callback");

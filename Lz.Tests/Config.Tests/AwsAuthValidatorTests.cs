@@ -211,6 +211,52 @@ public class AwsAuthValidatorTests
         Assert.Contains(errs, e => e.Contains("128-char"));
     }
 
+    // ---- DevCallbackBasePaths (a local app's own mount path) ---------------
+
+    [Fact]
+    public void Validate_AcceptsDevCallbackBasePaths_WithDevCallbacksOn()
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            IncludeDevCallbackUrls = true,
+            DevCallbackBasePaths = new List<string> { "seller/", "shop/app/", "my_app-2/" },
+        }), errs);
+        Assert.DoesNotContain(errs, e => e.Contains("DevCallbackBasePaths"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("seller")]
+    [InlineData("/seller/")]
+    [InlineData("seller//")]
+    [InlineData("../seller/")]
+    [InlineData("sel ler/")]
+    [InlineData("https://localhost:7218/seller/")]
+    public void Validate_RejectsDevCallbackBasePath_ThatIsNotARelativePathEndingInSlash(string basePath)
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            IncludeDevCallbackUrls = true,
+            DevCallbackBasePaths = new List<string> { "seller/", basePath },
+        }), errs);
+        Assert.Contains(errs, e => e.Contains("DevCallbackBasePaths[1]"));
+        Assert.DoesNotContain(errs, e => e.Contains("DevCallbackBasePaths[0]"));
+    }
+
+    [Fact]
+    public void Validate_RejectsDevCallbackBasePaths_WithDevCallbacksOff()
+    {
+        // The paths would register nothing: IncludeDevCallbackUrls gates every localhost entry.
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            DevCallbackBasePaths = new List<string> { "seller/" },
+        }), errs);
+        Assert.Contains(errs, e => e.Contains("DevCallbackBasePaths") && e.Contains("IncludeDevCallbackUrls is false"));
+    }
+
     [Fact]
     public void Validate_FlagsBaseTypeInAuthConfigs()
     {

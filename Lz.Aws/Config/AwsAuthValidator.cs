@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Lz.Core.Config;
 
 namespace Lz.Aws.Config;
@@ -20,6 +21,9 @@ public static class AwsAuthValidator
     private static readonly string[] _validMfa = { "OFF", "ON", "OPTIONAL" };
     private static readonly string[] _validAsm = { "OFF", "AUDIT", "ENFORCED" };
     private static readonly string[] _validTiers = { "LITE", "ESSENTIALS", "PLUS" };
+
+    // One or more path segments, each followed by '/': "seller/", "shop/app/". The root is built in.
+    private static readonly Regex _devCallbackBasePath = new(@"^(?:[A-Za-z0-9_-]+/)+$");
 
     public static void Validate(SystemConfig config, List<string> errs)
     {
@@ -128,6 +132,22 @@ public static class AwsAuthValidator
             errs.Add(
                 $"AuthConfigs['{poolName}'] has MfaConfiguration={pool.MfaConfiguration} but no MFA " +
                 "factor enabled. Set SoftwareTokenMfa=true (or SmsMfa=true once SMS is supported).");
+
+        if (pool.DevCallbackBasePaths is { Count: > 0 } devBasePaths)
+        {
+            if (!pool.IncludeDevCallbackUrls)
+                errs.Add(
+                    $"AuthConfigs['{poolName}'].DevCallbackBasePaths is set, but IncludeDevCallbackUrls is false, so " +
+                    "no localhost callback would be registered. Set IncludeDevCallbackUrls: true or remove the list.");
+            for (int i = 0; i < devBasePaths.Count; i++)
+            {
+                if (devBasePaths[i] is not { } basePath || !_devCallbackBasePath.IsMatch(basePath))
+                    errs.Add(
+                        $"AuthConfigs['{poolName}'].DevCallbackBasePaths[{i}] '{devBasePaths[i]}' is invalid. Use a " +
+                        "relative path whose segments are letters, digits, '-' or '_', each followed by '/', such as " +
+                        "'seller/'. The root is always registered.");
+            }
+        }
 
         if (pool.Groups != null)
         {
