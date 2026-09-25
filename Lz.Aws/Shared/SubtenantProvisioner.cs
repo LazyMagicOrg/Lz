@@ -18,9 +18,11 @@ namespace Lz.Aws.Shared;
 
 /// <summary>
 /// Creates and deletes per-subtenant infrastructure imperatively (outside
-/// Pulumi). Per-subtenant resources — the S3 assets bucket and the DynamoDB
-/// table — are decoupled from the tenant Pulumi stack so that subtenants
-/// can be added or removed without re-running <c>deploytenant</c>.
+/// Pulumi). Per-subtenant resources — the S3 assets bucket and the two
+/// DynamoDB tables, {sk}_{tk}_{stk} and its GSI twin {sk}_{tk}_{stk}_gsi —
+/// are decoupled from the tenant Pulumi stack so that subtenants can be added
+/// or removed without re-running <c>deploytenant</c>. The two tables live and
+/// die together: every path that ensures or destroys one does both.
 /// <para>
 /// Called by three places:
 /// <list type="bullet">
@@ -35,7 +37,7 @@ namespace Lz.Aws.Shared;
 public static class SubtenantProvisioner
 {
     /// <summary>
-    /// Ensure the S3 bucket and DynamoDB table for every subtenant listed
+    /// Ensure the S3 bucket and DynamoDB tables for every subtenant listed
     /// on <paramref name="tenant"/> exist. Idempotent — existing resources
     /// have their policy/tags re-applied so console-side drift is corrected.
     /// </summary>
@@ -53,7 +55,7 @@ public static class SubtenantProvisioner
     }
 
     /// <summary>
-    /// Ensure the S3 bucket and DynamoDB table for a single subtenant exist.
+    /// Ensure the S3 bucket and both DynamoDB tables for a single subtenant exist.
     /// </summary>
     public static async Task EnsureOneAsync(
         SystemConfig system, TenantConfig tenant, string subtenantKey,
@@ -98,43 +100,68 @@ public static class SubtenantProvisioner
             ? $"    {bucketName} — created"
             : $"    {bucketName} — exists (policy re-applied)");
 
-        // DynamoDB table — {sk}_{tk}_{stk}. This is the subtenant VAULT/PII table;
-        // system.Durability (when set) gates deletion protection + PITR on it.
-        var tableName = $"{sk}_{tk}_{subtenantKey}";
-        Console.WriteLine($"  subtenant '{subtenantKey}': ensuring table {tableName}");
+        // DynamoDB tables — {sk}_{tk}_{stk} and its GSI twin. These are the subtenant
+        // VAULT/PII tables; system.Durability (when set) gates deletion protection +
+        // PITR on both, the same decision for each.
         var durability = TableDurabilityPolicy.ForVaultTable(system.Durability);
-        var tableCreated = await DynamoDbTableCreator.EnsureTableAsync(
-            profile, region, tableName,
+        using var ddb = CreateDynamoClient(profile, region);
+        await EnsureTablesAsync(
+            ddb, sk, tk, subtenantKey,
             new Dictionary<string, string>(tags) { { "Level", "subtenant" } },
-            durability);
-        Console.WriteLine(tableCreated
-            ? $"    {tableName} — created"
-            : $"    {tableName} — exists");
-        // Surface the durability protections applied — the requested decision IS
-        // the applied state (ApplyDurabilityAsync applies exactly it, and any
-        // failure throws before 'created' prints). Reported HERE, uniformly for
-        // the create and exists paths, rather than inside DynamoDbTableCreator
-        // where the create-path deletion-protection set is deliberately skipped by
-        // ApplyDurabilityAsync and would go unlogged. Printed only when something
-        // is requested, so a no-opt-in system's output is unchanged.
-        if (durability.Any)
-            Console.WriteLine(
-                $"    {tableName} — durability: deletion protection " +
-                $"{(durability.DeletionProtection ? "ENABLED" : "off")}, " +
-                $"point-in-time recovery {(durability.PointInTimeRecovery ? "ENABLED" : "off")}");
+            durability, DynamoDbTableCreator.DefaultActivePollDelay);
     }
 
     /// <summary>
-    /// Destroy the S3 bucket and DynamoDB table for a single subtenant.
+    /// The subtenant's two tables: the LSI table and its GSI twin, which holds the
+    /// entities LazyMagic's Gsi table kind puts there.
+    /// </summary>
+    internal static (string Lsi, string Gsi) TableNames(string sk, string tk, string subtenantKey)
+        => ($"{sk}_{tk}_{subtenantKey}", $"{sk}_{tk}_{subtenantKey}_gsi");
+
+    /// <summary>
+    /// Ensures both of a subtenant's tables, each in its own shape and under the
+    /// same durability decision.
+    /// </summary>
+    internal static async Task EnsureTablesAsync(
+        Amazon.DynamoDBv2.IAmazonDynamoDB ddb, string sk, string tk, string subtenantKey,
+        Dictionary<string, string> tags, TableDurabilityDecision durability, TimeSpan activePollDelay)
+    {
+        var (lsi, gsi) = TableNames(sk, tk, subtenantKey);
+        foreach (var (tableName, isGsi) in new[] { (lsi, false), (gsi, true) })
+        {
+            Console.WriteLine($"  subtenant '{subtenantKey}': ensuring table {tableName}");
+            var tableCreated = isGsi
+                ? await DynamoDbTableCreator.EnsureGsiTableAsync(ddb, tableName, tags, durability, activePollDelay)
+                : await DynamoDbTableCreator.EnsureTableAsync(ddb, tableName, tags, durability, activePollDelay);
+            Console.WriteLine(tableCreated
+                ? $"    {tableName} — created"
+                : $"    {tableName} — exists");
+            // Surface the durability protections applied — the requested decision IS
+            // the applied state (ApplyDurabilityAsync applies exactly it, and any
+            // failure throws before 'created' prints). Reported HERE, uniformly for
+            // the create and exists paths, rather than inside DynamoDbTableCreator
+            // where the create-path deletion-protection set is deliberately skipped by
+            // ApplyDurabilityAsync and would go unlogged. Printed only when something
+            // is requested, so a no-opt-in system's output is unchanged.
+            if (durability.Any)
+                Console.WriteLine(
+                    $"    {tableName} — durability: deletion protection " +
+                    $"{(durability.DeletionProtection ? "ENABLED" : "off")}, " +
+                    $"point-in-time recovery {(durability.PointInTimeRecovery ? "ENABLED" : "off")}");
+        }
+    }
+
+    /// <summary>
+    /// Destroy the S3 bucket and both DynamoDB tables for a single subtenant.
     /// When <paramref name="forceEmptyBucket"/> is true the bucket is emptied
     /// before deletion (data loss — callers should confirm with the user).
     /// <para>
-    /// If the subtenant table has DynamoDB deletion protection enabled, it is
-    /// NOT deleted unless <paramref name="forceDeleteProtected"/> is also set —
-    /// in which case protection is disabled first, then the table is deleted.
-    /// Without the flag, a protected table causes this to throw (the destroy
-    /// fails loudly rather than silently leaving PII behind or silently
-    /// stripping the protection).
+    /// If either subtenant table has DynamoDB deletion protection enabled, nothing
+    /// is deleted unless <paramref name="forceDeleteProtected"/> is also set — in
+    /// which case protection is disabled first, then the table is deleted. Without
+    /// the flag, a protected table causes this to throw before anything is
+    /// destroyed (the destroy fails loudly rather than silently leaving PII behind,
+    /// silently stripping the protection, or leaving half a subtenant).
     /// </para>
     /// </summary>
     public static async Task DeleteOneAsync(
@@ -147,31 +174,55 @@ public static class SubtenantProvisioner
 
         var bucketName = SubtenantBucketManager.BucketName(
             sk, tk, subtenantKey, system.SystemSuffix);
-        var tableName = $"{sk}_{tk}_{subtenantKey}";
+        var (lsi, gsi) = TableNames(sk, tk, subtenantKey);
 
         using var ddb = CreateDynamoClient(profile, region);
+        await DeleteOneAsync(
+            ddb, new[] { lsi, gsi }, bucketName,
+            () => SubtenantBucketManager.DeleteBucketAsync(profile, region, bucketName, forceEmptyBucket),
+            forceDeleteProtected);
+    }
 
-        // Resolve the table teardown decision BEFORE any destructive step. A
-        // protected-table refusal must abort the WHOLE destroy — never leave a
-        // deleted bucket beside a surviving table (a half-destroyed subtenant).
-        var (tableExists, isProtected) = await DescribeTableProtectionAsync(ddb, tableName);
-        var action = TableDurabilityPolicy.DecideTeardown(isProtected, forceDeleteProtected);
-        if (action == TableTeardownAction.Refuse)
+    /// <summary>
+    /// The teardown itself, over any client and bucket deletion. Every table's
+    /// decision is resolved BEFORE any destructive step: a protected-table refusal
+    /// must abort the WHOLE destroy — never leave a deleted bucket, or one deleted
+    /// table, beside a surviving table (a half-destroyed subtenant). A table that is
+    /// already gone is skipped, and never stops the other from being deleted.
+    /// </summary>
+    internal static async Task DeleteOneAsync(
+        Amazon.DynamoDBv2.IAmazonDynamoDB ddb, IReadOnlyList<string> tableNames, string bucketName,
+        Func<Task> deleteBucket, bool forceDeleteProtected)
+    {
+        var teardowns = new List<(string Table, bool Exists, TableTeardownAction Action)>();
+        foreach (var tableName in tableNames)
+        {
+            var (exists, isProtected) = await DescribeTableProtectionAsync(ddb, tableName);
+            teardowns.Add((tableName, exists, TableDurabilityPolicy.DecideTeardown(isProtected, forceDeleteProtected)));
+        }
+        var refused = teardowns
+            .Where(t => t.Action == TableTeardownAction.Refuse)
+            .Select(t => $"'{t.Table}'")
+            .ToList();
+        if (refused.Count > 0)
             throw new InvalidOperationException(
-                $"DynamoDB table '{tableName}' has deletion protection enabled; refusing " +
-                "to delete it (nothing was destroyed — the S3 bucket is untouched). This is " +
-                "the subtenant vault/PII table; its rows are destroyed by deletion. Re-run " +
-                "with --force-delete-protected to disable protection and delete it (DATA LOSS; " +
+                $"DynamoDB table {string.Join(" and ", refused)} has deletion protection enabled; refusing " +
+                "to delete (nothing was destroyed — the S3 bucket and both tables are untouched). These " +
+                "are the subtenant vault/PII tables; their rows are destroyed by deletion. Re-run " +
+                "with --force-delete-protected to disable protection and delete them (DATA LOSS; " +
                 "ensure the PITR/backup window is an acceptable recovery point first).");
 
-        // Past the gate — both the bucket and the table WILL be destroyed.
+        // Past the gate — the bucket and every table that exists WILL be destroyed.
         Console.WriteLine($"  deleting bucket {bucketName}");
-        await SubtenantBucketManager.DeleteBucketAsync(profile, region, bucketName, forceEmptyBucket);
+        await deleteBucket();
 
-        Console.WriteLine($"  deleting table {tableName}");
-        if (!tableExists)
-            return; // Table already gone; bucket handled above.
-        await ExecuteTableTeardownAsync(ddb, tableName, action);
+        foreach (var (tableName, exists, action) in teardowns)
+        {
+            Console.WriteLine($"  deleting table {tableName}");
+            if (!exists)
+                continue; // Table already gone.
+            await ExecuteTableTeardownAsync(ddb, tableName, action);
+        }
     }
 
     private static Amazon.DynamoDBv2.AmazonDynamoDBClient CreateDynamoClient(
@@ -206,7 +257,7 @@ public static class SubtenantProvisioner
     /// <summary>
     /// Executes the resolved teardown for an existing table. <see
     /// cref="TableTeardownAction.Refuse"/> is impossible here — it is gated in
-    /// <see cref="DeleteOneAsync"/> before any destructive step.
+    /// DeleteOneAsync before any destructive step.
     /// </summary>
     private static async Task ExecuteTableTeardownAsync(
         Amazon.DynamoDBv2.IAmazonDynamoDB client, string tableName, TableTeardownAction action)

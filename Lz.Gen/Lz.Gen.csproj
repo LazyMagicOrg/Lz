@@ -39,6 +39,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- DotNetRepoProject's table-declaration reader and repo builder are internal; Gen.Tests pins them. -->
+    <InternalsVisibleTo Include="Lz.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- FlowThroughHelpers.tpl is loaded as an embedded resource by DotNetControllerProject -->
     <EmbeddedResource Include="ArtifactGeneration\ModuleArtifacts\FlowThroughHelpers.tpl">
       <LogicalName>Lz.Gen.ArtifactGeneration.ModuleArtifacts.FlowThroughHelpers.tpl</LogicalName>

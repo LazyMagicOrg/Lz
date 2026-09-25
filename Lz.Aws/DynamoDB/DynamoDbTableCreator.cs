@@ -4,25 +4,39 @@ using Amazon.DynamoDBv2.Model;
 namespace Lz.Aws.DynamoDB;
 
 /// <summary>
-/// Creates DynamoDB tables with the LazyMagic envelope schema:
-///   PK (HASH) + SK (RANGE)            -- attribute names MUST be "PK"/"SK"
-///   5 Local Secondary Indexes: PK-SK1-Index through PK-SK5-Index (sort keys SK1..SK5)
-///   TTL enabled on "TTL" attribute
-///   PAY_PER_REQUEST billing
+/// Creates DynamoDB tables with the LazyMagic envelope schema, in the two shapes behind LazyMagic's table
+/// kinds (DYDBRepository's TableKind):
+///
+///   LSI table (TableKind.Lsi) — EnsureTableAsync:
+///     PK (HASH) + SK (RANGE)            -- attribute names MUST be "PK"/"SK"
+///     5 Local Secondary Indexes: PK-SK1-Index through PK-SK5-Index (sort keys SK1..SK5), projection ALL
+///   GSI table (TableKind.Gsi) — EnsureGsiTableAsync, named for its LSI table plus "_gsi":
+///     PK (HASH) + SK (RANGE)
+///     NO local secondary indexes, so no 10 GB limit on a partition key value's items
+///     5 Global Secondary Indexes with the LSIs' names and keys: PK-SK1-Index through PK-SK5-Index,
+///     partition key PK, sort key SK1..SK5, projection KEYS_ONLY
+///   Both: TTL enabled on "TTL" attribute, PAY_PER_REQUEST billing.
 ///
 /// The key/index ATTRIBUTE NAMES must exactly match what
 /// LazyMagic.Service.DynamoDBRepo.DYDBRepository reads and writes:
 /// it stores the partition key as a literal "PK" attribute and the sort key as
-/// "SK" (see AssignEntityAttributes / QueryEquals), and queries the LSIs by
+/// "SK" (see AssignEntityAttributes / QueryEquals), and queries the indexes by
 /// "SK1".."SK5". A prior version created the keys as "id"/"sk"/"sk1".."sk5",
 /// which the repo cannot read or write (every /AppApi call 500'd with a
 /// swallowed DynamoDB ValidationException).
+///
+/// Each shape's CreateTableRequest is written out in its own ensure method (the internal overload that takes
+/// the poll delay): Scutara's DynamoTableShapeDriftTests reads each shape from that method's body. What the
+/// shapes share — tags, the wait for ACTIVE, TTL and durability — is in the helpers below.
 ///
 /// Tables are persistent — not deleted on destroy.
 /// Creation is idempotent — skips if table already exists.
 /// </summary>
 public static class DynamoDbTableCreator
 {
+    /// <summary>The wait between DescribeTable calls while a new table becomes ACTIVE.</summary>
+    internal static readonly TimeSpan DefaultActivePollDelay = TimeSpan.FromSeconds(3);
+
     /// <summary>
     /// Ensures a DynamoDB table exists with the standard LazyMagic schema.
     /// Returns true if created, false if already existed.
@@ -32,13 +46,7 @@ public static class DynamoDbTableCreator
         Dictionary<string, string>? tags = null,
         TableDurabilityDecision? durability = null)
     {
-        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
-        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-
-        using var client = credentials != null
-            ? new AmazonDynamoDBClient(credentials, endpoint)
-            : new AmazonDynamoDBClient(endpoint);
-
+        using var client = CreateClient(profile, region);
         return await EnsureTableAsync(client, tableName, tags, durability);
     }
 
@@ -51,29 +59,21 @@ public static class DynamoDbTableCreator
     /// the table already exists (never DISABLED here — disabling is reserved for
     /// the deliberate --force-delete-protected teardown path).
     /// </summary>
-    public static async Task<bool> EnsureTableAsync(
+    public static Task<bool> EnsureTableAsync(
         IAmazonDynamoDB client, string tableName,
         Dictionary<string, string>? tags = null,
         TableDurabilityDecision? durability = null)
+        => EnsureTableAsync(client, tableName, tags, durability, DefaultActivePollDelay);
+
+    internal static async Task<bool> EnsureTableAsync(
+        IAmazonDynamoDB client, string tableName,
+        Dictionary<string, string>? tags,
+        TableDurabilityDecision? durability,
+        TimeSpan activePollDelay)
     {
         var decision = durability ?? TableDurabilityDecision.None;
-
-        // Check if table already exists
-        try
-        {
-            var existing = await client.DescribeTableAsync(tableName);
-            // Idempotent ensure: re-apply requested protections to an existing
-            // table so opting a deployed system in (or re-running deploy) actually
-            // takes effect. Guarded on the flags, so None is a pure no-op here.
-            await ApplyDurabilityAsync(
-                client, tableName, decision,
-                existing.Table.DeletionProtectionEnabled ?? false);
+        if (await ExistsReapplyingDurabilityAsync(client, tableName, decision))
             return false; // Already exists
-        }
-        catch (ResourceNotFoundException)
-        {
-            // Table doesn't exist — create it
-        }
 
         // Attribute definitions — PK, SK, and 5 LSI sort keys. Names MUST match
         // DYDBRepository (literal "PK"/"SK"/"SK1".."SK5"), not "id"/"sk".
@@ -111,17 +111,6 @@ public static class DynamoDbTableCreator
             });
         }
 
-        // Tags
-        var tableTags = new List<Tag>
-        {
-            new() { Key = "ManagedBy", Value = "lz-pulumi" },
-        };
-        if (tags != null)
-        {
-            foreach (var (key, value) in tags)
-                tableTags.Add(new Tag { Key = key, Value = value });
-        }
-
         // Create table
         var createRequest = new CreateTableRequest
         {
@@ -130,7 +119,7 @@ public static class DynamoDbTableCreator
             KeySchema = keySchema,
             LocalSecondaryIndexes = localSecondaryIndexes,
             BillingMode = BillingMode.PAY_PER_REQUEST,
-            Tags = tableTags,
+            Tags = BuildTags(tags),
         };
         // Deletion protection is a create-time field (Nullable<bool>): set it ONLY
         // when requested, so an unset (null) leaves the request byte-identical to
@@ -140,11 +129,164 @@ public static class DynamoDbTableCreator
             createRequest.DeletionProtectionEnabled = true;
 
         await client.CreateTableAsync(createRequest);
+        await CompleteCreateAsync(client, tableName, decision, activePollDelay);
+        return true;
+    }
 
-        // Wait for table to become ACTIVE. 5-minute ceiling — pay-per-request
-        // tables typically activate in <30s; anything longer means something is
-        // wrong (throttling, region issue, AWS incident) and failing loudly is
-        // better than hanging the deploy.
+    /// <summary>
+    /// Ensures a GSI table exists: the LazyMagic keys with five keys-only global secondary indexes in place of the
+    /// LSI table's five local ones, so a type's items are not capped at 10 GB. LazyMagic's Gsi kind reads it: it
+    /// queries an index for keys and fetches the items from the table. Returns true if created, false if it
+    /// already existed. Durability is applied exactly as EnsureTableAsync applies it.
+    /// </summary>
+    public static async Task<bool> EnsureGsiTableAsync(
+        string profile, string region, string tableName,
+        Dictionary<string, string>? tags = null,
+        TableDurabilityDecision? durability = null)
+    {
+        using var client = CreateClient(profile, region);
+        return await EnsureGsiTableAsync(client, tableName, tags, durability);
+    }
+
+    /// <summary>EnsureGsiTableAsync using an existing client.</summary>
+    public static Task<bool> EnsureGsiTableAsync(
+        IAmazonDynamoDB client, string tableName,
+        Dictionary<string, string>? tags = null,
+        TableDurabilityDecision? durability = null)
+        => EnsureGsiTableAsync(client, tableName, tags, durability, DefaultActivePollDelay);
+
+    internal static async Task<bool> EnsureGsiTableAsync(
+        IAmazonDynamoDB client, string tableName,
+        Dictionary<string, string>? tags,
+        TableDurabilityDecision? durability,
+        TimeSpan activePollDelay)
+    {
+        var decision = durability ?? TableDurabilityDecision.None;
+        if (await ExistsReapplyingDurabilityAsync(client, tableName, decision))
+            return false; // Already exists
+
+        // The same seven attributes as the LSI table: the keys, and the five index sort keys. Every one an index
+        // keys on must be declared, and nothing else may be.
+        var attributeDefinitions = new List<AttributeDefinition>
+        {
+            new() { AttributeName = "PK", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK1", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK2", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK3", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK4", AttributeType = ScalarAttributeType.S },
+            new() { AttributeName = "SK5", AttributeType = ScalarAttributeType.S },
+        };
+
+        // Key schema — composite key (PK HASH + SK RANGE), as in the LSI table
+        var keySchema = new List<KeySchemaElement>
+        {
+            new() { AttributeName = "PK", KeyType = KeyType.HASH },
+            new() { AttributeName = "SK", KeyType = KeyType.RANGE },
+        };
+
+        // 5 Global Secondary Indexes keyed like the LSIs (PK + SKi), names PK-SK1-Index .. PK-SK5-Index, so
+        // DYDBRepository's queries need no change. KEYS_ONLY: an entry holds PK, SK and SKi, and the reader
+        // fetches the item.
+        var globalSecondaryIndexes = new List<GlobalSecondaryIndex>();
+        for (int i = 1; i <= 5; i++)
+        {
+            globalSecondaryIndexes.Add(new GlobalSecondaryIndex
+            {
+                IndexName = $"PK-SK{i}-Index",
+                KeySchema = new List<KeySchemaElement>
+                {
+                    new() { AttributeName = "PK", KeyType = KeyType.HASH },
+                    new() { AttributeName = $"SK{i}", KeyType = KeyType.RANGE },
+                },
+                Projection = new Projection { ProjectionType = ProjectionType.KEYS_ONLY },
+            });
+        }
+
+        // Create table — no LocalSecondaryIndexes: they are what brings the 10 GB limit.
+        var createRequest = new CreateTableRequest
+        {
+            TableName = tableName,
+            AttributeDefinitions = attributeDefinitions,
+            KeySchema = keySchema,
+            GlobalSecondaryIndexes = globalSecondaryIndexes,
+            BillingMode = BillingMode.PAY_PER_REQUEST,
+            Tags = BuildTags(tags),
+        };
+        if (decision.DeletionProtection)
+            createRequest.DeletionProtectionEnabled = true;
+
+        await client.CreateTableAsync(createRequest);
+        await CompleteCreateAsync(client, tableName, decision, activePollDelay);
+        return true;
+    }
+
+    private static AmazonDynamoDBClient CreateClient(string profile, string region)
+    {
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+
+        return credentials != null
+            ? new AmazonDynamoDBClient(credentials, endpoint)
+            : new AmazonDynamoDBClient(endpoint);
+    }
+
+    /// <summary>
+    /// The idempotent half of an ensure. When the table exists, re-apply the requested protections to it, so
+    /// opting a deployed system in (or re-running deploy) actually takes effect, and answer true; when it does
+    /// not, answer false and let the caller create it. Guarded on the flags, so None is a pure no-op here.
+    /// </summary>
+    private static async Task<bool> ExistsReapplyingDurabilityAsync(
+        IAmazonDynamoDB client, string tableName, TableDurabilityDecision decision)
+    {
+        try
+        {
+            var existing = await client.DescribeTableAsync(tableName);
+            await ApplyDurabilityAsync(
+                client, tableName, decision,
+                existing.Table.DeletionProtectionEnabled ?? false);
+            return true;
+        }
+        catch (ResourceNotFoundException)
+        {
+            return false; // Table doesn't exist — create it
+        }
+    }
+
+    private static List<Tag> BuildTags(Dictionary<string, string>? tags)
+    {
+        var tableTags = new List<Tag>
+        {
+            new() { Key = "ManagedBy", Value = "lz-pulumi" },
+        };
+        if (tags != null)
+        {
+            foreach (var (key, value) in tags)
+                tableTags.Add(new Tag { Key = key, Value = value });
+        }
+        return tableTags;
+    }
+
+    /// <summary>
+    /// What follows a CreateTable for both shapes: wait for ACTIVE, enable TTL, then apply PITR. Deletion
+    /// protection was already set in the CreateTable request, so it is passed as the current state and
+    /// ApplyDurabilityAsync skips a redundant UpdateTable.
+    /// </summary>
+    private static async Task CompleteCreateAsync(
+        IAmazonDynamoDB client, string tableName, TableDurabilityDecision decision, TimeSpan activePollDelay)
+    {
+        await WaitForActiveAsync(client, tableName, activePollDelay);
+        await EnableTtlAsync(client, tableName);
+        await ApplyDurabilityAsync(client, tableName, decision, decision.DeletionProtection);
+    }
+
+    /// <summary>
+    /// Waits for a new table to become ACTIVE. 5-minute ceiling — pay-per-request tables typically activate in
+    /// &lt;30s; anything longer means something is wrong (throttling, region issue, AWS incident) and failing
+    /// loudly is better than hanging the deploy.
+    /// </summary>
+    private static async Task WaitForActiveAsync(IAmazonDynamoDB client, string tableName, TimeSpan pollDelay)
+    {
         Console.Write($"    Waiting for {tableName}...");
         var deadline = DateTime.UtcNow.AddMinutes(5);
         while (true)
@@ -156,7 +298,7 @@ public static class DynamoDbTableCreator
                     $"DynamoDB table '{tableName}' did not become ACTIVE within 5 minutes. " +
                     "Check the AWS console for the table status and retry.");
             }
-            await Task.Delay(3000);
+            await Task.Delay(pollDelay);
             var desc = await client.DescribeTableAsync(tableName);
             if (desc.Table.TableStatus == TableStatus.ACTIVE)
             {
@@ -165,8 +307,10 @@ public static class DynamoDbTableCreator
             }
             Console.Write(".");
         }
+    }
 
-        // Enable TTL
+    private static async Task EnableTtlAsync(IAmazonDynamoDB client, string tableName)
+    {
         try
         {
             await client.UpdateTimeToLiveAsync(new UpdateTimeToLiveRequest
@@ -186,13 +330,6 @@ public static class DynamoDbTableCreator
             Console.WriteLine($"    TTL warning for {tableName}: {ex.Message}");
             Console.ResetColor();
         }
-
-        // Apply PITR now that the table is ACTIVE. Deletion protection was already
-        // set in the CreateTable request above, so pass currentDeletionProtection:
-        // decision.DeletionProtection to skip a redundant UpdateTable.
-        await ApplyDurabilityAsync(client, tableName, decision, decision.DeletionProtection);
-
-        return true;
     }
 
     /// <summary>

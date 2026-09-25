@@ -117,4 +117,46 @@ public class AwsNamingValidatorTests
         AwsNamingValidator.ValidateTenantKeys(sys, "bcs", tenant, errs);
         Assert.Empty(errs);
     }
+
+    // A table's GSI twin is its name plus "_gsi": tenant "gsi" would own {sk}_gsi, the system table's twin, and
+    // subtenant "gsi" would own {sk}_{tk}_gsi, the tenant table's.
+    [Theory]
+    [InlineData("gsi", "cerulean", "TenantKey 'gsi' is reserved")]
+    [InlineData("bcs", "gsi", "SubtenantKey 'gsi' is reserved")]
+    public void ValidateTenantKeys_RefusesGsiAsATenantOrSubtenantKey(string tenantKey, string subtenantKey, string expected)
+    {
+        var errs = new List<string>();
+        AwsNamingValidator.ValidateTenantKeys(ReservedKeySystem, tenantKey, TenantWith(tenantKey, subtenantKey), errs);
+        Assert.Contains(errs, e => e.Contains(expected));
+    }
+
+    [Theory]
+    [InlineData("gsi2")]
+    [InlineData("gs")]
+    [InlineData("xgsi")]
+    public void ValidateTenantKeys_ReservesOnlyGsiItself(string key)
+    {
+        var errs = new List<string>();
+        AwsNamingValidator.ValidateTenantKeys(ReservedKeySystem, key, TenantWith(key, key), errs);
+        Assert.Empty(errs);
+    }
+
+    private static readonly SystemConfig ReservedKeySystem = new()
+    {
+        SystemKey = "bcs",
+        Environment = "dev",
+        SystemSuffix = "4543-a317",
+    };
+
+    private static TenantConfig TenantWith(string tenantKey, string subtenantKey) => new()
+    {
+        SystemKey = ReservedKeySystem.SystemKey,
+        TenantKey = tenantKey,
+        Environment = ReservedKeySystem.Environment,
+        RootDomain = "example.com",
+        Subtenants = new Dictionary<string, SubtenantEntry>
+        {
+            [subtenantKey] = new() { SubDomain = subtenantKey },
+        },
+    };
 }

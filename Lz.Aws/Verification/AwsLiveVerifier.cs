@@ -304,6 +304,8 @@ public static class AwsLiveVerifier
         foreach (var stk in tc.Subtenants?.Keys ?? Enumerable.Empty<string>())
         {
             checks.Add(() => ctx.CheckDynamoTable($"{sk}_{tk}_{stk}", "table (subtenant)"));
+            // Its GSI twin, ensured and destroyed with it by SubtenantProvisioner.
+            checks.Add(() => ctx.CheckDynamoTable($"{sk}_{tk}_{stk}_gsi", "table (subtenant, GSI)"));
             // SubtenantProvisioner uses the SYSTEM suffix for subtenant buckets.
             checks.Add(() => ctx.CheckBucket(
                 Shared.SubtenantBucketManager.BucketName(sk, tk, stk, ss),

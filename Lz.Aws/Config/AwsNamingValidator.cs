@@ -57,15 +57,30 @@ public static class AwsNamingValidator
         SystemConfig system, string tenantKey, TenantConfig tenant, List<string> errs)
     {
         ValidateKey(tenantKey, "TenantKey", errs);
+        ValidateNotReserved(tenantKey, $"TenantKey '{tenantKey}'", errs);
 
         if (tenant.Subtenants != null)
         {
             foreach (var stk in tenant.Subtenants.Keys)
             {
                 ValidateKey(stk, $"SubtenantKey '{stk}'", errs);
+                ValidateNotReserved(stk, $"SubtenantKey '{stk}'", errs);
                 ValidateCombinedBucketLength(system, tenantKey, stk, errs);
             }
         }
+    }
+
+    /// <summary>
+    /// A table's GSI twin is its name plus "_gsi", so a tenant keyed "gsi" would own
+    /// {sk}_gsi, the system table's twin, and a subtenant keyed "gsi" would own
+    /// {sk}_{tk}_gsi, the tenant table's.
+    /// </summary>
+    private static void ValidateNotReserved(string? key, string fieldName, List<string> errs)
+    {
+        if (string.Equals(key, "gsi", StringComparison.Ordinal))
+            errs.Add(
+                $"{fieldName} is reserved: a table's GSI twin is named with a \"_gsi\" " +
+                "suffix, so this key would name another level's twin. Choose another key.");
     }
 
     /// <summary>

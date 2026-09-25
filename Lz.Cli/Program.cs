@@ -1841,7 +1841,7 @@ class Program
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
         var cmd = new Command("destroysubtenant",
-            "Destroy one subtenant's S3 bucket and DynamoDB table. After " +
+            "Destroy one subtenant's S3 bucket and its two DynamoDB tables (the table and its _gsi twin). After " +
             "running, remove the subtenant from subtenantconfig and run " +
             "`lz deploysubtenants` to refresh KVS. The CloudFront KVS entry " +
             "for the removed subtenant is NOT cleared — clean it up via the " +
@@ -1853,7 +1853,7 @@ class Program
             "Empty the S3 bucket before deleting (data loss). Without --force, " +
             "deletion fails if the bucket is non-empty.");
         var forceDeleteProtectedOption = new Option<bool>("--force-delete-protected",
-            "Delete the subtenant DynamoDB table even if it has deletion " +
+            "Delete the subtenant DynamoDB tables even if they have deletion " +
             "protection enabled (disables protection first, then deletes — DATA " +
             "LOSS). Without this flag, a protected table is left intact and the " +
             "destroy fails. Separate from --force (which only empties the S3 bucket).");
@@ -1886,8 +1886,8 @@ class Program
                         "  - S3 bucket " +
                         $"{Lz.Aws.Shared.SubtenantBucketManager.BucketName(config.SystemKey, tenantKey, subtenantKey, config.SystemSuffix)} " +
                         $"will be deleted{(force ? " (emptied first — DATA LOSS)" : "")}.");
-                    Console.WriteLine($"  - DynamoDB table {config.SystemKey}_{tenantKey}_{subtenantKey} will be deleted (DATA LOSS)" +
-                        $"{(forceDeleteProtected ? "; deletion protection, if enabled, will be DISABLED first (--force-delete-protected)" : " — if it has deletion protection enabled, the destroy will FAIL unless you also pass --force-delete-protected")}.");
+                    Console.WriteLine($"  - DynamoDB tables {config.SystemKey}_{tenantKey}_{subtenantKey} and {config.SystemKey}_{tenantKey}_{subtenantKey}_gsi will be deleted (DATA LOSS)" +
+                        $"{(forceDeleteProtected ? "; deletion protection, if enabled, will be DISABLED first (--force-delete-protected)" : " — if either has deletion protection enabled, the destroy will FAIL unless you also pass --force-delete-protected")}.");
                     Console.Write("Type 'yes' to confirm: ");
                     Console.ResetColor();
                     var response = Console.ReadLine();
