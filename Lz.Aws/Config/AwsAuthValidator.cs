@@ -149,6 +149,20 @@ public static class AwsAuthValidator
             }
         }
 
+        if (pool.DevCallbackPorts is { Count: > 0 } devPorts)
+        {
+            if (!pool.IncludeDevCallbackUrls)
+                errs.Add(
+                    $"AuthConfigs['{poolName}'].DevCallbackPorts is set, but IncludeDevCallbackUrls is false, so " +
+                    "no localhost callback would be registered. Set IncludeDevCallbackUrls: true or remove the list.");
+            for (int i = 0; i < devPorts.Count; i++)
+            {
+                if (devPorts[i] is < 1 or > 65535)
+                    errs.Add(
+                        $"AuthConfigs['{poolName}'].DevCallbackPorts[{i}] {devPorts[i]} is not a TCP port (1-65535).");
+            }
+        }
+
         if (pool.Groups != null)
         {
             var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -245,6 +245,47 @@ public class AwsAuthValidatorTests
         Assert.DoesNotContain(errs, e => e.Contains("DevCallbackBasePaths[0]"));
     }
 
+    // ---- DevCallbackPorts (a local app's own dev-server port) --------------
+
+    [Fact]
+    public void Validate_AcceptsDevCallbackPorts_WithDevCallbacksOn()
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            IncludeDevCallbackUrls = true,
+            DevCallbackPorts = new List<int> { 7218, 7219, 1, 65535 },
+        }), errs);
+        Assert.DoesNotContain(errs, e => e.Contains("DevCallbackPorts"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-7219)]
+    [InlineData(65536)]
+    public void Validate_RejectsDevCallbackPort_ThatIsNotATcpPort(int port)
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            IncludeDevCallbackUrls = true,
+            DevCallbackPorts = new List<int> { 7219, port },
+        }), errs);
+        Assert.Contains(errs, e => e.Contains("DevCallbackPorts[1]"));
+        Assert.DoesNotContain(errs, e => e.Contains("DevCallbackPorts[0]"));
+    }
+
+    [Fact]
+    public void Validate_RejectsDevCallbackPorts_WithDevCallbacksOff()
+    {
+        var errs = new List<string>();
+        AwsAuthValidator.Validate(WithPool(new AwsAuthConfigEntry
+        {
+            DevCallbackPorts = new List<int> { 7219 },
+        }), errs);
+        Assert.Contains(errs, e => e.Contains("DevCallbackPorts") && e.Contains("IncludeDevCallbackUrls is false"));
+    }
+
     [Fact]
     public void Validate_RejectsDevCallbackBasePaths_WithDevCallbacksOff()
     {

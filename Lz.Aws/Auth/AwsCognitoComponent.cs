@@ -374,7 +374,8 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             {
                 // 5001 is the LocalWebService (API) port; 7218 is the Blazor WASM
                 // dev-server port (all three MagicPets WASM apps launch on 7218 —
-                // one at a time — per each WASMApp/Properties/launchSettings.json).
+                // one at a time — per each WASMApp/Properties/launchSettings.json),
+                // unless the pool's DevCallbackPorts names its own apps' ports instead.
                 // SPA-OIDC in local VS debug builds its redirect_uri from the WASM's
                 // own origin+base-path (redirect override in Program.cs →
                 // {BaseAddress}authentication/login-callback), so every localhost
@@ -388,10 +389,10 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 // (IncludeDevCallbackUrls).
                 callbackUrls.Add("https://localhost:5001/authentication/login-callback");
                 logoutUrls.Add("https://localhost:5001/authentication/logout-callback");
-                foreach (var basePath in CognitoDevCallbacks.BasePaths(poolConfig.DevCallbackBasePaths))
+                foreach (var baseUrl in CognitoDevCallbacks.BaseUrls(poolConfig.DevCallbackPorts, poolConfig.DevCallbackBasePaths))
                 {
-                    callbackUrls.Add($"https://localhost:7218/{basePath}authentication/login-callback");
-                    logoutUrls.Add($"https://localhost:7218/{basePath}authentication/logout-callback");
+                    callbackUrls.Add($"{baseUrl}authentication/login-callback");
+                    logoutUrls.Add($"{baseUrl}authentication/logout-callback");
                 }
                 // MAUI native apps: LazyMagic.OIDC.MAUI hardcodes this custom-scheme
                 // redirect (MauiOIDCService.GetRedirectUri → "awsloginmaui://auth-callback").

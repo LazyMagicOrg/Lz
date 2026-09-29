@@ -93,6 +93,14 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     public List<string>? DevCallbackBasePaths { get; set; }
 
     /// <summary>
+    /// The localhost ports the pool's local apps serve on, registered INSTEAD OF the default 7218
+    /// (<see cref="Lz.Aws.Auth.CognitoDevCallbacks.DefaultPort"/>), each with every base path. Lets two local apps on
+    /// different pools run at once - one on 7218, the other on, say, 7219. Used only with
+    /// <see cref="IncludeDevCallbackUrls"/>. Null (default) registers 7218 alone, so the plan is unchanged.
+    /// </summary>
+    public List<int>? DevCallbackPorts { get; set; }
+
+    /// <summary>
     /// When true, end users can self-register via Cognito Hosted UI's
     /// "Sign up" link. Translates to <c>AllowAdminCreateUserOnly = false</c>
     /// on the user pool's <c>AdminCreateUserConfig</c>. Default <c>false</c>

@@ -58,6 +58,8 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
                 IncludeDevCallbackUrls: true
                 DevCallbackBasePaths:
                   - seller/
+                DevCallbackPorts:
+                  - 7219
                 Groups:
                   - Name: super-admin
                     Description: Destructive privileges
@@ -80,6 +82,7 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
         Assert.Equal("ENFORCED", aws.AdvancedSecurityMode);
         Assert.True(aws.IncludeDevCallbackUrls);
         Assert.Equal(new[] { "seller/" }, aws.DevCallbackBasePaths);
+        Assert.Equal(new[] { 7219 }, aws.DevCallbackPorts);
 
         Assert.NotNull(aws.Groups);
         Assert.Equal(2, aws.Groups!.Count);
@@ -114,6 +117,7 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
         Assert.Equal("OFF", aws.AdvancedSecurityMode);
         Assert.False(aws.IncludeDevCallbackUrls);
         Assert.Null(aws.DevCallbackBasePaths);
+        Assert.Null(aws.DevCallbackPorts);
         Assert.Null(aws.Groups);
         // M0-2 backward-compat: MachineAuth absent -> null -> no resource server / M2M client.
         Assert.Null(aws.MachineAuth);
