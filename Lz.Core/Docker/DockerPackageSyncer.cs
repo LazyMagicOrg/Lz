@@ -13,12 +13,15 @@ namespace Lz.Core.Docker;
 ///   2. Parse project.assets.json to discover all resolved packages
 ///   3. Copy each .nupkg from the global cache into Context/DockerPackages/
 ///
-/// <para><b>THE CONTAINER'S LANE IS THE WORKSPACE'S LANE, and that is by construction rather than
-/// by configuration.</b> Step 1 restores on the host, so it obeys whatever
-/// <c>Packages.Local.props</c> says at that moment; step 2 reads the versions that restore actually
-/// RESOLVED; step 3 copies exactly those. Switch the workspace with <c>lz packages mode</c> and the
-/// next image follows, with no separate switch to forget. The folder is deleted and recreated each
-/// run, so nothing survives from a previous lane.</para>
+/// <para><b>THE CONTAINER'S LANE IS THE WORKSPACE'S LANE.</b> Step 1 restores on the host, so it
+/// obeys whatever <c>Packages.Local.props</c> says at that moment; step 2 reads the versions that
+/// restore actually RESOLVED; step 3 copies exactly those. Step 4 copies the override itself into
+/// <c>DockerPackages/</c> too, because the image's own restore needs it as much as the packages: the
+/// override lives at the workspace root, outside the build context, so without the copy the in-image
+/// restore fell back to the consumer's committed pins and failed NU1102 against a DockerPackages that
+/// held only the local lane's versions (2026-10-02). The consumer imports the copy only inside a
+/// container. Switch the workspace with <c>lz packages mode</c> and the next image follows. The
+/// folder is deleted and recreated each run, so nothing survives from a previous lane.</para>
 ///
 /// <para>Worth stating because it is easy to misread: a stale <c>DockerPackages</c> is a folder that
 /// this syncer has NOT run over, not evidence that it copies the wrong thing. Building the image
@@ -100,6 +103,18 @@ public static class DockerPackageSyncer
 
         Console.WriteLine($"  Copied {copied} packages to DockerPackages/");
 
+        // 6. The lane override travels with the packages it names (see the class remarks).
+        var laneOverride = LaneOverridePath(contextPath);
+        if (laneOverride is not null)
+        {
+            File.Copy(laneOverride, Path.Combine(dockerPkgDir, Lz.Core.PackageLane.PackageLaneStatus.LocalOverrideFileName));
+            Console.WriteLine($"  Lane: local - {Lz.Core.PackageLane.PackageLaneStatus.LocalOverrideFileName} copied to DockerPackages/");
+        }
+        else
+        {
+            Console.WriteLine("  Lane: published - no override, the image restores the committed pins");
+        }
+
         // THE PROVENANCE LINE. Without it the image's first-party versions are invisible until
         // something fails, and a lane mix-up looks exactly like a working build.
         if (syncedFirstParty.Count > 0)
@@ -153,7 +168,11 @@ public static class DockerPackageSyncer
         try
         {
             var root = Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot(contextPath);
-            var configPath = Directory.EnumerateFiles(root, "*uget.[Cc]onfig").FirstOrDefault();
+            // Match the name case-insensitively by hand: .NET search patterns support only * and ?,
+            // so the "*uget.[Cc]onfig" this used to pass matched nothing - the first-party set was
+            // always empty, which silently disabled both the provenance line and the guard below.
+            var configPath = Directory.EnumerateFiles(root, "*.config")
+                .FirstOrDefault(f => Path.GetFileName(f).Equals("nuget.config", StringComparison.OrdinalIgnoreCase));
             if (configPath is null) return ids;
 
             var feeds = Lz.Core.PackageLane.LocalFeeds.FromNuGetConfig(File.ReadAllText(configPath));
@@ -165,6 +184,21 @@ public static class DockerPackageSyncer
             // check simply does not apply, which is different from it failing.
         }
         return ids;
+    }
+
+    /// <summary>The workspace's lane override, or null on the published lane or outside a workspace.</summary>
+    private static string? LaneOverridePath(string contextPath)
+    {
+        try
+        {
+            var root = Lz.Core.Repos.RepoDiscovery.FindWorkspaceRoot(contextPath);
+            var path = Path.Combine(root, Lz.Core.PackageLane.PackageLaneStatus.LocalOverrideFileName);
+            return File.Exists(path) ? path : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task RunDotnetRestoreAsync(string projectPath)
