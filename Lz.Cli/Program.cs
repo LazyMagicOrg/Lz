@@ -1,4 +1,7 @@
 using System.CommandLine;
+using System.CommandLine.Builder;
+using System.CommandLine.Help;
+using System.CommandLine.Parsing;
 using System.Reflection;
 using Lz.Core.Config;
 using Lz.Core.Definitions;
@@ -180,7 +183,7 @@ class Program
             .ToHashSet(StringComparer.Ordinal);
 
         // Top-level help: render the command list grouped into sections for
-        // readability (Shared / System / Tenant / Subtenant / Misc). Subcommand
+        // readability (Shared / System / Tenant / Subtenant / Pipeline / Misc). Subcommand
         // help (e.g. `lz deploytenant -h`) is unaffected. Placed after plugin
         // command registration so plugin-contributed commands are included.
         if (args.Length == 0 ||
@@ -190,7 +193,21 @@ class Program
             return 0;
         }
 
-        var rc = await rootCommand.InvokeAsync(args);
+        // A root-level parse error (`lz yada`, `lz --bogus`) prints the root command's help after
+        // the errors. Without this that is System.CommandLine's default layout - one flat list,
+        // full-length descriptions, "Lz.Cli" for the name - instead of the grouped help above.
+        // Same defaults as rootCommand.InvokeAsync, so typo suggestions and error reporting stay.
+        var parser = new CommandLineBuilder(rootCommand)
+            .UseDefaults()
+            .UseHelp(ctx =>
+            {
+                if (ctx.Command != rootCommand) return;
+                ctx.HelpBuilder.CustomizeLayout(_ =>
+                    new HelpSectionDelegate[] { _ => PrintGroupedHelp(rootCommand, pluginCommands) });
+            })
+            .Build();
+
+        var rc = await parser.InvokeAsync(args);
         // Handlers signal failure via Environment.ExitCode (the established
         // pattern throughout this file), but a Main that RETURNS an int makes
         // the runtime ignore Environment.ExitCode — so honor it explicitly.
@@ -233,9 +250,13 @@ class Program
                         "park", "unpark", "destroytenant" }),
             ("Subtenant", "per-subtenant resources",
                 new[] { "deploysubtenants", "deploystaticsite", "destroysubtenant" }),
+            // Not System: neither is a stack, the pipeline lives in its own build account, and both
+            // are person-run bootstraps that plan unless --apply. Listed in the order they are run.
+            ("Pipeline",  "decoupled CD bootstrap: build account first, then each target account",
+                new[] { "bootstrappipeline", "bootstrapdeployer" }),
             ("Misc",      "discovery, codegen, utilities",
                 new[] { "status", "getenv", "gettenants", "gettesttenant", "gen", "util", "repos",
-                        "clonerepos", "verify", "unlock" }),
+                        "clonerepos", "packages", "verify", "unlock" }),
         };
 
         var byName = root.Subcommands.ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
