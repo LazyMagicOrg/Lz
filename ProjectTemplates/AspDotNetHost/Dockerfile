@@ -23,25 +23,49 @@ WORKDIR /src
 
 ARG ContainerName=""
 
-# Copy entire solution
+# WHICH LANE THE FIRST-PARTY PACKAGES COME FROM. REQUIRED, and deliberately WITHOUT A DEFAULT.
+#
+#   local      - /src/DockerPackages, filled by DockerPackageSyncer from a HOST restore. What
+#                `lz deploycontainer` passes; the loop that works today.
+#   published  - LazyMagicOrg's registry and nuget.org, and nothing on this machine.
+#
+# A DEFAULT WOULD DEFEAT THE POINT whichever way it fell. Defaulting to `local` lets a pipeline that
+# forgets the arg sign an image whose contents depend on a workstation. Defaulting to `published`
+# breaks `lz deploycontainer` the moment it is run from an older config. So neither: the build
+# refuses. This mirrors DecoupledCd.md section 4.3's rule for `builtFrom.packages` - a value that is
+# required with an explicit "none" beats a value that may be absent, because absence cannot be
+# distinguished from a writer that forgot.
+ARG PackageLane=""
+
+# Copy entire solution. .dockerignore excludes /Packages/ - see that file for why DockerPackages is
+# NOT excluded with it.
 COPY . .
 
-# Generate nuget.config to use DockerPackages folder
-RUN echo '<?xml version="1.0" encoding="utf-8"?>' > nuget.config && \
-    echo '<configuration>' >> nuget.config && \
-    echo '  <packageSources>' >> nuget.config && \
-    echo '    <clear />' >> nuget.config && \
-    echo '    <add key="DockerCache" value="/src/DockerPackages" />' >> nuget.config && \
-    echo '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />' >> nuget.config && \
-    echo '  </packageSources>' >> nuget.config && \
-    echo '  <fallbackPackageFolders>' >> nuget.config && \
-    echo '    <clear />' >> nuget.config && \
-    echo '  </fallbackPackageFolders>' >> nuget.config && \
-    echo '</configuration>' >> nuget.config
+RUN case "${PackageLane}" in \
+      published|local) echo "PackageLane=${PackageLane}" ;; \
+      "") echo "REFUSED: PackageLane is required and has no default. Pass --build-arg PackageLane=published for a" >&2; \
+          echo "         signable image, or =local for the DockerPackages loop. See this Dockerfile's ARG note." >&2; \
+          exit 1 ;; \
+      *)  echo "REFUSED: PackageLane='${PackageLane}' is not 'published' or 'local'." >&2; exit 1 ;; \
+    esac
 
-# Restore the specific container project (separate layer so package restore is cached)
+# Restore the specific container project (separate layer so package restore is cached).
+#
+# The config is now a COMMITTED file chosen by lane, not a chain of `echo` redirects. Two reasons
+# beyond tidiness: a generated file is not reviewable in a diff, and it cannot be named by
+# RestoreConfigFile from outside the image when someone wants to reproduce the restore by hand.
+#
+# THE CREDENTIAL IS A BUILDKIT SECRET, NEVER A BUILD ARG. An ARG is recorded in the image history,
+# so `docker history` would print it. The published lane needs one even though LazyMagicOrg's
+# packages are public, because GitHub Packages 401s on an anonymous read; the local lane needs none,
+# which is why the mount is optional and the export is guarded by the file's existence.
 WORKDIR /src/Containers/${ContainerName}
-RUN dotnet restore "${ContainerName}.csproj"
+RUN --mount=type=secret,id=nuget_creds \
+    if [ -f /run/secrets/nuget_creds ]; then \
+      export NuGetPackageSourceCredentials_LazyMagicRegistry="$(cat /run/secrets/nuget_creds)"; \
+    fi; \
+    dotnet restore "${ContainerName}.csproj" \
+      -p:RestoreConfigFile=/src/Containers/${ContainerName}/docker.${PackageLane}.NuGet.Config
 
 # Publish directly (publish builds internally; a standalone `dotnet build` would be redundant since
 # only /app/publish is copied into the final image). --no-restore reuses the cached restore above.
@@ -52,6 +76,16 @@ RUN dotnet publish "${ContainerName}.csproj" -c Release -o /app/publish \
 
 FROM base AS final
 ARG ContainerName=""
+ARG PackageLane=""
+
+# THE LANE TRAVELS WITH THE IMAGE. A build record's `builtFrom.lane` (DecoupledCd.md section 4.3) is
+# written by the build workflow, which is outside the trust boundary; this label is the same fact
+# read off the artifact, so Verify can CORROBORATE the record rather than taking its word. Deliberately
+# just the lane: the resolved package versions belong in the record, sourced from project.assets.json,
+# and putting a second copy in the image would create two sources of truth for one fact.
+LABEL org.lazymagic.package-lane="${PackageLane}"
+LABEL org.lazymagic.container-name="${ContainerName}"
+
 ENV CONTAINER_DLL=${ContainerName}.dll
 WORKDIR /app
 COPY --from=publish /app/publish .
