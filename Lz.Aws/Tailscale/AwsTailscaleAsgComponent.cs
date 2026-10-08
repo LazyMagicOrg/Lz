@@ -119,25 +119,26 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
 
         // =====================================================================
         // LOOKUP LATEST ARM64 AL2023 AMI
+        //
+        // The STANDARD Amazon Linux 2023 image, through AWS's own "latest" pointer.
+        //
+        // This used to be a name search - the newest image matching
+        // "al2023-ami-*-arm64". That pattern also matches the minimal and the
+        // ECS-optimized lines, each in several kernel versions, and "newest" took
+        // whichever AWS happened to publish last: in practice the ECS-optimized image,
+        // which starts Docker, containerd and the ECS agent (~80 MB) on a machine that
+        // only routes. On the default 0.5 GB instance that left too little for the
+        // Tailscale install, the kernel killed yum, and the router never joined the
+        // tailnet (measured 2026-10-08: 0 of 2 on the ECS image, 4 of 4 on this one).
+        //
+        // kernel-default follows the kernel AWS currently recommends (6.18 today). Use
+        // al2023-ami-kernel-6.1-arm64 to pin the kernel line instead: it leaves about
+        // 25 MB more free at boot, which matters on a t4g.nano and nowhere else.
         // =====================================================================
 
-        var ami = Pulumi.Aws.Ec2.GetAmi.Invoke(new GetAmiInvokeArgs
+        var ami = Pulumi.Aws.Ssm.GetParameter.Invoke(new Pulumi.Aws.Ssm.GetParameterInvokeArgs
         {
-            MostRecent = true,
-            Owners = { "amazon" },
-            Filters =
-            {
-                new Pulumi.Aws.Ec2.Inputs.GetAmiFilterInputArgs
-                {
-                    Name = "name",
-                    Values = { "al2023-ami-*-arm64" },
-                },
-                new Pulumi.Aws.Ec2.Inputs.GetAmiFilterInputArgs
-                {
-                    Name = "state",
-                    Values = { "available" },
-                },
-            },
+            Name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
         });
 
         // =====================================================================
@@ -161,7 +162,9 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
         {
             Name = $"{prefix}-tailscale-lt",
             Description = ltDescription,
-            ImageId = ami.Apply(a => a.Id),
+            // InsecureValue, not Value: an image ID is not a secret, and Value would
+            // mark this property as one in state and in every preview.
+            ImageId = ami.Apply(a => a.InsecureValue),
             InstanceType = instanceType,
             UserData = userDataOutput.Apply(ud =>
                 Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(ud))),
@@ -346,12 +349,17 @@ done
 
 # ===================================================================
 # SSM Agent — enables AWS Console -> Connect -> SSM Session Manager.
-# AL2023 minimal does NOT include amazon-ssm-agent by default and the
-# package isn't always in the minimal AMI's enabled dnf repos, so we
-# install from the official AWS RPM URL (works on any AL/RHEL variant).
-# Architecture is detected so the same script runs on x86_64 or arm64.
-# The IAM role already carries AmazonSSMManagedInstanceCore; once the
-# agent starts it registers and the SSM tab goes Online within ~60s.
+# The standard AL2023 image already ships the agent, so this install
+# normally finds nothing to do. KEEP IT, FIRST AND NON-FATAL: the first
+# dnf run on a fresh instance builds the package catalogue and needs
+# 250-280 MB, which a 0.5 GB instance cannot always spare. When the
+# kernel kills that run, this is the step that dies; the download stays
+# cached and the Tailscale install below then succeeds. Without this
+# step the Tailscale installer makes the first run, under set -e, and
+# the router never comes up (measured 2026-10-08: 0 of 2).
+# It installs from the official AWS RPM URL (works on any AL/RHEL
+# variant); architecture is detected so the same script runs on x86_64
+# or arm64. The IAM role already carries AmazonSSMManagedInstanceCore.
 # Failure here is non-fatal — Tailscale + EFS setup must still proceed.
 # ===================================================================
 ARCH=$(uname -m)
