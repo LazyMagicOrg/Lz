@@ -2,7 +2,7 @@ namespace Lz.Core.Config;
 
 /// <summary>
 /// Opt-in decoupled-CD pipeline. Maps to the "Pipeline:" section in
-/// systemconfig.{systemkey}.{env}.yaml. Design: Docs/specs/DecoupledCd.md.
+/// systemconfig.{systemkey}.{env}.yaml. Design: Docs/specs/Platform/DecoupledCd.md.
 ///
 /// <para>WHAT IT IS FOR. Today every class this system deploys reaches AWS because a person ran an
 /// <c>lz</c> command from a workstation holding administrator credentials. The pipeline moves the

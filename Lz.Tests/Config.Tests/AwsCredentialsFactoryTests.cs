@@ -5,7 +5,7 @@ using Lz.Aws;
 namespace Lz.Tests.Config.Tests;
 
 /// <summary>
-/// The one place a configured <c>Profile</c> becomes credentials (Docs/specs/DecoupledCd.md §8
+/// The one place a configured <c>Profile</c> becomes credentials (Docs/specs/Platform/DecoupledCd.md §8
 /// item 2, punchlist P0).
 ///
 /// <para>P0 asks specifically for "a test that a config naming a profile resolves exactly the

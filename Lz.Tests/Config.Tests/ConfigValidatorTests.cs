@@ -48,7 +48,7 @@ public class ConfigValidatorTests
     /// INVERTED 2026-09-11. This test used to assert that a missing Profile was a validation
     /// error, which was right while lz only ever ran on a workstation with an SSO profile. The
     /// decoupled-CD deployer runs inside the target account on a task role and has no profile at
-    /// all (Docs/specs/DecoupledCd.md §8 item 2), so an empty Profile is now the AMBIENT case and
+    /// all (Docs/specs/Platform/DecoupledCd.md §8 item 2), so an empty Profile is now the AMBIENT case and
     /// an ordinary supported state. It is kept rather than deleted because the assertion it makes
     /// is still load-bearing — just in the other direction.
     /// </summary>

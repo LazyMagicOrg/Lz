@@ -216,7 +216,7 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// <see cref="CustomAuth"/>. DISTINCT from <see cref="MachineAuth"/>: that welds its resource server to
     /// <c>client_credentials</c> clients (which carry neither a user <c>sub</c> nor an <c>aud</c>); the hosted
     /// MCP path needs auth-code + PKCE, the only Cognito flow that yields <c>sub</c> + scope + <c>aud</c>
-    /// together. See specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+    /// together. See specs/Platform/McpAuth.md §7.4 and specs/Platform/McpAgents.md M0-8.
     /// </summary>
     public McpResourceConfig? McpResource { get; set; }
 }

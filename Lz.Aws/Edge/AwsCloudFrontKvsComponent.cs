@@ -992,7 +992,7 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
         // header, so these reach the container the same gated way /bff does. ADDED ONLY when
         // tenantConfig.McpEnabled, so tenants without MCP keep a byte-for-byte identical behaviors list.
         // The bare /mcp URL (not /AipApi/mcp) is load-bearing: it is the token aud + the PRM resource. See
-        // specs/McpAgents.md M0-8 and specs/McpAuth.md §7.4.
+        // specs/Platform/McpAgents.md M0-8 and specs/Platform/McpAuth.md §7.4.
         if (tenantConfig.McpEnabled == true)
         {
             // "/.well-known/oauth-protected-resource*" (prefix) covers BOTH the bare PRM and the RFC 9728

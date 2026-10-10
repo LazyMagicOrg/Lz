@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 namespace Lz.Tests.Validation.Tests;
 
 /// <summary>
-/// "Failures that report and exit 0 now exit non-zero" — Docs/specs/DecoupledCd.md §8, the one
+/// "Failures that report and exit 0 now exit non-zero" — Docs/specs/Platform/DecoupledCd.md §8, the one
 /// change in that design classed as a cross-system bug fix rather than gated on <c>Pipeline</c>,
 /// and P0's "the exit-code fix, with a test per formerly-silent path".
 ///

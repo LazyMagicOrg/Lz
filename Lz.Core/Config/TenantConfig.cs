@@ -154,7 +154,7 @@ public class TenantConfig
     /// NOT the merchants' pool, so its browser session cannot share the tenantauth
     /// <c>/bff</c> — that instance is bound to one pool's confidential client. Repointing
     /// <c>BffAuthPool</c> instead would move the single <c>/bff</c> WHOLESALE and break every
-    /// tenantauth app sharing it. See Scutara's Docs/specs/PlatformStaffPool.md.</para>
+    /// tenantauth app sharing it. See Scutara's Docs/specs/Admin/Features/PlatformStaffPool.md.</para>
     /// </summary>
     public bool? BffSystemAuthEnabled { get; set; }
 
@@ -163,7 +163,7 @@ public class TenantConfig
     /// (Streamable HTTP) and the RFC 9728 PRM (<c>/.well-known/oauth-protected-resource</c>) to the API
     /// origin (AipHost), unstripped (same passthrough model as <c>/bff</c>). Default <c>false</c>/null ⇒
     /// the behaviors list is byte-for-byte identical to a non-MCP tenant. Pair with the pool's
-    /// <c>McpResource</c> opt-in and AipHost's <c>Mcp:*</c> config. See specs/McpAgents.md M0-8.
+    /// <c>McpResource</c> opt-in and AipHost's <c>Mcp:*</c> config. See specs/Platform/McpAgents.md M0-8.
     /// </summary>
     public bool? McpEnabled { get; set; }
 

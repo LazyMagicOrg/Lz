@@ -708,7 +708,7 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             // from MachineAuth: that mints client_credentials clients (no sub, no aud); the hosted MCP path
             // needs auth-code + PKCE — the only Cognito flow yielding sub + scope + aud together. The aud
             // itself is set at RUNTIME (client sends &resource=<Identifier> at /authorize), not here. See
-            // specs/McpAuth.md §7.4 and specs/McpAgents.md M0-8.
+            // specs/Platform/McpAuth.md §7.4 and specs/Platform/McpAgents.md M0-8.
             // =================================================================
             // Captured for the ManagedLoginBranding block below: ManagedLoginVersion=2 requires a per-client
             // branding slot or the hosted UI returns "Login pages unavailable" for THIS client's sign-in (the

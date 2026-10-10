@@ -7,7 +7,7 @@ using YamlDotNet.Serialization.NamingConventions;
 namespace Lz.Tests.Config.Tests;
 
 /// <summary>
-/// The opt-in Pipeline block (Docs/specs/DecoupledCd.md, punchlist P0).
+/// The opt-in Pipeline block (Docs/specs/Platform/DecoupledCd.md, punchlist P0).
 ///
 /// <para>The spec is explicit that byte-identical-when-absent "is not a courtesy here; it is the
 /// compatibility guarantee the sibling systems run on, so it is pinned by a test, not a comment".

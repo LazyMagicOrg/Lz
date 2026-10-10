@@ -213,7 +213,7 @@ public static class ConfigValidator
 
     /// <summary>
     /// Validate an opt-in Pipeline block. See <see cref="PipelineConfig"/> and
-    /// Docs/specs/DecoupledCd.md.
+    /// Docs/specs/Platform/DecoupledCd.md.
     ///
     /// <para>EVERY RULE BELOW IS GATED ON <c>Enabled</c>, deliberately. A present-but-false block
     /// is a legitimate way to record "this environment has considered the pipeline and is not

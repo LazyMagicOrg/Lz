@@ -9,7 +9,7 @@ namespace Lz.Aws;
 /// <para>WHY IT EXISTS. <c>lz</c> has always run on a workstation with an SSO profile, so
 /// <c>Profile</c> was required and 32 sites hand-rolled the same resolution. The decoupled-CD
 /// deployer runs INSIDE the target account with a task role and no profile at all
-/// (Docs/specs/DecoupledCd.md §8 item 2), so "no profile" has to become an ordinary, supported
+/// (Docs/specs/Platform/DecoupledCd.md §8 item 2), so "no profile" has to become an ordinary, supported
 /// state rather than a configuration error.</para>
 ///
 /// <para>NULL MEANS "LET THE CLIENT USE ITS OWN DEFAULT CHAIN", and that is a deliberate design
