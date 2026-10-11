@@ -70,6 +70,13 @@ internal sealed class BffStackOutputs
     public Output<string> ClientSecret(string pool) =>
         _foundation.GetOutput($"auth_{pool}_bffClientSecret").Apply(v => v as string ?? string.Empty);
 
+    /// <summary>
+    /// The hours <paramref name="pool"/>'s BFF refresh token lasts, as the foundation exported it, or
+    /// <paramref name="whenAbsent"/> for a foundation deployed before it exported one.
+    /// </summary>
+    public Output<string> SessionTtlHours(string pool, string whenAbsent) =>
+        _foundation.GetOutput($"auth_{pool}_bffSessionTtlHours").Apply(v => BffWiring.SessionTtlHoursOf(v, whenAbsent));
+
     /// <summary>BFF authority (OIDC issuer) for <paramref name="pool"/>, or "" if absent.</summary>
     public Output<string> Authority(string pool) =>
         _foundation.GetOutput($"auth_{pool}_authority").Apply(v => v as string ?? string.Empty);

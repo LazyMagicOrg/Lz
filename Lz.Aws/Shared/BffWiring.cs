@@ -60,6 +60,28 @@ internal static class BffWiring
     /// definition. Call ONLY when <see cref="IsEnabled"/> is true.
     /// </para>
     /// </summary>
+    /// <summary>What the consumer instance's session length was before the foundation exported the pool's own.</summary>
+    public const string ConsumerSessionTtlHoursWhenNotExported = "720";
+
+    /// <summary>
+    /// PURE. A session length as the host's env takes it, from what a stack reference returned for the foundation's
+    /// export: a whole number of hours above zero, whatever type it came back as. Anything else - no export, an
+    /// empty one, zero, a fraction, words - is <paramref name="whenAbsent"/>, never a session of no length.
+    /// </summary>
+    public static string SessionTtlHoursOf(object? exported, string whenAbsent)
+    {
+        var text = exported switch
+        {
+            string s => s.Trim(),
+            IFormattable number => number.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+            _ => null,
+        };
+        return int.TryParse(text, System.Globalization.NumberStyles.None,
+                   System.Globalization.CultureInfo.InvariantCulture, out var hours) && hours > 0
+            ? hours.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : whenAbsent;
+    }
+
     public static List<(string Name, Output<string> Value)> BuildEnv(
         TenantConfig tenantConfig, ComponentResource parent)
     {
@@ -145,7 +167,12 @@ internal static class BffWiring
                 url.EndsWith(DiscoverySuffix, StringComparison.OrdinalIgnoreCase)
                     ? url[..^DiscoverySuffix.Length]
                     : url);
-            const string consumerTtlHours = "720"; // consumer sessions ≈ 30 days (§8.14)
+            // THE SESSION LASTS AS LONG AS ITS REFRESH TOKEN, AND THAT IS ONE NUMBER: the consumerauth pool's
+            // BffSessionTtlHours, which the foundation gives the client as its RefreshTokenValidity and exports.
+            // It was a constant here (720, about 30 days, §8.14) beside a pool setting that defaulted to 12, so
+            // the two could disagree and the shorter one won silently. The constant remains only as the answer
+            // for a foundation deployed before it exported the number.
+            var consumerTtlHours = foundation.SessionTtlHours(consumerPool, ConsumerSessionTtlHoursWhenNotExported);
 
             list.AddRange(new List<(string, Output<string>)>
             {
@@ -160,7 +187,7 @@ internal static class BffWiring
                 ("LZ_CBFF_COOKIE_DOMAIN", lit(cookieDomain)),
                 ("LZ_CBFF_COOKIE_NAME", lit("__cbff")),
                 ("LZ_CBFF_SESSION_TABLE", lit($"{sk}_{tk}_cbff")),
-                ("LZ_CBFF_SESSION_TTL_HOURS", lit(consumerTtlHours)),
+                ("LZ_CBFF_SESSION_TTL_HOURS", consumerTtlHours),
                 ("LZ_CBFF_AUTHNAME", lit(consumerPool)),
                 ("LZ_CBFF_AWS_REGION", lit(region)),
                 ("LZ_CBFF_ACCESS_TOKEN_SKEW_SECONDS", lit("60")),

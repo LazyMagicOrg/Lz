@@ -28,6 +28,9 @@ public class AuthPoolDetail
     /// </summary>
     public Output<string>? BffClientId { get; init; }
 
+    /// <summary>The hours the BFF client's refresh token lasts. Null when the pool has no BFF client.</summary>
+    public int? BffSessionTtlHours { get; init; }
+
     /// <summary>
     /// Confidential BFF app-client secret, when the pool provisioned one.
     /// <c>null</c> otherwise. The authoritative runtime copy is written into

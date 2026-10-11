@@ -444,6 +444,7 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             // so the deploy plan is identical to a pre-BFF deploy.
             Output<string>? bffClientId = null;
             Output<string>? bffClientSecret = null;
+            int? bffSessionTtlHours = null;
             if (poolConfig.ProvisionBffClient)
             {
                 // Token validity derived from the per-pool BFF session TTL.
@@ -452,6 +453,9 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 var ttlHours = poolConfig.BffSessionTtlHours > 0
                     ? poolConfig.BffSessionTtlHours
                     : 12;
+                // Handed on with the client, so the host's session length can be the refresh token's and not a
+                // second number kept somewhere else (see BffWiring).
+                bffSessionTtlHours = ttlHours;
 
                 // BFF callback lives at /bff/callback (NOT /oauth2/callback,
                 // which is the façade's apex callback for the public client).
@@ -1147,6 +1151,7 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 // without a BFF client.
                 BffClientId = bffClientId,
                 BffClientSecret = bffClientSecret,
+                BffSessionTtlHours = bffSessionTtlHours,
                 // Smartstore confidential-client outputs. Null unless
                 // ProvisionSmartstoreClient was set for this pool.
                 SmartstoreClientId = smartstoreClientId,
@@ -1360,6 +1365,12 @@ public class CognitoPoolOutputs
     public Output<string>? BffClientId { get; init; }
 
     /// <summary>
+    /// The BFF client's refresh-token validity in hours, which is the pool's <c>BffSessionTtlHours</c>. Non-null
+    /// only when the pool's <c>ProvisionBffClient</c> flag was set.
+    /// </summary>
+    public int? BffSessionTtlHours { get; init; }
+
+    /// <summary>
     /// Confidential BFF client secret. Non-null only when the pool's
     /// <c>ProvisionBffClient</c> flag was set. Persisted into the tenant
     /// Secrets Manager secret by the tenant-data flow, never exported in clear
@@ -1403,6 +1414,7 @@ public class AwsCognitoOutputs : IAuthPoolOutputs
                 Authority = kv.Value.Authority,
                 BffClientId = kv.Value.BffClientId,
                 BffClientSecret = kv.Value.BffClientSecret,
+                BffSessionTtlHours = kv.Value.BffSessionTtlHours,
                 SmartstoreClientId = kv.Value.SmartstoreClientId,
                 SmartstoreClientSecret = kv.Value.SmartstoreClientSecret,
             });

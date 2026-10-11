@@ -927,6 +927,12 @@ public class SystemDeployment
                         exports[$"auth_{poolName}_bffClientId"] = pool.BffClientId;
                     if (pool.BffClientSecret != null)
                         exports[$"auth_{poolName}_bffClientSecret"] = pool.BffClientSecret;
+                    // How long that client's refresh token lasts, for the host's session length (BffWiring).
+                    // As a string: an env value is one, and a number read back through a stack reference is not
+                    // reliably the type it was written as.
+                    if (pool.BffSessionTtlHours is > 0)
+                        exports[$"auth_{poolName}_bffSessionTtlHours"] =
+                            Output.Create(pool.BffSessionTtlHours.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     // Smartstore confidential-client outputs — only present when the
                     // pool set ProvisionSmartstoreClient. Null otherwise, so
                     // unconfigured pools export exactly the same keys as before.
