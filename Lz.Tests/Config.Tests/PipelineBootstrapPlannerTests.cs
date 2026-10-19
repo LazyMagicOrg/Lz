@@ -365,11 +365,12 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
-    public void OnlyGetAuthorizationTokenIsGrantedOnStar()
+    public void OnlyTheTokenActionsAreGrantedOnStar()
     {
-        // That action takes no resource, so it cannot be narrowed. Everything else must be scoped,
-        // and a review of this policy should be able to see at a glance that only one wildcard
-        // resource exists and which action it belongs to.
+        // They take no resource, so they cannot be narrowed: the private-ECR token, and the public-ECR
+        // pull token with the STS bearer token it is minted through (a signed-in base-image pull).
+        // Everything else must be scoped, and a review of this policy should be able to see at a glance
+        // which actions the wildcard resource belongs to.
         var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()), "147440642635");
         var image = plan.Roles.Single(r => r.Class == "image");
 
@@ -380,7 +381,9 @@ public class PipelineBootstrapPlannerTests
             .SelectMany(s => s.GetProperty("Action").EnumerateArray().Select(a => a.GetString()))
             .ToList();
 
-        Assert.Equal(new[] { "ecr:GetAuthorizationToken" }, starred);
+        Assert.Equal(
+            new[] { "ecr:GetAuthorizationToken", "ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken" },
+            starred);
     }
 
     [Fact]

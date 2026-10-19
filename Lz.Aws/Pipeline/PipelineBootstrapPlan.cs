@@ -490,6 +490,18 @@ public static class PipelineBootstrapPlanner
                 Action = new[] { "ecr:GetAuthorizationToken" },
                 Resource = "*",
             });
+            // A SIGNED-IN PULL FROM PUBLIC ECR (2026-10-19). An image build pulls base layers from
+            // public.ecr.aws, and anonymously its quota is shared by every job on the hosted runner's IP:
+            // ScutaraService's build failed five times in two days on `429 Data limit exceeded`. Signing
+            // in takes a public-ECR token, which is minted through an STS service bearer token; neither
+            // action takes a resource, and neither lets the role push to or change any public repository.
+            statements.Add(new
+            {
+                Sid = "PublicEcrPullTokenTakesNoResource",
+                Effect = "Allow",
+                Action = new[] { "ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken" },
+                Resource = "*",
+            });
             statements.Add(new
             {
                 Sid = "SignItsOwnPushes",
