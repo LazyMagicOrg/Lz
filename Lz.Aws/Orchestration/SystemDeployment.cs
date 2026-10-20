@@ -377,7 +377,7 @@ public class SystemDeployment
             Console.WriteLine($"Refusing to deploy tenant '{tenantKey}': another writer is rolling {h.Service}. {ServiceLease.Describe(h.By)}.");
             Console.WriteLine("Nothing has been changed. Re-run once it finishes, or when the lease expires.");
             Console.ResetColor();
-            throw new InvalidOperationException($"{h.Service} is held: {ServiceLease.Describe(h.By)}");
+            throw new ServiceLeaseHeldException($"{h.Service} is held: {ServiceLease.Describe(h.By)}");
         }
         Console.WriteLine($"Holding the per-service lease on {string.Join(", ", services)}.");
         return new TenantServiceLeases(store, cluster, claimed);

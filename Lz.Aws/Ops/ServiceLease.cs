@@ -13,6 +13,10 @@ public abstract record ServiceLeaseClaim
     public sealed record Held(ServiceLeaseRecord By) : ServiceLeaseClaim;
 }
 
+/// <summary>A deploy refused because another writer holds a service's lease. The refusal has been printed; the CLI exits 1
+/// without a stack trace, since nothing went wrong but the timing.</summary>
+public sealed class ServiceLeaseHeldException(string message) : InvalidOperationException(message);
+
 /// <summary>The conditional reads and writes a lease needs; one implementation per store, and a fake for the tests.</summary>
 public interface IServiceLeaseStore
 {

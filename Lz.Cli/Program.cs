@@ -1325,7 +1325,17 @@ class Program
                     Console.WriteLine(
                         $"Deploying tenant '{tk}' for system " +
                         $"'{config.SystemKey}' ({config.Environment})");
-                    await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
+                    try
+                    {
+                        await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
+                    }
+                    catch (ServiceLeaseHeldException)
+                    {
+                        // Refused before anything changed, and already said why (DecoupledCd.md V-J). The subtenant
+                        // and runtime steps below are skipped with it.
+                        Environment.ExitCode = 1;
+                        continue;
+                    }
 
                     // Per-subtenant infrastructure (S3 buckets + DynamoDB tables)
                     // is managed imperatively, outside Pulumi. This runs after
