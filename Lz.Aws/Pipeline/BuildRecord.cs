@@ -74,6 +74,11 @@ public sealed record BuildRecordBuiltFrom(
 /// <param name="BuiltAt">RFC 3339 UTC, and the sort key inside a prefix — see <see cref="BuildRecordFormat"/>.</param>
 /// <param name="BuiltBy">The GitHub identity that ran the build, for the human reading the store.</param>
 /// <param name="WorkflowRunId">The run, so a record can be traced back to its logs.</param>
+/// <param name="Intake">
+/// What the intake checked (DecoupledCd.md §4.3, §15.4), present on every record the intake writes and on none that
+/// today's push path writes. Its presence also changes the record's KEY, which then carries the run attempt
+/// (<see cref="BuildRecordFormat.KeyFor"/>).
+/// </param>
 public sealed record BuildRecord(
     [property: JsonPropertyName("schema")] int Schema,
     [property: JsonPropertyName("class")] string Class,
@@ -81,7 +86,44 @@ public sealed record BuildRecord(
     [property: JsonPropertyName("identity")] BuildRecordIdentity Identity,
     [property: JsonPropertyName("builtAt")] string BuiltAt,
     [property: JsonPropertyName("builtBy")] string BuiltBy,
-    [property: JsonPropertyName("workflowRunId")] string WorkflowRunId);
+    [property: JsonPropertyName("workflowRunId")] string WorkflowRunId,
+    [property: JsonPropertyName("intake")] BuildRecordIntake? Intake = null);
+
+/// <summary>
+/// The intake's account of one artifact (DecoupledCd.md §4.3, §15.4, V-12, V-19): the run attempt and job it checked,
+/// the digest GitHub reported for the artifact, and Gate 1's verdict - a record is written only on a pass, so the
+/// parser refuses any other result. Image records also carry what the AipApi check and the supply chain need.
+/// </summary>
+/// <param name="RunId">The run; equal to the record's <c>workflowRunId</c>.</param>
+/// <param name="RunAttempt">The attempt, from 1. Part of the record's key: each attempt is its own artifact.</param>
+/// <param name="JobId">The job that built the artifact.</param>
+/// <param name="WorkflowRef">The workflow file the run ran, <c>{owner}/{repo}/.github/workflows/{file}@{ref}</c>.</param>
+/// <param name="GithubDigest">The <c>digest</c> GitHub's artifacts API reported, which the fetch compared the bytes with.</param>
+/// <param name="Gate1">Gate 1's verdict for exactly these bytes.</param>
+/// <param name="ServiceVersion">Image records: the build's NBGV version, for test's AipApi check (§15.5, T-13).</param>
+/// <param name="BaseImageDigest">Image records: the pinned base image the build started from (V-19).</param>
+/// <param name="Sbom">Image records: the SBOM, stored write-once beside the record (V-19).</param>
+public sealed record BuildRecordIntake(
+    [property: JsonPropertyName("runId")] string RunId,
+    [property: JsonPropertyName("runAttempt")] int RunAttempt,
+    [property: JsonPropertyName("jobId")] string JobId,
+    [property: JsonPropertyName("workflowRef")] string WorkflowRef,
+    [property: JsonPropertyName("githubDigest")] string GithubDigest,
+    [property: JsonPropertyName("gate1")] BuildRecordGate1 Gate1,
+    [property: JsonPropertyName("serviceVersion")] string? ServiceVersion = null,
+    [property: JsonPropertyName("baseImageDigest")] string? BaseImageDigest = null,
+    [property: JsonPropertyName("sbom")] BuildRecordObjectRef? Sbom = null);
+
+/// <param name="Result">Always <c>passed</c> on a record: nothing is recorded for a build that failed Gate 1.</param>
+/// <param name="Evidence">The key of the verdict in the intake's evidence store.</param>
+public sealed record BuildRecordGate1(
+    [property: JsonPropertyName("result")] string Result,
+    [property: JsonPropertyName("evidence")] string Evidence);
+
+/// <summary>An S3 object named by key AND version, so it names those bytes and no later ones.</summary>
+public sealed record BuildRecordObjectRef(
+    [property: JsonPropertyName("key")] string Key,
+    [property: JsonPropertyName("versionId")] string VersionId);
 
 /// <summary>
 /// Serialising, parsing and KEYING build records — the format frozen before the first record
@@ -155,8 +197,32 @@ public static class BuildRecordFormat
         // ':' is legal in an S3 key but awkward in URLs and shell quoting, and a timestamp is the
         // one field guaranteed to contain it.
         var stamp = record.BuiltAt.Replace(":", "").Replace("-", "");
+
+        // THE RUN ATTEMPT, ON AN INTAKE RECORD ONLY (DecoupledCd.md §15.4). Each attempt of a run is its own artifact,
+        // built again, so two attempts must not share a key - in a write-once store the second would be refused. A record
+        // written by today's push path has no intake block and keeps its {builtAt}-{runId} stem, so every record and zip
+        // already in the stores still has the key it was written under.
+        if (record.Intake is { } intake)
+        {
+            if (intake.RunAttempt < 1)
+                throw new InvalidOperationException(
+                    $"build record's intake.runAttempt is {intake.RunAttempt}; GitHub numbers attempts from 1, and the " +
+                    "attempt is part of the key.");
+            return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}-{intake.RunAttempt}{extension}";
+        }
+
         return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}{extension}";
     }
+
+    /// <summary>
+    /// A record's <c>builtAt</c> under v5: the run's <c>created_at</c> from GitHub's workflow-runs API, in the record's
+    /// fixed-width RFC 3339 UTC form (DecoupledCd.md §15.8 item 11, decided 2026-10-20). Every attempt and every retry of
+    /// one run computes the same value, so a run's attempts tie (and <c>runAttempt</c> breaks the tie), and a re-run of
+    /// an older run stays older than a later push's build: Prepare, DeployBundle and the promotion poller never take it
+    /// over a newer one. Nothing the repository writes can set it.
+    /// </summary>
+    public static string BuiltAtFor(DateTimeOffset runCreatedAt)
+        => runCreatedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
     /// The prefix one repository's writer role owns for one class: <c>{class}/{repo}/</c>,
@@ -256,7 +322,68 @@ public static class BuildRecordFormat
             RequireTrustworthyBundle(r, artifactStore);
         }
 
+        if (r.Intake is not null)
+            RequireTrustworthyIntake(r);
+
         return r;
+    }
+
+    private static readonly Regex Sha256Digest = new("^sha256:[0-9a-f]{64}$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// What an intake record must say before anything acts on it (DecoupledCd.md §4.3, §15.4). Checked here, before the
+    /// first one is written, for the reason <see cref="RequireTrustworthyBundle"/> gives.
+    /// </summary>
+    private static void RequireTrustworthyIntake(BuildRecord r)
+    {
+        var i = r.Intake!;
+        Require(i.RunId, "intake.runId");
+        Require(i.JobId, "intake.jobId");
+        Require(i.WorkflowRef, "intake.workflowRef");
+        Require(i.GithubDigest, "intake.githubDigest");
+
+        // ONE RUN, NAMED ONCE. The key carries workflowRunId; a record whose intake names another run describes an
+        // artifact its key does not.
+        if (!string.Equals(i.RunId, r.WorkflowRunId, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"intake.runId is '{i.RunId}' but workflowRunId is '{r.WorkflowRunId}'. A record names one run.");
+
+        if (i.RunAttempt < 1)
+            throw new InvalidOperationException(
+                $"intake.runAttempt is {i.RunAttempt}; GitHub numbers attempts from 1, and the attempt is part of the key.");
+
+        if (!Sha256Digest.IsMatch(i.GithubDigest))
+            throw new InvalidOperationException(
+                $"intake.githubDigest is '{i.GithubDigest}', not 'sha256:' and 64 lowercase hex characters, the form " +
+                "GitHub's artifacts API reports and the fetch compared the bytes with.");
+
+        // ONLY A PASS IS RECORDED (V-12): the intake pushes and records nothing for a build that failed Gate 1, so a
+        // record carrying any other verdict was written by something that is not the intake.
+        if (i.Gate1 is null)
+            throw new InvalidOperationException("build record has an intake block but no intake.gate1.");
+        if (!string.Equals(i.Gate1.Result, "passed", StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"intake.gate1.result is '{i.Gate1.Result}'. The intake records a build only after Gate 1 passed it.");
+        Require(i.Gate1.Evidence, "intake.gate1.evidence");
+
+        // IMAGE RECORDS carry what the AipApi check and the supply chain need (§15.5, T-13, V-19). Test's Verify refuses
+        // an image member without serviceVersion, so a record missing it would be deployable in dev and never promoted.
+        if (IsImageClass(r.Class))
+        {
+            Require(i.ServiceVersion, "intake.serviceVersion");
+            Require(i.BaseImageDigest, "intake.baseImageDigest");
+            if (!Sha256Digest.IsMatch(i.BaseImageDigest!))
+                throw new InvalidOperationException(
+                    $"intake.baseImageDigest is '{i.BaseImageDigest}', not a sha256 digest. A base image named by tag is " +
+                    "a mutable pointer (V-19).");
+            if (i.Sbom is null)
+                throw new InvalidOperationException("an image record's intake block has no sbom (V-19).");
+            Require(i.Sbom.Key, "intake.sbom.key");
+            Require(i.Sbom.VersionId, "intake.sbom.versionId");
+            if (string.Equals(i.Sbom.VersionId, "null", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "intake.sbom.versionId is S3's \"null\", which the next write to its key replaces.");
+        }
     }
 
     private static readonly Regex LowercaseHexSha256 = new("^[0-9a-f]{64}$", RegexOptions.Compiled);
