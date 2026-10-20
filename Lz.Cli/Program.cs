@@ -1514,6 +1514,26 @@ class Program
                         $"=== updatecontainer: tenant {tk} ({config.Environment}){(dryRun ? " [dry-run]" : "")} ===");
                     Console.ResetColor();
 
+                    // ONE WRITER AT A TIME ON A SERVICE (DecoupledCd.md V-J): each roll takes the service's lease in the
+                    // system table and is refused, naming the holder, while the deployer or a deploytenant holds it. A
+                    // dry run changes nothing, so takes nothing. A system with no system table runs without, and says so.
+                    ServiceLeaseRequest? lease = null;
+                    if (!dryRun)
+                    {
+                        var leaseStore = await DynamoDbServiceLeaseStore.OpenAsync(profile, region, config.SystemKey, Cts.Token);
+                        if (leaseStore is null)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  no system table '{config.SystemKey}': rolling without the per-service lease");
+                            Console.ResetColor();
+                        }
+                        else
+                        {
+                            lease = new ServiceLeaseRequest(leaseStore,
+                                $"updatecontainer:{Environment.UserName}@{Environment.MachineName}", "lz updatecontainer");
+                        }
+                    }
+
                     foreach (var (svcName, _) in containersToProcess)
                     {
                         // Must match AwsFargateAlbTenantServiceComponent (service) and
@@ -1533,9 +1553,9 @@ class Program
                         {
                             var result = await updater.UpdateIfNewerAsync(
                                 cluster, ecsService, sources, tag, force, wait, dryRun, Cts.Token,
-                                ctx.ParseResult.GetValueForOption(digestOption));
+                                ctx.ParseResult.GetValueForOption(digestOption), lease);
                             PrintUpdateResult(result);
-                            if (result.Outcome == UpdateOutcome.Failed)
+                            if (result.Outcome is UpdateOutcome.Failed or UpdateOutcome.LeaseHeld)
                                 anyFailure = true;
                         }
                         catch (Exception ex)
@@ -1567,6 +1587,7 @@ class Program
             UpdateOutcome.NoEcrImage     => (ConsoleColor.Yellow,   "no-image  "),
             UpdateOutcome.NoRunningTasks => (ConsoleColor.Yellow,   "not-running"),
             UpdateOutcome.Failed         => (ConsoleColor.Red,      "FAILED    "),
+            UpdateOutcome.LeaseHeld      => (ConsoleColor.Red,      "lease-held"),
             _                                       => (ConsoleColor.Gray,     "?         "),
         };
         Console.ForegroundColor = color;

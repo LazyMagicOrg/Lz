@@ -324,6 +324,80 @@ public class SystemDeployment
         if (!preFlightPassed)
             return;
 
+        // --- ONE WRITER AT A TIME ON A SERVICE (DecoupledCd.md V-J) ---
+        // From the read of what each service runs (ResolveImageDigestsAsync, inside the Pulumi up) to the end of the
+        // post-deploy roll, this command holds every ECS service's lease: an image the deployer or updatecontainer rolled
+        // in between would be reverted by the update. A held lease refuses the deploy before anything changes.
+        var leases = await ClaimTenantServiceLeasesAsync(tenantKey, tenantConfig);
+        try
+        {
+            await DeployTenantUnderLeaseAsync(stackName, tenantKey, tenantConfig, checker, smtpSecrets);
+        }
+        finally
+        {
+            await ReleaseTenantServiceLeasesAsync(leases);
+        }
+    }
+
+    /// <summary>The leases this deploy holds, and where: empty with no store when the system has no ECS cluster or no system table.</summary>
+    private sealed record TenantServiceLeases(IServiceLeaseStore? Store, string Cluster, IReadOnlyList<(string Service, ServiceLeaseRecord Lease)> Held);
+
+    private async Task<TenantServiceLeases> ClaimTenantServiceLeasesAsync(string tenantKey, TenantConfig tenantConfig)
+    {
+        var none = new TenantServiceLeases(null, "", Array.Empty<(string, ServiceLeaseRecord)>());
+        var services = _system.ServiceLayerServices.Concat(_system.HostLayerServices)
+            .Where(s => s.Docker != null)
+            .Select(s => $"{_config.SystemKey}-{tenantKey}-{s.Name}")
+            .ToList();
+        if (services.Count == 0) return none;
+
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+
+        // The same two candidates as updatecontainer. No cluster: a Lambda topology, or a system not yet deployed, with
+        // no ECS service for anything else to be rolling.
+        var cluster = await new AwsContainerUpdater(profile, region).ResolveClusterAsync(
+            new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" }, _ct);
+        if (cluster is null) return none;
+
+        var store = await DynamoDbServiceLeaseStore.OpenAsync(profile, region, _config.SystemKey, _ct);
+        if (store is null)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"No system table '{_config.SystemKey}': deploying without the per-service lease.");
+            Console.ResetColor();
+            return none;
+        }
+
+        var (claimed, held) = await ServiceLease.ClaimAllAsync(store, cluster, services,
+            $"deploytenant:{Environment.UserName}@{Environment.MachineName}", $"lz deploytenant {tenantKey}", DateTimeOffset.UtcNow);
+        if (held is { } h)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Refusing to deploy tenant '{tenantKey}': another writer is rolling {h.Service}. {ServiceLease.Describe(h.By)}.");
+            Console.WriteLine("Nothing has been changed. Re-run once it finishes, or when the lease expires.");
+            Console.ResetColor();
+            throw new InvalidOperationException($"{h.Service} is held: {ServiceLease.Describe(h.By)}");
+        }
+        Console.WriteLine($"Holding the per-service lease on {string.Join(", ", services)}.");
+        return new TenantServiceLeases(store, cluster, claimed);
+    }
+
+    private static async Task ReleaseTenantServiceLeasesAsync(TenantServiceLeases leases)
+    {
+        if (leases.Store is null) return;
+        foreach (var (service, lease) in leases.Held)
+        {
+            if (await ServiceLease.ReleaseAsync(leases.Store, leases.Cluster, service, lease)) continue;
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"WARNING: this deploy outlived its lease on {service}, which another writer took before the release.");
+            Console.ResetColor();
+        }
+    }
+
+    private async Task DeployTenantUnderLeaseAsync(
+        string stackName, string tenantKey, TenantConfig tenantConfig, ITransitionChecker checker, Dictionary<string, string?>? smtpSecrets)
+    {
         // --- Single Pulumi up: data + service-layer + host-layer + CDN ---
         // Always refresh before up. Multi-stack systems with cross-stack DNS records
         // and imperative operations (lz park) make state drift inevitable. The ~30s

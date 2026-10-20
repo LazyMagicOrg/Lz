@@ -41,9 +41,15 @@ public enum UpdateOutcome
     /// alarm or a lifecycle hook, with ECS's reason in the detail — stopped, finished running another
     /// digest, or timed out.</summary>
     Failed,
+    /// <summary>Another writer holds the service's lease (DecoupledCd.md V-J); nothing was changed, and the detail
+    /// names the holder.</summary>
+    LeaseHeld,
 }
 
 public record ContainerUpdateResult(string Service, UpdateOutcome Outcome, string Detail);
+
+/// <summary>Who takes a service's lease for an update, and where the lease lives (DecoupledCd.md V-J).</summary>
+public sealed record ServiceLeaseRequest(IServiceLeaseStore Store, string Holder, string Purpose);
 
 /// <summary>
 /// Performs a zero-downtime container refresh for a tenant ECS service:
@@ -176,7 +182,7 @@ public class AwsContainerUpdater
     public async Task<ContainerUpdateResult> UpdateIfNewerAsync(
         string cluster, string ecsService, ServiceImageSources sources, string tag,
         bool force, bool wait, bool dryRun, CancellationToken ct,
-        string? targetDigest = null)
+        string? targetDigest = null, ServiceLeaseRequest? lease = null)
     {
         var ecrRepo = sources.WorkstationRepository;
 
@@ -228,7 +234,58 @@ public class AwsContainerUpdater
                     ? $"would force-deploy (running {Short(running[0])}, ECR {Short(ecrDigest)})"
                     : $"would deploy: running {Short(running[0])} != ECR {Short(ecrDigest)}");
 
-        // 4. Deploy. DesiredCount is intentionally omitted throughout so ECS keeps the
+        // 4. Deploy, under the service's lease when one is asked for: from here to the end of the wait this
+        //    command is the service's one writer (DecoupledCd.md V-J).
+        return lease is null
+            ? await RollAsync(cluster, ecsService, sources, repository, ecrDigest, alreadyCurrent, wait, ct)
+            : await RunUnderLeaseAsync(lease, cluster, ecsService, wait, DateTimeOffset.UtcNow,
+                () => RollAsync(cluster, ecsService, sources, repository, ecrDigest, alreadyCurrent, wait, ct));
+    }
+
+    /// <summary>
+    /// THE LEASE AROUND A ROLL, as a static function over the store so it can be tested without AWS. Claims the lease,
+    /// or returns <see cref="UpdateOutcome.LeaseHeld"/> naming the holder having changed nothing; runs the roll; releases.
+    ///
+    /// <para><b>A FIRE-AND-FORGET ROLL KEEPS THE LEASE</b> (<c>--no-wait</c>): the rollout it started is still running when
+    /// the command returns, and releasing then would let a second writer start on a service mid-rollout, the very thing the
+    /// lease exists to stop. It is left to expire, and the detail says until when. A roll that throws releases, since this
+    /// command will write nothing more. A release that finds another holder (this command outlived its lease) is reported
+    /// in the detail rather than passed over.</para>
+    /// </summary>
+    public static async Task<ContainerUpdateResult> RunUnderLeaseAsync(
+        ServiceLeaseRequest lease, string cluster, string ecsService, bool wait, DateTimeOffset now,
+        Func<Task<ContainerUpdateResult>> roll)
+    {
+        var claim = await ServiceLease.ClaimAsync(lease.Store, cluster, ecsService, lease.Holder, lease.Purpose, now);
+        if (claim is ServiceLeaseClaim.Held held)
+            return new(ecsService, UpdateOutcome.LeaseHeld,
+                $"refused, nothing changed: another writer is rolling this service. {ServiceLease.Describe(held.By)}");
+        var mine = ((ServiceLeaseClaim.Claimed)claim).Lease;
+
+        ContainerUpdateResult result;
+        try
+        {
+            result = await roll();
+        }
+        catch
+        {
+            await ServiceLease.ReleaseAsync(lease.Store, cluster, ecsService, mine);
+            throw;
+        }
+
+        if (!wait && result.Outcome == UpdateOutcome.Deployed)
+            return result with { Detail = $"{result.Detail}; the service's lease stays held until {mine.ExpiresAt:HH:mm:ss}Z, since the rollout is not waited for" };
+        return await ServiceLease.ReleaseAsync(lease.Store, cluster, ecsService, mine)
+            ? result
+            : result with { Detail = $"{result.Detail}; WARNING: this command outlived its lease, which another writer took before the release" };
+    }
+
+    /// <summary>Steps 4 and 5 of the update: move the service to the digest, then wait.</summary>
+    private async Task<ContainerUpdateResult> RollAsync(
+        string cluster, string ecsService, ServiceImageSources sources, string repository, string ecrDigest,
+        bool alreadyCurrent, bool wait, CancellationToken ct)
+    {
+        //    DesiredCount is intentionally omitted throughout so ECS keeps the
         //    current count and rolls the task — no downtime either way.
         //
         //    The newest deployment is read FIRST, so the wait can tell the deployment this command starts

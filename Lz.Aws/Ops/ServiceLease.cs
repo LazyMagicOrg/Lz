@@ -70,6 +70,29 @@ public static class ServiceLease
         throw new InvalidOperationException($"the lease on {cluster}/{service} could be neither claimed nor read; it is changing under us");
     }
 
+    /// <summary>
+    /// Claims every service's lease, ALL OR NONE: <c>deploytenant</c> moves every service of a tenant in one Pulumi update,
+    /// so it needs them all. On the first held one, those already claimed are released and the holder is returned.
+    /// </summary>
+    public static async Task<(IReadOnlyList<(string Service, ServiceLeaseRecord Lease)> Claimed, (string Service, ServiceLeaseRecord By)? Held)>
+        ClaimAllAsync(IServiceLeaseStore store, string cluster, IEnumerable<string> services, string holder, string purpose, DateTimeOffset now)
+    {
+        var claimed = new List<(string, ServiceLeaseRecord)>();
+        foreach (var service in services)
+        {
+            switch (await ClaimAsync(store, cluster, service, holder, purpose, now))
+            {
+                case ServiceLeaseClaim.Claimed c:
+                    claimed.Add((service, c.Lease));
+                    break;
+                case ServiceLeaseClaim.Held h:
+                    foreach (var (s, l) in claimed) await ReleaseAsync(store, cluster, s, l);
+                    return (Array.Empty<(string, ServiceLeaseRecord)>(), (service, h.By));
+            }
+        }
+        return (claimed, null);
+    }
+
     /// <summary>Releases the lease if <paramref name="lease"/>'s token still holds it; false if another took it since.</summary>
     public static Task<bool> ReleaseAsync(IServiceLeaseStore store, string cluster, string service, ServiceLeaseRecord lease)
         => store.DeleteIfTokenAsync(KeyFor(cluster, service), lease.Token);
@@ -89,6 +112,28 @@ public sealed class DynamoDbServiceLeaseStore : IServiceLeaseStore
     {
         _db = db;
         _table = table;
+    }
+
+    /// <summary>
+    /// The store in <paramref name="table"/>, or null when that table DOES NOT EXIST: a topology without a system table
+    /// (Keycloak's) has nowhere to keep a lease, and the caller says it runs without one. Every other failure (access
+    /// denied, an expired session, throttling) throws, so a lease that cannot be read is never taken for no lease at all.
+    /// </summary>
+    public static async Task<DynamoDbServiceLeaseStore?> OpenAsync(string profile, string region, string table, CancellationToken ct)
+    {
+        var credentials = Lz.Aws.AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+        IAmazonDynamoDB db = credentials != null ? new AmazonDynamoDBClient(credentials, endpoint) : new AmazonDynamoDBClient(endpoint);
+        try
+        {
+            await db.DescribeTableAsync(table, ct);
+        }
+        catch (ResourceNotFoundException)
+        {
+            db.Dispose();
+            return null;
+        }
+        return new DynamoDbServiceLeaseStore(db, table);
     }
 
     public async Task<bool> PutIfFreeAsync(string key, ServiceLeaseRecord record, DateTimeOffset now)

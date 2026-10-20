@@ -122,4 +122,102 @@ public class ServiceLeaseTests
     [Fact]
     public void TheLeaseOutlastsTheLongestRolloutWait()
         => Assert.True(ServiceLease.Duration > TimeSpan.FromMinutes(10));
+
+    // ---- deploytenant's claim on every service of a tenant (ServiceLease.ClaimAllAsync) ----
+
+    [Fact]
+    public async Task ATenantDeployClaimsEveryService()
+    {
+        var store = new FakeStore();
+        var (claimed, held) = await ServiceLease.ClaimAllAsync(store, Cluster, new[] { "scu-mp-a", "scu-mp-b" }, "deploytenant:tmay", "deploy", T0);
+        Assert.Null(held);
+        Assert.Equal(new[] { "scu-mp-a", "scu-mp-b" }, claimed.Select(c => c.Service));
+        Assert.Equal(2, store.Items.Count);
+    }
+
+    [Fact]
+    public async Task OneHeldServiceRefusesTheTenantAndReleasesTheOthers()
+    {
+        var store = new FakeStore();
+        await ServiceLease.ClaimAsync(store, Cluster, "scu-mp-b", "deployer:req-9", "roll", T0);
+        var (claimed, held) = await ServiceLease.ClaimAllAsync(store, Cluster, new[] { "scu-mp-a", "scu-mp-b", "scu-mp-c" }, "deploytenant:tmay", "deploy", T0);
+        Assert.Empty(claimed);
+        Assert.Equal("scu-mp-b", held!.Value.Service);
+        Assert.Equal("deployer:req-9", held.Value.By.Holder);
+        Assert.Equal("deployer:req-9", store.Items.Single().Value.Holder);   // a released, c never claimed
+    }
+
+    // ---- updatecontainer's roll under the lease (AwsContainerUpdater.RunUnderLeaseAsync) ----
+
+    private static Task<ContainerUpdateResult> Roll(FakeStore s, bool wait, Func<Task<ContainerUpdateResult>> roll)
+        => AwsContainerUpdater.RunUnderLeaseAsync(new ServiceLeaseRequest(s, "updatecontainer:tmay@ws", "lz updatecontainer"),
+            Cluster, Service, wait, T0, roll);
+
+    [Fact]
+    public async Task ARollRunsHoldingTheLeaseAndReleasesItAfterTheWait()
+    {
+        var store = new FakeStore();
+        string? holderDuringRoll = null;
+        var result = await Roll(store, wait: true, () =>
+        {
+            holderDuringRoll = store.Items.Single().Value.Holder;
+            return Task.FromResult(new ContainerUpdateResult(Service, UpdateOutcome.Verified, "landed"));
+        });
+        Assert.Equal("updatecontainer:tmay@ws", holderDuringRoll);
+        Assert.Equal(UpdateOutcome.Verified, result.Outcome);
+        Assert.Equal("landed", result.Detail);
+        Assert.Empty(store.Items);
+    }
+
+    [Fact]
+    public async Task AHeldServiceIsNotRolledAndTheRefusalNamesTheHolder()
+    {
+        var store = new FakeStore();
+        await Claim(store, "deployer:req-7", T0.AddMinutes(-1));
+        var rolled = false;
+        var result = await Roll(store, wait: true, () => { rolled = true; return Task.FromResult(new ContainerUpdateResult(Service, UpdateOutcome.Verified, "")); });
+        Assert.False(rolled);
+        Assert.Equal(UpdateOutcome.LeaseHeld, result.Outcome);
+        Assert.Contains("deployer:req-7", result.Detail);
+        Assert.Equal("deployer:req-7", store.Items.Single().Value.Holder);
+    }
+
+    [Fact]
+    public async Task ARollNotWaitedForKeepsTheLeaseUntilItExpires()
+    {
+        var store = new FakeStore();
+        var result = await Roll(store, wait: false, () => Task.FromResult(new ContainerUpdateResult(Service, UpdateOutcome.Deployed, "requested")));
+        Assert.Equal("updatecontainer:tmay@ws", store.Items.Single().Value.Holder);
+        Assert.Contains("stays held until", result.Detail);
+    }
+
+    [Fact]
+    public async Task AFailedRollReleases()
+    {
+        var store = new FakeStore();
+        await Roll(store, wait: true, () => Task.FromResult(new ContainerUpdateResult(Service, UpdateOutcome.Failed, "rolled back")));
+        Assert.Empty(store.Items);
+    }
+
+    [Fact]
+    public async Task ARollThatThrowsReleasesEvenWhenNotWaitedFor()
+    {
+        var store = new FakeStore();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Roll(store, wait: false, () => throw new InvalidOperationException("UpdateService refused")));
+        Assert.Empty(store.Items);
+    }
+
+    [Fact]
+    public async Task ARollThatOutlivedItsLeaseSaysSo()
+    {
+        var store = new FakeStore();
+        var result = await Roll(store, wait: true, async () =>
+        {
+            await Claim(store, "deployer:req-8", T0 + ServiceLease.Duration);   // ours expired mid-roll and was taken
+            return new ContainerUpdateResult(Service, UpdateOutcome.Verified, "landed");
+        });
+        Assert.Contains("outlived its lease", result.Detail);
+        Assert.Equal("deployer:req-8", store.Items.Single().Value.Holder);
+    }
 }
