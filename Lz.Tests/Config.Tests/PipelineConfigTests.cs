@@ -77,6 +77,14 @@ public class PipelineConfigTests
             Path.Combine("Lz.Core", "Config", "SystemConfig.cs"),
             Path.Combine("Lz.Core", "Config", "PipelineConfig.cs"),
             Path.Combine("Lz.Core", "Config", "ConfigValidator.cs"),
+
+            // ConfigLoader, added 2026-10-20 (DecoupledCd V-21, §15.7 V-A). Config layer: it fills the fields that moved
+            // to pipelineconfig.{sk}.yaml into the environment's Pipeline block before validation, and refuses an
+            // environment config that still names them. The absent paths are BuildSideConfigTests' -
+            // NoPipelineBlock_NothingIsReadOrInvented and NoBuildSideFile_ADisabledOrAbsentBlockLoadsAsBefore - and the
+            // present path was diffed live: bootstrappipeline, bootstrapdeployer and previewtenant against dev planned
+            // the same before and after the move.
+            Path.Combine("Lz.Core", "Config", "ConfigLoader.cs"),
             Path.Combine("Lz.Aws", "Pipeline", "PipelineBootstrapPlan.cs"),
 
             // EcrRepositoryNaming, added 2026-09-12. It reads Registry.RepositoryNaming and is

@@ -194,8 +194,41 @@ public static class ConfigLoader
         config.SystemKey = systemKey;
         config.Environment = environment;
         config.State = GenerateAwsStateConfig($"{systemKey}-{environment}", config.SystemSuffix, config.Region);
+        ApplyBuildSideConfig(config, yaml, filePath, systemKey, environment);
         ConfigValidator.Validate(config, filePath);
         return config;
+    }
+
+    /// <summary>
+    /// THE BUILD-SIDE FILE (DecoupledCd.md V-21, §15.7 V-A): refuse an environment config that still names a field that
+    /// moved, then fill those fields from <c>pipelineconfig.{systemkey}.yaml</c> beside it. See <see cref="BuildSideConfig"/>.
+    /// </summary>
+    private static void ApplyBuildSideConfig(SystemConfig config, string yaml, string filePath, string systemKey, string environment)
+    {
+        var moved = BuildSideConfig.MovedFieldsNamedIn(yaml);
+        if (moved.Count > 0)
+            throw new InvalidOperationException(
+                $"{Path.GetFileName(filePath)}: Pipeline names {string.Join(", ", moved)}, which every environment shares; " +
+                $"they live in {BuildSideConfig.FileNameFor(systemKey)} now (ArtifactAccountId as BuildAccountId, and " +
+                "DeployOnBuildRecord as the promotion chain's first environment). Move them there.");
+
+        var buildSidePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(filePath))!, BuildSideConfig.FileNameFor(systemKey));
+        if (!File.Exists(buildSidePath))
+        {
+            if (config.Pipeline is { Enabled: true })
+                throw new InvalidOperationException(
+                    $"{Path.GetFileName(filePath)}: Pipeline is enabled but there is no {BuildSideConfig.FileNameFor(systemKey)} " +
+                    "beside it, which names the build account and the repositories.");
+            return;
+        }
+
+        if (config.Pipeline is null) return;   // an environment outside the pipeline reads nothing from it
+        var buildSide = Deserializer.Deserialize<BuildSideConfig>(File.ReadAllText(buildSidePath)) ?? new BuildSideConfig();
+        var problems = buildSide.Problems();
+        if (problems.Count > 0)
+            throw new InvalidOperationException(
+                $"{BuildSideConfig.FileNameFor(systemKey)}: {string.Join("; ", problems)}.");
+        buildSide.MergeInto(config.Pipeline, environment);
     }
 
     /// <summary>

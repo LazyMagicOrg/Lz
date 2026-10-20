@@ -233,6 +233,30 @@ public class PipelineRepositoryConfig
     /// produces. The list is short and it is the trust boundary, so it is worth writing down.</para>
     /// </summary>
     public List<string>? Artifacts { get; set; }
+
+    /// <summary>
+    /// The repository's GitHub id (V-21, §15.4): the run check compares ids, so a rename or a look-alike organization
+    /// cannot pass. Required once <see cref="Intake"/> is set; read by nothing before the intake exists (V-B).
+    /// </summary>
+    public long? RepositoryId { get; set; }
+
+    /// <summary>The owning organization's GitHub id. Required with <see cref="Intake"/>.</summary>
+    public long? OwnerId { get; set; }
+
+    /// <summary>The build workflow's path, e.g. <c>.github/workflows/build-aiphost.yml</c>. Required with <see cref="Intake"/>.</summary>
+    public string? WorkflowPath { get; set; }
+
+    /// <summary>
+    /// <c>dry</c> or <c>live</c> (§15.7 V-B to V-D): dry, the intake checks and stages a run and records what it found
+    /// beside today's push path; live, it pushes and records. Absent: the intake does not look at this repository.
+    /// </summary>
+    public string? Intake { get; set; }
+
+    /// <summary>
+    /// <c>dry</c> or <c>live</c>: when dev's Verify starts requiring the intake block on this repository's records. Set
+    /// <c>live</c> last, only once the switching run has been taken in live (V-D).
+    /// </summary>
+    public string? Verify { get; set; }
 }
 
 /// <summary>Registry hardening for the pipeline. See DecoupledCd.md sections 4.1 and 8.</summary>
