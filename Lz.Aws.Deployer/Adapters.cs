@@ -21,6 +21,12 @@ internal static class Clients
     public static readonly Lazy<IAmazonS3> S3 = new(() => new AmazonS3Client());
     public static readonly Lazy<IAmazonECR> Ecr = new(() => new AmazonECRClient());
     public static readonly Lazy<IAmazonECS> Ecs = new(() => new AmazonECSClient());
+    public static readonly Lazy<Amazon.DynamoDBv2.IAmazonDynamoDB> DynamoDb = new(() => new Amazon.DynamoDBv2.AmazonDynamoDBClient());
+
+    /// <summary>The per-service lease in the table the function is configured with (DecoupledCd.md V-J).</summary>
+    public static Lz.Aws.Ops.IServiceLeaseStore Leases()
+        => new Lz.Aws.Ops.DynamoDbServiceLeaseStore(DynamoDb.Value,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.LeaseTable));
     public static readonly Lazy<Amazon.StepFunctions.IAmazonStepFunctions> Sfn = new(() => new Amazon.StepFunctions.AmazonStepFunctionsClient());
     public static readonly Lazy<Amazon.SimpleNotificationService.IAmazonSimpleNotificationService> Sns =
         new(() => new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient());

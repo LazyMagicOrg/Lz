@@ -336,10 +336,45 @@ public static class VerifyStep
 /// </summary>
 public static class PrepareStep
 {
+    /// <summary>The lease holder an execution claims as. Unique per execution, so its claim is re-entrant.</summary>
+    public static string LeaseHolder(string executionName) => $"deployer:{executionName}";
+
+    /// <summary>
+    /// <para><b>UNDER THE SERVICE'S LEASE</b> (DecoupledCd.md V-J), claimed before the read of the current revision and held
+    /// until Record or RecordFailure releases it: <c>lz updatecontainer</c> and <c>lz deploytenant</c> each move the image
+    /// by their own path, and one landing between this read and the roll would be reverted by it. A held lease throws
+    /// <see cref="ServiceRollInProgress"/>, which the definition retries; a refusal after the claim releases it.</para>
+    /// </summary>
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, string registry, IServices services, ITaskDefinitions definitions)
+        JsonObject state, string executionName, string registry, IServices services, ITaskDefinitions definitions,
+        Lz.Aws.Ops.IServiceLeaseStore leases, DateTimeOffset now)
     {
         var target = DeployerInput.From(state).Target;
+        var holder = LeaseHolder(executionName);
+
+        var claim = await Lz.Aws.Ops.ServiceLease.ClaimReentrantAsync(
+            leases, target.Cluster, target.Service, holder, "the deployer's image roll", now);
+        if (claim is Lz.Aws.Ops.ServiceLeaseClaim.Held held)
+            throw new ServiceRollInProgress(
+                $"another writer is rolling {target.Service}: {Lz.Aws.Ops.ServiceLease.Describe(held.By)}. Nothing has been registered.");
+        var lease = ((Lz.Aws.Ops.ServiceLeaseClaim.Claimed)claim).Lease;
+
+        try
+        {
+            var prepared = await PrepareAsync(state, target, registry, services, definitions);
+            prepared["lease"] = new JsonObject { ["holder"] = holder, ["expiresAt"] = lease.ExpiresAt.ToString("O") };
+            return prepared;
+        }
+        catch
+        {
+            await Lz.Aws.Ops.ServiceLease.ReleaseAsync(leases, target.Cluster, target.Service, lease);
+            throw;
+        }
+    }
+
+    private static async Task<JsonObject> PrepareAsync(
+        JsonObject state, DeployTarget target, string registry, IServices services, ITaskDefinitions definitions)
+    {
 
         // The digest Verify established — never one from the input, which names only where to deploy.
         var digest = (state["verified"] as JsonObject)?["digest"] is JsonValue v && v.TryGetValue<string>(out var d)
@@ -622,7 +657,7 @@ public static class VerifyRolloutStep
 public static class RecordStep
 {
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer)
+        JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, Lz.Aws.Ops.IServiceLeaseStore leases)
     {
         var verified = state["verified"] as JsonObject
             ?? throw new DeployRefused("verified", "the state has no Verify result; Record cannot run first.");
@@ -645,7 +680,7 @@ public static class RecordStep
                 $"the state's evidence key is '{Text(evidence, "key")}', not '{key}', which this execution's record implies.");
 
         var written = await writer.PutOnceAsync(evidenceStore, key, body);
-        return new JsonObject { ["key"] = key, ["written"] = written };
+        return new JsonObject { ["key"] = key, ["written"] = written, ["lease"] = await LeaseRelease.AfterAsync(state, executionName, leases) };
     }
 
     private static string? Text(JsonObject o, string name)
@@ -659,7 +694,8 @@ public static class RecordStep
 public static class RecordFailureStep
 {
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now)
+        JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now,
+        Lz.Aws.Ops.IServiceLeaseStore leases)
     {
         var key = DeployEvidence.FailureKey(executionName);
 
@@ -668,7 +704,47 @@ public static class RecordFailureStep
         // real failure under an evidence error.
         var written = await writer.PutOnceAsync(evidenceStore, key, DeployEvidence.Failed(executionName, now, state));
 
-        return new JsonObject { ["key"] = key, ["written"] = written };
+        return new JsonObject { ["key"] = key, ["written"] = written, ["lease"] = await LeaseRelease.AfterAsync(state, executionName, leases) };
+    }
+}
+
+/// <summary>
+/// The release of an execution's service lease (DecoupledCd.md V-J), after Record or RecordFailure has written its evidence.
+///
+/// <para><b>BY HOLDER, FROM THE INPUT'S TARGET.</b> Prepare's result may never have reached the state (a Prepare that
+/// timed out after its claim), so the release asks the store whether this execution holds the lease, rather than reading
+/// a token from the state. A client bundle's execution names no service and has nothing to release.</para>
+///
+/// <para><b>NEVER THROWS.</b> The evidence is written by then; a release that fails must not turn a landed deploy into a
+/// failure, or bury the failure being recorded. It says what happened instead, and a lease left behind expires.</para>
+/// </summary>
+public static class LeaseRelease
+{
+    public static async Task<string> AfterAsync(JsonObject state, string executionName, Lz.Aws.Ops.IServiceLeaseStore leases)
+    {
+        DeployTarget target;
+        try
+        {
+            target = DeployerInput.From(state).Target;
+        }
+        catch (DeployRefused)
+        {
+            return "none: the input names no service";
+        }
+
+        try
+        {
+            return await Lz.Aws.Ops.ServiceLease.ReleaseHeldByAsync(leases, target.Cluster, target.Service, PrepareStep.LeaseHolder(executionName)) switch
+            {
+                true => "released",
+                false => "held by another writer; not released",
+                null => "none held",
+            };
+        }
+        catch (Exception ex)
+        {
+            return $"release failed, so it expires instead: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 }
 

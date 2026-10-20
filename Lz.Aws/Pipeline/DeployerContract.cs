@@ -39,6 +39,13 @@ public sealed class ScanNotYetAvailable(string message) : Exception(message);
 /// </summary>
 public sealed class ImageNotYetReplicated(string message) : Exception(message);
 
+/// <summary>
+/// Another writer holds the service's lease (DecoupledCd.md V-J): <c>lz updatecontainer</c>, <c>lz deploytenant</c> or another
+/// execution. RETRIED by the definition, for longer than a lease lasts, so a writer that died holding one is waited out.
+/// Thrown by Prepare before it reads or registers anything.
+/// </summary>
+public sealed class ServiceRollInProgress(string message) : Exception(message);
+
 /// <summary>The roll is under way. RETRIED by the definition; its retry limit is the rollout timeout.</summary>
 public sealed class RolloutStillRolling(string message) : Exception(message);
 
@@ -286,6 +293,8 @@ public static class DeployerEnvironment
     public const string ImageRepositories = "LZ_IMAGE_REPOSITORIES";
     public const string Registry = "LZ_REGISTRY";
     public const string EvidenceStore = "LZ_EVIDENCE_STORE";
+    /// <summary>The DynamoDB table holding the per-service lease (DecoupledCd.md V-J): the environment's system table.</summary>
+    public const string LeaseTable = "LZ_LEASE_TABLE";
     public const string TrustedProfiles = "LZ_TRUSTED_SIGNING_PROFILES";
     public const string RegistryScopes = "LZ_TRUST_REGISTRY_SCOPES";
     public const string ArtifactAccount = "LZ_ARTIFACT_ACCOUNT";

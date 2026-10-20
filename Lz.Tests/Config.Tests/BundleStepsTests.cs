@@ -715,7 +715,7 @@ public sealed class BundleStepsTests : IDisposable
         // Record takes it from there, unchanged.
         state["rollout"] = result;
         var writer = new EvidenceWriter();
-        var recorded = await RecordStep.RunAsync(state, Execution, "scu-dev-deploy-evidence-4df6-b9c6", writer);
+        var recorded = await RecordStep.RunAsync(state, Execution, "scu-dev-deploy-evidence-4df6-b9c6", writer, new Lz.Tests.Orchestration.Tests.InMemoryServiceLeaseStore());
         Assert.Equal("deploys/client/scutara/scutarasellerapp/" + Execution + ".json", recorded["key"]!.GetValue<string>());
         Assert.Single(writer.Written);
     }

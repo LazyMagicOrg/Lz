@@ -47,7 +47,8 @@ public class ServiceLeaseDynamoDbTests
 
             Assert.False(await ServiceLease.ReleaseAsync(store, "c", "s", first with { Token = "not-it" }));
             Assert.True(await ServiceLease.ReleaseAsync(store, "c", "s", first));
-            Assert.Null(await store.GetAsync(ServiceLease.KeyFor("c", "s")));
+            Assert.Equal(DateTimeOffset.UnixEpoch, (await store.GetAsync(ServiceLease.KeyFor("c", "s")))!.ExpiresAt);   // released, by expiring
+            Assert.True(await ServiceLease.ReleaseAsync(store, "c", "s", first));   // a repeated release by its holder
 
             var crashed = Assert.IsType<ServiceLeaseClaim.Claimed>(await ServiceLease.ClaimAsync(store, "c", "s", "deployer:crashed", "roll", t0)).Lease;
             Assert.IsType<ServiceLeaseClaim.Held>(await ServiceLease.ClaimAsync(store, "c", "s", "x", "roll", t0 + ServiceLease.Duration - TimeSpan.FromSeconds(1)));

@@ -43,6 +43,8 @@
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
     <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
+    <!-- The per-service lease (DecoupledCd.md V-J): Prepare claims it, Record and RecordFailure release it. -->
+    <Compile Include="..\Lz.Aws\Ops\ServiceLease.cs" Link="Linked\Lz.Aws\Ops\ServiceLease.cs" />
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
@@ -69,6 +71,8 @@
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
     <!-- The bundle deploy (P4 stage C) invalidates the app's path and waits for it. -->
     <PackageReference Include="AWSSDK.CloudFront" Version="4.0.101.3" />
+    <!-- The per-service lease (V-J) lives in the system table. -->
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.109" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

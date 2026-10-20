@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Lz.Aws.Pipeline;
+using Lz.Tests.Orchestration.Tests;
 
 namespace Lz.Tests.Config.Tests;
 
@@ -299,6 +300,23 @@ public class DeployerStepsTests
     // ---------------------------------------------------------------------------------------
 
     private const string RegistryHost = "503947800380.dkr.ecr.us-west-2.amazonaws.com";
+
+    // The steps as the handlers call them, with the per-service lease (V-J) in memory. A test that is about the lease
+    // passes its own store; the rest get a fresh, empty one, so Prepare claims freely.
+    private const string LeaseExecution = "req-abc-1";
+    private static readonly DateTimeOffset LeaseNow = new(2026, 10, 20, 18, 0, 0, TimeSpan.Zero);
+
+    private static Task<JsonObject> Prepare(JsonObject state, string registry, IServices services, ITaskDefinitions definitions,
+        InMemoryServiceLeaseStore? leases = null, string execution = LeaseExecution)
+        => PrepareStep.RunAsync(state, execution, registry, services, definitions, leases ?? new InMemoryServiceLeaseStore(), LeaseNow);
+
+    private static Task<JsonObject> Record(JsonObject state, string execution, string store, IEvidenceWriter writer,
+        InMemoryServiceLeaseStore? leases = null)
+        => RecordStep.RunAsync(state, execution, store, writer, leases ?? new InMemoryServiceLeaseStore());
+
+    private static Task<JsonObject> RecordFailure(JsonObject state, string execution, string store, IEvidenceWriter writer, DateTimeOffset now,
+        InMemoryServiceLeaseStore? leases = null)
+        => RecordFailureStep.RunAsync(state, execution, store, writer, now, leases ?? new InMemoryServiceLeaseStore());
     private const string Secret = "not-a-real-secret-but-shaped-like-one";
 
     private sealed class Definitions(Amazon.ECS.Model.TaskDefinition definition, string? runningBuiltAt = null) : ITaskDefinitions
@@ -355,7 +373,7 @@ public class DeployerStepsTests
     {
         var definitions = new Definitions(CurrentDefinition());
 
-        var result = await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+        var result = await Prepare(PrepareState(), RegistryHost, new Services(Service()), definitions);
 
         // The base is what the service runs NOW, not what Verify saw.
         Assert.Equal(new[] { CurrentTd }, definitions.Described);
@@ -380,11 +398,11 @@ public class DeployerStepsTests
     public async Task Prepare_ReturnsNothingCopiedFromTheDefinition_SoItsSecretStaysOutOfStateAndEvidence()
     {
         // What Prepare returns lands in execution state, and DeployEvidence.Deployed copies it into kept evidence.
-        var result = await PrepareStep.RunAsync(
+        var result = await Prepare(
             PrepareState(), RegistryHost, new Services(Service()), new Definitions(CurrentDefinition()));
 
         Assert.DoesNotContain(Secret, result.ToJsonString());
-        Assert.Equal(new[] { "taskDefinitionArn", "image", "previousTaskDefinitionArn", "previousImage", "ordering" },
+        Assert.Equal(new[] { "taskDefinitionArn", "image", "previousTaskDefinitionArn", "previousImage", "ordering", "lease" },
             result.Select(p => p.Key));
     }
 
@@ -394,7 +412,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            PrepareStep.RunAsync(State(), RegistryHost, new Services(Service()), definitions));
+            Prepare(State(), RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == "verified");
         Assert.Empty(definitions.Described);
@@ -407,7 +425,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(null), definitions));
+            Prepare(PrepareState(), RegistryHost, new Services(null), definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == "target.service");
         Assert.Empty(definitions.Registered);
@@ -421,7 +439,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+            Prepare(state, RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains("no container named 'worker'", ex.Message);
         Assert.Empty(definitions.Registered);
@@ -433,7 +451,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            PrepareStep.RunAsync(PrepareState(), "registry.example.com", new Services(Service()), definitions));
+            Prepare(PrepareState(), "registry.example.com", new Services(Service()), definitions));
 
         Assert.Empty(definitions.Described);
     }
@@ -450,7 +468,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
 
         var ex = await Assert.ThrowsAsync<DeploySuperseded>(() =>
-            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions));
+            Prepare(PrepareState(), RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains("2026-09-13T22:05:10Z", ex.Message);
         Assert.Contains(BuiltAt, ex.Message);
@@ -466,7 +484,7 @@ public class DeployerStepsTests
     {
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt);
 
-        var result = await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+        var result = await Prepare(PrepareState(), RegistryHost, new Services(Service()), definitions);
 
         Assert.Single(definitions.Registered);
         Assert.False(string.IsNullOrWhiteSpace(result["ordering"]!.GetValue<string>()));
@@ -477,7 +495,7 @@ public class DeployerStepsTests
     {
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T21:40:00Z");
 
-        await PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions);
+        await Prepare(PrepareState(), RegistryHost, new Services(Service()), definitions);
 
         var tags = Assert.Single(definitions.Registered).Tags;
         Assert.Equal(BuiltAt, Assert.Single(tags, t => t.Key == DeployOrdering.BuiltAtTag).Value);
@@ -491,14 +509,14 @@ public class DeployerStepsTests
         state["allowOlderBuild"] = true;
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
 
-        var result = await PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions);
+        var result = await Prepare(state, RegistryHost, new Services(Service()), definitions);
 
         Assert.Single(definitions.Registered);
         Assert.Contains("allowOlderBuild", result["ordering"]!.GetValue<string>());
 
         state["allowOlderBuild"] = false;
         await Assert.ThrowsAsync<DeploySuperseded>(() =>
-            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), new Definitions(CurrentDefinition(), "2026-09-13T22:05:10Z")));
+            Prepare(state, RegistryHost, new Services(Service()), new Definitions(CurrentDefinition(), "2026-09-13T22:05:10Z")));
     }
 
     [Theory]
@@ -512,7 +530,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-13T22:05:10Z");
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+            Prepare(state, RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == "allowOlderBuild");
         Assert.Empty(definitions.Registered);
@@ -526,7 +544,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition(), runningBuiltAt: tag);
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            PrepareStep.RunAsync(PrepareState(), RegistryHost, new Services(Service()), definitions));
+            Prepare(PrepareState(), RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == DeployOrdering.BuiltAtTag);
         Assert.Empty(definitions.Registered);
@@ -540,7 +558,7 @@ public class DeployerStepsTests
         var definitions = new Definitions(CurrentDefinition());
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            PrepareStep.RunAsync(state, RegistryHost, new Services(Service()), definitions));
+            Prepare(state, RegistryHost, new Services(Service()), definitions));
 
         Assert.Contains(ex.Refusals, r => r.Check == "verified");
         Assert.Empty(definitions.Registered);
@@ -816,7 +834,7 @@ public class DeployerStepsTests
     {
         var writer = new Evidence();
 
-        var result = await RecordStep.RunAsync(RecordState(), "req-abc-1", "scu-dev-deploy-evidence-4df6-b9c6", writer);
+        var result = await Record(RecordState(), "req-abc-1", "scu-dev-deploy-evidence-4df6-b9c6", writer);
 
         Assert.Equal(
             ("scu-dev-deploy-evidence-4df6-b9c6", "deploys/image/scutara/scutaraservice/req-abc-1.json", "{\"outcome\":\"deployed\"}"),
@@ -829,7 +847,7 @@ public class DeployerStepsTests
     {
         // THE RETRY THE SDK INTEGRATION COULD NOT SURVIVE: the write landed, its response was lost, and the
         // retry met the conditional write. That is a recorded deploy, not a failed one.
-        var result = await RecordStep.RunAsync(RecordState(), "req-abc-1", "bucket", new Evidence(exists: true));
+        var result = await Record(RecordState(), "req-abc-1", "bucket", new Evidence(exists: true));
 
         Assert.False(result["written"]!.GetValue<bool>());
     }
@@ -840,7 +858,7 @@ public class DeployerStepsTests
         var writer = new Evidence();
 
         var ex = await Assert.ThrowsAsync<DeployRefused>(() =>
-            RecordStep.RunAsync(RecordState("deploys/image/someone/else/req-abc-1.json"), "req-abc-1", "bucket", writer));
+            Record(RecordState("deploys/image/someone/else/req-abc-1.json"), "req-abc-1", "bucket", writer));
 
         Assert.Contains(ex.Refusals, r => r.Check == "rollout.evidence.key");
         Assert.Empty(writer.Writes);
@@ -849,7 +867,7 @@ public class DeployerStepsTests
     [Fact]
     public async Task Record_BeforeVerifyRollout_IsRefused()
     {
-        await Assert.ThrowsAsync<DeployRefused>(() => RecordStep.RunAsync(RolloutState(), "req-abc-1", "bucket", new Evidence()));
+        await Assert.ThrowsAsync<DeployRefused>(() => Record(RolloutState(), "req-abc-1", "bucket", new Evidence()));
     }
 
     [Fact]
@@ -862,7 +880,7 @@ public class DeployerStepsTests
             DateTimeOffset.Parse("2026-09-12T19:00:00Z"));
         var writer = new Evidence();
 
-        await RecordStep.RunAsync(state, "req-abc-1", "bucket", writer);
+        await Record(state, "req-abc-1", "bucket", writer);
 
         var write = Assert.Single(writer.Writes);
         Assert.Equal(state["rollout"]!["evidence"]!["key"]!.GetValue<string>(), write.Key);
@@ -890,7 +908,7 @@ public class DeployerStepsTests
         state["error"] = new JsonObject { ["Error"] = "DeployRefused", ["Cause"] = "{\"errorMessage\":\"[scan] …\"}" };
         var writer = new Evidence();
 
-        var result = await RecordFailureStep.RunAsync(state, "req-abc-1", "scu-dev-deploy-evidence-4df6-b9c6", writer, DateTimeOffset.UtcNow);
+        var result = await RecordFailure(state, "req-abc-1", "scu-dev-deploy-evidence-4df6-b9c6", writer, DateTimeOffset.UtcNow);
 
         var write = Assert.Single(writer.Writes);
         Assert.Equal("failures/req-abc-1.json", write.Key);
@@ -901,7 +919,7 @@ public class DeployerStepsTests
     [Fact]
     public async Task EvidenceAlreadyWrittenByThisExecution_IsNotAFailureOfItsOwn()
     {
-        var result = await RecordFailureStep.RunAsync(State(), "req-abc-1", "bucket", new Evidence(exists: true), DateTimeOffset.UtcNow);
+        var result = await RecordFailure(State(), "req-abc-1", "bucket", new Evidence(exists: true), DateTimeOffset.UtcNow);
         Assert.False(result["written"]!.GetValue<bool>());
     }
 

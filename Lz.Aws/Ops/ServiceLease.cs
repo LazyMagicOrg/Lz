@@ -25,8 +25,13 @@ public interface IServiceLeaseStore
 
     Task<ServiceLeaseRecord?> GetAsync(string key);
 
-    /// <summary>Deletes the lease only if it still carries <paramref name="token"/>.</summary>
-    Task<bool> DeleteIfTokenAsync(string key, string token);
+    /// <summary>
+    /// Releases the lease only if it still carries <paramref name="token"/>, by EXPIRING it in place (ExpiresAt set to
+    /// the epoch) rather than deleting it: an expired lease is free to every claimer already, and the deployer's roles
+    /// then hold no delete on anything, as DeployBundle's lease releases by a conditional overwrite. True again for a
+    /// release repeated by the same holder.
+    /// </summary>
+    Task<bool> ReleaseIfTokenAsync(string key, string token);
 }
 
 /// <summary>
@@ -69,9 +74,38 @@ public static class ServiceLease
         for (var attempt = 0; attempt < 2; attempt++)
         {
             if (await store.PutIfFreeAsync(key, record, now)) return new ServiceLeaseClaim.Claimed(record);
-            if (await store.GetAsync(key) is { } held) return new ServiceLeaseClaim.Held(held);
+            // A lease read back expired was released (or ran out) after our put was refused: free, so put again.
+            if (await store.GetAsync(key) is { } held && held.ExpiresAt > now) return new ServiceLeaseClaim.Held(held);
         }
         throw new InvalidOperationException($"the lease on {cluster}/{service} could be neither claimed nor read; it is changing under us");
+    }
+
+    /// <summary>
+    /// A claim that a holder's OWN lease satisfies: the lease it already holds comes back as claimed, token and expiry
+    /// unchanged. ONLY FOR A HOLDER NAME NO OTHER WRITER CAN BEAR, a deployer execution's (<c>deployer:{execution}</c>):
+    /// Step Functions retries a state, and a retried Prepare must find its own claim, not wait it out. The CLIs' holder
+    /// names a user and a machine, which two runs can share, so they never claim this way.
+    /// </summary>
+    public static async Task<ServiceLeaseClaim> ClaimReentrantAsync(
+        IServiceLeaseStore store, string cluster, string service, string holder, string purpose, DateTimeOffset now)
+    {
+        var claim = await ClaimAsync(store, cluster, service, holder, purpose, now);
+        return claim is ServiceLeaseClaim.Held held && held.By.Holder == holder && held.By.ExpiresAt > now
+            ? new ServiceLeaseClaim.Claimed(held.By)
+            : claim;
+    }
+
+    /// <summary>
+    /// Releases the lease if <paramref name="holder"/> holds it, whatever its token: for a step that knows who it is but
+    /// not the claim's token (the deployer's Record and RecordFailure, after a Prepare whose result may never have reached
+    /// the execution's state). Null when there was no lease; false when another holds it.
+    /// </summary>
+    public static async Task<bool?> ReleaseHeldByAsync(IServiceLeaseStore store, string cluster, string service, string holder)
+    {
+        var key = KeyFor(cluster, service);
+        if (await store.GetAsync(key) is not { } lease) return null;
+        if (lease.ExpiresAt <= DateTimeOffset.UnixEpoch) return null;
+        return lease.Holder == holder && await store.ReleaseIfTokenAsync(key, lease.Token);
     }
 
     /// <summary>
@@ -99,15 +133,16 @@ public static class ServiceLease
 
     /// <summary>Releases the lease if <paramref name="lease"/>'s token still holds it; false if another took it since.</summary>
     public static Task<bool> ReleaseAsync(IServiceLeaseStore store, string cluster, string service, ServiceLeaseRecord lease)
-        => store.DeleteIfTokenAsync(KeyFor(cluster, service), lease.Token);
+        => store.ReleaseIfTokenAsync(KeyFor(cluster, service), lease.Token);
 
     /// <summary>The line a refusal prints: who holds the service, why, and until when.</summary>
     public static string Describe(ServiceLeaseRecord lease)
         => $"{lease.Holder} holds it for {lease.Purpose}, claimed {lease.ClaimedAt:yyyy-MM-dd HH:mm:ss}Z, expiring {lease.ExpiresAt:HH:mm:ss}Z";
 }
 
-/// <summary>The lease in the environment's DynamoDB system table.</summary>
-public sealed class DynamoDbServiceLeaseStore : IServiceLeaseStore
+/// <summary>The lease in the environment's DynamoDB system table. BCL and the DynamoDB SDK only, since the deployer's
+/// functions compile this file too; the CLI's opener, which needs lz's credentials, is in ServiceLeaseOpen.cs.</summary>
+public sealed partial class DynamoDbServiceLeaseStore : IServiceLeaseStore
 {
     private readonly IAmazonDynamoDB _db;
     private readonly string _table;
@@ -116,28 +151,6 @@ public sealed class DynamoDbServiceLeaseStore : IServiceLeaseStore
     {
         _db = db;
         _table = table;
-    }
-
-    /// <summary>
-    /// The store in <paramref name="table"/>, or null when that table DOES NOT EXIST: a topology without a system table
-    /// (Keycloak's) has nowhere to keep a lease, and the caller says it runs without one. Every other failure (access
-    /// denied, an expired session, throttling) throws, so a lease that cannot be read is never taken for no lease at all.
-    /// </summary>
-    public static async Task<DynamoDbServiceLeaseStore?> OpenAsync(string profile, string region, string table, CancellationToken ct)
-    {
-        var credentials = Lz.Aws.AwsCredentialsFactory.ResolveOrThrow(profile);
-        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
-        IAmazonDynamoDB db = credentials != null ? new AmazonDynamoDBClient(credentials, endpoint) : new AmazonDynamoDBClient(endpoint);
-        try
-        {
-            await db.DescribeTableAsync(table, ct);
-        }
-        catch (ResourceNotFoundException)
-        {
-            db.Dispose();
-            return null;
-        }
-        return new DynamoDbServiceLeaseStore(db, table);
     }
 
     public async Task<bool> PutIfFreeAsync(string key, ServiceLeaseRecord record, DateTimeOffset now)
@@ -183,17 +196,22 @@ public sealed class DynamoDbServiceLeaseStore : IServiceLeaseStore
             DateTimeOffset.FromUnixTimeSeconds(long.Parse(i["ExpiresAt"].N)), i["Token"].S);
     }
 
-    public async Task<bool> DeleteIfTokenAsync(string key, string token)
+    public async Task<bool> ReleaseIfTokenAsync(string key, string token)
     {
         try
         {
-            await _db.DeleteItemAsync(new DeleteItemRequest
+            await _db.UpdateItemAsync(new UpdateItemRequest
             {
                 TableName = _table,
                 Key = new() { ["PK"] = new() { S = key }, ["SK"] = new() { S = ServiceLease.SortKey } },
+                UpdateExpression = "SET ExpiresAt = :released",
                 ConditionExpression = "#t = :token",
                 ExpressionAttributeNames = new() { ["#t"] = "Token" },
-                ExpressionAttributeValues = new() { [":token"] = new() { S = token } },
+                ExpressionAttributeValues = new()
+                {
+                    [":token"] = new() { S = token },
+                    [":released"] = new() { N = "0" },
+                },
             });
             return true;
         }

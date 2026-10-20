@@ -251,6 +251,11 @@ public static class DeployerPlanner
     public const int RolloutRetryIntervalSeconds = 30;
     public const int RolloutRetryMaxAttempts = 40;
 
+    // Prepare's wait for a service lease another writer holds (DecoupledCd.md V-J): 31 minutes, past a lease's 30, so a
+    // writer that died holding one is waited out rather than failed on.
+    public const int ServiceLeaseRetryIntervalSeconds = 30;
+    public const int ServiceLeaseRetryMaxAttempts = 62;
+
     /// <summary>
     /// How long DeployBundle waits for another execution's lease on the app: 30 s × 40 attempts, twenty minutes — longer
     /// than <see cref="BundleMarker.Lease"/>, so a lease left by a deploy that died is outlasted rather than failed on.
@@ -538,8 +543,9 @@ public static class DeployerPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(prepare, DeployerHandlers.Prepare, $"{prepare}-fn",
-                Combine(Logs(region, acct, prepare), PrepareGrants(region, acct, sk, env)),
-                new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry },
+                Combine(Logs(region, acct, prepare), [.. PrepareGrants(region, acct, sk, env),
+                         .. LeaseGrants(region, acct, sk, "ClaimAndReleaseTheServiceLease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem")]),
+                new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry, [DeployerEnvironment.LeaseTable] = sk },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(rollout, DeployerHandlers.VerifyRollout, $"{rollout}-fn",
@@ -548,13 +554,15 @@ public static class DeployerPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(record, DeployerHandlers.Record, $"{record}-fn",
-                Combine(Logs(region, acct, record), RecordGrants(evidence)),
-                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                Combine(Logs(region, acct, record), [.. RecordGrants(evidence),
+                         .. LeaseGrants(region, acct, sk, "ReleaseTheServiceLease", "dynamodb:GetItem", "dynamodb:UpdateItem")]),
+                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence, [DeployerEnvironment.LeaseTable] = sk },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(failure, DeployerHandlers.RecordFailure, $"{failure}-fn",
-                Combine(Logs(region, acct, failure), FailureGrants(evidence)),
-                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                Combine(Logs(region, acct, failure), [.. FailureGrants(evidence),
+                         .. LeaseGrants(region, acct, sk, "ReleaseTheServiceLease", "dynamodb:GetItem", "dynamodb:UpdateItem")]),
+                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence, [DeployerEnvironment.LeaseTable] = sk },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(hook, DeployerHandlers.SignatureHook, $"{hook}-fn",
@@ -602,6 +610,13 @@ public static class DeployerPlanner
 
             bundleFunctions = (FnArn(deployBundle), FnArn(verifyBundle));
         }
+
+        // THE LEASE OUTLASTS THE SPAN IT COVERS, from Prepare's claim to Record's release: the rollout wait is its longest
+        // part, and a lease that expired inside it would let another writer start on a service mid-rollout.
+        if (TimeSpan.FromSeconds(RolloutRetryIntervalSeconds * RolloutRetryMaxAttempts) + TimeSpan.FromMinutes(5) > Lz.Aws.Ops.ServiceLease.Duration)
+            throw new InvalidOperationException("the service lease must outlast the rollout wait with margin, or a live roll's lease could be taken.");
+        if (TimeSpan.FromSeconds(ServiceLeaseRetryIntervalSeconds * ServiceLeaseRetryMaxAttempts) <= Lz.Aws.Ops.ServiceLease.Duration)
+            throw new InvalidOperationException("Prepare must wait longer than a lease lasts, or a lease whose holder died fails the deploy.");
 
         var machine = $"{sk}-{env}-deployer";
         var machineArn = $"arn:aws:states:{region}:{acct}:stateMachine:{machine}";
@@ -1535,6 +1550,28 @@ public static class DeployerPlanner
         },
     };
 
+    /// <summary>
+    /// The per-service lease's items in the system table (DecoupledCd.md V-J), and no others: every key must lead with
+    /// <c>lease#ecs-service#</c>, so these grants reach no application data in the same table.
+    /// </summary>
+    private static object[] LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions) => new object[]
+    {
+        new
+        {
+            Sid = sid,
+            Effect = "Allow",
+            Action = actions,
+            Resource = $"arn:aws:dynamodb:{region}:{accountId}:table/{sk}",
+            Condition = new Dictionary<string, object>
+            {
+                ["ForAllValues:StringLike"] = new Dictionary<string, object>
+                {
+                    ["dynamodb:LeadingKeys"] = new[] { $"{Lz.Aws.Ops.ServiceLease.KeyPrefix}*" },
+                },
+            },
+        },
+    };
+
     private static object[] RecordGrants(string evidence) => new object[]
     {
         new
@@ -2050,7 +2087,18 @@ public static class DeployerPlanner
                 Resource = prepareFn,
                 Parameters = payload,
                 ResultPath = "$.deploy",
-                Retry = new[] { Transient() },
+                Retry = new[]
+                {
+                    // Another writer holds the service's lease (V-J): wait, for longer than a lease lasts.
+                    new
+                    {
+                        ErrorEquals = new[] { nameof(ServiceRollInProgress) },
+                        IntervalSeconds = ServiceLeaseRetryIntervalSeconds,
+                        MaxAttempts = ServiceLeaseRetryMaxAttempts,
+                        BackoffRate = 1.0,
+                    },
+                    Transient(),
+                },
                 Next = "Deploy",
                 Catch = catchAll,
             },

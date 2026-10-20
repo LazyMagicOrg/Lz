@@ -85,11 +85,14 @@ public sealed class PrepareFunction
         // The decisions and the sequence are PrepareStep's, where a test drives them.
         var result = await PrepareStep.RunAsync(
             state,
+            executionName,
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.Registry),
             new EcsServices(Clients.Ecs.Value),
-            new EcsTaskDefinitions(Clients.Ecs.Value));
+            new EcsTaskDefinitions(Clients.Ecs.Value),
+            Clients.Leases(),
+            DateTimeOffset.UtcNow);
 
-        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}");
+        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}, holding the service's lease");
         return Io.Write(result);
     }
 }
@@ -118,9 +121,10 @@ public sealed class RecordFunction
             state,
             executionName,
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
-            new S3EvidenceWriter(Clients.S3.Value));
+            new S3EvidenceWriter(Clients.S3.Value),
+            Clients.Leases());
 
-        context.Logger.LogInformation($"{executionName}: deploy recorded at {result["key"]} (written: {result["written"]})");
+        context.Logger.LogInformation($"{executionName}: deploy recorded at {result["key"]} (written: {result["written"]}); lease {result["lease"]}");
         return Io.Write(result);
     }
 }
@@ -136,9 +140,10 @@ public sealed class RecordFailureFunction
             executionName,
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
             new S3EvidenceWriter(Clients.S3.Value),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            Clients.Leases());
 
-        context.Logger.LogInformation($"{executionName}: failure recorded at {result["key"]} (written: {result["written"]})");
+        context.Logger.LogInformation($"{executionName}: failure recorded at {result["key"]} (written: {result["written"]}); lease {result["lease"]}");
         return Io.Write(result);
     }
 }
