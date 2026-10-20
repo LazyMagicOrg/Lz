@@ -359,7 +359,7 @@ public class AwsFargateAlbServiceComponent : IServiceComponent
 
                 var envVars = new List<object>
                 {
-                    new { name = "ASPNETCORE_ENVIRONMENT", value = _config.Environment == "dev" ? "Development" : "Production" },
+                    new { name = Lz.Aws.Shared.AspNetEnvironment.Variable, value = Lz.Aws.Shared.AspNetEnvironment.For(_config.Environment) },
                     new { name = "LZ_SYSTEM_KEY", value = prefix },
                     new { name = "LZ_SERVICE_NAME", value = serviceName },
                     new { name = "AWS_REGION", value = _config.Region },

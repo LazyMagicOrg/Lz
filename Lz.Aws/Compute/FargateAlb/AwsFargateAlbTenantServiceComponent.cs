@@ -603,7 +603,7 @@ public class AwsFargateAlbTenantServiceComponent : ComponentResource, ITenantSer
 
                 var envVars = new List<object>
                 {
-                    new { name = "ASPNETCORE_ENVIRONMENT", value = env == "dev" ? "Development" : "Production" },
+                    new { name = Lz.Aws.Shared.AspNetEnvironment.Variable, value = Lz.Aws.Shared.AspNetEnvironment.For(env) },
                     new { name = "ASPNETCORE_URLS", value = aspnetUrls },
                     new { name = "LZ_SYSTEM_KEY", value = sk },
                     new { name = "LZ_TENANT_KEY", value = tk },

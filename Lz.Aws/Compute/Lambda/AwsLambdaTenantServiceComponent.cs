@@ -198,7 +198,7 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
         // Base (always-present) function env.
         var baseVars = new System.Collections.Generic.Dictionary<string, string>
         {
-            { "ASPNETCORE_ENVIRONMENT", env == "prod" ? "Production" : "Development" },
+            { Lz.Aws.Shared.AspNetEnvironment.Variable, Lz.Aws.Shared.AspNetEnvironment.For(env) },
             { "SYSTEM_KEY", sk },
             { "TENANT_KEY", tk },
             { "ENVIRONMENT", env },

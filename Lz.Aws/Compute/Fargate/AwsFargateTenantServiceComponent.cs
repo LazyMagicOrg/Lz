@@ -350,7 +350,7 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         // environment array is identical to a pre-BFF deploy.
         var baseEnv = new List<KeyValuePair<string, string>>
         {
-            new("ASPNETCORE_ENVIRONMENT", env == "prod" ? "Production" : "Development"),
+            new(Lz.Aws.Shared.AspNetEnvironment.Variable, Lz.Aws.Shared.AspNetEnvironment.For(env)),
             new("ASPNETCORE_URLS", $"http://+:{port}"),
             new("LZ_SYSTEM_KEY", sk),
             new("LZ_TENANT_KEY", tk),
