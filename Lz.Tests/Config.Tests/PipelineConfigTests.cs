@@ -133,6 +133,12 @@ public class PipelineConfigTests
             // that has not opted in — the same gate bootstrappipeline has. Reached only from
             // `lz bootstrapdeployer`; no deploy path calls it.
             Path.Combine("Lz.Aws", "Pipeline", "DeployerBootstrapper.cs"),
+
+            // IntakeBuildPlan, 2026-10-21 (DecoupledCd V-B). Reads Pipeline.Repositories for the repositories with an
+            // Intake mode, and plans the intake's resources in the BUILD account. Reached only from `lz bootstrappipeline`;
+            // no deploy path calls it. Absent paths: IntakeBuildPlanTests.ASystemWithNoPipelineBlock_GetsNoIntake_AndReadsNothingElse
+            // and ASystemWithNoIntakeRepository_GetsNoIntake, which plan nothing.
+            Path.Combine("Lz.Aws", "Pipeline", "IntakeBuildPlan.cs"),
         };
 
         var root = RepoRoot();

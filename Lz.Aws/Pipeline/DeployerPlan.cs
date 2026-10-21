@@ -239,7 +239,7 @@ public static class DeployerHandlers
 /// </summary>
 public static class DeployerPlanner
 {
-    private static readonly JsonSerializerOptions Asl = new()
+    internal static readonly JsonSerializerOptions Asl = new()
     {
         WriteIndented = true,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -1435,7 +1435,7 @@ public static class DeployerPlanner
     /// The log grant AWS's own per-function basic execution role uses: create the log group anywhere
     /// in the account's region, write only to this function's.
     /// </summary>
-    private static object[] Logs(string region, string accountId, string function) => new object[]
+    internal static object[] Logs(string region, string accountId, string function) => new object[]
     {
         new
         {
@@ -1954,10 +1954,10 @@ public static class DeployerPlanner
     private static string[] RepositoryArns(string region, string accountId, IReadOnlyList<string> repositories)
         => repositories.Select(r => $"arn:aws:ecr:{region}:{accountId}:repository/{r}").ToArray();
 
-    private static string Policy(params object[] statements)
+    internal static string Policy(params object[] statements)
         => JsonSerializer.Serialize(new { Version = "2012-10-17", Statement = statements }, Asl);
 
-    private static string Combine(object[] first, object[] second)
+    internal static string Combine(object[] first, object[] second)
         => Policy(first.Concat(second).ToArray());
 
     /// <summary>
@@ -1968,7 +1968,7 @@ public static class DeployerPlanner
     /// adding, which is the whole point of stating it rather than relying on the absence of a
     /// grant.</para>
     /// </summary>
-    private static string DenyPolicyFor()
+    internal static string DenyPolicyFor()
         => JsonSerializer.Serialize(new
         {
             Version = "2012-10-17",
