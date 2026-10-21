@@ -45,6 +45,13 @@
     <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
     <!-- The per-service lease (DecoupledCd.md V-J): Prepare claims it, Record and RecordFailure release it. -->
     <Compile Include="..\Lz.Aws\Ops\ServiceLease.cs" Link="Linked\Lz.Aws\Ops\ServiceLease.cs" />
+    <!-- The intake (DecoupledCd.md V-B), in the build account: V-A's decisions and V-B's steps and GitHub reads. BCL only. -->
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeRuns.cs" Link="Linked\Lz.Aws\Pipeline\IntakeRuns.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeNames.cs" Link="Linked\Lz.Aws\Pipeline\IntakeNames.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeArtifacts.cs" Link="Linked\Lz.Aws\Pipeline\IntakeArtifacts.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeGitHub.cs" Link="Linked\Lz.Aws\Pipeline\IntakeGitHub.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakePollStep.cs" Link="Linked\Lz.Aws\Pipeline\IntakePollStep.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeSteps.cs" Link="Linked\Lz.Aws\Pipeline\IntakeSteps.cs" />
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
@@ -73,6 +80,8 @@
     <PackageReference Include="AWSSDK.CloudFront" Version="4.0.101.3" />
     <!-- The per-service lease (V-J) lives in the system table. -->
     <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.109" />
+    <!-- The intake App's key (V-B). -->
+    <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

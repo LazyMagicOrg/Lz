@@ -9,7 +9,7 @@ namespace Lz.Tests.Config.Tests;
 public sealed class IntakeStepsTests : IDisposable
 {
     private const long RepoId = 1001, OwnerId = 2002, RunId = 9001;
-    private static readonly IntakeRepository Service = new("Example/ExampleService", RepoId, OwnerId, ".github/workflows/build-aiphost.yml", "dry", new[] { "aiphost" });
+    private static readonly IntakeRepository Service = new("Example/ExampleService", RepoId, OwnerId, ".github/workflows/build-aiphost.yml", "dry", "image", new[] { "aiphost" });
     private static readonly IReadOnlyList<IntakeRepository> Repos = new[] { Service };
     private static readonly DateTimeOffset Now = new(2026, 10, 21, 2, 0, 0, TimeSpan.Zero);
     private readonly string _work = Path.Combine(Path.GetTempPath(), "lz-intake-" + Guid.NewGuid().ToString("N")[..8]);
@@ -66,7 +66,7 @@ public sealed class IntakeStepsTests : IDisposable
         return f;
     }
 
-    private Task<JsonObject> Fetch(Fakes f) => IntakeFetchStep.RunAsync(Input(), Exec(), Repos, "image", f, f, f, _work);
+    private Task<JsonObject> Fetch(Fakes f) => IntakeFetchStep.RunAsync(Input(), Exec(), Repos, f, f, f, _work);
 
     // ---- check the run ----
 

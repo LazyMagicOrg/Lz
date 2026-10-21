@@ -95,7 +95,7 @@ public static class IntakeCheckRunStep
 public static class IntakeFetchStep
 {
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, string executionName, IReadOnlyList<IntakeRepository> repositories, string classOf,
+        JsonObject state, string executionName, IReadOnlyList<IntakeRepository> repositories,
         IIntakeGitHub github, IIntakeScratch scratch, IIntakeEvidenceStore evidence, string workDirectory)
     {
         var input = IntakeInput.From(state);
@@ -120,7 +120,7 @@ public static class IntakeFetchStep
                 if (!ArtifactCheck.DigestMatches(artifact.Digest, sha256))
                     return IntakeCheckRunStep.Refused($"{artifact.Name}: the bytes downloaded hash to sha256:{sha256}, not GitHub's {artifact.Digest}");
 
-                if (classOf == "image")
+                if (repository.Class == "image")
                 {
                     try
                     {

@@ -6,11 +6,23 @@ using System.Text.Json.Nodes;
 namespace Lz.Aws.Pipeline;
 
 /// <summary>A repository the intake takes runs from, as the poller's configuration carries it, and its mode.</summary>
+/// <param name="Class">The repository's artifact class (<c>image</c>, <c>client</c>, …), which decides how its artifacts are read.</param>
 /// <param name="Artifacts">The artifacts each run must upload, by the names config gives them (the run attempt is appended).</param>
-public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, IReadOnlyList<string> Artifacts)
+public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class, IReadOnlyList<string> Artifacts)
 {
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
+}
+
+/// <summary>The environment variables that configure the intake's functions: written by the planner, read by the handlers.</summary>
+public static class IntakeEnvironment
+{
+    public const string Repositories = "LZ_INTAKE_REPOSITORIES";
+    public const string EvidenceStore = "LZ_INTAKE_EVIDENCE";
+    public const string ScratchBucket = "LZ_INTAKE_SCRATCH";
+    public const string AppSecret = "LZ_INTAKE_APP_SECRET";
+    public const string StateMachine = "LZ_INTAKE_MACHINE";
+    public const string AlertsTopic = "LZ_INTAKE_ALERTS";
 }
 
 /// <summary>The repositories in one environment variable, as JSON: written by the planner, read by the intake's functions.</summary>

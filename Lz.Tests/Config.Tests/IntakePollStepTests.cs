@@ -8,7 +8,7 @@ public class IntakePollStepTests
 {
     private const long RepoId = 1001, OwnerId = 2002;
     private static readonly DateTimeOffset Now = new(2026, 10, 21, 2, 0, 0, TimeSpan.Zero);
-    private static readonly IntakeRepository Service = new("Example/ExampleService", RepoId, OwnerId, ".github/workflows/build-aiphost.yml", "dry", new[] { "aiphost" });
+    private static readonly IntakeRepository Service = new("Example/ExampleService", RepoId, OwnerId, ".github/workflows/build-aiphost.yml", "dry", "image", new[] { "aiphost" });
 
     private static string Name(long run, int attempt = 1, int retry = 0) => IntakeNames.For(RepoId, run, attempt, retry);
 

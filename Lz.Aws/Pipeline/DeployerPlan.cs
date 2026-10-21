@@ -197,9 +197,18 @@ public static class DeployerHandlers
     public static readonly string DeployBundle = For("DeployBundleFunction");
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
 
+    // The intake (DecoupledCd.md V-B), in the build account: the same package, its own functions and roles.
+    public static readonly string IntakePoller = For("IntakePollerFunction");
+    public static readonly string IntakeCheckRun = For("IntakeCheckRunFunction");
+    public static readonly string IntakeFetch = For("IntakeFetchFunction");
+    public static readonly string IntakeRecord = For("IntakeRecordFunction");
+
     /// <summary>Every handler, for the packaging test.</summary>
     public static IReadOnlyList<string> All => new[]
-        { Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle };
+    {
+        Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle,
+        IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord,
+    };
 
     private static string For(string type) => $"{Assembly}::{Assembly}.{type}::HandleAsync";
 }
