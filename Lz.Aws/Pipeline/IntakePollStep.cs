@@ -8,11 +8,20 @@ namespace Lz.Aws.Pipeline;
 /// <summary>A repository the intake takes runs from, as the poller's configuration carries it, and its mode.</summary>
 /// <param name="Class">The repository's artifact class (<c>image</c>, <c>client</c>, …), which decides how its artifacts are read.</param>
 /// <param name="Artifacts">The artifacts each run must upload, by the names config gives them (the run attempt is appended).</param>
-public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class, IReadOnlyList<string> Artifacts)
+/// <param name="Gate1">The test bundle and how Gate 1 runs it (V-C); null for a repository with no Gate 1 yet.</param>
+public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class,
+    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null)
 {
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
 }
+
+/// <summary>Gate 1 for a repository (DecoupledCd.md §15.4, V-C), from the build-side file.</summary>
+/// <param name="Artifact">The run artifact holding the test bundle, named for the attempt like the others.</param>
+public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images);
+
+/// <summary>An image Gate 1 pulls by digest and tags as the tests expect it.</summary>
+public sealed record IntakeImage(string From, string As);
 
 /// <summary>The environment variables that configure the intake's functions: written by the planner, read by the handlers.</summary>
 public static class IntakeEnvironment
@@ -46,6 +55,7 @@ public static class IntakeEvidence
     public static string Refused(string attemptName) => $"refused/{attemptName}.json";
     public static string Fault(string executionName) => $"faults/{executionName}.json";
     public static string Staged(string executionName) => $"staged/{executionName}.json";
+    public static string Gate1(string executionName) => $"gate1/{executionName}.json";
     public static string Alarm(string alarm) => $"alarms/{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(alarm)))[..24].ToLowerInvariant()}.json";
 
     public static readonly string[] DecisionPrefixes = { "taken-in/", "refused/", "faults/" };

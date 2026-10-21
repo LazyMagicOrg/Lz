@@ -102,15 +102,17 @@ public static class IntakeFetchStep
         var repository = input.In(repositories) ?? throw new IntakeFault($"{input.Repo} is not configured; CheckRun should have refused it");
 
         // Check names each expected artifact for this attempt itself (ArtifactCheck.NameFor), and keys what it found by
-        // the configured name.
+        // the configured name. The test bundle, where Gate 1 is configured, is fetched the same way (V-C).
+        var expected = repository.Gate1 is { } gate1 ? repository.Artifacts.Append(gate1.Artifact).ToList() : repository.Artifacts;
         var listed = await github.ArtifactsAsync(input.Repo, input.RunId);
-        var check = ArtifactCheck.Check(input.RunId, input.RunAttempt, repository.Artifacts, listed);
+        var check = ArtifactCheck.Check(input.RunId, input.RunAttempt, expected, listed);
         if (!check.Passed) return IntakeCheckRunStep.Refused(check.Reasons.ToArray());
 
         var staged = new JsonArray();
         string? manifestDigest = null;
         Directory.CreateDirectory(workDirectory);
-        foreach (var artifact in repository.Artifacts.Select(n => check.Found[n]))
+        JsonObject? tests = null;
+        foreach (var (configured, artifact) in expected.Select(n => (n, check.Found[n])))
         {
             var path = Path.Combine(workDirectory, $"{artifact.Name}.zip");
             try
@@ -120,7 +122,8 @@ public static class IntakeFetchStep
                 if (!ArtifactCheck.DigestMatches(artifact.Digest, sha256))
                     return IntakeCheckRunStep.Refused($"{artifact.Name}: the bytes downloaded hash to sha256:{sha256}, not GitHub's {artifact.Digest}");
 
-                if (repository.Class == "image")
+                var isTests = repository.Gate1?.Artifact == configured;
+                if (repository.Class == "image" && !isTests)
                 {
                     try
                     {
@@ -135,6 +138,7 @@ public static class IntakeFetchStep
                 var key = $"{executionName}/{artifact.Name}.zip";
                 await scratch.PutFileAsync(key, path);
                 staged.Add(new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bytes"] = new FileInfo(path).Length });
+                if (isTests) tests = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
             }
             finally
             {
@@ -144,6 +148,7 @@ public static class IntakeFetchStep
 
         var result = new JsonObject { ["verdict"] = "staged", ["staged"] = staged };
         if (manifestDigest is not null) result["manifestDigest"] = manifestDigest;
+        if (tests is not null) result["tests"] = tests;
         await evidence.PutOnceAsync(IntakeEvidence.Staged(executionName), result.ToJsonString());   // already there: this try's retry wrote it
         return result;
     }
@@ -184,6 +189,7 @@ public static class IntakeRecordStep
             ["at"] = now.ToString("O"),
             ["run"] = Run(input),
             ["staged"] = state["fetch"]?.DeepClone(),
+            ["gate1"] = state["gate1"]?.DeepClone(),
         };
         return Written(IntakeEvidence.TakenIn(input.AttemptName), await evidence.PutOnceAsync(IntakeEvidence.TakenIn(input.AttemptName), body.ToJsonString()));
     }
@@ -191,7 +197,9 @@ public static class IntakeRecordStep
     public static async Task<JsonObject> RefusedAsync(JsonObject state, IIntakeEvidenceStore evidence, IIntakeAlerts alerts, DateTimeOffset now)
     {
         var input = IntakeInput.From(state);
-        var reasons = (state["check"]?["verdict"]?.GetValue<string>() == "refused" ? state["check"] : state["fetch"])?["reasons"]?.DeepClone();
+        // Whichever step refused: the run check, the fetch, or Gate 1 (V-C).
+        var refusing = new[] { "check", "fetch", "gate1" }.Select(s => state[s]).FirstOrDefault(n => n?["verdict"]?.GetValue<string>() is "refused" or "failed");
+        var reasons = refusing?["reasons"]?.DeepClone();
         var key = IntakeEvidence.Refused(input.AttemptName);
         var written = await evidence.PutOnceAsync(key, new JsonObject
         {

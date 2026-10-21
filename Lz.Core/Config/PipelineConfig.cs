@@ -257,6 +257,42 @@ public class PipelineRepositoryConfig
     /// <c>live</c> last, only once the switching run has been taken in live (V-D).
     /// </summary>
     public string? Verify { get; set; }
+
+    /// <summary>
+    /// The run artifact holding the test bundle Gate 1 runs (DecoupledCd.md §15.4, V-C), e.g. <c>tests</c>; the attempt is
+    /// appended as for every artifact. Not one of <see cref="Artifacts"/>, which for an image are ECR repositories. Needs
+    /// <see cref="Gate1"/>.
+    /// </summary>
+    public string? TestBundle { get; set; }
+
+    /// <summary>How Gate 1 runs <see cref="TestBundle"/>. From this file, never from the bundle (§15.4: the buildspec is fixed).</summary>
+    public PipelineGate1Config? Gate1 { get; set; }
+}
+
+/// <summary>Gate 1 for one repository (DecoupledCd.md §15.4, V-C).</summary>
+public class PipelineGate1Config
+{
+    /// <summary>The test assembly, relative to the unzipped bundle, e.g. <c>ServiceTest/bin/Debug/net10.0/ServiceTest.dll</c>.</summary>
+    public string? Run { get; set; }
+
+    /// <summary>The <c>dotnet test --filter</c> Gate 1 runs, e.g. <c>Category!=Aws&amp;Category!=E2E</c>.</summary>
+    public string? Filter { get; set; }
+
+    /// <summary>The .NET SDK the tests run under, an exact version (the repository's global.json).</summary>
+    public string? SdkVersion { get; set; }
+
+    /// <summary>The SHA-512 Microsoft publishes for that SDK's linux-x64 tarball, checked before it is used.</summary>
+    public string? SdkSha512 { get; set; }
+
+    /// <summary>Images the tests start, pulled by digest from a mirror and named as the tests expect them.</summary>
+    public List<PipelineGate1Image>? Images { get; set; }
+}
+
+/// <summary>One image pulled for Gate 1: <see cref="From"/> by digest, tagged <see cref="As"/>.</summary>
+public class PipelineGate1Image
+{
+    public string? From { get; set; }
+    public string? As { get; set; }
 }
 
 /// <summary>Registry hardening for the pipeline. See DecoupledCd.md sections 4.1 and 8.</summary>

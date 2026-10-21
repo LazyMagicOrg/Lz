@@ -69,8 +69,30 @@ public class BuildSideConfig
                 p.Add($"{name}: Verify is live but Intake is not; Verify goes live last (V-D)");
             if (repo.Intake is not null && (repo.RepositoryId is null || repo.OwnerId is null || string.IsNullOrWhiteSpace(repo.WorkflowPath)))
                 p.Add($"{name}: an Intake mode needs RepositoryId, OwnerId and WorkflowPath, which the run check compares by id");
+            p.AddRange(Gate1Problems(name, repo));
         }
         return p;
+    }
+
+    /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
+    private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
+    {
+        if (repo.TestBundle is null && repo.Gate1 is null) yield break;
+        if (string.IsNullOrWhiteSpace(repo.TestBundle)) { yield return $"{name}: Gate1 is set without a TestBundle to run"; yield break; }
+        if (repo.Gate1 is not { } g) { yield return $"{name}: TestBundle is set without Gate1 to say how it runs"; yield break; }
+        if (string.IsNullOrWhiteSpace(g.Run) || g.Run.StartsWith('/') || g.Run.Contains(".."))
+            yield return $"{name}: Gate1.Run '{g.Run}' is not a path inside the bundle";
+        if (string.IsNullOrWhiteSpace(g.Filter)) yield return $"{name}: Gate1.Filter is required; Gate 1 never runs the whole suite by default";
+        if (g.SdkVersion is null || !Regex.IsMatch(g.SdkVersion, @"^\d+\.\d+\.\d+$"))
+            yield return $"{name}: Gate1.SdkVersion '{g.SdkVersion}' is not an exact SDK version";
+        if (g.SdkSha512 is null || !Regex.IsMatch(g.SdkSha512, "^[0-9a-f]{128}$"))
+            yield return $"{name}: Gate1.SdkSha512 is not a lower-case SHA-512";
+        foreach (var image in g.Images ?? new())
+        {
+            if (image.From is null || !Regex.IsMatch(image.From, "@sha256:[0-9a-f]{64}$"))
+                yield return $"{name}: Gate1 image '{image.From}' is not pulled by digest";
+            if (string.IsNullOrWhiteSpace(image.As)) yield return $"{name}: Gate1 image '{image.From}' has no As";
+        }
     }
 
     /// <summary>

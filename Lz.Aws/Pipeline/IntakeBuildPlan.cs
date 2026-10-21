@@ -62,7 +62,11 @@ public static class IntakeBuildPlanner
             .Where(r => !string.IsNullOrEmpty(r.Intake))
             .Select(r => new IntakeRepository(
                 r.Repo!, r.RepositoryId!.Value, r.OwnerId!.Value, r.WorkflowPath!, r.Intake!, r.Class!,
-                (IReadOnlyList<string>?)r.Artifacts ?? Array.Empty<string>()))
+                (IReadOnlyList<string>?)r.Artifacts ?? Array.Empty<string>(),
+                r.TestBundle is { } bundle && r.Gate1 is { } g
+                    ? new IntakeGate1(bundle, g.Run!, g.Filter!, g.SdkVersion!, g.SdkSha512!,
+                        (g.Images ?? new()).Select(i => new IntakeImage(i.From!, i.As!)).ToList())
+                    : null))
             .ToList();
 
     /// <summary>The intake's plan, or null when no repository has an <c>Intake</c> mode: a system that has not opted in gets none.</summary>

@@ -185,7 +185,38 @@ public class BuildSideConfigTests : IDisposable
         { "Verify is 'yes'", new BuildSideConfig { BuildAccountId = "147440642635", Repositories = new() { new() { Repo = "a/b", Verify = "yes" } } } },
         { "Verify goes live last", new BuildSideConfig { BuildAccountId = "147440642635", Repositories = new() { new() { Repo = "a/b", Intake = "dry", Verify = "live", RepositoryId = 1, OwnerId = 2, WorkflowPath = "w" } } } },
         { "needs RepositoryId, OwnerId and WorkflowPath", new BuildSideConfig { BuildAccountId = "147440642635", Repositories = new() { new() { Repo = "a/b", Intake = "dry" } } } },
+        { "TestBundle is set without Gate1", WithGate1(g => { }, bundle: "tests", gate1: false) },
+        { "Gate1 is set without a TestBundle", WithGate1(g => { }, bundle: null) },
+        { "is not a path inside the bundle", WithGate1(g => g.Run = "../escape.dll") },
+        { "is not a path inside the bundle", WithGate1(g => g.Run = "/abs.dll") },
+        { "Gate1.Filter is required", WithGate1(g => g.Filter = " ") },
+        { "is not an exact SDK version", WithGate1(g => g.SdkVersion = "10.0") },
+        { "is not a lower-case SHA-512", WithGate1(g => g.SdkSha512 = new string('A', 128)) },
+        { "is not pulled by digest", WithGate1(g => g.Images![0].From = "public.ecr.aws/x/y:2.6.0") },
+        { "has no As", WithGate1(g => g.Images![0].As = "") },
     };
+
+    private static PipelineGate1Config SoundGate1() => new()
+    {
+        Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", Filter = "Category!=Aws&Category!=E2E",
+        SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
+        Images = new() { new() { From = "public.ecr.aws/x/y@sha256:" + new string('b', 64), As = "amazon/dynamodb-local:2.6.0" } },
+    };
+
+    private static BuildSideConfig WithGate1(Action<PipelineGate1Config> change, string? bundle = "tests", bool gate1 = true)
+    {
+        var g = SoundGate1();
+        change(g);
+        return new BuildSideConfig
+        {
+            BuildAccountId = "147440642635",
+            Repositories = new() { new() { Repo = "a/b", TestBundle = bundle, Gate1 = gate1 ? g : null } },
+        };
+    }
+
+    [Fact]
+    public void ASoundGate1_HasNoProblems()
+        => Assert.Empty(WithGate1(_ => { }).Problems());
 
     [Theory]
     [MemberData(nameof(Unsound))]
