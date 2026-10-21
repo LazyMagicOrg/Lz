@@ -52,6 +52,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\IntakeGitHub.cs" Link="Linked\Lz.Aws\Pipeline\IntakeGitHub.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakePollStep.cs" Link="Linked\Lz.Aws\Pipeline\IntakePollStep.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakeSteps.cs" Link="Linked\Lz.Aws\Pipeline\IntakeSteps.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeGate1.cs" Link="Linked\Lz.Aws\Pipeline\IntakeGate1.cs" />
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
@@ -82,6 +83,8 @@
     <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.109" />
     <!-- The intake App's key (V-B). -->
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
+    <!-- Gate 1 (V-C): start the build and read its reports. -->
+    <PackageReference Include="AWSSDK.CodeBuild" Version="4.0.101.16" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

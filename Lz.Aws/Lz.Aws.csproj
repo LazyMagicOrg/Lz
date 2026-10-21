@@ -203,6 +203,8 @@
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
     <PackageReference Include="AWSSDK.EC2" Version="4.*" />
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
+    <!-- Gate 1's project and report group (DecoupledCd.md V-C), created by bootstrappipeline. -->
+    <PackageReference Include="AWSSDK.CodeBuild" Version="4.0.101.16" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.*" />
     <PackageReference Include="AWSSDK.SecurityToken" Version="4.*" />
     <PackageReference Include="AWSSDK.SSO" Version="4.0.2.14" />

@@ -32,6 +32,7 @@ public static class IntakeEnvironment
     public const string AppSecret = "LZ_INTAKE_APP_SECRET";
     public const string StateMachine = "LZ_INTAKE_MACHINE";
     public const string AlertsTopic = "LZ_INTAKE_ALERTS";
+    public const string Gate1Project = "LZ_INTAKE_GATE1_PROJECT";
 }
 
 /// <summary>The repositories in one environment variable, as JSON: written by the planner, read by the intake's functions.</summary>

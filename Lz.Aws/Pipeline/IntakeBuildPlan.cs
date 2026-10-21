@@ -43,7 +43,18 @@ public sealed record IntakeBuildPlan(
     int PollerReservedConcurrency,
     int PollerMaximumEventAgeSeconds,
     IReadOnlyList<IntakeAlarm> Alarms,
-    IReadOnlyList<IntakeRepository> Repositories);
+    IReadOnlyList<IntakeRepository> Repositories,
+    IntakeGate1Build? Gate1 = null);
+
+/// <summary>
+/// Gate 1's CodeBuild project (DecoupledCd.md §15.4, §3; V-C): privileged, so the docker and workflow tiers have a daemon; its
+/// buildspec fixed here, never taken from the bundle; its role holding its own logs and its report group's reports and
+/// nothing else - no S3, no secret, no push, no sign, no pipeline store.
+/// </summary>
+public sealed record IntakeGate1Build(
+    string ProjectName, string ProjectArn, string RoleName, string RolePolicy, string TrustPolicy,
+    string ReportGroupName, string ReportGroupArn, string LogGroupName, string Buildspec,
+    string Image, string ComputeType, int TimeoutMinutes);
 
 public static class IntakeBuildPlanner
 {
@@ -51,6 +62,15 @@ public static class IntakeBuildPlanner
     public const int FetchTimeoutSeconds = 900;
     public const int FetchMemoryMb = 2048;
     public const int FetchEphemeralStorageMb = 4096;
+
+    public const string Gate1Image = "aws/codebuild/standard:8.0";
+    public const string Gate1ComputeType = "BUILD_GENERAL1_MEDIUM";
+    public const int Gate1TimeoutMinutes = 60;
+
+    // Gate 1's verdict waits while the build runs: 30 s × 130, past the build's own sixty-minute timeout, so a build that
+    // runs too long ends TIMED_OUT, a fault, before the wait gives up.
+    public const int Gate1PollSeconds = 30;
+    public const int Gate1PollAttempts = 130;
 
     public static string EvidenceStoreFor(SystemConfig c) => $"{c.SystemKey}-intake-evidence-{c.SystemSuffix}";
     public static string ScratchBucketFor(SystemConfig c) => $"{c.SystemKey}-intake-scratch-{c.SystemSuffix}";
@@ -170,6 +190,65 @@ public static class IntakeBuildPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
         };
 
+        // GATE 1 (V-C), only where a repository has one.
+        IntakeGate1Build? gate1 = null;
+        string? gate1StartArn = null, gate1VerdictArn = null;
+        if (repositories.Any(r => r.Gate1 is not null))
+        {
+            var project = Fn("gate1");
+            var projectArn = $"arn:aws:codebuild:{region}:{accountId}:project/{project}";
+            var reportGroup = $"{project}-tests";
+            var reportGroupArn = $"arn:aws:codebuild:{region}:{accountId}:report-group/{reportGroup}";
+            var logGroup = $"/aws/codebuild/{project}";
+            var (start, verdict) = (Fn("gate1-start"), Fn("gate1-verdict"));
+
+            gate1 = new IntakeGate1Build(
+                project, projectArn, $"{project}-build",
+                DeployerPlanner.Policy(
+                    new
+                    {
+                        Sid = "WriteItsOwnLogs", Effect = "Allow",
+                        Action = new[] { "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents" },
+                        Resource = new[] { $"arn:aws:logs:{region}:{accountId}:log-group:{logGroup}", $"arn:aws:logs:{region}:{accountId}:log-group:{logGroup}:*" },
+                    },
+                    new
+                    {
+                        Sid = "WriteItsOwnReports", Effect = "Allow",
+                        Action = new[] { "codebuild:CreateReport", "codebuild:UpdateReport", "codebuild:BatchPutTestCases" },
+                        Resource = reportGroupArn,
+                    }),
+                DeployerPlanner.ServiceTrustPolicy("codebuild.amazonaws.com"),
+                reportGroup, reportGroupArn, logGroup, BuildspecFor(reportGroupArn),
+                Gate1Image, Gate1ComputeType, Gate1TimeoutMinutes);
+
+            functions.Add(new(start, DeployerHandlers.IntakeGate1Start, $"{start}-fn",
+                DeployerPlanner.Combine(DeployerPlanner.Logs(region, accountId, start), new object[]
+                {
+                    // To sign the one URL Gate 1 reads its bundle by; Gate 1's own role holds no S3 right.
+                    new { Sid = "PresignTheTestBundle", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{scratch}/*" },
+                    new { Sid = "StartGate1", Effect = "Allow", Action = new[] { "codebuild:StartBuild" }, Resource = projectArn },
+                }),
+                new Dictionary<string, string>
+                {
+                    [IntakeEnvironment.Repositories] = reposVariable,
+                    [IntakeEnvironment.ScratchBucket] = scratch,
+                    [IntakeEnvironment.Gate1Project] = project,
+                },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+
+            functions.Add(new(verdict, DeployerHandlers.IntakeGate1Verdict, $"{verdict}-fn",
+                DeployerPlanner.Combine(DeployerPlanner.Logs(region, accountId, verdict), new[]
+                {
+                    new { Sid = "ReadGate1", Effect = "Allow", Action = new[] { "codebuild:BatchGetBuilds" }, Resource = new[] { projectArn } },
+                    new { Sid = "ReadItsReports", Effect = "Allow", Action = new[] { "codebuild:BatchGetReports", "codebuild:DescribeTestCases" }, Resource = new[] { reportGroupArn } },
+                    WriteEvidence("WriteTheVerdictOnce", "gate1/"),
+                }),
+                new Dictionary<string, string> { [IntakeEnvironment.EvidenceStore] = evidence },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+
+            (gate1StartArn, gate1VerdictArn) = (FnArn(start), FnArn(verdict));
+        }
+
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToArray();
         var machineRolePolicy = DeployerPlanner.Policy(new { Sid = "InvokeTheIntakeFunctions", Effect = "Allow", Action = new[] { "lambda:InvokeFunction" }, Resource = invoked });
 
@@ -228,23 +307,59 @@ public static class IntakeBuildPlanner
             StateMachineTrustPolicy: DeployerPlanner.ServiceTrustPolicy("states.amazonaws.com", accountId, $"arn:aws:states:{region}:{accountId}:stateMachine:*"),
             FunctionTrustPolicy: DeployerPlanner.ServiceTrustPolicy("lambda.amazonaws.com"),
             DenyPolicy: DeployerPlanner.DenyPolicyFor(),
-            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record)),
+            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn),
             ScheduleRuleName: $"{sk}-intake-poll",
             ScheduleExpression: "rate(1 minute)",
             PollerFunctionName: poller,
             PollerReservedConcurrency: 1,
             PollerMaximumEventAgeSeconds: 60,
             Alarms: alarms,
-            Repositories: repositories);
+            Repositories: repositories,
+            Gate1: gate1);
     }
+
+    /// <summary>
+    /// GATE 1'S BUILDSPEC, fixed in the project (§15.4), never from the bundle. What it runs comes in the build's variables,
+    /// from the build-side file: the .NET SDK by exact version, checked against Microsoft's published SHA-512 before use;
+    /// the images the tests start, pulled by digest from a mirror and tagged as the tests expect (no Docker Hub limit); the
+    /// bundle by its presigned URL, checked against its SHA-256 before it is unzipped; then the filtered tests, reported to
+    /// the report group as TRX. A failing test fails the build; the report is processed either way.
+    /// </summary>
+    public static string BuildspecFor(string reportGroupArn) => $$"""
+        version: 0.2
+        env:
+          shell: bash
+        phases:
+          install:
+            commands:
+              - curl -fsSL --retry 3 -o /tmp/sdk.tgz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${SDK_VERSION}/dotnet-sdk-${SDK_VERSION}-linux-x64.tar.gz"
+              - echo "${SDK_SHA512}  /tmp/sdk.tgz" | sha512sum -c -
+              - mkdir -p /opt/gate1-dotnet && tar -xzf /tmp/sdk.tgz -C /opt/gate1-dotnet
+              - printf '%s\n' "$GATE1_IMAGES" | while read -r from as; do [ -z "$from" ] || { docker pull "$from" && docker tag "$from" "$as"; } || exit 1; done
+          pre_build:
+            commands:
+              - curl -fsSL --retry 3 -o /tmp/bundle.zip "$BUNDLE_URL"
+              - echo "${BUNDLE_SHA256}  /tmp/bundle.zip" | sha256sum -c -
+              - mkdir -p /tmp/bundle && unzip -q /tmp/bundle.zip -d /tmp/bundle
+          build:
+            commands:
+              - cd "/tmp/bundle/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results
+        reports:
+          {{reportGroupArn}}:
+            files:
+              - gate1.trx
+            base-directory: /tmp/gate1-results
+            file-format: VISUALSTUDIOTRX
+        """;
 
     /// <summary>
     /// THE DRY INTAKE'S MACHINE, the dry part of V-A's <see cref="IntakePlan.Default"/>: CheckRun, then FetchAndStage, then the
     /// outcome — taken in when staged, refused when either step refused — and a fault, from any step, recorded and the
     /// execution failed. No Gate 1, push or record state exists in it, so none can be reached (V-B pushes nothing).
     /// </summary>
-    public static string DefinitionFor(string checkFn, string fetchFn, string recordFn)
+    public static string DefinitionFor(string checkFn, string fetchFn, string recordFn, string? gate1StartFn = null, string? gate1VerdictFn = null)
     {
+        var gate1 = gate1StartFn is not null && gate1VerdictFn is not null;
         var payload = new Dictionary<string, object> { ["state.$"] = "$", ["executionName.$"] = "$$.Execution.Name" };
         object Transient() => new
         {
@@ -272,7 +387,7 @@ public static class IntakeBuildPlanner
             ["FetchVerdict"] = new
             {
                 Type = "Choice",
-                Choices = new object[] { new { Variable = "$.fetch.verdict", StringEquals = "staged", Next = "MarkTakenIn" } },
+                Choices = new object[] { new { Variable = "$.fetch.verdict", StringEquals = "staged", Next = gate1 ? "HasGate1" : "MarkTakenIn" } },
                 Default = "MarkRefused",
             },
             ["MarkTakenIn"] = Mark("taken-in", "RecordTakenIn"),
@@ -285,9 +400,39 @@ public static class IntakeBuildPlanner
             ["FaultNotRecorded"] = new { Type = "Fail", Error = "FaultNotRecorded", Cause = "the fault could not be written; the poller alarms on an execution that closed with nothing recorded" },
         };
 
+        if (gate1)
+        {
+            // GATE 1 (V-C): only a repository whose fetch staged a test bundle has one; the rest go straight to the outcome.
+            states["HasGate1"] = new
+            {
+                Type = "Choice",
+                Choices = new object[] { new { Variable = "$.fetch.tests", IsPresent = true, Next = "Gate1Start" } },
+                Default = "MarkTakenIn",
+            };
+            states["Gate1Start"] = new { Type = "Task", Resource = gate1StartFn!, Parameters = payload, ResultPath = "$.gate1Start", Retry = new[] { Transient() }, Next = "Gate1Verdict", Catch = toFault };
+            states["Gate1Verdict"] = new
+            {
+                Type = "Task", Resource = gate1VerdictFn!, Parameters = payload, ResultPath = "$.gate1",
+                Retry = new object[]
+                {
+                    new { ErrorEquals = new[] { nameof(Gate1StillRunning) }, IntervalSeconds = Gate1PollSeconds, MaxAttempts = Gate1PollAttempts, BackoffRate = 1.0 },
+                    Transient(),
+                },
+                Next = "Gate1Outcome", Catch = toFault,
+            };
+            states["Gate1Outcome"] = new
+            {
+                Type = "Choice",
+                Choices = new object[] { new { Variable = "$.gate1.verdict", StringEquals = "passed", Next = "MarkTakenIn" } },
+                Default = "MarkRefused",
+            };
+        }
+
         return JsonSerializer.Serialize(new
         {
-            Comment = "lz intake, dry (DecoupledCd.md §15.4, V-B): check, fetch and stage, record. Pushes nothing.",
+            Comment = gate1
+                ? "lz intake, dry (DecoupledCd.md §15.4, V-B, V-C): check, fetch and stage, Gate 1, record. Pushes nothing."
+                : "lz intake, dry (DecoupledCd.md §15.4, V-B): check, fetch and stage, record. Pushes nothing.",
             StartAt = "CheckRun",
             States = states,
         }, DeployerPlanner.Asl);

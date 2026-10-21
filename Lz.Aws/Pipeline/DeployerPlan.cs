@@ -202,12 +202,14 @@ public static class DeployerHandlers
     public static readonly string IntakeCheckRun = For("IntakeCheckRunFunction");
     public static readonly string IntakeFetch = For("IntakeFetchFunction");
     public static readonly string IntakeRecord = For("IntakeRecordFunction");
+    public static readonly string IntakeGate1Start = For("IntakeGate1StartFunction");
+    public static readonly string IntakeGate1Verdict = For("IntakeGate1VerdictFunction");
 
     /// <summary>Every handler, for the packaging test.</summary>
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle,
-        IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord,
+        IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict,
     };
 
     private static string For(string type) => $"{Assembly}::{Assembly}.{type}::HandleAsync";

@@ -188,4 +188,91 @@ public class IntakeBuildPlanTests
         Assert.Equal(900, fetch.TimeoutSeconds);
         Assert.True(IntakeBuildPlanner.FetchEphemeralStorageMb >= 4096);
     }
+
+    // ---- Gate 1 (V-C) ----
+
+    private static IntakeBuildPlan WithGate1()
+    {
+        var config = Config();
+        var repo = config.Pipeline!.Repositories![0];
+        repo.TestBundle = "tests";
+        repo.Gate1 = new PipelineGate1Config
+        {
+            Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", Filter = "Category!=Aws&Category!=E2E", SdkVersion = "10.0.301",
+            SdkSha512 = new string('a', 128),
+            Images = new() { new() { From = "public.ecr.aws/x/y@sha256:" + new string('b', 64), As = "amazon/dynamodb-local:2.6.0" } },
+        };
+        return IntakeBuildPlanner.Plan(config, Account)!;
+    }
+
+    [Fact]
+    public void WithoutGate1_ThePlanHasNone_AndAStagedFetchIsTakenInAsBefore()
+    {
+        Assert.Null(Plan().Gate1);
+        Assert.DoesNotContain(Plan().Functions, f => f.Handler is var h && (h == DeployerHandlers.IntakeGate1Start || h == DeployerHandlers.IntakeGate1Verdict));
+        Assert.Equal("MarkTakenIn", States().GetProperty("FetchVerdict").GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.False(States().TryGetProperty("Gate1Start", out _));
+    }
+
+    [Fact]
+    public void Gate1sRole_HoldsItsLogsAndReportsAndNothingElse()
+    {
+        var g = WithGate1().Gate1!;
+        var actions = Actions(g.RolePolicy).ToList();
+        Assert.All(actions, a => Assert.True(a.StartsWith("logs:") || a.StartsWith("codebuild:"), a));
+        Assert.All(Grants(g.RolePolicy).Where(x => x.Action.StartsWith("codebuild:")), x => Assert.Equal(g.ReportGroupArn, x.Resource));
+        Assert.All(Grants(g.RolePolicy).Where(x => x.Action.StartsWith("logs:")), x => Assert.Contains("/aws/codebuild/scu-intake-gate1", x.Resource));
+        Assert.Contains("codebuild.amazonaws.com", g.TrustPolicy);
+    }
+
+    [Fact]
+    public void OnlyTheStartFunction_ReadsTheScratchBucketOrStartsABuild()
+    {
+        var p = WithGate1();
+        var readers = p.Functions.Where(f => Grants(f.Policy).Any(g => g.Action == "s3:GetObject" && g.Resource.Contains(p.ScratchBucket))).Select(f => f.Handler);
+        Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start }, readers);
+        var starters = p.Functions.Where(f => Actions(f.Policy).Contains("codebuild:StartBuild")).Select(f => f.Handler);
+        Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start }, starters);
+        Assert.Equal(new[] { $"arn:aws:s3:::{p.EvidenceStore}/gate1/*" },
+            Grants(Fn(p, DeployerHandlers.IntakeGate1Verdict).Policy).Where(g => g.Action == "s3:PutObject").Select(g => g.Resource));
+    }
+
+    [Fact]
+    public void TheBuildspec_ChecksBothHashes_AndTakesWhatItRunsFromTheBuildsVariables()
+    {
+        var spec = WithGate1().Gate1!.Buildspec;
+        Assert.Contains("sha512sum -c -", spec);
+        Assert.Contains("sha256sum -c -", spec);
+        Assert.True(spec.IndexOf("sha256sum -c -", StringComparison.Ordinal) < spec.IndexOf("unzip", StringComparison.Ordinal), "the bundle is checked before it is unzipped");
+        Assert.Contains("--filter \"$GATE1_FILTER\"", spec);
+        Assert.DoesNotContain("Category", spec);            // nothing of the repository's own is fixed in it
+        Assert.Contains(WithGate1().Gate1!.ReportGroupArn, spec);
+        Assert.Equal(("aws/codebuild/standard:8.0", 60), (WithGate1().Gate1!.Image, WithGate1().Gate1!.TimeoutMinutes));
+    }
+
+    [Fact]
+    public void TheMachine_RunsGate1OnlyWhereABundleWasStaged_AndOnlyAPassIsTakenIn()
+    {
+        var s = JsonDocument.Parse(WithGate1().Definition).RootElement.GetProperty("States");
+        Assert.Equal("HasGate1", s.GetProperty("FetchVerdict").GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.Equal("$.fetch.tests", s.GetProperty("HasGate1").GetProperty("Choices")[0].GetProperty("Variable").GetString());
+        Assert.Equal("Gate1Start", s.GetProperty("HasGate1").GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.Equal("Gate1Verdict", s.GetProperty("Gate1Start").GetProperty("Next").GetString());
+        var wait = s.GetProperty("Gate1Verdict").GetProperty("Retry")[0];
+        Assert.Equal("Gate1StillRunning", wait.GetProperty("ErrorEquals")[0].GetString());
+        Assert.True(wait.GetProperty("IntervalSeconds").GetInt32() * wait.GetProperty("MaxAttempts").GetInt32() > 60 * 60, "the wait outlasts the build's timeout");
+        Assert.Equal("passed", s.GetProperty("Gate1Outcome").GetProperty("Choices")[0].GetProperty("StringEquals").GetString());
+        Assert.Equal("MarkTakenIn", s.GetProperty("Gate1Outcome").GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.Equal("MarkRefused", s.GetProperty("Gate1Outcome").GetProperty("Default").GetString());
+        foreach (var name in new[] { "Gate1Start", "Gate1Verdict" })
+            Assert.Equal("MarkFault", s.GetProperty(name).GetProperty("Catch")[0].GetProperty("Next").GetString());
+    }
+
+    [Fact]
+    public void TheRepositoriesVariable_CarriesHowGate1Runs()
+    {
+        var repo = IntakeRepositories.Decode(Fn(WithGate1(), DeployerHandlers.IntakeGate1Start).Environment[IntakeEnvironment.Repositories]).Single();
+        Assert.Equal(("tests", "Category!=Aws&Category!=E2E", "10.0.301"), (repo.Gate1!.Artifact, repo.Gate1.Filter, repo.Gate1.SdkVersion));
+        Assert.Equal("amazon/dynamodb-local:2.6.0", repo.Gate1.Images.Single().As);
+    }
 }

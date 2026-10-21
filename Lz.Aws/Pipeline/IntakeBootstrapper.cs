@@ -11,6 +11,8 @@ using Amazon.SimpleNotificationService;
 using Amazon.SimpleNotificationService.Model;
 using Amazon.StepFunctions;
 using Amazon.StepFunctions.Model;
+using Amazon.CodeBuild;
+using CodeBuild = Amazon.CodeBuild.Model;
 
 namespace Lz.Aws.Pipeline;
 
@@ -38,6 +40,9 @@ public static class IntakeBootstrapper
             Console.WriteLine($"    {f.Name,-28} {f.TimeoutSeconds,4}s {f.MemoryMb,5} MB  role {f.RoleName}");
         Console.WriteLine($"    schedule:   {plan.ScheduleRuleName} {plan.ScheduleExpression} -> {plan.PollerFunctionName} (one at a time, ticks at most {plan.PollerMaximumEventAgeSeconds} s old, never retried)");
         Console.WriteLine($"    alerts:     {plan.AlertsTopicName}; alarms {string.Join(", ", plan.Alarms.Select(a => a.Name))}");
+        if (plan.Gate1 is { } g)
+            Console.WriteLine($"    Gate 1:     CodeBuild {g.ProjectName} ({g.Image}, {g.ComputeType}, privileged, {g.TimeoutMinutes} min, buildspec fixed here), " +
+                              $"role {g.RoleName} (its logs and {g.ReportGroupName} only), the bundle by a 15-minute URL");
     }
 
     public static async Task ApplyAsync(IntakeBuildPlan plan, string? profile, string region, int logRetentionDays)
@@ -56,6 +61,7 @@ public static class IntakeBootstrapper
         using var cloudWatch = Client<IAmazonCloudWatch>((c, e) => new AmazonCloudWatchClient(c, e), e => new AmazonCloudWatchClient(e));
         using var logs = Client<Amazon.CloudWatchLogs.IAmazonCloudWatchLogs>((c, e) => new Amazon.CloudWatchLogs.AmazonCloudWatchLogsClient(c, e), e => new Amazon.CloudWatchLogs.AmazonCloudWatchLogsClient(e));
         using var secrets = Client<IAmazonSecretsManager>((c, e) => new AmazonSecretsManagerClient(c, e), e => new AmazonSecretsManagerClient(e));
+        using var codeBuild = Client<IAmazonCodeBuild>((c, e) => new AmazonCodeBuildClient(c, e), e => new AmazonCodeBuildClient(e));
 
         Console.WriteLine();
         Console.WriteLine("Intake (V-B, dry):");
@@ -112,10 +118,79 @@ public static class IntakeBootstrapper
 
         var machineRoleArn = await DeployerBootstrapper.EnsureRoleAsync(iam, plan.StateMachineRoleName, plan.StateMachineTrustPolicy,
             "lz intake machine (DecoupledCd.md V-B).", ($"{plan.StateMachineRoleName}-grant", plan.StateMachineRolePolicy), plan.DenyPolicy);
+        // Gate 1 (V-C) before the machine that starts it.
+        if (plan.Gate1 is { } gate1) await EnsureGate1Async(codeBuild, iam, logs, plan, gate1, logRetentionDays);
+
         await EnsureStateMachineAsync(sfn, plan, machineRoleArn);
 
         await EnsureScheduleAsync(events, lambda, plan, enabled: secretExists);
         foreach (var alarm in plan.Alarms) await EnsureAlarmAsync(cloudWatch, plan, alarm);
+    }
+
+    /// <summary>
+    /// Gate 1's report group, its role (its logs and its reports, and the self-rewrite Deny) and its project: privileged, the
+    /// curated image, no source and no artifacts, the buildspec from the plan. Each created or brought back to the plan, and the
+    /// project read back.
+    /// </summary>
+    private static async Task EnsureGate1Async(
+        IAmazonCodeBuild codeBuild, IAmazonIdentityManagementService iam, Amazon.CloudWatchLogs.IAmazonCloudWatchLogs logs,
+        IntakeBuildPlan plan, IntakeGate1Build g, int logRetentionDays)
+    {
+        var groups = await codeBuild.BatchGetReportGroupsAsync(new CodeBuild.BatchGetReportGroupsRequest { ReportGroupArns = new List<string> { g.ReportGroupArn } });
+        if ((groups.ReportGroups ?? new List<CodeBuild.ReportGroup>()).Count == 0)
+        {
+            await codeBuild.CreateReportGroupAsync(new CodeBuild.CreateReportGroupRequest
+            {
+                Name = g.ReportGroupName, Type = Amazon.CodeBuild.ReportType.TEST,
+                ExportConfig = new CodeBuild.ReportExportConfig { ExportConfigType = Amazon.CodeBuild.ReportExportConfigType.NO_EXPORT },
+            });
+            Console.WriteLine($"  report group '{g.ReportGroupName}' created (kept in CodeBuild, exported nowhere).");
+        }
+        else Console.WriteLine($"  report group '{g.ReportGroupName}' already exists.");
+
+        await DeployerBootstrapper.EnsureLogGroupAsync(logs, g.LogGroupName, logRetentionDays);
+        var roleArn = await DeployerBootstrapper.EnsureRoleAsync(iam, g.RoleName, g.TrustPolicy,
+            "lz intake Gate 1 build (DecoupledCd.md V-C): its logs and reports only.", ($"{g.RoleName}-grant", g.RolePolicy), plan.DenyPolicy);
+
+        var environment = new CodeBuild.ProjectEnvironment
+        {
+            Type = Amazon.CodeBuild.EnvironmentType.LINUX_CONTAINER, Image = g.Image, ComputeType = new Amazon.CodeBuild.ComputeType(g.ComputeType),
+            PrivilegedMode = true, ImagePullCredentialsType = Amazon.CodeBuild.ImagePullCredentialsType.CODEBUILD,
+        };
+        var source = new CodeBuild.ProjectSource { Type = Amazon.CodeBuild.SourceType.NO_SOURCE, Buildspec = g.Buildspec };
+        var artifacts = new CodeBuild.ProjectArtifacts { Type = Amazon.CodeBuild.ArtifactsType.NO_ARTIFACTS };
+        var logsConfig = new CodeBuild.LogsConfig { CloudWatchLogs = new CodeBuild.CloudWatchLogsConfig { Status = Amazon.CodeBuild.LogsConfigStatusType.ENABLED, GroupName = g.LogGroupName } };
+
+        var existing = (await codeBuild.BatchGetProjectsAsync(new CodeBuild.BatchGetProjectsRequest { Names = new List<string> { g.ProjectName } })).Projects ?? new List<CodeBuild.Project>();
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                if (existing.Count == 0)
+                    await codeBuild.CreateProjectAsync(new CodeBuild.CreateProjectRequest
+                    {
+                        Name = g.ProjectName, Description = "lz intake Gate 1 (DecoupledCd.md V-C): the staged test bundle's tests, fixed buildspec.",
+                        Source = source, Artifacts = artifacts, Environment = environment, ServiceRole = roleArn,
+                        TimeoutInMinutes = g.TimeoutMinutes, LogsConfig = logsConfig,
+                    });
+                else
+                    await codeBuild.UpdateProjectAsync(new CodeBuild.UpdateProjectRequest
+                    {
+                        Name = g.ProjectName, Source = source, Artifacts = artifacts, Environment = environment, ServiceRole = roleArn,
+                        TimeoutInMinutes = g.TimeoutMinutes, LogsConfig = logsConfig,
+                    });
+                break;
+            }
+            catch (CodeBuild.InvalidInputException ex) when (attempt < 10 && ex.Message.Contains("not authorized to perform: sts:AssumeRole", StringComparison.OrdinalIgnoreCase))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3));   // a role created seconds ago is not yet assumable
+            }
+        }
+
+        var read = (await codeBuild.BatchGetProjectsAsync(new CodeBuild.BatchGetProjectsRequest { Names = new List<string> { g.ProjectName } })).Projects.Single();
+        if (read.Source?.Buildspec != g.Buildspec || read.Environment?.PrivilegedMode != true || read.ServiceRole != roleArn)
+            throw new InvalidOperationException($"Gate 1's project '{g.ProjectName}' does not read back as planned (buildspec, privileged mode or role).");
+        Console.WriteLine($"  project '{g.ProjectName}' {(existing.Count == 0 ? "created" : "updated")} and read back: {g.Image}, {g.ComputeType}, privileged, buildspec as planned.");
     }
 
     private static async Task<bool> SecretExistsAsync(IAmazonSecretsManager secrets, string name)
