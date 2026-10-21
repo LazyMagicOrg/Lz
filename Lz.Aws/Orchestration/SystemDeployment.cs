@@ -29,6 +29,10 @@ public class SystemDeployment
     private readonly SystemConfig _config;
     private readonly CancellationToken _ct;
 
+    // What each tenant service was set to before this command's plan, by service name (V-J). Filled by
+    // ResolveImageDigestsAsync, read by the plan check and the after-apply check.
+    private readonly Dictionary<string, RunningServiceImage> _runningImages = new(StringComparer.Ordinal);
+
     public SystemDeployment(
         IPlatformFactory factory, SystemDefinition system, SystemConfig config,
         CancellationToken cancellationToken = default)
@@ -332,10 +336,95 @@ public class SystemDeployment
         try
         {
             await DeployTenantUnderLeaseAsync(stackName, tenantKey, tenantConfig, checker, smtpSecrets);
+
+            // Still under the lease, so what is read is what this deploy left, and nothing else's.
+            await CheckForRevertsAsync(tenantKey, tenantConfig);
         }
         finally
         {
             await ReleaseTenantServiceLeasesAsync(leases);
+        }
+    }
+
+    /// <summary>
+    /// AFTER APPLYING (DecoupledCd.md V-J): each service the plan check saw running is read again. Set to an older build, or to
+    /// another digest whose build time cannot be compared, is a revert that got past the plan check: it alerts, on the
+    /// pipeline's alerts topic where there is one, and the command exits 1. A newer build is reported and allowed.
+    /// </summary>
+    private async Task CheckForRevertsAsync(string tenantKey, TenantConfig tenantConfig)
+    {
+        if (_runningImages.Count == 0) return;
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+        var clusters = new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" };
+
+        var reverts = new List<string>();
+        foreach (var svc in _system.ServiceLayerServices.Concat(_system.HostLayerServices).Where(s => s.Docker != null))
+        {
+            var ecsService = $"{_config.SystemKey}-{tenantKey}-{svc.Name}";
+            if (!_runningImages.TryGetValue(ecsService, out var before)) continue;
+
+            var ecrName = $"{_config.SystemKey}-{tenantConfig.TenantSuffix}-{_config.Environment}-{tenantKey}-{svc.Name}";
+            var after = await AwsContainerUpdater.ReadServiceImageAsync(profile, region, clusters, ecsService,
+                new ServiceImageSources(svc.Name, ecrName,
+                    Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(_config, svc.Name, tenantKey, region)));
+            var (verdict, detail) = after.State == ServiceImageState.DigestPinned
+                ? TenantPlanCheck.JudgeAfterApply(ecsService, before, after.Digest, after.BuiltAt)
+                : (TenantPlanCheck.AfterApply.Unordered, $"{ecsService} could not be read back after the deploy ({after.State}{(after.Error is { } e ? $": {e}" : "")})");
+
+            switch (verdict)
+            {
+                case TenantPlanCheck.AfterApply.Unchanged:
+                    Console.WriteLine($"  image check: {detail}.");
+                    break;
+                case TenantPlanCheck.AfterApply.Newer:
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  image check: {detail}.");
+                    Console.ResetColor();
+                    break;
+                default:
+                    reverts.Add(detail);
+                    break;
+            }
+        }
+        if (reverts.Count == 0) return;
+
+        var message = $"lz deploytenant {tenantKey} ({_config.SystemKey}/{_config.Environment}) left a service on another image than it ran before: "
+                      + string.Join("; ", reverts) + ". Roll it forward with the deployer or `lz updatecontainer --digest`.";
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine($"IMAGE REVERTED: {message}");
+        Console.ResetColor();
+        await AlertAsync(profile, region, $"{_config.SystemKey}-{_config.Environment}: deploytenant reverted an image", message);
+        throw new TenantDeployRefusedException(message);
+    }
+
+    /// <summary>Publishes to the pipeline's alerts topic, where this environment has one; says so either way, and never throws.</summary>
+    private async Task AlertAsync(string profile, string region, string subject, string message)
+    {
+        try
+        {
+            var account = await AwsAccountResolver.ResolveAccountIdAsync(profile, region);
+            if (Lz.Aws.Pipeline.DeployerPlanner.AlertsTopicArnIfAny(region, account, _config) is not { } topic)
+            {
+                Console.WriteLine("  (no alert sent: this environment has no Pipeline.Alerts topic)");
+                return;
+            }
+            var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+            var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+            using var sns = credentials != null
+                ? new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(credentials, endpoint)
+                : new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(endpoint);
+            await sns.PublishAsync(new Amazon.SimpleNotificationService.Model.PublishRequest
+            {
+                TopicArn = topic, Subject = subject.Length > 100 ? subject[..100] : subject, Message = message,
+            }, _ct);
+            Console.WriteLine($"  alert sent to {topic}");
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  the alert could NOT be sent ({ex.GetType().Name}: {ex.Message}); this output is the only record");
+            Console.ResetColor();
         }
     }
 
@@ -604,9 +693,15 @@ public class SystemDeployment
             Console.WriteLine();
         }
 
+        // BEFORE APPLYING (DecoupledCd.md V-J): a plan that would set a running service to another image is refused here,
+        // with nothing changed but the refresh. Only where a service runs a pinned digest; a first deploy has nothing to keep.
+        if (_runningImages.Count > 0)
+            await RefuseAnImageChangingPlanAsync(stack);
+
         Console.WriteLine("Running Pulumi up...");
         Console.WriteLine();
 
+        TenantPlanCheck.DeclaredImages.Clear();
         var result = await stack.UpAsync(new UpOptions
         {
             OnEvent = HandleEngineEvent,
@@ -1271,12 +1366,46 @@ public class SystemDeployment
             if (service.Repository is { } pipelineRepository)
                 tenantConfig.ResolvedImageRepositories[svc.Name] = pipelineRepository;
 
+            // WHAT THE SERVICE IS SET TO, for the plan check before applying and the revert check after (V-J), and its
+            // build time, which the new revision carries on. Only a pinned service has either; a first deploy has none.
+            if (service.State == ServiceImageState.DigestPinned)
+            {
+                _runningImages[ecsService] = new RunningServiceImage(svc.Name, digest, service.BuiltAt);
+                if (service.BuiltAt is { } builtAt)
+                    tenantConfig.ResolvedImageBuiltAt[svc.Name] = builtAt;
+            }
+
             Console.WriteLine(service.State != ServiceImageState.DigestPinned
                 ? $"  {svc.Name}: no pinned service yet — pinning ECR :latest, {digest}"
                 : service.Repository is { } kept
                     ? $"  {svc.Name}: keeping the pipeline image the service currently runs, {kept}@{digest}"
                     : $"  {svc.Name}: pinning the digest the service currently runs, {digest}");
         }
+    }
+
+    private async Task RefuseAnImageChangingPlanAsync(WorkspaceStack stack)
+    {
+        Console.WriteLine("Checking the plan keeps each running service's image...");
+        TenantPlanCheck.DeclaredImages.Clear();
+        var steps = new List<PlannedStep>();
+        await stack.PreviewAsync(new PreviewOptions
+        {
+            OnEvent = e => Capture(e, steps),
+            OnStandardError = PrintStdErr,
+        }, _ct);
+
+        var refusals = TenantPlanCheck.DigestRefusals(steps, _runningImages, TenantPlanCheck.DeclaredImages);
+        if (refusals.Count == 0)
+        {
+            Console.WriteLine($"  the plan keeps {string.Join(", ", _runningImages.Select(r => $"{r.Key} on {r.Value.Digest[..Math.Min(19, r.Value.Digest.Length)]}"))}.");
+            return;
+        }
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("Refusing to apply: the plan would set a running service to another image.");
+        foreach (var r in refusals) Console.WriteLine($"  {r}");
+        Console.WriteLine("Nothing has been applied. Move the image with the deployer or `lz updatecontainer`, never with a tenant deploy.");
+        Console.ResetColor();
+        throw new TenantDeployRefusedException(string.Join("; ", refusals));
     }
 
     /// <summary>
@@ -1305,21 +1434,40 @@ public class SystemDeployment
         Console.WriteLine("Running Pulumi preview...");
         Console.WriteLine();
 
+        TenantPlanCheck.DeclaredImages.Clear();   // what THIS program run declares, not an earlier one
+        var steps = new List<PlannedStep>();
         var result = await stack.PreviewAsync(new PreviewOptions
         {
-            OnEvent = HandleEngineEvent,
+            OnEvent = e => { Capture(e, steps); HandleEngineEvent(e); },
             OnStandardError = PrintStdErr,
         }, _ct);
 
         Console.WriteLine();
-        return PrintPreviewSummary(result.ChangeSummary);
+        var destructive = PrintPreviewSummary(result.ChangeSummary, steps);
+
+        // What deploytenant would refuse, so a preview says so before a deploy finds out (V-J).
+        var refusals = TenantPlanCheck.DigestRefusals(steps, _runningImages, TenantPlanCheck.DeclaredImages);
+        if (refusals.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("deploytenant would REFUSE this plan:");
+            foreach (var r in refusals) Console.WriteLine($"  {r}");
+            Console.ResetColor();
+        }
+        return destructive;
+    }
+
+    private static void Capture(EngineEvent e, List<PlannedStep> steps)
+    {
+        if (e.ResourcePreEvent?.Metadata is { } m && m.Op != OperationType.Same)
+            steps.Add(PlannedStep.From(m));
     }
 
     /// <summary>
     /// Print the preview change summary and return whether it is destructive
     /// (contains any replace or delete operation).
     /// </summary>
-    internal static bool PrintPreviewSummary(IReadOnlyDictionary<OperationType, int> changeSummary)
+    internal static bool PrintPreviewSummary(IReadOnlyDictionary<OperationType, int> changeSummary, IReadOnlyList<PlannedStep>? steps = null)
     {
         var meaningful = changeSummary?.Where(kv => kv.Key != OperationType.Same).ToList()
                          ?? new List<KeyValuePair<OperationType, int>>();
@@ -1335,6 +1483,21 @@ public class SystemDeployment
 
         changeSummary!.TryGetValue(OperationType.Replace, out var replaces);
         changeSummary.TryGetValue(OperationType.Delete, out var deletes);
+
+        // AN IMAGE-ONLY TASK-DEFINITION REPLACE IS NOT DESTRUCTIVE (V-J): a task definition is immutable, so every image
+        // change replaces it, and counting those would fail every routine roll. Counted from the steps when there are any.
+        if (steps is not null)
+        {
+            foreach (var td in steps.Where(s => s.Type == TenantPlanCheck.TaskDefinitionType && s.Op == OperationType.Replace))
+                if (TenantPlanCheck.WhyNotImageOnly(td) is { } why)
+                    Console.WriteLine($"  task-definition replace counted: {why}");
+            var imageOnly = steps.Count(TenantPlanCheck.IsImageOnlyTaskDefinitionReplace);
+            if (imageOnly > 0)
+            {
+                Console.WriteLine($"  ({imageOnly} image-only task-definition replace(s), not counted as destructive)");
+                replaces = Math.Max(0, replaces - imageOnly);
+            }
+        }
         var destructive = replaces + deletes > 0;
         if (destructive)
         {

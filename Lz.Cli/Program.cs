@@ -1329,10 +1329,10 @@ class Program
                     {
                         await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
                     }
-                    catch (ServiceLeaseHeldException)
+                    catch (Exception ex) when (ex is ServiceLeaseHeldException or Lz.Aws.Orchestration.TenantDeployRefusedException)
                     {
-                        // Refused before anything changed, and already said why (DecoupledCd.md V-J). The subtenant
-                        // and runtime steps below are skipped with it.
+                        // Refused before anything changed, or a reverted image found after applying, and already said
+                        // why (DecoupledCd.md V-J). The subtenant and runtime steps below are skipped with it.
                         Environment.ExitCode = 1;
                         continue;
                     }

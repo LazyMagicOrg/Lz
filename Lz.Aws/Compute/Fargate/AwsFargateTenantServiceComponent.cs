@@ -105,9 +105,15 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
         var imageRepository = ImagePinPolicy.ImageRepository(
             ecrName, tenantConfig.ResolvedImageRepositories.GetValueOrDefault(serviceName), resolvedDigest, imagePin);
         var imageUri = ecsIdentity.Apply(id =>
-            ImagePinPolicy.ImageRef(
+        {
+            var image = ImagePinPolicy.ImageRef(
                 $"{id.AccountId}.dkr.ecr.{ecsRegion}.amazonaws.com/{imageRepository}",
-                "latest", resolvedDigest, imagePin));
+                "latest", resolvedDigest, imagePin);
+            // WHAT THIS PROGRAM DECLARES, for the tenant plan check (DecoupledCd.md V-J): the plan's own value is a masked
+            // secret, so the check reads the image here, where it is put into the definition Pulumi plans.
+            Lz.Aws.Orchestration.TenantPlanCheck.DeclaredImages[prefix] = image;
+            return image;
+        });
 
         // Resolve effective Fargate settings — tenant's Fargate: block, then the system's, then
         // FargateConfig defaults (the legacy pre-Fargate YAML fallback was removed in 0.11.0).
@@ -541,6 +547,19 @@ public class AwsFargateTenantServiceComponent : ComponentResource, ITenantServic
             ContainerDefinitions = containerDefs,
             Tags = { { "System", sk }, { "Tenant", tk }, { "ManagedBy", "lz-pulumi" } },
         };
+
+        // THE BUILD TIME OF THE IMAGE IT KEEPS (DecoupledCd.md V-J): the revision the service runs carries the deployer's
+        // lz:builtAt, and this one names the same digest, so it carries the same time. Without it, the deployer's
+        // older-build refusal would find no time on the service after every tenant deploy, and let an older build through.
+        if (tenantConfig.ResolvedImageBuiltAt.GetValueOrDefault(serviceName) is { } builtAt)
+            taskDefArgs.Tags.Add(Lz.Aws.Pipeline.DeployOrdering.BuiltAtTag, builtAt);
+
+        // WHAT ELSE THE DEFINITIONS SAY, hashed without their images (V-J): a plan cannot read the secret definitions, and
+        // this is how it tells an image-only replace from any other (TenantPlanCheck.IsImageOnlyTaskDefinitionReplace).
+        // Unsecret: the definitions carry secrets, so their hash would be masked in the plan too, and read by nothing. A
+        // SHA-256 over them reveals none of them.
+        taskDefArgs.Tags.Add(Lz.Aws.Orchestration.TenantPlanCheck.DefinitionsHashTag,
+            Output.Unsecret(containerDefs.Apply(Lz.Aws.Orchestration.TenantPlanCheck.DefinitionsHash)));
 
         // Retain superseded revisions instead of letting Pulumi deregister them. This is the
         // BINDING constraint on rollback and it is independent of pinning: AWS refuses to

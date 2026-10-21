@@ -488,7 +488,7 @@ public class AwsContainerUpdater
     {
         try
         {
-            var (_, containers) = await ReadServiceTaskDefinitionContainersAsync(cluster, ecsService, ct);
+            var (_, containers, _) = await ReadServiceTaskDefinitionContainersAsync(cluster, ecsService, ct);
             return ImagePinPolicy.SelectContainerImage(containers, sources);
         }
         catch
@@ -507,7 +507,7 @@ public class AwsContainerUpdater
     /// <c>destroytenant</c> left DRAINING or INACTIVE, and reading ITS definition would make a
     /// recreated service inherit whatever the torn-down one last ran.</para>
     /// </summary>
-    private async Task<(bool ServiceActive, IReadOnlyList<DefinedContainer> Containers)> ReadServiceTaskDefinitionContainersAsync(
+    private async Task<(bool ServiceActive, IReadOnlyList<DefinedContainer> Containers, string? BuiltAt)> ReadServiceTaskDefinitionContainersAsync(
         string cluster, string ecsService, CancellationToken ct)
     {
         var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
@@ -518,18 +518,21 @@ public class AwsContainerUpdater
 
         var service = svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE");
         var taskDefArn = service?.TaskDefinition;
-        if (string.IsNullOrEmpty(taskDefArn)) return (false, Array.Empty<DefinedContainer>());
+        if (string.IsNullOrEmpty(taskDefArn)) return (false, Array.Empty<DefinedContainer>(), null);
 
+        // With its tags, for the lz:builtAt the deployer's Prepare writes (DecoupledCd.md V-J).
         var td = await _ecs.DescribeTaskDefinitionAsync(new DescribeTaskDefinitionRequest
         {
             TaskDefinition = taskDefArn,
+            Include = new List<string> { "TAGS" },
         }, ct);
 
         // SDK v4: a collection with no members is null.
         var containers = (td.TaskDefinition?.ContainerDefinitions ?? new List<ContainerDefinition>())
             .Select(c => new DefinedContainer(c.Name, c.Image))
             .ToList();
-        return (true, containers);
+        var builtAt = td.Tags?.FirstOrDefault(t => t.Key == Lz.Aws.Pipeline.DeployOrdering.BuiltAtTag)?.Value;
+        return (true, containers, builtAt);
     }
 
     /// <summary>
@@ -617,9 +620,9 @@ public class AwsContainerUpdater
             var cluster = await updater.ResolveClusterAsync(clusterCandidates, CancellationToken.None);
             if (cluster is null) return ServiceImageRead.NoService;
 
-            var (active, containers) = await updater.ReadServiceTaskDefinitionContainersAsync(
+            var (active, containers, builtAt) = await updater.ReadServiceTaskDefinitionContainersAsync(
                 cluster, ecsService, CancellationToken.None);
-            return ImagePinPolicy.ClassifyServiceContainers(active, containers, sources);
+            return ImagePinPolicy.ClassifyServiceContainers(active, containers, sources) with { BuiltAt = builtAt };
         }
         catch (Exception ex)
         {

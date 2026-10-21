@@ -76,6 +76,14 @@ public class TenantConfig
     public Dictionary<string, string> ResolvedImageRepositories { get; } = new();
 
     /// <summary>
+    /// The <c>lz:builtAt</c> of the revision the service runs, keyed by service name, when it has one: the tenant deploy's
+    /// own revision carries it on (DecoupledCd.md V-J), so the deployer's older-build refusal still has a time to compare
+    /// after a <c>deploytenant</c>. Runtime-only, like the digests.
+    /// </summary>
+    [YamlDotNet.Serialization.YamlIgnore]
+    public Dictionary<string, string> ResolvedImageBuiltAt { get; } = new();
+
+    /// <summary>
     /// Optional override for the per-tenant media S3 bucket name. When unset,
     /// the name is derived by convention: {sk}-{tk}-{stk}-media--{suffix}.
     /// Backs the Smartstore.AmazonS3 media storage provider.

@@ -1085,6 +1085,14 @@ public static class DeployerPlanner
     public static string AlertsTopicArn(string region, string targetAccountId, SystemConfig config)
         => $"arn:aws:sns:{region}:{targetAccountId}:{AlertsTopicName(config)}";
 
+    /// <summary>
+    /// The alerts topic, or null where this environment has none (no Pipeline block, or Alerts off): for an alert raised
+    /// outside the deployer, such as <c>lz deploytenant</c>'s reverted-image alert (DecoupledCd.md V-J), so the deploy path
+    /// reads nothing of the block itself.
+    /// </summary>
+    public static string? AlertsTopicArnIfAny(string region, string targetAccountId, SystemConfig config)
+        => config.Pipeline is { Enabled: true, Alerts: true } ? AlertsTopicArn(region, targetAccountId, config) : null;
+
     /// <summary>The default-bus rule that sends this deployer's failed executions to the topic.</summary>
     public static string FailedDeployRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-failed";
 

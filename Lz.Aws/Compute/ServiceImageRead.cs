@@ -43,8 +43,12 @@ public enum ServiceImageState
 /// the pipeline's (DecoupledCd.md §14.1). Null otherwise, which is every read on a system without the
 /// Pipeline block: the digest is then in the workstation repository, as it always was.
 /// </param>
+/// <param name="BuiltAt">
+/// The <c>lz:builtAt</c> tag of the revision the service is set to, when it has one: the build time the deployer's Prepare
+/// writes, which a tenant deploy carries onto its own revision and checks after applying (DecoupledCd.md V-J).
+/// </param>
 public readonly record struct ServiceImageRead(
-    ServiceImageState State, string? Digest = null, string? Error = null, string? Repository = null)
+    ServiceImageState State, string? Digest = null, string? Error = null, string? Repository = null, string? BuiltAt = null)
 {
     public static readonly ServiceImageRead NoService = new(ServiceImageState.NoService);
     public static readonly ServiceImageRead NotDigestPinned = new(ServiceImageState.NotDigestPinned);
