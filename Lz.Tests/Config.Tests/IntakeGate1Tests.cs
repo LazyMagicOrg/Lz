@@ -113,10 +113,21 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal("https://presigned/one-object", v["BUNDLE_URL"]);
         Assert.Equal(new string('2', 64), v["BUNDLE_SHA256"]);
         Assert.Equal(Gate1.Run, v["GATE1_RUN"]);
+        Assert.Equal("/tmp/bundle", v["GATE1_ROOT"]);
+        Assert.Equal("/home/runner/work/R/R", IntakeGate1StartStep.VariablesFor(Gate1 with { BuildRoot = "/home/runner/work/R/R" }, "u", "s")["GATE1_ROOT"]);
         Assert.Equal(Gate1.Filter, v["GATE1_FILTER"]);
         Assert.Equal((Gate1.SdkVersion, Gate1.SdkSha512), (v["SDK_VERSION"], v["SDK_SHA512"]));
         Assert.Equal($"{Gate1.Images[0].From} {Gate1.Images[0].As}", v["GATE1_IMAGES"]);
         Assert.Equal("build:1", result["buildId"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ConfigsVariables_GoWithTheBuild_AndCannotReplaceGate1sOwn()
+    {
+        var withEnv = Gate1 with { Environment = new Dictionary<string, string> { ["TESTCONTAINERS_HOST_OVERRIDE"] = "localhost", ["BUNDLE_URL"] = "https://elsewhere" } };
+        var v = IntakeGate1StartStep.VariablesFor(withEnv, "https://presigned/one-object", new string('2', 64));
+        Assert.Equal("localhost", v["TESTCONTAINERS_HOST_OVERRIDE"]);
+        Assert.Equal("https://presigned/one-object", v["BUNDLE_URL"]);
     }
 
     [Fact]

@@ -82,11 +82,20 @@ public class BuildSideConfig
         if (repo.Gate1 is not { } g) { yield return $"{name}: TestBundle is set without Gate1 to say how it runs"; yield break; }
         if (string.IsNullOrWhiteSpace(g.Run) || g.Run.StartsWith('/') || g.Run.Contains(".."))
             yield return $"{name}: Gate1.Run '{g.Run}' is not a path inside the bundle";
+        if (g.BuildRoot is { } root && (!Regex.IsMatch(root, "^/[A-Za-z0-9._/-]+$") || root.Contains("..")))
+            yield return $"{name}: Gate1.BuildRoot '{root}' is not an absolute path";
         if (string.IsNullOrWhiteSpace(g.Filter)) yield return $"{name}: Gate1.Filter is required; Gate 1 never runs the whole suite by default";
         if (g.SdkVersion is null || !Regex.IsMatch(g.SdkVersion, @"^\d+\.\d+\.\d+$"))
             yield return $"{name}: Gate1.SdkVersion '{g.SdkVersion}' is not an exact SDK version";
         if (g.SdkSha512 is null || !Regex.IsMatch(g.SdkSha512, "^[0-9a-f]{128}$"))
             yield return $"{name}: Gate1.SdkSha512 is not a lower-case SHA-512";
+        foreach (var (key, value) in g.Environment ?? new())
+        {
+            if (!Regex.IsMatch(key, "^[A-Z_][A-Z0-9_]*$")) yield return $"{name}: Gate1.Environment name '{key}' is not an environment variable's";
+            else if (key.StartsWith("BUNDLE_") || key.StartsWith("GATE1_") || key.StartsWith("SDK_"))
+                yield return $"{name}: Gate1.Environment '{key}' is one of Gate 1's own names";
+            if (value is null) yield return $"{name}: Gate1.Environment '{key}' has no value";
+        }
         foreach (var image in g.Images ?? new())
         {
             if (image.From is null || !Regex.IsMatch(image.From, "@sha256:[0-9a-f]{64}$"))

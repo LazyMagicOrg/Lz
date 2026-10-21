@@ -190,10 +190,14 @@ public class BuildSideConfigTests : IDisposable
         { "is not a path inside the bundle", WithGate1(g => g.Run = "../escape.dll") },
         { "is not a path inside the bundle", WithGate1(g => g.Run = "/abs.dll") },
         { "Gate1.Filter is required", WithGate1(g => g.Filter = " ") },
+        { "is not an absolute path", WithGate1(g => g.BuildRoot = "relative/path") },
+        { "is not an absolute path", WithGate1(g => g.BuildRoot = "/home/../etc") },
         { "is not an exact SDK version", WithGate1(g => g.SdkVersion = "10.0") },
         { "is not a lower-case SHA-512", WithGate1(g => g.SdkSha512 = new string('A', 128)) },
         { "is not pulled by digest", WithGate1(g => g.Images![0].From = "public.ecr.aws/x/y:2.6.0") },
         { "has no As", WithGate1(g => g.Images![0].As = "") },
+        { "is not an environment variable's", WithGate1(g => g.Environment = new() { ["lower-case"] = "x" }) },
+        { "is one of Gate 1's own names", WithGate1(g => g.Environment = new() { ["BUNDLE_URL"] = "https://elsewhere" }) },
     };
 
     private static PipelineGate1Config SoundGate1() => new()

@@ -275,6 +275,12 @@ public class PipelineGate1Config
     /// <summary>The test assembly, relative to the unzipped bundle, e.g. <c>ServiceTest/bin/Debug/net10.0/ServiceTest.dll</c>.</summary>
     public string? Run { get; set; }
 
+    /// <summary>
+    /// Where the bundle is unzipped: the checkout path it was BUILT at (e.g. <c>/home/runner/work/ScutaraService/ScutaraService</c>),
+    /// since a test that finds the source by <c>[CallerFilePath]</c> reads the compiler's path. Absent: <c>/tmp/bundle</c>.
+    /// </summary>
+    public string? BuildRoot { get; set; }
+
     /// <summary>The <c>dotnet test --filter</c> Gate 1 runs, e.g. <c>Category!=Aws&amp;Category!=E2E</c>.</summary>
     public string? Filter { get; set; }
 
@@ -286,6 +292,12 @@ public class PipelineGate1Config
 
     /// <summary>Images the tests start, pulled by digest from a mirror and named as the tests expect them.</summary>
     public List<PipelineGate1Image>? Images { get; set; }
+
+    /// <summary>
+    /// Variables the tests need in Gate 1's build (e.g. <c>TESTCONTAINERS_HOST_OVERRIDE: localhost</c>), passed with the build.
+    /// Gate 1's own names (<c>BUNDLE_*</c>, <c>GATE1_*</c>, <c>SDK_*</c>) are refused.
+    /// </summary>
+    public Dictionary<string, string>? Environment { get; set; }
 }
 
 /// <summary>One image pulled for Gate 1: <see cref="From"/> by digest, tagged <see cref="As"/>.</summary>

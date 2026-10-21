@@ -42,13 +42,23 @@ public sealed class Gate1StillRunning(string message) : Exception(message);
 public static class IntakeGate1StartStep
 {
     public static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(15);
+    public const string DefaultRoot = "/tmp/bundle";
 
-    /// <summary>The build's variables. The image list is one "from as" pair per line.</summary>
-    public static IReadOnlyDictionary<string, string> VariablesFor(IntakeGate1 gate1, string url, string sha256) => new Dictionary<string, string>
+    /// <summary>The build's variables: config's own first, then Gate 1's, which config cannot name. The image list is one "from as" pair per line.</summary>
+    public static IReadOnlyDictionary<string, string> VariablesFor(IntakeGate1 gate1, string url, string sha256)
+    {
+        var variables = new Dictionary<string, string>(gate1.Environment ?? new Dictionary<string, string>());
+        foreach (var (name, value) in Gate1Variables(gate1, url, sha256)) variables[name] = value;   // Gate 1's own always win
+        return variables;
+    }
+
+    private static Dictionary<string, string> Gate1Variables(IntakeGate1 gate1, string url, string sha256) => new()
     {
         ["BUNDLE_URL"] = url,
         ["BUNDLE_SHA256"] = sha256,
         ["GATE1_RUN"] = gate1.Run,
+        // The path the bundle was built at, so a test that reads its source by [CallerFilePath] finds it (measured: two did not).
+        ["GATE1_ROOT"] = gate1.BuildRoot ?? DefaultRoot,
         ["GATE1_FILTER"] = gate1.Filter,
         ["SDK_VERSION"] = gate1.SdkVersion,
         ["SDK_SHA512"] = gate1.SdkSha512,

@@ -85,7 +85,9 @@ public static class IntakeBuildPlanner
                 (IReadOnlyList<string>?)r.Artifacts ?? Array.Empty<string>(),
                 r.TestBundle is { } bundle && r.Gate1 is { } g
                     ? new IntakeGate1(bundle, g.Run!, g.Filter!, g.SdkVersion!, g.SdkSha512!,
-                        (g.Images ?? new()).Select(i => new IntakeImage(i.From!, i.As!)).ToList())
+                        (g.Images ?? new()).Select(i => new IntakeImage(i.From!, i.As!)).ToList(),
+                        g.Environment is { Count: > 0 } env ? new Dictionary<string, string>(env) : null,
+                        g.BuildRoot)
                     : null))
             .ToList();
 
@@ -340,10 +342,10 @@ public static class IntakeBuildPlanner
             commands:
               - curl -fsSL --retry 3 -o /tmp/bundle.zip "$BUNDLE_URL"
               - echo "${BUNDLE_SHA256}  /tmp/bundle.zip" | sha256sum -c -
-              - mkdir -p /tmp/bundle && unzip -q /tmp/bundle.zip -d /tmp/bundle
+              - mkdir -p "$GATE1_ROOT" && unzip -q /tmp/bundle.zip -d "$GATE1_ROOT"
           build:
             commands:
-              - cd "/tmp/bundle/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results
+              - cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results
         reports:
           {{reportGroupArn}}:
             files:

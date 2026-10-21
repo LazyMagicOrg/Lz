@@ -18,7 +18,10 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
 
 /// <summary>Gate 1 for a repository (DecoupledCd.md §15.4, V-C), from the build-side file.</summary>
 /// <param name="Artifact">The run artifact holding the test bundle, named for the attempt like the others.</param>
-public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images);
+/// <param name="Environment">Variables the tests need, from config, passed with the build.</param>
+/// <param name="BuildRoot">Where the bundle is unzipped: the path it was built at, or <c>/tmp/bundle</c>.</param>
+public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images,
+    IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null);
 
 /// <summary>An image Gate 1 pulls by digest and tags as the tests expect it.</summary>
 public sealed record IntakeImage(string From, string As);

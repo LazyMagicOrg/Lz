@@ -244,6 +244,7 @@ public class IntakeBuildPlanTests
         Assert.Contains("sha512sum -c -", spec);
         Assert.Contains("sha256sum -c -", spec);
         Assert.True(spec.IndexOf("sha256sum -c -", StringComparison.Ordinal) < spec.IndexOf("unzip", StringComparison.Ordinal), "the bundle is checked before it is unzipped");
+        Assert.Contains("unzip -q /tmp/bundle.zip -d \"$GATE1_ROOT\"", spec);
         Assert.Contains("--filter \"$GATE1_FILTER\"", spec);
         Assert.DoesNotContain("Category", spec);            // nothing of the repository's own is fixed in it
         Assert.Contains(WithGate1().Gate1!.ReportGroupArn, spec);
