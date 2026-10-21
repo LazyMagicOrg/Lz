@@ -52,6 +52,13 @@ public static class Gate2Lists
     public static string Variable() => string.Join("\n", Filters.Select(f => $"{f.Name} {f.Filter}"));
 
     /// <summary>
+    /// A listed test's METHOD: a theory's case without its arguments. The lists are of methods because what discovery
+    /// gives depends on where it runs (measured 2026-10-21): an e2e theory with no live environment is skipped and listed
+    /// once, as in Gate 1, and with one, as in Gate 2, once per case. Gate 2 compares its results' methods with them.
+    /// </summary>
+    public static string Method(string listed) => listed.IndexOf('(') is var i and >= 0 ? listed[..i] : listed;
+
+    /// <summary>
     /// Each list from the FIRST complete block of its name — <c>GATE1-LIST-BEGIN name</c>, then <c>GATE1-LIST name test</c>
     /// lines, then <c>GATE1-LIST-END name</c> — so a test printing a block later cannot replace one; null unless every list
     /// has a complete block. A list may be empty: a repository with no e2e tests.
@@ -73,8 +80,9 @@ public static class Gate2Lists
             {
                 if (open is not null && line[(Prefix.Length + 5)..] == open) { done[open] = names!; (open, names) = (null, null); }
             }
-            else if (open is not null && line.StartsWith($"{Prefix} {open} ", StringComparison.Ordinal))
-                names!.Add(line[(Prefix.Length + open.Length + 2)..]);
+            else if (open is not null && line.StartsWith($"{Prefix} {open} ", StringComparison.Ordinal)
+                     && Method(line[(Prefix.Length + open.Length + 2)..]) is var method && !names!.Contains(method))
+                names!.Add(method);
         }
         return Filters.All(f => done.ContainsKey(f.Name)) ? Filters.ToDictionary(f => f.Name, f => done[f.Name]) : null;
     }

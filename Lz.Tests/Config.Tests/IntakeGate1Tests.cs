@@ -40,7 +40,7 @@ public sealed class IntakeGate1Tests : IDisposable
         public Gate1Build Build = new("SUCCEEDED", null, new[] { "arn:report" }, Now.AddMinutes(-5), Now);
         public Gate1Report? Report = new(7332, new Dictionary<string, int> { ["SUCCEEDED"] = 7331, ["SKIPPED"] = 1 });
         public IReadOnlyList<string> Failed = new[] { "A.Test1", "B.Test2" };
-        public IReadOnlyList<string> LogLines = ListBlocks(("precondition", new[] { "E.Pre" }), ("blocking", new[] { "E.A", "E.B(x: \"1\")" }), ("advisory", Array.Empty<string>()));
+        public IReadOnlyList<string> LogLines = ListBlocks(("precondition", new[] { "E.Pre" }), ("blocking", new[] { "E.A", "E.B(x: \"1\")", "E.B(x: \"2\")" }), ("advisory", Array.Empty<string>()));
         public int ReportReads;
         public readonly Dictionary<string, string> Evidence = new(StringComparer.Ordinal);
 
@@ -147,15 +147,28 @@ public sealed class IntakeGate1Tests : IDisposable
     [Fact]
     public void EachList_IsItsFirstCompleteBlock_AndATestPrintingOneLaterReplacesNothing()
     {
-        var lines = ListBlocks(("precondition", new[] { "P" }), ("blocking", new[] { "A", "B (with spaces)" }), ("advisory", Array.Empty<string>()))
+        var lines = ListBlocks(("precondition", new[] { "P" }), ("blocking", new[] { "A", "B with spaces" }), ("advisory", Array.Empty<string>()))
             .Concat(ListBlocks(("blocking", new[] { "Forged" })))
             .Prepend("GATE1-LIST blocking Stray").ToList();
 
         var lists = Gate2Lists.Parse(lines)!;
 
         Assert.Equal(new[] { "P" }, lists["precondition"]);
-        Assert.Equal(new[] { "A", "B (with spaces)" }, lists["blocking"]);
+        Assert.Equal(new[] { "A", "B with spaces" }, lists["blocking"]);
         Assert.Empty(lists["advisory"]);
+    }
+
+    [Fact]
+    public void ATheory_IsListedOnce_ByItsMethod_WhetherDiscoveryExpandedItsCasesOrNot()
+    {
+        // Measured: with no live environment an e2e theory is skipped and listed once (Gate 1); with one, once per case.
+        static IReadOnlyList<string> Blocking(params string[] tests)
+            => Gate2Lists.Parse(ListBlocks(("precondition", Array.Empty<string>()), ("blocking", tests), ("advisory", Array.Empty<string>())))!["blocking"];
+
+        var skipped = Blocking("N.T.Fact", "N.T.Rebuild");
+        var expanded = Blocking("N.T.Fact", "N.T.Rebuild(licence: \"E2E-SOLAR-1\")", "N.T.Rebuild(licence: \"E2E-SOLAR-2\")");
+        Assert.Equal(new[] { "N.T.Fact", "N.T.Rebuild" }, skipped);
+        Assert.Equal(skipped, expanded);
     }
 
     [Theory]
@@ -203,7 +216,7 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal(new string('1', 64), verdict["artifactSha256"]!["aiphost-1"]!.GetValue<string>());
         Assert.Equal(new string('2', 64), verdict["artifactSha256"]!["tests-1"]!.GetValue<string>());
         Assert.Equal(300, verdict["seconds"]!.GetValue<int>());
-        Assert.Equal(new[] { "E.A", "E.B(x: \"1\")" }, verdict["gate2Lists"]!["blocking"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.Equal(new[] { "E.A", "E.B" }, verdict["gate2Lists"]!["blocking"]!.AsArray().Select(n => n!.GetValue<string>()));
         Assert.Empty(verdict["gate2Lists"]!["advisory"]!.AsArray());
         Assert.True(f.Evidence.ContainsKey(IntakeEvidence.Gate1(Exec)));
     }
