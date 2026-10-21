@@ -121,25 +121,79 @@ public static class IntakePublishStep
             input.RunId.ToString(), input.RunAttempt, Text(check, "jobIds"), Text(check, "workflowRef"), "sha256:" + sha256,
             new BuildRecordGate1("passed", gate1Evidence));
 
-        // Everything a record needs is checked BEFORE anything is pushed, so a refusal leaves nothing behind.
+        // Everything a record needs is checked BEFORE anything is pushed or written, so a refusal leaves nothing behind.
         var isImage = BuildRecordFormat.IsImageClass(repository.Class);
-        if (!isImage) throw new IntakeFault($"{repository.Class} records are not published yet; only an image's (V-D)");
+        if (!isImage && repository.Class != "client")
+            throw new IntakeFault($"{repository.Class} records are not published yet; an image's and a client's are (V-D)");
         if (repository.Artifacts.Count != 1)
-            throw new IntakeFault($"{input.Repo} names {repository.Artifacts.Count} image artifacts; a record names one image");
+            throw new IntakeFault($"{input.Repo} names {repository.Artifacts.Count} artifacts; a record names one");
+        var artifactName = repository.Artifacts[0];
+        var staged = Passed(artifactName);
+        var testsStaged = repository.Gate1 is { } g ? Passed(g.Artifact) : default;
+        Directory.CreateDirectory(workDirectory);
+        var written = new JsonArray();
+
+        BuildRecord Record(string cls, BuildRecordIdentity identity, string artifact, string sha256) => new(
+            BuildRecordFormat.CurrentSchema, cls, builtFrom, identity, builtAt, Text(check, "actor"), input.RunId.ToString(), Intake(artifact, sha256));
+
+        // THE TESTS ZIP AND ITS RECORD come first, so no record that starts a deploy exists before the bundle Gate 2 reads.
+        async Task WriteTestsAsync()
+        {
+            if (repository.Gate1 is not { } gate) return;
+            var provisional = Record("tests", new BuildRecordIdentity("bundle"), gate.Artifact, testsStaged.Sha256);
+            var zipKey = BuildRecordFormat.BundleKeyFor(provisional);
+            var stored = await PutArtifactAsync(stores, zipKey, await Fetched(testsStaged, "tests.zip"), testsStaged.Sha256);
+            written.Add(await WriteRecordAsync(stores, provisional with
+            {
+                Identity = new BuildRecordIdentity("bundle", Bucket: artifactStore, Key: zipKey, VersionId: stored.VersionId, Sha256: testsStaged.Sha256),
+            }, artifactStore));
+        }
+
+        if (!isImage)
+        {
+            // A CLIENT (V-D): its bundle is the one zip the build made, inside the artifact; the artifact store keeps it as it is.
+            var bundlePath = Path.Combine(workDirectory, IntakeFetchStep.BundleEntry);
+            string bundleSha;
+            try
+            {
+                var outer = await Fetched(staged, "artifact.zip");
+                bundleSha = IntakeFetchStep.ReadBundle(outer);
+                using var zip = ZipFile.OpenRead(outer);
+                zip.Entries.Single().ExtractToFile(bundlePath, overwrite: true);
+            }
+            catch (InvalidOperationException ex)
+            {
+                throw new IntakeFault($"{artifactName}-{input.RunAttempt}: {ex.Message}");
+            }
+
+            await WriteTestsAsync();
+            var provisional = Record(repository.Class, new BuildRecordIdentity("bundle"), artifactName, staged.Sha256);
+            var bundleKey = BuildRecordFormat.BundleKeyFor(provisional);
+            var stored = await PutArtifactAsync(stores, bundleKey, bundlePath, bundleSha);
+            written.Add(await WriteRecordAsync(stores, provisional with
+            {
+                Identity = new BuildRecordIdentity("bundle", Bucket: artifactStore, Key: bundleKey, VersionId: stored.VersionId, Sha256: bundleSha),
+            }, artifactStore));
+
+            return new JsonObject
+            {
+                ["outcome"] = "published",
+                ["bundle"] = new JsonObject { ["key"] = bundleKey, ["versionId"] = stored.VersionId, ["sha256"] = bundleSha },
+                ["records"] = written,
+            };
+        }
+
+        // AN IMAGE also needs (V-19) its version, its base image and its SBOM, and a pipeline repository to go into.
         var serviceVersion = builtFromNode["serviceVersion"]?.GetValue<string>() ?? throw new IntakeFault("builtFrom has no serviceVersion, which an image record needs (V-19)");
         var baseImage = builtFromNode["baseImageDigest"]?.GetValue<string>() ?? throw new IntakeFault("builtFrom has no baseImageDigest, which an image record needs (V-19)");
         var sbomArtifact = repository.Sbom ?? throw new IntakeFault($"{input.Repo} uploads no SBOM, which an image record needs (V-19)");
-        var imageArtifact = repository.Artifacts[0];
-        var target = targets.SingleOrDefault(t => string.Equals(t.Repo, repository.Repo, StringComparison.OrdinalIgnoreCase) && t.Artifact == imageArtifact)
-            ?? throw new IntakeFault($"no pipeline repository is configured for {input.Repo}'s {imageArtifact}");
-        var imageStaged = Passed(imageArtifact);
+        var target = targets.SingleOrDefault(t => string.Equals(t.Repo, repository.Repo, StringComparison.OrdinalIgnoreCase) && t.Artifact == artifactName)
+            ?? throw new IntakeFault($"no pipeline repository is configured for {input.Repo}'s {artifactName}");
         var sbomStaged = Passed(sbomArtifact);
-        var testsStaged = repository.Gate1 is { } g ? Passed(g.Artifact) : default;
-        Directory.CreateDirectory(workDirectory);
 
-        // 3. THE IMAGE, PUSHED AND SIGNED.
+        // THE IMAGE, PUSHED AND SIGNED.
         var tag = $"{headSha}-{input.RunId}-{input.RunAttempt}";
-        var pushed = await IntakePushStep.RunAsync(await Fetched(imageStaged, "image.zip"), target.Repository, tag, registry);
+        var pushed = await IntakePushStep.RunAsync(await Fetched(staged, "image.zip"), target.Repository, tag, registry);
         var digest = pushed["manifestDigest"]!.GetValue<string>();
         if (digest != manifest) throw new IntakeFault($"the staged image is {digest}, not the {manifest} Gate 1 passed");
         switch (await signatures.StatusAsync(target.Repository, digest, target.SigningProfileArn))
@@ -149,25 +203,9 @@ public static class IntakePublishStep
             case var other: throw new ImageNotYetSigned($"{target.Repository}@{digest} is not signed yet ({other ?? "no status"})");
         }
 
-        var imageRecord = new BuildRecord(BuildRecordFormat.CurrentSchema, repository.Class, builtFrom, new BuildRecordIdentity("image", Digest: digest),
-            builtAt, Text(check, "actor"), input.RunId.ToString(),
-            Intake(imageArtifact, imageStaged.Sha256) with { ServiceVersion = serviceVersion, BaseImageDigest = baseImage });
-        var written = new JsonArray();
-
-        // 4. THE TESTS ZIP AND ITS RECORD, then the SBOM and the image's record.
-        if (repository.Gate1 is { } gate)
-        {
-            var provisional = new BuildRecord(BuildRecordFormat.CurrentSchema, "tests", builtFrom, new BuildRecordIdentity("bundle"),
-                builtAt, Text(check, "actor"), input.RunId.ToString(), Intake(gate.Artifact, testsStaged.Sha256));
-            var zipKey = BuildRecordFormat.BundleKeyFor(provisional);
-            var stored = await PutArtifactAsync(stores, zipKey, await Fetched(testsStaged, "tests.zip"), testsStaged.Sha256);
-            var testsRecord = provisional with
-            {
-                Identity = new BuildRecordIdentity("bundle", Bucket: artifactStore, Key: zipKey, VersionId: stored.VersionId, Sha256: testsStaged.Sha256),
-            };
-            written.Add(await WriteRecordAsync(stores, testsRecord, artifactStore));
-        }
-
+        await WriteTestsAsync();
+        var imageRecord = Record(repository.Class, new BuildRecordIdentity("image", Digest: digest), artifactName, staged.Sha256);
+        imageRecord = imageRecord with { Intake = imageRecord.Intake! with { ServiceVersion = serviceVersion, BaseImageDigest = baseImage } };
         var sbomKey = BuildRecordFormat.KeyFor(imageRecord)[..^".json".Length] + ".sbom.json";
         var sbomPath = Path.Combine(workDirectory, "sbom.json");
         using (var zip = ZipFile.OpenRead(await Fetched(sbomStaged, "sbom.zip")))

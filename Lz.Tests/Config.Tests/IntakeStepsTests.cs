@@ -129,6 +129,55 @@ public sealed class IntakeStepsTests : IDisposable
         Assert.Empty(Directory.GetFiles(_work));   // nothing left on the function's disk
     }
 
+    // ---- a client's bundle (V-D) ----
+
+    private static readonly IReadOnlyList<IntakeRepository> Client = new[] { Service with { Class = "client", Artifacts = new[] { "app" } } };
+
+    private Fakes WithClientArtifact(params (string Name, byte[] Data)[] entries)
+    {
+        var f = new Fakes();
+        var zip = ZipOf(entries);
+        f.Artifacts.Add(new GitHubArtifact(41, "app-1", RunId, false, Digest(zip), zip.Length));
+        f.Bytes[41] = zip;
+        return f;
+    }
+
+    [Fact]
+    public async Task AClientsArtifact_IsStaged_WithItsOneBundleZipsOwnSha()
+    {
+        var bundle = ZipOf(("app/index.html", System.Text.Encoding.UTF8.GetBytes("<html/>")));
+        var f = WithClientArtifact(("bundle.zip", bundle));
+
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), Client, f, f, f, _work);
+
+        Assert.Equal("staged", result["verdict"]!.GetValue<string>());
+        Assert.Equal("sha256:" + Convert.ToHexString(SHA256.HashData(bundle)).ToLowerInvariant()[..64], "sha256:" + result["bundle"]!["bundleSha256"]!.GetValue<string>());
+        Assert.Null(result["manifestDigest"]);   // a bundle is not read as an image
+        Assert.Contains($"{Exec()}/app-1.zip", f.Scratch.Keys);
+    }
+
+    [Theory]
+    [InlineData("bundle.tar")]
+    [InlineData("wwwroot/bundle.zip")]
+    [InlineData("two")]
+    public async Task AClientsArtifactNotHoldingOneBundleZip_IsRefused_AndNotStaged(string shape)
+    {
+        var inner = ZipOf(("app/index.html", new byte[] { 1 }));
+        var f = shape == "two" ? WithClientArtifact(("bundle.zip", inner), ("extra.txt", new byte[] { 2 })) : WithClientArtifact((shape, inner));
+
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), Client, f, f, f, _work);
+
+        Assert.Equal("refused", result["verdict"]!.GetValue<string>());
+        Assert.Empty(f.Scratch);
+    }
+
+    [Fact]
+    public async Task AClientsBundleZipThatIsNoZip_IsRefused()
+    {
+        var f = WithClientArtifact(("bundle.zip", System.Text.Encoding.UTF8.GetBytes("not a zip")));
+        Assert.Equal("refused", (await IntakeFetchStep.RunAsync(Input(), Exec(), Client, f, f, f, _work))["verdict"]!.GetValue<string>());
+    }
+
     // ---- builtFrom (V-D) ----
 
     private static readonly IReadOnlyList<IntakeRepository> WithBuiltFrom = new[] { Service with { BuiltFrom = "builtfrom" } };

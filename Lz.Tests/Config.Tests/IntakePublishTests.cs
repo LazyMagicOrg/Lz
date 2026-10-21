@@ -251,6 +251,106 @@ public class IntakePublishTests : IDisposable
         Assert.Equal(0, f.Pushes);
     }
 
+    // ---- a client (V-D, SellerApp) ----
+
+    private const string ClientRepo = "Scutara/ScutaraSellerApp";
+    private const long ClientRepoId = 1341231897, ClientRunId = 39700000001;
+
+    private static IntakeRepository Seller(string mode = "live") => new(ClientRepo, ClientRepoId, 320723031, ".github/workflows/build-bundle.yml", mode, "client",
+        new[] { "sellerapp" }, new IntakeGate1("tests", "ViewModelsTest.dll", "FullyQualifiedName~ViewModelsTest", "10.0.301", new string('a', 128), Array.Empty<IntakeImage>()),
+        "builtfrom");
+
+    /// <summary>A client's state after Gate 1 passed: its artifact wraps the one bundle.zip the build made.</summary>
+    private (Fakes Fakes, JsonObject State, byte[] Bundle, byte[] Artifact) ClientPassed(string entry = "bundle.zip")
+    {
+        var f = new Fakes();
+        var bundle = ZipOf("seller/index.html", Encoding.UTF8.GetBytes("<html>seller</html>"));
+        var artifact = ZipOf(entry, bundle);
+        var tests = ZipOf("ViewModelsTest.dll", Encoding.UTF8.GetBytes("tests"));
+        var exec = IntakeNames.For(ClientRepoId, ClientRunId, 1, 0);
+        f.Scratch[$"{exec}/sellerapp-1.zip"] = artifact;
+        f.Scratch[$"{exec}/tests-1.zip"] = tests;
+        JsonObject Staged(string name, byte[] b) => new() { ["artifact"] = $"{name}-1", ["key"] = $"{exec}/{name}-1.zip", ["sha256"] = Hex(b) };
+        var state = new JsonObject
+        {
+            ["repo"] = ClientRepo, ["repositoryId"] = ClientRepoId, ["runId"] = ClientRunId, ["runAttempt"] = 1, ["retry"] = 0,
+            ["check"] = new JsonObject
+            {
+                ["verdict"] = "passed", ["headBranch"] = "main", ["headSha"] = Sha, ["createdAt"] = "2026-10-22T09:00:00.0000000+00:00",
+                ["actor"] = "tmay57", ["jobIds"] = "201", ["workflowRef"] = $"{ClientRepo}/.github/workflows/build-bundle.yml@refs/heads/main",
+            },
+            ["fetch"] = new JsonObject
+            {
+                ["verdict"] = "staged",
+                ["staged"] = new JsonArray(Staged("sellerapp", artifact), Staged("tests", tests)),
+                ["tests"] = Staged("tests", tests),
+                ["builtFrom"] = new JsonObject { ["packages"] = new JsonObject { ["BaseApp.ViewModels"] = "1.0.49" } },
+            },
+            ["gate1"] = new JsonObject
+            {
+                ["verdict"] = "passed",
+                ["artifactSha256"] = new JsonObject { ["sellerapp-1"] = Hex(artifact), ["tests-1"] = Hex(tests) },
+            },
+        };
+        return (f, state, bundle, artifact);
+    }
+
+    private Task<JsonObject> PublishClient(Fakes f, JsonObject state, IntakeRepository? repo = null)
+        => IntakePublishStep.RunAsync(state, IntakeNames.For(ClientRepoId, ClientRunId, 1, 0), new[] { repo ?? Seller() },
+            Targets, Records, Artifacts, f, f, f, f, _work);
+
+    [Fact]
+    public async Task AClientsPass_WritesItsTestsThenItsBundleAndRecord_TheBundleBeingTheBuildsOwnZip()
+    {
+        var (f, state, bundle, artifact) = ClientPassed();
+
+        var result = await PublishClient(f, state);
+
+        Assert.Equal("published", result["outcome"]!.GetValue<string>());
+        Assert.Equal(0, f.Pushes);   // no registry for a client
+        const string stem = "20261022T090000Z-39700000001-1";
+        Assert.Equal(new[] { $"tests/scutara/scutarasellerapp/{stem}.json", $"client/scutara/scutarasellerapp/{stem}.json" }, f.RecordWrites);
+        Assert.Equal(bundle, f.ArtifactStore[$"client/scutara/scutarasellerapp/{stem}.zip"].Bytes);   // the inner zip, unchanged
+
+        var client = BuildRecordFormat.Parse(f.RecordStore[$"client/scutara/scutarasellerapp/{stem}.json"], Artifacts);
+        Assert.Equal(("bundle", Artifacts, $"client/scutara/scutarasellerapp/{stem}.zip"), (client.Identity.Kind, client.Identity.Bucket, client.Identity.Key));
+        Assert.Equal(Hex(bundle), client.Identity.Sha256);
+        Assert.Equal(f.ArtifactStore[client.Identity.Key!].Version, client.Identity.VersionId);
+        Assert.Equal("sha256:" + Hex(artifact), client.Intake!.GithubDigest);   // what GitHub reported, and Gate 1 passed
+        Assert.Equal("1.0.49", client.BuiltFrom.Packages["BaseApp.ViewModels"]);
+        Assert.Null(client.Intake.ServiceVersion);
+    }
+
+    [Fact]
+    public async Task AClientRunThePushPathRecorded_IsTakenInDry()
+    {
+        var (f, state, _, _) = ClientPassed();
+        f.RecordStore[$"client/scutara/scutarasellerapp/20261022T090001Z-{ClientRunId}.json"] = "{}";
+        Assert.Equal("push-path", (await PublishClient(f, state))["outcome"]!.GetValue<string>());
+        Assert.Empty(f.RecordWrites);
+    }
+
+    [Theory]
+    [InlineData("bundle.tar")]
+    [InlineData("wwwroot/bundle.zip")]
+    public async Task AClientArtifactNotHoldingOneBundleZip_PublishesNothing(string entry)
+    {
+        var (f, state, _, _) = ClientPassed(entry);
+        await Assert.ThrowsAsync<IntakeFault>(() => PublishClient(f, state));
+        Assert.Empty(f.RecordWrites);
+        Assert.Empty(f.ArtifactStore);
+    }
+
+    [Fact]
+    public async Task AClientsRetry_WritesNothingAgain()
+    {
+        var (f, state, _, _) = ClientPassed();
+        await PublishClient(f, state);
+        var (records, artifacts) = (f.RecordWrites.Count, f.ArtifactStore.Count);
+        Assert.Equal("published", (await PublishClient(f, state))["outcome"]!.GetValue<string>());
+        Assert.Equal((records, artifacts), (f.RecordWrites.Count, f.ArtifactStore.Count));
+    }
+
     [Fact]
     public async Task ARecordForAnotherAttemptAtTheKey_IsRefused_NeverOverwritten()
     {

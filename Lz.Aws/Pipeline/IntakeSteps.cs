@@ -125,6 +125,8 @@ public static class IntakeFetchStep
         JsonObject? tests = null;
         JsonObject? builtFrom = null;
         JsonObject? sbom = null;
+        JsonObject? bundle = null;
+        string? bundleSha256 = null;
         foreach (var (configured, artifact) in expected.Select(n => (n, check.Found[n])))
         {
             var path = Path.Combine(workDirectory, $"{artifact.Name}.zip");
@@ -166,12 +168,26 @@ public static class IntakeFetchStep
                         return IntakeCheckRunStep.Refused($"{artifact.Name}: {ex.Message}");
                     }
                 }
+                else if (!isTests)
+                {
+                    // A BUNDLE (V-D): the artifact wraps the one zip the build made, whose bytes the record will name.
+                    try
+                    {
+                        bundleSha256 = ReadBundle(path);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        return IntakeCheckRunStep.Refused($"{artifact.Name}: {ex.Message}");
+                    }
+                }
 
                 var key = $"{executionName}/{artifact.Name}.zip";
                 await scratch.PutFileAsync(key, path);
                 staged.Add(new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bytes"] = new FileInfo(path).Length });
                 if (isTests) tests = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
                 if (isSbom) sbom = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
+                if (bundleSha256 is not null && bundle is null)
+                    bundle = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bundleSha256"] = bundleSha256 };
             }
             finally
             {
@@ -184,6 +200,7 @@ public static class IntakeFetchStep
         if (tests is not null) result["tests"] = tests;
         if (builtFrom is not null) result["builtFrom"] = builtFrom;
         if (sbom is not null) result["sbom"] = sbom;
+        if (bundle is not null) result["bundle"] = bundle;
         await evidence.PutOnceAsync(IntakeEvidence.Staged(executionName), result.ToJsonString());   // already there: this try's retry wrote it
         return result;
     }
@@ -220,6 +237,32 @@ public static class IntakeFetchStep
             result["baseImageDigest"] = bd is JsonValue bdv && bdv.TryGetValue<string>(out var digest) && Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$")
                 ? digest : throw new InvalidOperationException("builtfrom.json's baseImageDigest is not a sha256 digest");
         return result;
+    }
+
+    /// <summary>The one entry a client's artifact holds: the bundle the build zipped, which the artifact store keeps as it is.</summary>
+    public const string BundleEntry = "bundle.zip";
+
+    /// <summary>
+    /// A client's bundle in its artifact's zip (V-D): exactly one entry, <c>bundle.zip</c>, itself a zip; its SHA-256, which
+    /// is the bundle record's. GitHub zips what it uploads, so the build's own zip is inside, its bytes unchanged.
+    /// </summary>
+    public static string ReadBundle(string zipPath)
+    {
+        using var zip = ZipFile.OpenRead(zipPath);
+        if (zip.Entries.Count != 1 || zip.Entries[0].FullName != BundleEntry)
+            throw new InvalidOperationException($"the artifact holds {string.Join(", ", zip.Entries.Select(e => e.FullName))}, not one {BundleEntry}");
+        using var inner = new MemoryStream();
+        using (var entry = zip.Entries[0].Open()) entry.CopyTo(inner);
+        try
+        {
+            using var bundle = new ZipArchive(new MemoryStream(inner.ToArray()), ZipArchiveMode.Read);
+            if (bundle.Entries.Count == 0) throw new InvalidOperationException($"{BundleEntry} is empty");
+        }
+        catch (InvalidDataException)
+        {
+            throw new InvalidOperationException($"{BundleEntry} is not a zip");
+        }
+        return Convert.ToHexString(SHA256.HashData(inner.ToArray())).ToLowerInvariant();
     }
 
     /// <summary>The image in an artifact's zip: exactly one <c>.tar</c> entry, an OCI archive.</summary>
