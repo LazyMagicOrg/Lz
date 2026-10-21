@@ -9,8 +9,9 @@ namespace Lz.Aws.Pipeline;
 /// <param name="Class">The repository's artifact class (<c>image</c>, <c>client</c>, …), which decides how its artifacts are read.</param>
 /// <param name="Artifacts">The artifacts each run must upload, by the names config gives them (the run attempt is appended).</param>
 /// <param name="Gate1">The test bundle and how Gate 1 runs it (V-C); null for a repository with no Gate 1 yet.</param>
+/// <param name="BuiltFrom">The artifact holding the build's <c>builtfrom.json</c>; null where the repository uploads none.</param>
 public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class,
-    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null)
+    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null, string? BuiltFrom = null)
 {
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];

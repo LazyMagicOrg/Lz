@@ -88,7 +88,8 @@ public static class IntakeBuildPlanner
                         (g.Images ?? new()).Select(i => new IntakeImage(i.From!, i.As!)).ToList(),
                         g.Environment is { Count: > 0 } env ? new Dictionary<string, string>(env) : null,
                         g.BuildRoot)
-                    : null))
+                    : null,
+                r.BuiltFrom))
             .ToList();
 
     /// <summary>The intake's plan, or null when no repository has an <c>Intake</c> mode: a system that has not opted in gets none.</summary>

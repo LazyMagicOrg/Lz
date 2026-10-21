@@ -70,6 +70,10 @@ public class BuildSideConfig
             if (repo.Intake is not null && (repo.RepositoryId is null || repo.OwnerId is null || string.IsNullOrWhiteSpace(repo.WorkflowPath)))
                 p.Add($"{name}: an Intake mode needs RepositoryId, OwnerId and WorkflowPath, which the run check compares by id");
             p.AddRange(Gate1Problems(name, repo));
+            if (repo.BuiltFrom is { } bf && !Regex.IsMatch(bf, "^[a-z][a-z0-9-]*$"))
+                p.Add($"{name}: BuiltFrom '{bf}' is not an artifact's base name");
+            if (repo.BuiltFrom is { } same && (same == repo.TestBundle || (repo.Artifacts ?? new()).Contains(same)))
+                p.Add($"{name}: BuiltFrom '{same}' names an artifact that is already the image or the test bundle");
         }
         return p;
     }

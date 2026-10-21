@@ -265,6 +265,13 @@ public class PipelineRepositoryConfig
     /// </summary>
     public string? TestBundle { get; set; }
 
+    /// <summary>
+    /// The run artifact holding <c>builtfrom.json</c>, <c>{"packages": {name: version}}</c>: the first-party versions the build
+    /// resolved, which the intake's record carries as <c>builtFrom.packages</c> (DecoupledCd.md §4.3, V-D), e.g. <c>builtfrom</c>.
+    /// The attempt is appended as for every artifact. Not one of <see cref="Artifacts"/>, which for an image are ECR repositories.
+    /// </summary>
+    public string? BuiltFrom { get; set; }
+
     /// <summary>How Gate 1 runs <see cref="TestBundle"/>. From this file, never from the bundle (§15.4: the buildspec is fixed).</summary>
     public PipelineGate1Config? Gate1 { get; set; }
 }

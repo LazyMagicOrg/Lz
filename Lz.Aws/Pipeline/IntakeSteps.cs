@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace Lz.Aws.Pipeline;
 
@@ -103,7 +104,8 @@ public static class IntakeFetchStep
 
         // Check names each expected artifact for this attempt itself (ArtifactCheck.NameFor), and keys what it found by
         // the configured name. The test bundle, where Gate 1 is configured, is fetched the same way (V-C).
-        var expected = repository.Gate1 is { } gate1 ? repository.Artifacts.Append(gate1.Artifact).ToList() : repository.Artifacts;
+        var expected = repository.Gate1 is { } gate1 ? repository.Artifacts.Append(gate1.Artifact).ToList() : repository.Artifacts.ToList();
+        if (repository.BuiltFrom is { } builtFromArtifact) expected = expected.Append(builtFromArtifact).ToList();   // V-D
         var listed = await github.ArtifactsAsync(input.Repo, input.RunId);
         var check = ArtifactCheck.Check(input.RunId, input.RunAttempt, expected, listed);
         if (!check.Passed) return IntakeCheckRunStep.Refused(check.Reasons.ToArray());
@@ -112,6 +114,7 @@ public static class IntakeFetchStep
         string? manifestDigest = null;
         Directory.CreateDirectory(workDirectory);
         JsonObject? tests = null;
+        JsonObject? builtFrom = null;
         foreach (var (configured, artifact) in expected.Select(n => (n, check.Found[n])))
         {
             var path = Path.Combine(workDirectory, $"{artifact.Name}.zip");
@@ -123,7 +126,19 @@ public static class IntakeFetchStep
                     return IntakeCheckRunStep.Refused($"{artifact.Name}: the bytes downloaded hash to sha256:{sha256}, not GitHub's {artifact.Digest}");
 
                 var isTests = repository.Gate1?.Artifact == configured;
-                if (repository.Class == "image" && !isTests)
+                var isBuiltFrom = repository.BuiltFrom == configured;
+                if (isBuiltFrom)
+                {
+                    try
+                    {
+                        builtFrom = ReadBuiltFrom(path);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or System.Text.Json.JsonException)
+                    {
+                        return IntakeCheckRunStep.Refused($"{artifact.Name}: {ex.Message}");
+                    }
+                }
+                else if (repository.Class == "image" && !isTests)
                 {
                     try
                     {
@@ -149,8 +164,35 @@ public static class IntakeFetchStep
         var result = new JsonObject { ["verdict"] = "staged", ["staged"] = staged };
         if (manifestDigest is not null) result["manifestDigest"] = manifestDigest;
         if (tests is not null) result["tests"] = tests;
+        if (builtFrom is not null) result["builtFrom"] = builtFrom;
         await evidence.PutOnceAsync(IntakeEvidence.Staged(executionName), result.ToJsonString());   // already there: this try's retry wrote it
         return result;
+    }
+
+    /// <summary>
+    /// The build's <c>builtfrom.json</c> (V-D), its zip's one entry: <c>{"packages": {name: version}}</c> and nothing else, every
+    /// name and version a plain string, at least one, as the push path's record requires; returned as <c>{"packages": …}</c>.
+    /// </summary>
+    public static JsonObject ReadBuiltFrom(string zipPath)
+    {
+        using var zip = ZipFile.OpenRead(zipPath);
+        if (zip.Entries.Count != 1 || zip.Entries[0].FullName != "builtfrom.json")
+            throw new InvalidOperationException($"the artifact holds {string.Join(", ", zip.Entries.Select(e => e.FullName))}, not one builtfrom.json");
+        if (zip.Entries[0].Length > 1 << 20) throw new InvalidOperationException("builtfrom.json is over a megabyte");
+        using var stream = zip.Entries[0].Open();
+        var root = JsonNode.Parse(stream) as JsonObject ?? throw new InvalidOperationException("builtfrom.json is not an object");
+        if (root.Count != 1 || root["packages"] is not JsonObject packages)
+            throw new InvalidOperationException("builtfrom.json must be {\"packages\": {name: version}} and nothing else");
+        if (packages.Count == 0) throw new InvalidOperationException("builtfrom.json names no packages; the build consumes first-party packages");
+        var clean = new JsonObject();
+        foreach (var (name, version) in packages)
+        {
+            var text = version is JsonValue v && v.TryGetValue<string>(out var t) ? t : null;
+            if (text is null || !Regex.IsMatch(name, @"^[A-Za-z0-9._-]{1,200}$") || !Regex.IsMatch(text, @"^[0-9A-Za-z.+-]{1,100}$"))
+                throw new InvalidOperationException($"builtfrom.json's package '{name}' is not a package name and a version");
+            clean[name] = text;
+        }
+        return new JsonObject { ["packages"] = clean };
     }
 
     /// <summary>The image in an artifact's zip: exactly one <c>.tar</c> entry, an OCI archive.</summary>

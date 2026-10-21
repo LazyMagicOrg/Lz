@@ -192,6 +192,8 @@ public class BuildSideConfigTests : IDisposable
         { "Gate1.Filter is required", WithGate1(g => g.Filter = " ") },
         { "is not an absolute path", WithGate1(g => g.BuildRoot = "relative/path") },
         { "is not an absolute path", WithGate1(g => g.BuildRoot = "/home/../etc") },
+        { "is not an artifact's base name", WithBuiltFrom("Builtfrom") },
+        { "is already the image or the test bundle", WithBuiltFrom("tests") },
         { "is not an exact SDK version", WithGate1(g => g.SdkVersion = "10.0") },
         { "is not a lower-case SHA-512", WithGate1(g => g.SdkSha512 = new string('A', 128)) },
         { "is not pulled by digest", WithGate1(g => g.Images![0].From = "public.ecr.aws/x/y:2.6.0") },
@@ -206,6 +208,13 @@ public class BuildSideConfigTests : IDisposable
         SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
         Images = new() { new() { From = "public.ecr.aws/x/y@sha256:" + new string('b', 64), As = "amazon/dynamodb-local:2.6.0" } },
     };
+
+    private static BuildSideConfig WithBuiltFrom(string builtFrom)
+    {
+        var c = WithGate1(_ => { });
+        c.Repositories![0].BuiltFrom = builtFrom;
+        return c;
+    }
 
     private static BuildSideConfig WithGate1(Action<PipelineGate1Config> change, string? bundle = "tests", bool gate1 = true)
     {

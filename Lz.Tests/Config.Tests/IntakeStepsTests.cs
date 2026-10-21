@@ -129,6 +129,53 @@ public sealed class IntakeStepsTests : IDisposable
         Assert.Empty(Directory.GetFiles(_work));   // nothing left on the function's disk
     }
 
+    // ---- builtFrom (V-D) ----
+
+    private static readonly IReadOnlyList<IntakeRepository> WithBuiltFrom = new[] { Service with { BuiltFrom = "builtfrom" } };
+
+    private Fakes WithImageAndBuiltFrom(string json, string entry = "builtfrom.json")
+    {
+        var f = WithImage(ImageZip());
+        var zip = ZipOf((entry, System.Text.Encoding.UTF8.GetBytes(json)));
+        f.Artifacts.Add(new GitHubArtifact(32, "builtfrom-1", RunId, false, Digest(zip), zip.Length));
+        f.Bytes[32] = zip;
+        return f;
+    }
+
+    [Fact]
+    public async Task TheBuildsBuiltFrom_IsStaged_AndItsPackagesRead()
+    {
+        var f = WithImageAndBuiltFrom("{\"packages\":{\"LazyMagic.Shared\":\"3.0.35\",\"Lz.Core\":\"0.13.70\"}}");
+
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), WithBuiltFrom, f, f, f, _work);
+
+        Assert.Equal("staged", result["verdict"]!.GetValue<string>());
+        Assert.Equal("3.0.35", result["builtFrom"]!["packages"]!["LazyMagic.Shared"]!.GetValue<string>());
+        Assert.Contains($"{Exec()}/builtfrom-1.zip", f.Scratch.Keys);
+    }
+
+    [Theory]
+    [InlineData("{\"packages\":{}}", "builtfrom.json")]                                   // names no packages
+    [InlineData("{\"packages\":{\"A\":\"1\"},\"commit\":\"x\"}", "builtfrom.json")]      // more than the packages
+    [InlineData("{\"packages\":{\"A\":1}}", "builtfrom.json")]                            // a version that is not a string
+    [InlineData("{\"packages\":{\"A\":\"1 2\"}}", "builtfrom.json")]                      // not a version
+    [InlineData("[]", "builtfrom.json")]
+    [InlineData("{\"packages\":{\"A\":\"1\"}}", "other.json")]                            // not the one entry
+    public async Task ABuiltFromNotInItsForm_IsRefused(string json, string entry)
+    {
+        var f = WithImageAndBuiltFrom(json, entry);
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), WithBuiltFrom, f, f, f, _work);
+        Assert.Equal("refused", result["verdict"]!.GetValue<string>());
+        Assert.Contains(result["reasons"]!.AsArray(), r => r!.GetValue<string>().StartsWith("builtfrom-1"));
+    }
+
+    [Fact]
+    public async Task AMissingBuiltFrom_IsRefused_WhereTheRepositoryNamesOne()
+    {
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), WithBuiltFrom, WithImage(ImageZip()), WithImage(ImageZip()), new Fakes(), _work);
+        Assert.Equal("refused", result["verdict"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task AnArtifactNamedForAnotherAttempt_IsRefused_AndNothingIsStaged()
     {
