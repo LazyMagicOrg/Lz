@@ -42,8 +42,11 @@ public static class PipelineBootstrapper
         var accountId = await ResolveAccountAsync(profile, region);
 
         var plan = PipelineBootstrapPlanner.Plan(config, accountId);
+        // The intake (DecoupledCd.md V-B): only where the build-side file gives a repository an Intake mode.
+        var intake = IntakeBuildPlanner.Plan(config, accountId);
 
         Print(plan, accountId, profile, apply);
+        if (intake is not null) IntakeBootstrapper.Print(intake);
         if (!apply)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
@@ -146,6 +149,9 @@ public static class PipelineBootstrapper
 
             await TriggerApply.RemoveRuleAsync(events, eventBusName: null, staleRule, "Pipeline.DeployOnBuildRecord is off");
         }
+
+        if (intake is not null)
+            await IntakeBootstrapper.ApplyAsync(intake, profile, region, config.Hygiene?.LambdaLogRetentionDays ?? 14);
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;

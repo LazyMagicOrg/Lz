@@ -235,7 +235,7 @@ public static class DeployerBootstrapper
     /// A function's log group, with its retention (DecoupledCd.md §14.3) — created here rather than by Lambda on the first
     /// log line, which makes a group that never expires. Read back.
     /// </summary>
-    private static async Task EnsureLogGroupAsync(Amazon.CloudWatchLogs.IAmazonCloudWatchLogs logs, string name, int retentionDays)
+    internal static async Task EnsureLogGroupAsync(Amazon.CloudWatchLogs.IAmazonCloudWatchLogs logs, string name, int retentionDays)
     {
         try
         {
@@ -409,11 +409,14 @@ public static class DeployerBootstrapper
     /// missing. Looked for next to Lz.Aws.dll, where the build puts them in every load scenario.
     /// </summary>
     private static Dictionary<string, PackageBytes> LocatePackages(PipelineDeployer plan)
+        => LocatePackages(plan.Functions.Select(f => f.Package));
+
+    internal static Dictionary<string, PackageBytes> LocatePackages(IEnumerable<string> packages)
     {
         var dir = Path.Combine(Path.GetDirectoryName(typeof(DeployerBootstrapper).Assembly.Location)!, "Lambda");
         var result = new Dictionary<string, PackageBytes>();
 
-        foreach (var package in plan.Functions.Select(f => f.Package).Distinct())
+        foreach (var package in packages.Distinct())
         {
             var path = Path.Combine(dir, DeployerPackages.ZipFor(package));
             if (!File.Exists(path))
@@ -430,7 +433,7 @@ public static class DeployerBootstrapper
         return result;
     }
 
-    private sealed record PackageBytes(string Path, byte[] Bytes, IReadOnlyList<string> MissingVerifierFiles);
+    internal sealed record PackageBytes(string Path, byte[] Bytes, IReadOnlyList<string> MissingVerifierFiles);
 
     private static async Task<string> ResolveAccountAsync(string? profile, string region)
     {
@@ -578,7 +581,7 @@ public static class DeployerBootstrapper
         Console.WriteLine($"  registry policy written: ecr:ReplicateImage for the build account; {total - 1} other statement(s) preserved.");
     }
 
-    private static async Task EnsureEvidenceStoreAsync(IAmazonS3 s3, string bucket, string region)
+    internal static async Task EnsureEvidenceStoreAsync(IAmazonS3 s3, string bucket, string region)
     {
         try
         {
@@ -616,7 +619,7 @@ public static class DeployerBootstrapper
     /// buried mid-document, and because an explicit Deny beats any Allow — including a future one
     /// nobody connects to this decision (§5.5).</para>
     /// </summary>
-    private static async Task<string> EnsureRoleAsync(
+    internal static async Task<string> EnsureRoleAsync(
         IAmazonIdentityManagementService iam, string roleName, string trust, string description,
         (string Name, string Document) grant, string denyPolicy)
     {
@@ -713,9 +716,11 @@ public static class DeployerBootstrapper
     /// waiting for each update to settle — Lambda refuses a configuration change while a code update
     /// is still in progress.
     /// </summary>
-    private static async Task EnsureFunctionAsync(
-        IAmazonLambda lambda, DeployerFunction fn, string roleArn, PackageBytes package)
+    internal static async Task EnsureFunctionAsync(
+        IAmazonLambda lambda, DeployerFunction fn, string roleArn, PackageBytes package, int? ephemeralStorageMb = null)
     {
+        // Lambda's default /tmp is 512 MB; only the intake's fetch, which stages an image, asks for more.
+        var storage = ephemeralStorageMb is { } mb ? new EphemeralStorage { Size = mb } : null;
         var environment = new Amazon.Lambda.Model.Environment
         {
             Variables = new Dictionary<string, string>(fn.Environment),
@@ -752,6 +757,7 @@ public static class DeployerBootstrapper
                         MemorySize = fn.MemoryMb,
                         Architectures = new List<string> { Architecture.X86_64 },
                         Environment = environment,
+                        EphemeralStorage = storage,
                         PackageType = PackageType.Zip,
                         Description = "lz decoupled-CD deployer (DecoupledCd.md §5).",
                     });
@@ -786,6 +792,7 @@ public static class DeployerBootstrapper
             Timeout = fn.TimeoutSeconds,
             MemorySize = fn.MemoryMb,
             Environment = environment,
+            EphemeralStorage = storage,
         });
         await WaitForSettledAsync(lambda, fn.Name);
         Console.WriteLine($"  function '{fn.Name}' already exists — code and configuration updated.");

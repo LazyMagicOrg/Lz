@@ -142,7 +142,7 @@ public class BootstrapHardeningCallSiteTests
         At(src, "await EnsureRoleAsync(iam, plan.HookInvokerRoleName, plan.HookInvokerTrustPolicy,", file);
         Assert.Equal(3, Count(src, "await EnsureRoleAsync("));
 
-        var body = Body(src, "private static async Task<string> EnsureRoleAsync(");
+        var body = Body(src, "internal static async Task<string> EnsureRoleAsync(");
         // No trust written here: it is planned, where a test reads its conditions.
         Assert.DoesNotContain("Principal", body);
 
@@ -170,7 +170,7 @@ public class BootstrapHardeningCallSiteTests
         Assert.True(loop < group && group < function, "a function could log into a group that never expires");
         At(src, "if (plan.LogRetentionDays is int retention)", file);
 
-        var body = Body(src, "private static async Task EnsureLogGroupAsync(");
+        var body = Body(src, "internal static async Task EnsureLogGroupAsync(");
         var put = At(body, "await logs.PutRetentionPolicyAsync(", file);
         var readBack = At(body, "if (group?.RetentionInDays != retentionDays)", file);
         Assert.True(put < readBack);
