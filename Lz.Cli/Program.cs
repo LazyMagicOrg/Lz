@@ -165,6 +165,7 @@ class Program
         RegisterReposCommand(rootCommand);
         RegisterCloneReposCommand(rootCommand);
         RegisterBootstrapPipelineCommand(rootCommand, systemKeyOption, envOption);
+        RegisterProbeIntakePushCommand(rootCommand, systemKeyOption, envOption);
         RegisterBootstrapDeployerCommand(rootCommand, systemKeyOption, envOption);
         RegisterPackagesCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
@@ -253,7 +254,7 @@ class Program
             // Not System: neither is a stack, the pipeline lives in its own build account, and both
             // are person-run bootstraps that plan unless --apply. Listed in the order they are run.
             ("Pipeline",  "decoupled CD bootstrap: build account first, then each target account",
-                new[] { "bootstrappipeline", "bootstrapdeployer" }),
+                new[] { "bootstrappipeline", "bootstrapdeployer", "probeintakepush" }),
             ("Misc",      "discovery, codegen, utilities",
                 new[] { "status", "getenv", "gettenants", "gettesttenant", "gen", "util", "repos",
                         "clonerepos", "packages", "verify", "unlock" }),
@@ -3058,6 +3059,48 @@ class Program
                 }
             }
         }, systemKeyOption, envOption, applyOption, profileOption);
+
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // lz probeintakepush — V-C's one probe push (DecoupledCd.md §15.8 items 3 and 4), before V-D.
+    // ---------------------------------------------------------------
+    private static void RegisterProbeIntakePushCommand(
+        RootCommand root, Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var cmd = new Command("probeintakepush",
+            "Measure the intake's push once, in the build account: push one staged image into a probe ECR repository " +
+            "outside the pipeline's repositories (tag-immutable, its own signing profile and rule), push it again, then " +
+            "once with a wrong imageDigest, read back the digest and the signing status, and remove the repository, its " +
+            "rule and the push function with its role. Changes nothing the pipeline uses.");
+        var executionOption = new Option<string>("--execution", "The intake execution whose staged image is pushed, e.g. 1035592016-39635771899-1.") { IsRequired = true };
+        var profileOption = new Option<string?>("--profile", "AWS profile for the BUILD account (e.g. scu-cicd).");
+        var keepOption = new Option<bool>("--keep", "Leave the probe in place, to inspect it; re-run without --keep to remove it.");
+        cmd.AddOption(systemKeyOption);
+        cmd.AddOption(envOption);
+        cmd.AddOption(executionOption);
+        cmd.AddOption(profileOption);
+        cmd.AddOption(keepOption);
+
+        cmd.SetHandler(async (systemKey, env, execution, profileOverride, keep) =>
+        {
+            var config = ConfigResolver.ResolveSystemConfigs(ConfigResolver.ResolveEnvironment(env), systemKey).Single();
+            if (!string.IsNullOrWhiteSpace(profileOverride)) config.Profile = profileOverride;
+            try
+            {
+                var report = await Lz.Aws.Pipeline.IntakePushProbe.RunAsync(config, execution, keep);
+                Console.WriteLine();
+                Console.WriteLine(report.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(ex.Message);
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+            }
+        }, systemKeyOption, envOption, executionOption, profileOption, keepOption);
 
         root.AddCommand(cmd);
     }

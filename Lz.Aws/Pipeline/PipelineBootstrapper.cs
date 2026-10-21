@@ -409,7 +409,7 @@ public static class PipelineBootstrapper
     }
 
     /// <summary>The registry's signing rules, or none when it has no signing configuration.</summary>
-    private static async Task<IReadOnlyList<Amazon.ECR.Model.SigningRule>> SigningRulesAsync(Amazon.ECR.IAmazonECR ecr)
+    internal static async Task<IReadOnlyList<Amazon.ECR.Model.SigningRule>> SigningRulesAsync(Amazon.ECR.IAmazonECR ecr)
     {
         try
         {
@@ -423,7 +423,7 @@ public static class PipelineBootstrapper
         }
     }
 
-    private static async Task<string> EnsureSigningProfileAsync(IAmazonSigner signer, string profileName)
+    internal static async Task<string> EnsureSigningProfileAsync(IAmazonSigner signer, string profileName)
     {
         try
         {

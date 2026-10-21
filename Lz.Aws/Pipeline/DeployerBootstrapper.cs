@@ -435,7 +435,7 @@ public static class DeployerBootstrapper
 
     internal sealed record PackageBytes(string Path, byte[] Bytes, IReadOnlyList<string> MissingVerifierFiles);
 
-    private static async Task<string> ResolveAccountAsync(string? profile, string region)
+    internal static async Task<string> ResolveAccountAsync(string? profile, string region)
     {
         var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
