@@ -40,6 +40,7 @@ public sealed class IntakeGate1Tests : IDisposable
         public Gate1Build Build = new("SUCCEEDED", null, new[] { "arn:report" }, Now.AddMinutes(-5), Now);
         public Gate1Report? Report = new(7332, new Dictionary<string, int> { ["SUCCEEDED"] = 7331, ["SKIPPED"] = 1 });
         public IReadOnlyList<string> Failed = new[] { "A.Test1", "B.Test2" };
+        public IReadOnlyList<string> LogLines = ListBlocks(("precondition", new[] { "E.Pre" }), ("blocking", new[] { "E.A", "E.B(x: \"1\")" }), ("advisory", Array.Empty<string>()));
         public int ReportReads;
         public readonly Dictionary<string, string> Evidence = new(StringComparer.Ordinal);
 
@@ -47,10 +48,14 @@ public sealed class IntakeGate1Tests : IDisposable
         public Task<Gate1Build> DescribeAsync(string buildId) => Task.FromResult(Build);
         public Task<Gate1Report?> ReportAsync(IReadOnlyList<string> reportArns) { ReportReads++; return Task.FromResult(Report); }
         public Task<IReadOnlyList<string>> FailedCasesAsync(IReadOnlyList<string> reportArns, int max) => Task.FromResult<IReadOnlyList<string>>(Failed.Take(max).ToList());
+        public Task<IReadOnlyList<string>> ListLinesAsync(Gate1Build build) => Task.FromResult(LogLines);
         public string GetUrl(string key, TimeSpan lifetime) { Presigned = (key, lifetime); return "https://presigned/one-object"; }
         public Task<IReadOnlyList<string>> KeysAsync(string prefix) => Task.FromResult<IReadOnlyList<string>>(Evidence.Keys.ToList());
         public Task<bool> PutOnceAsync(string key, string body) => Task.FromResult(Evidence.TryAdd(key, body));
     }
+
+    private static string[] ListBlocks(params (string Name, string[] Tests)[] lists)
+        => lists.SelectMany(l => new[] { $"GATE1-LIST-BEGIN {l.Name}" }.Concat(l.Tests.Select(t => $"GATE1-LIST {l.Name} {t}")).Append($"GATE1-LIST-END {l.Name}")).ToArray();
 
     private static Dictionary<string, int> Counts(int ok, int failed = 0, int error = 0)
         => new() { ["SUCCEEDED"] = ok, ["FAILED"] = failed, ["ERROR"] = error };
@@ -128,6 +133,39 @@ public sealed class IntakeGate1Tests : IDisposable
         var v = IntakeGate1StartStep.VariablesFor(withEnv, "https://presigned/one-object", new string('2', 64));
         Assert.Equal("localhost", v["TESTCONTAINERS_HOST_OVERRIDE"]);
         Assert.Equal("https://presigned/one-object", v["BUNDLE_URL"]);
+
+        var lists = IntakeGate1StartStep.VariablesFor(Gate1 with { Environment = new Dictionary<string, string> { ["GATE1_LISTS"] = "blocking Category=Nothing" } }, "u", "s");
+        Assert.Equal(Gate2Lists.Variable(), lists["GATE1_LISTS"]);   // Gate 2's filters are fixed, never config's
+    }
+
+    // ---- Gate 2's lists ----
+
+    [Fact]
+    public void TheLists_AreGate2sFixedFilters_OnePerLine()
+        => Assert.Equal("precondition Category=E2E&Gate2=Precondition\nblocking Category=E2E&Gate2=Blocking\nadvisory Category=E2E&Gate2=Advisory", Gate2Lists.Variable());
+
+    [Fact]
+    public void EachList_IsItsFirstCompleteBlock_AndATestPrintingOneLaterReplacesNothing()
+    {
+        var lines = ListBlocks(("precondition", new[] { "P" }), ("blocking", new[] { "A", "B (with spaces)" }), ("advisory", Array.Empty<string>()))
+            .Concat(ListBlocks(("blocking", new[] { "Forged" })))
+            .Prepend("GATE1-LIST blocking Stray").ToList();
+
+        var lists = Gate2Lists.Parse(lines)!;
+
+        Assert.Equal(new[] { "P" }, lists["precondition"]);
+        Assert.Equal(new[] { "A", "B (with spaces)" }, lists["blocking"]);
+        Assert.Empty(lists["advisory"]);
+    }
+
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("advisory")]
+    public void AListWithNoEnd_OrNoneAtAll_MeansNoLists(string missing)
+    {
+        var lines = ListBlocks(Gate2Lists.Filters.Where(f => f.Name != missing).Select(f => (f.Name, new[] { "T" })).ToArray()).ToList();
+        Assert.Null(Gate2Lists.Parse(lines));
+        Assert.Null(Gate2Lists.Parse(lines.Append($"GATE1-LIST-BEGIN {missing}").Append($"GATE1-LIST {missing} T")));
     }
 
     [Fact]
@@ -165,7 +203,27 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal(new string('1', 64), verdict["artifactSha256"]!["aiphost-1"]!.GetValue<string>());
         Assert.Equal(new string('2', 64), verdict["artifactSha256"]!["tests-1"]!.GetValue<string>());
         Assert.Equal(300, verdict["seconds"]!.GetValue<int>());
+        Assert.Equal(new[] { "E.A", "E.B(x: \"1\")" }, verdict["gate2Lists"]!["blocking"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.Empty(verdict["gate2Lists"]!["advisory"]!.AsArray());
         Assert.True(f.Evidence.ContainsKey(IntakeEvidence.Gate1(Exec)));
+    }
+
+    [Fact]
+    public async Task APassWithoutGate2sLists_IsAFault_SinceGate2CouldNotCheckItsResults()
+    {
+        var f = new Fakes { LogLines = ListBlocks(("precondition", new[] { "P" })) };
+        var fault = await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1VerdictStep.RunAsync(Started(), Exec, f, f, Now));
+        Assert.Contains("no complete Gate 2 lists", fault.Message);
+        Assert.Empty(f.Evidence);
+    }
+
+    [Fact]
+    public async Task AFailureWithoutTheLists_IsStillDecided()
+    {
+        var f = new Fakes { Build = new("FAILED", null, new[] { "r" }, null, null), Report = new(3, Counts(2, failed: 1)), LogLines = Array.Empty<string>() };
+        var verdict = await IntakeGate1VerdictStep.RunAsync(Started(), Exec, f, f, Now);
+        Assert.Equal("failed", verdict["verdict"]!.GetValue<string>());
+        Assert.Null(verdict["gate2Lists"]);
     }
 
     [Fact]

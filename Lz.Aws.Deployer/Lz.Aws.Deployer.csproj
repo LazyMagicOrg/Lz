@@ -85,6 +85,8 @@
     <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.4.7" />
     <!-- Gate 1 (V-C): start the build and read its reports. -->
     <PackageReference Include="AWSSDK.CodeBuild" Version="4.0.101.16" />
+    <!-- Gate 1's verdict reads Gate 2's lists out of the build's log. -->
+    <PackageReference Include="AWSSDK.CloudWatchLogs" Version="4.0.106" />
   </ItemGroup>
 
   <!-- The Notation verifier's files, when present, are copied into signature-hook.zip by Lz.Aws.

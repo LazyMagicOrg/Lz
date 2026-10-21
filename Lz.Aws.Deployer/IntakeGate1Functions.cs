@@ -1,5 +1,7 @@
 using Amazon.CodeBuild;
 using Amazon.CodeBuild.Model;
+using Amazon.CloudWatchLogs;
+using Amazon.CloudWatchLogs.Model;
 using Amazon.Lambda.Core;
 using Amazon.S3;
 using Amazon.S3.Model;
@@ -34,7 +36,7 @@ public sealed class IntakeGate1VerdictFunction
     {
         var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
         var result = await IntakeGate1VerdictStep.RunAsync(
-            state, executionName, new CodeBuildGate1(Gate1Clients.CodeBuild.Value),
+            state, executionName, new CodeBuildGate1(Gate1Clients.CodeBuild.Value, Gate1Clients.Logs.Value),
             new S3IntakeEvidence(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.EvidenceStore)),
             DateTimeOffset.UtcNow);
         context.Logger.LogInformation($"{executionName}: Gate 1 {result["verdict"]}: {result["summary"]}");
@@ -45,6 +47,7 @@ public sealed class IntakeGate1VerdictFunction
 internal static class Gate1Clients
 {
     public static readonly Lazy<IAmazonCodeBuild> CodeBuild = new(() => new AmazonCodeBuildClient());
+    public static readonly Lazy<IAmazonCloudWatchLogs> Logs = new(() => new AmazonCloudWatchLogsClient());
 }
 
 /// <summary>A GET URL for one scratch object, signed by the start function's role, which holds that read.</summary>
@@ -56,7 +59,7 @@ internal sealed class S3ScratchPresigner(IAmazonS3 s3, string bucket) : IScratch
     });
 }
 
-internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild) : IGate1Builds
+internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild, IAmazonCloudWatchLogs? logs = null) : IGate1Builds
 {
     public async Task<string> StartAsync(string project, IReadOnlyDictionary<string, string> variables)
         => (await codeBuild.StartBuildAsync(new StartBuildRequest
@@ -78,7 +81,8 @@ internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild) : IGate1Builds
             : $"{failed.PhaseType}: {string.Join("; ", (failed.Contexts ?? new List<PhaseContext>()).Select(c => c.Message).Where(m => !string.IsNullOrWhiteSpace(m)))}";
         return new Gate1Build(build.BuildStatus?.Value ?? "", phase, build.ReportArns ?? new List<string>(),
             build.StartTime is { } s ? new DateTimeOffset(s, TimeSpan.Zero) : null,
-            build.EndTime is { } e ? new DateTimeOffset(e, TimeSpan.Zero) : null);
+            build.EndTime is { } e ? new DateTimeOffset(e, TimeSpan.Zero) : null,
+            build.Logs?.GroupName, build.Logs?.StreamName);
     }
 
     public async Task<Gate1Report?> ReportAsync(IReadOnlyList<string> reportArns)
@@ -110,5 +114,24 @@ internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild) : IGate1Builds
             if (names.Count >= max) break;
         }
         return names.Take(max).ToList();
+    }
+
+    // From the head, page by page, until the forward token stops changing, which is how GetLogEvents says the end.
+    public async Task<IReadOnlyList<string>> ListLinesAsync(Gate1Build build)
+    {
+        if (logs is null) throw new System.InvalidOperationException("this client was made without a logs client");
+        if (build.LogGroup is null || build.LogStream is null) return Array.Empty<string>();
+        var lines = new List<string>();
+        string? token = null;
+        while (true)
+        {
+            var page = await logs.GetLogEventsAsync(new GetLogEventsRequest
+            {
+                LogGroupName = build.LogGroup, LogStreamName = build.LogStream, StartFromHead = true, NextToken = token,
+            });
+            lines.AddRange((page.Events ?? new List<OutputLogEvent>()).Select(e => e.Message).Where(m => m.StartsWith(Gate2Lists.Prefix, StringComparison.Ordinal)));
+            if (page.NextForwardToken is null || page.NextForwardToken == token) return lines;
+            token = page.NextForwardToken;
+        }
     }
 }

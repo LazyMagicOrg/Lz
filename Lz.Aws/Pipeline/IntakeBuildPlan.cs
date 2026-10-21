@@ -243,6 +243,8 @@ public static class IntakeBuildPlanner
                 {
                     new { Sid = "ReadGate1", Effect = "Allow", Action = new[] { "codebuild:BatchGetBuilds" }, Resource = new[] { projectArn } },
                     new { Sid = "ReadItsReports", Effect = "Allow", Action = new[] { "codebuild:BatchGetReports", "codebuild:DescribeTestCases" }, Resource = new[] { reportGroupArn } },
+                    // Gate 2's lists, which Gate 1 prints into its own log (Gate2Lists).
+                    new { Sid = "ReadItsLog", Effect = "Allow", Action = new[] { "logs:GetLogEvents" }, Resource = new[] { $"arn:aws:logs:{region}:{accountId}:log-group:{logGroup}:log-stream:*" } },
                     WriteEvidence("WriteTheVerdictOnce", "gate1/"),
                 }),
                 new Dictionary<string, string> { [IntakeEnvironment.EvidenceStore] = evidence },
@@ -345,6 +347,7 @@ public static class IntakeBuildPlanner
               - mkdir -p "$GATE1_ROOT" && unzip -q /tmp/bundle.zip -d "$GATE1_ROOT"
           build:
             commands:
+              - set -o pipefail; cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && printf '%s\n' "$GATE1_LISTS" | while read -r name filter; do [ -z "$name" ] && continue; echo "GATE1-LIST-BEGIN $name"; DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --list-tests --filter "$filter" | sed -n "s/^    /GATE1-LIST $name /p" || exit 1; echo "GATE1-LIST-END $name"; done
               - cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results
         reports:
           {{reportGroupArn}}:

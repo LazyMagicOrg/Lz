@@ -5,7 +5,9 @@ namespace Lz.Aws.Pipeline;
 /// <summary>One look at a Gate 1 build: CodeBuild's status, the phase that failed if one did, and its test reports.</summary>
 /// <param name="Status">IN_PROGRESS, SUCCEEDED, FAILED, FAULT, TIMED_OUT or STOPPED.</param>
 /// <param name="FailedPhase">The first phase that did not succeed, with CodeBuild's message; null when none did.</param>
-public sealed record Gate1Build(string Status, string? FailedPhase, IReadOnlyList<string> ReportArns, DateTimeOffset? Started, DateTimeOffset? Ended);
+/// <param name="LogGroup">The build's CloudWatch log group and stream, where it prints Gate 2's lists; null before it has one.</param>
+public sealed record Gate1Build(string Status, string? FailedPhase, IReadOnlyList<string> ReportArns, DateTimeOffset? Started, DateTimeOffset? Ended,
+    string? LogGroup = null, string? LogStream = null);
 
 /// <summary>A test report's counts by status, as CodeBuild keeps them (SUCCEEDED, FAILED, SKIPPED, ERROR, UNKNOWN).</summary>
 public sealed record Gate1Report(int Total, IReadOnlyDictionary<string, int> StatusCounts);
@@ -23,6 +25,59 @@ public interface IGate1Builds
 
     /// <summary>Up to <paramref name="max"/> names of the reports' failed test cases.</summary>
     Task<IReadOnlyList<string>> FailedCasesAsync(IReadOnlyList<string> reportArns, int max);
+
+    /// <summary>The build log's lines that start with <see cref="Gate2Lists.Prefix"/>, in the order printed; empty when it has no log.</summary>
+    Task<IReadOnlyList<string>> ListLinesAsync(Gate1Build build);
+}
+
+/// <summary>
+/// GATE 2'S FIXED FILTERS, which Gate 1 lists (DecoupledCd.md §15.5, V-C). Fixed here, not settings: the preconditions, the
+/// blocking set and the advisory set of the e2e tier, by each test's <c>Gate2</c> trait (a test marked <c>Out</c> is in none).
+/// Gate 1 lists each from the build's own bundle BEFORE it runs a test, printing one block per list into its log, and the
+/// verdict records them, so Gate 2 can require its results to be exactly the list the build was gated with. The block is as
+/// trustworthy as the reports: both come out of a container running the repository's own code.
+/// </summary>
+public static class Gate2Lists
+{
+    public const string Prefix = "GATE1-LIST";
+
+    public static readonly IReadOnlyList<(string Name, string Filter)> Filters = new[]
+    {
+        ("precondition", "Category=E2E&Gate2=Precondition"),
+        ("blocking", "Category=E2E&Gate2=Blocking"),
+        ("advisory", "Category=E2E&Gate2=Advisory"),
+    };
+
+    /// <summary>The build variable: one "name filter" pair per line.</summary>
+    public static string Variable() => string.Join("\n", Filters.Select(f => $"{f.Name} {f.Filter}"));
+
+    /// <summary>
+    /// Each list from the FIRST complete block of its name — <c>GATE1-LIST-BEGIN name</c>, then <c>GATE1-LIST name test</c>
+    /// lines, then <c>GATE1-LIST-END name</c> — so a test printing a block later cannot replace one; null unless every list
+    /// has a complete block. A list may be empty: a repository with no e2e tests.
+    /// </summary>
+    public static IReadOnlyDictionary<string, IReadOnlyList<string>>? Parse(IEnumerable<string> lines)
+    {
+        var done = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        string? open = null;
+        List<string>? names = null;
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd('\r', '\n');
+            if (line.StartsWith(Prefix + "-BEGIN ", StringComparison.Ordinal))
+            {
+                var name = line[(Prefix.Length + 7)..];
+                if (open is null && !done.ContainsKey(name)) (open, names) = (name, new List<string>());
+            }
+            else if (line.StartsWith(Prefix + "-END ", StringComparison.Ordinal))
+            {
+                if (open is not null && line[(Prefix.Length + 5)..] == open) { done[open] = names!; (open, names) = (null, null); }
+            }
+            else if (open is not null && line.StartsWith($"{Prefix} {open} ", StringComparison.Ordinal))
+                names!.Add(line[(Prefix.Length + open.Length + 2)..]);
+        }
+        return Filters.All(f => done.ContainsKey(f.Name)) ? Filters.ToDictionary(f => f.Name, f => done[f.Name]) : null;
+    }
 }
 
 /// <summary>A short-lived URL for one object in the scratch bucket, which grants that object and nothing more.</summary>
@@ -63,6 +118,7 @@ public static class IntakeGate1StartStep
         ["SDK_VERSION"] = gate1.SdkVersion,
         ["SDK_SHA512"] = gate1.SdkSha512,
         ["GATE1_IMAGES"] = string.Join("\n", gate1.Images.Select(i => $"{i.From} {i.As}")),
+        ["GATE1_LISTS"] = Gate2Lists.Variable(),
     };
 
     public static async Task<JsonObject> RunAsync(
@@ -112,7 +168,8 @@ public static class Gate1Judge
 /// <summary>
 /// GATE 1, DECIDED (V-C): one look at the build; while it runs, <see cref="Gate1StillRunning"/>; when it ends, the verdict
 /// written once to the intake's evidence under <c>gate1/{executionName}</c>, BINDING THE BYTES IT RAN FOR: the image's
-/// manifest digest and every staged artifact's SHA-256, from the fetch. A failure names up to twenty failed tests.
+/// manifest digest and every staged artifact's SHA-256, from the fetch. A failure names up to twenty failed tests. Gate 2's
+/// lists, read from the build's log, go with it; a PASS without them is a fault, since Gate 2 could not check its results.
 /// </summary>
 public static class IntakeGate1VerdictStep
 {
@@ -130,6 +187,10 @@ public static class IntakeGate1VerdictStep
             case Gate1Outcome.Fault: throw new IntakeFault($"Gate 1 {buildId}: {reason}");
         }
 
+        var lists = Gate2Lists.Parse(await builds.ListLinesAsync(build));
+        if (outcome == Gate1Outcome.Passed && lists is null)
+            throw new IntakeFault($"Gate 1 {buildId}: {reason}, but its log holds no complete Gate 2 lists");
+
         var failing = outcome == Gate1Outcome.Failed ? await builds.FailedCasesAsync(build.ReportArns, 20) : Array.Empty<string>();
         var fetch = state["fetch"] as JsonObject;
         var verdict = new JsonObject
@@ -145,6 +206,8 @@ public static class IntakeGate1VerdictStep
             ["manifestDigest"] = fetch?["manifestDigest"]?.DeepClone(),
             ["artifactSha256"] = new JsonObject((fetch?["staged"] as JsonArray ?? new JsonArray())
                 .Select(a => KeyValuePair.Create(a!["artifact"]!.GetValue<string>(), (JsonNode?)a["sha256"]!.GetValue<string>()))),
+            ["gate2Lists"] = lists is null ? null : new JsonObject(lists.Select(l => KeyValuePair.Create(
+                l.Key, (JsonNode?)new JsonArray(l.Value.Select(n => (JsonNode?)n).ToArray())))),
             ["at"] = now.ToString("O"),
         };
         await evidence.PutOnceAsync(IntakeEvidence.Gate1(executionName), verdict.ToJsonString());   // there already: a retry of this step

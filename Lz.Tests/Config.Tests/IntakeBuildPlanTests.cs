@@ -235,6 +235,10 @@ public class IntakeBuildPlanTests
         Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start }, starters);
         Assert.Equal(new[] { $"arn:aws:s3:::{p.EvidenceStore}/gate1/*" },
             Grants(Fn(p, DeployerHandlers.IntakeGate1Verdict).Policy).Where(g => g.Action == "s3:PutObject").Select(g => g.Resource));
+        // The verdict reads Gate 2's lists out of Gate 1's own log, and no other.
+        var logReads = Grants(Fn(p, DeployerHandlers.IntakeGate1Verdict).Policy).Where(g => g.Action == "logs:GetLogEvents").Select(g => g.Resource).ToList();
+        Assert.Single(logReads);
+        Assert.EndsWith($":log-group:{p.Gate1!.LogGroupName}:log-stream:*", logReads[0]);
     }
 
     [Fact]
@@ -246,6 +250,8 @@ public class IntakeBuildPlanTests
         Assert.True(spec.IndexOf("sha256sum -c -", StringComparison.Ordinal) < spec.IndexOf("unzip", StringComparison.Ordinal), "the bundle is checked before it is unzipped");
         Assert.Contains("unzip -q /tmp/bundle.zip -d \"$GATE1_ROOT\"", spec);
         Assert.Contains("--filter \"$GATE1_FILTER\"", spec);
+        Assert.Contains("--list-tests --filter \"$filter\"", spec);
+        Assert.True(spec.IndexOf("--list-tests", StringComparison.Ordinal) < spec.IndexOf("--filter \"$GATE1_FILTER\"", StringComparison.Ordinal), "Gate 2's lists are printed before a test runs");
         Assert.DoesNotContain("Category", spec);            // nothing of the repository's own is fixed in it
         Assert.Contains(WithGate1().Gate1!.ReportGroupArn, spec);
         Assert.Equal(("aws/codebuild/standard:8.0", 60), (WithGate1().Gate1!.Image, WithGate1().Gate1!.TimeoutMinutes));
