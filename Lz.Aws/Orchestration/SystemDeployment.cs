@@ -335,15 +335,80 @@ public class SystemDeployment
         var leases = await ClaimTenantServiceLeasesAsync(tenantKey, tenantConfig);
         try
         {
+            // WHERE EACH SERVICE'S ROLLOUT STOOD before this deploy, so the one it starts can be told from every earlier one.
+            var marks = await ReadRolloutMarksAsync(leases, tenantConfig);
+
             await DeployTenantUnderLeaseAsync(stackName, tenantKey, tenantConfig, checker, smtpSecrets);
 
             // Still under the lease, so what is read is what this deploy left, and nothing else's.
             await CheckForRevertsAsync(tenantKey, tenantConfig);
+
+            // THE LEASE IS HELD UNTIL THIS DEPLOY'S OWN ROLLOUTS FINISH (V-J): released while ECS still rolled, another
+            // writer could start on a service mid-rollout, the very thing the lease is there to stop.
+            await WaitForOwnRolloutsAsync(tenantKey, tenantConfig, leases, marks);
         }
         finally
         {
             await ReleaseTenantServiceLeasesAsync(leases);
         }
+    }
+
+    private async Task<IReadOnlyDictionary<string, AwsContainerUpdater.RolloutMark>> ReadRolloutMarksAsync(
+        TenantServiceLeases leases, TenantConfig tenantConfig)
+    {
+        var marks = new Dictionary<string, AwsContainerUpdater.RolloutMark>(StringComparer.Ordinal);
+        if (leases.Store is null) return marks;   // no ECS cluster, or no lease to hold
+        var updater = new AwsContainerUpdater(tenantConfig.Profile ?? _config.Profile, tenantConfig.Region ?? _config.Region);
+        foreach (var (service, _) in leases.Held)
+            marks[service] = await updater.ReadRolloutMarkAsync(leases.Cluster, service, _ct);
+        return marks;
+    }
+
+    private async Task WaitForOwnRolloutsAsync(
+        string tenantKey, TenantConfig tenantConfig, TenantServiceLeases leases,
+        IReadOnlyDictionary<string, AwsContainerUpdater.RolloutMark> marks)
+    {
+        if (marks.Count == 0) return;
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+        var updater = new AwsContainerUpdater(profile, region);
+        var failures = new List<string>();
+
+        foreach (var svc in _system.ServiceLayerServices.Concat(_system.HostLayerServices).Where(s => s.Docker != null))
+        {
+            var ecsService = $"{_config.SystemKey}-{tenantKey}-{svc.Name}";
+            if (!marks.TryGetValue(ecsService, out var before)) continue;
+            var after = await updater.ReadRolloutMarkAsync(leases.Cluster, ecsService, _ct);
+            if (!AwsContainerUpdater.StartedARollout(before, after))
+            {
+                Console.WriteLine($"  rollout: {ecsService} was not rolled by this deploy.");
+                continue;
+            }
+
+            // The digest the service is now set to, which every running task must run before the lease goes.
+            var ecrName = $"{_config.SystemKey}-{tenantConfig.TenantSuffix}-{_config.Environment}-{tenantKey}-{svc.Name}";
+            var sources = new ServiceImageSources(svc.Name, ecrName,
+                Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(_config, svc.Name, tenantKey, region));
+            var image = await AwsContainerUpdater.ReadServiceImageAsync(
+                profile, region, new[] { leases.Cluster }, ecsService, sources);
+            if (image.State != ServiceImageState.DigestPinned || image.Digest is not { } digest)
+            {
+                failures.Add($"{ecsService}: its revision names no digest to wait for ({image.State})");
+                continue;
+            }
+
+            Console.WriteLine($"  rollout: waiting for {ecsService} to run {digest[..Math.Min(19, digest.Length)]} on every task...");
+            var (landed, reason) = await updater.WaitForRolloutAsync(leases.Cluster, ecsService, sources, before.NewestDeploymentArn, digest, _ct);
+            if (landed) Console.WriteLine($"  rollout: {ecsService}: {reason}.");
+            else failures.Add($"{ecsService}: {reason}");
+        }
+        if (failures.Count == 0) return;
+
+        var message = $"lz deploytenant {tenantKey}: a rollout this deploy started did not land: {string.Join("; ", failures)}";
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine(message);
+        Console.ResetColor();
+        throw new TenantDeployRefusedException(message);
     }
 
     /// <summary>

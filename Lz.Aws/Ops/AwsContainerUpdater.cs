@@ -465,6 +465,42 @@ public class AwsContainerUpdater
         }
     }
 
+    /// <summary>Where a service's rollout stands at one moment: the revision it is set to, and its newest deployment.</summary>
+    public sealed record RolloutMark(string? TaskDefinitionArn, string? NewestDeploymentArn);
+
+    /// <summary>
+    /// Whether something between two marks started a rollout this command must wait out (DecoupledCd.md V-J): the service
+    /// was pointed at another revision, or ECS recorded another deployment (a forced redeploy changes no revision). With
+    /// neither, nothing rolled, and a wait would only time out.
+    /// </summary>
+    public static bool StartedARollout(RolloutMark before, RolloutMark after)
+        => !string.Equals(before.TaskDefinitionArn, after.TaskDefinitionArn, StringComparison.Ordinal)
+           || !string.Equals(before.NewestDeploymentArn, after.NewestDeploymentArn, StringComparison.Ordinal);
+
+    /// <summary>The service's <see cref="RolloutMark"/> now.</summary>
+    public async Task<RolloutMark> ReadRolloutMarkAsync(string cluster, string ecsService, CancellationToken ct)
+    {
+        var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
+        {
+            Cluster = cluster,
+            Services = new List<string> { ecsService },
+        }, ct);
+        var taskDefinition = svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE")?.TaskDefinition;
+        return new RolloutMark(taskDefinition, (await NewestServiceDeploymentAsync(cluster, ecsService, ct))?.Arn);
+    }
+
+    /// <summary>
+    /// Follows the deployment newer than <paramref name="baselineDeploymentArn"/> until ECS finishes it and every running
+    /// task runs <paramref name="digest"/>, as <c>updatecontainer</c>'s wait does, for <c>lz deploytenant</c> (V-J).
+    /// </summary>
+    public Task<(bool Landed, string Reason)> WaitForRolloutAsync(
+        string cluster, string ecsService, ServiceImageSources sources, string? baselineDeploymentArn, string digest, CancellationToken ct)
+        => WaitForDeploymentAsync(
+            baselineDeploymentArn, digest,
+            token => NewestServiceDeploymentAsync(cluster, ecsService, token),
+            async token => await GetRunningImageDigestsAsync(cluster, ecsService, sources, token),
+            WaitTimeout, PollInterval, ct);
+
     /// <summary>Short "family:revision" from a task-definition ARN, for log lines.</summary>
     private static string ShortArn(string arn)
     {

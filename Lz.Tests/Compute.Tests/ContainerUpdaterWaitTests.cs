@@ -181,4 +181,27 @@ public class ContainerUpdaterWaitTests
         Assert.Contains("not recorded", reason);
         Assert.Equal(1, ecs.Looks);
     }
+
+    // ---- deploytenant's own rollout (DecoupledCd.md V-J): wait only when this deploy started one ----
+
+    private const string Td175 = "arn:aws:ecs:us-west-2:503947800380:task-definition/scu-mp-aiphost:175";
+    private const string Td176 = "arn:aws:ecs:us-west-2:503947800380:task-definition/scu-mp-aiphost:176";
+    private const string DeplA = "arn:aws:ecs:us-west-2:503947800380:service-deployment/scu-dev-cluster/scu-mp-aiphost/a";
+    private const string DeplB = "arn:aws:ecs:us-west-2:503947800380:service-deployment/scu-dev-cluster/scu-mp-aiphost/b";
+
+    [Fact]
+    public void ANewRevision_StartedARollout_EvenBeforeECSRecordsItsDeployment()
+        => Assert.True(StartedARollout(new RolloutMark(Td175, DeplA), new RolloutMark(Td176, DeplA)));
+
+    [Fact]
+    public void ANewDeploymentOnTheSameRevision_StartedARollout()   // a forced redeploy changes no revision
+        => Assert.True(StartedARollout(new RolloutMark(Td175, DeplA), new RolloutMark(Td175, DeplB)));
+
+    [Fact]
+    public void NeitherMoving_StartedNothing_SoNothingIsWaitedFor()
+        => Assert.False(StartedARollout(new RolloutMark(Td175, DeplA), new RolloutMark(Td175, DeplA)));
+
+    [Fact]
+    public void AServiceWithNoDeploymentYet_ThatGetsOne_StartedARollout()
+        => Assert.True(StartedARollout(new RolloutMark(Td175, null), new RolloutMark(Td175, DeplA)));
 }
