@@ -56,6 +56,7 @@
     <!-- The push (V-C's probe, then V-D): its tag decision is IntakePlan.cs's IntakeWrites. -->
     <Compile Include="..\Lz.Aws\Pipeline\IntakePlan.cs" Link="Linked\Lz.Aws\Pipeline\IntakePlan.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakePush.cs" Link="Linked\Lz.Aws\Pipeline\IntakePush.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakePublish.cs" Link="Linked\Lz.Aws\Pipeline\IntakePublish.cs" />
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />

@@ -177,7 +177,10 @@ public sealed class IntakeGitHub
         r["status"]!.GetValue<string>(),
         r["conclusion"]?.GetValueKind() == JsonValueKind.String ? r["conclusion"]!.GetValue<string>() : null,
         DateTimeOffset.Parse(r["created_at"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture),
-        DateTimeOffset.Parse(r["updated_at"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture));
+        DateTimeOffset.Parse(r["updated_at"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture),
+        r["head_sha"]?.GetValue<string>() ?? "",
+        // Who started this attempt (a re-run's is the re-runner), else who pushed: the record's builtBy, for the reader.
+        r["triggering_actor"]?["login"]?.GetValue<string>() ?? r["actor"]?["login"]?.GetValue<string>() ?? "");
 
     private async Task<List<JsonNode>> PagedAsync(string path, string listName, string token, string what, CancellationToken ct)
     {

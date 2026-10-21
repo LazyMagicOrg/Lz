@@ -89,7 +89,7 @@ public static class IntakeBuildPlanner
                         g.Environment is { Count: > 0 } env ? new Dictionary<string, string>(env) : null,
                         g.BuildRoot)
                     : null,
-                r.BuiltFrom))
+                r.BuiltFrom, r.Sbom))
             .ToList();
 
     /// <summary>The intake's plan, or null when no repository has an <c>Intake</c> mode: a system that has not opted in gets none.</summary>
@@ -97,9 +97,8 @@ public static class IntakeBuildPlanner
     {
         var repositories = RepositoriesFor(config);
         if (repositories.Count == 0) return null;
-        if (repositories.FirstOrDefault(r => r.Mode != "dry") is { } live)
-            throw new InvalidOperationException(
-                $"{live.Repo} is Intake: {live.Mode}; this intake is built dry only (V-B), and pushes nothing. Live takes V-C and V-D.");
+        if (repositories.FirstOrDefault(r => r.Mode is not ("dry" or "live")) is { } unknown)
+            throw new InvalidOperationException($"{unknown.Repo} is Intake: {unknown.Mode}, not dry or live.");
         if (repositories.FirstOrDefault(r => r.Artifacts.Count == 0) is { } none)
             throw new InvalidOperationException($"{none.Repo} takes part in the intake and names no Artifacts, so there is nothing to fetch.");
 
@@ -195,7 +194,7 @@ public static class IntakeBuildPlanner
 
         // GATE 1 (V-C), only where a repository has one.
         IntakeGate1Build? gate1 = null;
-        string? gate1StartArn = null, gate1VerdictArn = null;
+        string? gate1StartArn = null, gate1VerdictArn = null, publishArn = null;
         if (repositories.Any(r => r.Gate1 is not null))
         {
             var project = Fn("gate1");
@@ -252,6 +251,61 @@ public static class IntakeBuildPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
             (gate1StartArn, gate1VerdictArn) = (FnArn(start), FnArn(verdict));
+
+            // THE PUBLISH (V-D), after Gate 1's pass: a no-op for a dry repository, so the machine is one shape for all.
+            var publish = Fn("publish");
+            var recordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, config.SystemSuffix);
+            var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, config.SystemSuffix);
+            var targets = PublishTargetsFor(config, accountId, repositories);
+            var images = repositories.Where(r => BuildRecordFormat.IsImageClass(r.Class)).ToList();
+            var publishGrants = new List<object>
+            {
+                new { Sid = "ReadTheStagedFiles", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{scratch}/*" },
+                new
+                {
+                    Sid = "ReadAndWriteItsRecordsOnce", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject" },
+                    Resource = repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => $"arn:aws:s3:::{recordStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
+                },
+                new
+                {
+                    Sid = "ListItsRecords", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{recordStore}",
+                    Condition = new Dictionary<string, object>
+                    {
+                        ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = repositories.Select(r => BuildRecordFormat.PrefixFor(r.Class, r.Repo) + "*").ToArray() },
+                    },
+                },
+                new
+                {
+                    Sid = "WriteItsArtifactsOnce", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject" },
+                    Resource = repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => $"arn:aws:s3:::{artifactStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
+                },
+            };
+            if (targets.Count > 0)
+            {
+                publishGrants.Add(new
+                {
+                    Sid = "PushToItsPipelineRepositories", Effect = "Allow",
+                    Action = new[] { "ecr:DescribeImages", "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:DescribeImageSigningStatus" },
+                    Resource = targets.Select(t => $"arn:aws:ecr:{region}:{accountId}:repository/{t.Repository}").Distinct().ToArray(),
+                });
+                publishGrants.Add(new
+                {
+                    Sid = "SignItsPushes", Effect = "Allow", Action = new[] { "signer:SignPayload" },
+                    Resource = targets.Select(t => t.SigningProfileArn).Distinct().ToArray(),
+                });
+            }
+            functions.Add(new(publish, DeployerHandlers.IntakePublish, $"{publish}-fn",
+                DeployerPlanner.Combine(DeployerPlanner.Logs(region, accountId, publish), publishGrants.ToArray()),
+                new Dictionary<string, string>
+                {
+                    [IntakeEnvironment.Repositories] = reposVariable,
+                    [IntakeEnvironment.ScratchBucket] = scratch,
+                    [IntakeEnvironment.PublishTargets] = PublishTargets.Encode(targets),
+                    [IntakeEnvironment.BuildRecordStore] = recordStore,
+                    [IntakeEnvironment.ArtifactStore] = artifactStore,
+                },
+                TimeoutSeconds: FetchTimeoutSeconds, MemoryMb: FetchMemoryMb, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            publishArn = FnArn(publish);
         }
 
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToArray();
@@ -312,7 +366,7 @@ public static class IntakeBuildPlanner
             StateMachineTrustPolicy: DeployerPlanner.ServiceTrustPolicy("states.amazonaws.com", accountId, $"arn:aws:states:{region}:{accountId}:stateMachine:*"),
             FunctionTrustPolicy: DeployerPlanner.ServiceTrustPolicy("lambda.amazonaws.com"),
             DenyPolicy: DeployerPlanner.DenyPolicyFor(),
-            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn),
+            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn, publishArn),
             ScheduleRuleName: $"{sk}-intake-poll",
             ScheduleExpression: "rate(1 minute)",
             PollerFunctionName: poller,
@@ -363,7 +417,22 @@ public static class IntakeBuildPlanner
     /// outcome — taken in when staged, refused when either step refused — and a fault, from any step, recorded and the
     /// execution failed. No Gate 1, push or record state exists in it, so none can be reached (V-B pushes nothing).
     /// </summary>
-    public static string DefinitionFor(string checkFn, string fetchFn, string recordFn, string? gate1StartFn = null, string? gate1VerdictFn = null)
+    /// <summary>
+    /// Where each image-class repository's one image is pushed (V-D): its pipeline repository and its push role's signing
+    /// profile, the same names the build-side plan gives them, so the intake signs under the profile dev's hook trusts.
+    /// </summary>
+    public static IReadOnlyList<PublishTarget> PublishTargetsFor(SystemConfig config, string accountId, IReadOnlyList<IntakeRepository> repositories)
+        => repositories.Where(r => BuildRecordFormat.IsImageClass(r.Class))
+            .SelectMany(r => r.Artifacts.Select(a => new PublishTarget(r.Repo, a, EcrRepositoryNaming.For(config, a),
+                PipelineBootstrapPlanner.SigningProfileArn(config.Region, accountId, PipelineBootstrapPlanner.SigningProfileNameFor(config.SystemKey, r.Repo)))))
+            .ToList();
+
+    // The publish waits for the image's signature: 10 s × 60, ten minutes, well inside managed signing's measured seconds.
+    public const int SigningPollSeconds = 10;
+    public const int SigningPollAttempts = 60;
+
+    public static string DefinitionFor(string checkFn, string fetchFn, string recordFn, string? gate1StartFn = null, string? gate1VerdictFn = null,
+        string? publishFn = null)
     {
         var gate1 = gate1StartFn is not null && gate1VerdictFn is not null;
         var payload = new Dictionary<string, object> { ["state.$"] = "$", ["executionName.$"] = "$$.Execution.Name" };
@@ -429,14 +498,29 @@ public static class IntakeBuildPlanner
             states["Gate1Outcome"] = new
             {
                 Type = "Choice",
-                Choices = new object[] { new { Variable = "$.gate1.verdict", StringEquals = "passed", Next = "MarkTakenIn" } },
+                Choices = new object[] { new { Variable = "$.gate1.verdict", StringEquals = "passed", Next = publishFn is null ? "MarkTakenIn" : "Publish" } },
                 Default = "MarkRefused",
             };
+            if (publishFn is not null)
+                // PUSH AND WRITE, ONLY ON A PASS (V-D): a dry repository's publish does nothing; a live one's pushes, waits for
+                // the signature (retried while the image is unsigned), writes the zips and the records.
+                states["Publish"] = new
+                {
+                    Type = "Task", Resource = publishFn, Parameters = payload, ResultPath = "$.publish",
+                    Retry = new object[]
+                    {
+                        new { ErrorEquals = new[] { nameof(ImageNotYetSigned) }, IntervalSeconds = SigningPollSeconds, MaxAttempts = SigningPollAttempts, BackoffRate = 1.0 },
+                        Transient(),
+                    },
+                    Next = "MarkTakenIn", Catch = toFault,
+                };
         }
 
         return JsonSerializer.Serialize(new
         {
-            Comment = gate1
+            Comment = publishFn is not null
+                ? "lz intake (DecoupledCd.md §15.4, V-B to V-D): check, fetch and stage, Gate 1, then for a live repository push and write, record."
+                : gate1
                 ? "lz intake, dry (DecoupledCd.md §15.4, V-B, V-C): check, fetch and stage, Gate 1, record. Pushes nothing."
                 : "lz intake, dry (DecoupledCd.md §15.4, V-B): check, fetch and stage, record. Pushes nothing.",
             StartAt = "CheckRun",

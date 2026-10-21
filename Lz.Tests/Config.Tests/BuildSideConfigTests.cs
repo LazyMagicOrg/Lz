@@ -241,9 +241,22 @@ public class BuildSideConfigTests : IDisposable
         => Assert.Empty(new BuildSideConfig
         {
             BuildAccountId = "147440642635",
-            Repositories = new() { new() { Repo = "a/b", Intake = "live", Verify = "live", RepositoryId = 1, OwnerId = 2, WorkflowPath = ".github/workflows/b.yml" } },
+            Repositories = new() { new() { Repo = "a/b", Intake = "live", Verify = "live", RepositoryId = 1, OwnerId = 2, WorkflowPath = ".github/workflows/b.yml",
+                                           BuiltFrom = "builtfrom", TestBundle = "tests", Gate1 = SoundGate1() } },
             Chain = new() { new() { Environment = "dev", AccountId = "503947800380" } },
         }.Problems());
+
+    [Theory]
+    [InlineData(null, "tests", "sbom", "needs BuiltFrom")]
+    [InlineData("builtfrom", null, "sbom", "needs Gate1")]
+    [InlineData("builtfrom", "tests", null, "needs Sbom")]
+    public void ALiveIntake_NeedsWhatItsRecordsCarry(string? builtFrom, string? bundle, string? sbom, string problem)
+    {
+        var c = WithGate1(_ => { }, bundle, gate1: bundle is not null);
+        var r = c.Repositories![0];
+        (r.Intake, r.Class, r.BuiltFrom, r.Sbom) = ("live", "image", builtFrom, sbom);
+        Assert.Contains(c.Problems(), p => p.Contains(problem));
+    }
 
     [Fact]
     public void OnlyKeysInsideThePipelineBlockCount()

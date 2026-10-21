@@ -13,7 +13,9 @@ public sealed record GitHubRun(
     string Status,
     string? Conclusion,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string HeadSha = "",
+    string Actor = "");
 
 /// <summary>A job of a run attempt as GitHub's jobs API answers for it.</summary>
 public sealed record GitHubJob(long Id, string? RunnerGroupName, IReadOnlyList<string> Labels);

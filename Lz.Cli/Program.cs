@@ -3029,13 +3029,15 @@ class Program
         var profileOption = new Option<string?>("--profile",
             "AWS profile for the BUILD account (e.g. scu-cicd). Defaults to the system config's " +
             "profile, which is usually NOT what you want — the pipeline lives in its own account.");
+        var planOutOption = new Option<string?>("--plan-out", "Write the intake's plan as JSON to this file, to compare with what is live.");
 
         cmd.AddOption(systemKeyOption);
         cmd.AddOption(envOption);
         cmd.AddOption(applyOption);
         cmd.AddOption(profileOption);
+        cmd.AddOption(planOutOption);
 
-        cmd.SetHandler(async (systemKey, env, apply, profileOverride) =>
+        cmd.SetHandler(async (systemKey, env, apply, profileOverride, planOut) =>
         {
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
@@ -3047,7 +3049,7 @@ class Program
                     if (!string.IsNullOrWhiteSpace(profileOverride))
                         config.Profile = profileOverride;
 
-                    await Lz.Aws.Pipeline.PipelineBootstrapper.BootstrapAsync(config, apply);
+                    await Lz.Aws.Pipeline.PipelineBootstrapper.BootstrapAsync(config, apply, planOut);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -3058,7 +3060,7 @@ class Program
                     return;
                 }
             }
-        }, systemKeyOption, envOption, applyOption, profileOption);
+        }, systemKeyOption, envOption, applyOption, profileOption, planOutOption);
 
         root.AddCommand(cmd);
     }

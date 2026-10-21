@@ -15,6 +15,7 @@ public class IntakeBuildPlanTests
         Pipeline = new PipelineConfig
         {
             Enabled = true,
+            Registry = new PipelineRegistryConfig { RepositoryNaming = "neutral" },
             Repositories = new List<PipelineRepositoryConfig>
             {
                 new() { Repo = "Example/ExampleService", Class = "image", Artifacts = artifacts ?? new List<string> { "aiphost" },
@@ -43,8 +44,11 @@ public class IntakeBuildPlanTests
         => Assert.Null(IntakeBuildPlanner.Plan(new SystemConfig { SystemKey = "med", Environment = "dev", Region = "us-west-2", SystemSuffix = "x" }, Account));
 
     [Fact]
-    public void ALiveIntake_IsRefused_SinceThisOnePushesNothing()
-        => Assert.Contains("dry only", Assert.Throws<InvalidOperationException>(() => IntakeBuildPlanner.Plan(Config("live"), Account)).Message);
+    public void ALiveIntake_IsPlanned_AndAnUnknownModeIsRefused()
+    {
+        Assert.Equal("live", Assert.Single(IntakeBuildPlanner.Plan(Config("live"), Account)!.Repositories).Mode);
+        Assert.Contains("not dry or live", Assert.Throws<InvalidOperationException>(() => IntakeBuildPlanner.Plan(Config("wet"), Account)).Message);
+    }
 
     [Fact]
     public void ARepositoryWithNoArtifacts_IsRefused()
@@ -230,7 +234,7 @@ public class IntakeBuildPlanTests
     {
         var p = WithGate1();
         var readers = p.Functions.Where(f => Grants(f.Policy).Any(g => g.Action == "s3:GetObject" && g.Resource.Contains(p.ScratchBucket))).Select(f => f.Handler);
-        Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start }, readers);
+        Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start, DeployerHandlers.IntakePublish }, readers.OrderBy(h => h, StringComparer.Ordinal));   // the publish reads what it pushes
         var starters = p.Functions.Where(f => Actions(f.Policy).Contains("codebuild:StartBuild")).Select(f => f.Handler);
         Assert.Equal(new[] { DeployerHandlers.IntakeGate1Start }, starters);
         Assert.Equal(new[] { $"arn:aws:s3:::{p.EvidenceStore}/gate1/*" },
@@ -269,10 +273,33 @@ public class IntakeBuildPlanTests
         Assert.Equal("Gate1StillRunning", wait.GetProperty("ErrorEquals")[0].GetString());
         Assert.True(wait.GetProperty("IntervalSeconds").GetInt32() * wait.GetProperty("MaxAttempts").GetInt32() > 60 * 60, "the wait outlasts the build's timeout");
         Assert.Equal("passed", s.GetProperty("Gate1Outcome").GetProperty("Choices")[0].GetProperty("StringEquals").GetString());
-        Assert.Equal("MarkTakenIn", s.GetProperty("Gate1Outcome").GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.Equal("Publish", s.GetProperty("Gate1Outcome").GetProperty("Choices")[0].GetProperty("Next").GetString());
         Assert.Equal("MarkRefused", s.GetProperty("Gate1Outcome").GetProperty("Default").GetString());
-        foreach (var name in new[] { "Gate1Start", "Gate1Verdict" })
+        // The publish follows only a pass, waits while the image is unsigned, and then takes the run in.
+        Assert.Equal("MarkTakenIn", s.GetProperty("Publish").GetProperty("Next").GetString());
+        Assert.Equal("ImageNotYetSigned", s.GetProperty("Publish").GetProperty("Retry")[0].GetProperty("ErrorEquals")[0].GetString());
+        foreach (var name in new[] { "Gate1Start", "Gate1Verdict", "Publish" })
             Assert.Equal("MarkFault", s.GetProperty(name).GetProperty("Catch")[0].GetProperty("Next").GetString());
+    }
+
+    [Fact]
+    public void ThePublish_PushesOnlyToItsPipelineRepository_SignsUnderItsProfile_AndWritesOnlyItsOwnPrefixes()
+    {
+        var p = WithGate1();
+        var publish = Fn(p, DeployerHandlers.IntakePublish);
+        var grants = Statements(publish.Policy).ToList();
+        JsonElement Sid(string sid) => grants.Single(s => s.GetProperty("Sid").GetString() == sid);
+
+        Assert.Equal(new[] { "arn:aws:ecr:us-west-2:147440642635:repository/scu-4df6-b9c6-aiphost" }, Strings(Sid("PushToItsPipelineRepositories").GetProperty("Resource")));
+        Assert.Equal(new[] { "arn:aws:signer:us-west-2:147440642635:/signing-profiles/scu_build_ci_exampleservice" }, Strings(Sid("SignItsPushes").GetProperty("Resource")));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-build-records-4df6-b9c6/image/example/exampleservice/*", "arn:aws:s3:::scu-build-records-4df6-b9c6/tests/example/exampleservice/*" },
+            Strings(Sid("ReadAndWriteItsRecordsOnce").GetProperty("Resource")));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-artifacts-4df6-b9c6/image/example/exampleservice/*", "arn:aws:s3:::scu-artifacts-4df6-b9c6/tests/example/exampleservice/*" },
+            Strings(Sid("WriteItsArtifactsOnce").GetProperty("Resource")));
+        Assert.DoesNotContain(Actions(publish.Policy), a => a.Contains("Delete") || a == "iam:PassRole" || a == "s3:*" || a == "ecr:*");
+
+        var target = Assert.Single(PublishTargets.Decode(publish.Environment[IntakeEnvironment.PublishTargets]));
+        Assert.Equal(("Example/ExampleService", "aiphost", "scu-4df6-b9c6-aiphost"), (target.Repo, target.Artifact, target.Repository));
     }
 
     [Fact]

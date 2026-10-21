@@ -10,8 +10,9 @@ namespace Lz.Aws.Pipeline;
 /// <param name="Artifacts">The artifacts each run must upload, by the names config gives them (the run attempt is appended).</param>
 /// <param name="Gate1">The test bundle and how Gate 1 runs it (V-C); null for a repository with no Gate 1 yet.</param>
 /// <param name="BuiltFrom">The artifact holding the build's <c>builtfrom.json</c>; null where the repository uploads none.</param>
+/// <param name="Sbom">The artifact holding the build's SBOM, one <c>.json</c> document (V-19); null where it uploads none.</param>
 public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class,
-    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null, string? BuiltFrom = null)
+    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null, string? BuiltFrom = null, string? Sbom = null)
 {
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
@@ -37,6 +38,10 @@ public static class IntakeEnvironment
     public const string StateMachine = "LZ_INTAKE_MACHINE";
     public const string AlertsTopic = "LZ_INTAKE_ALERTS";
     public const string Gate1Project = "LZ_INTAKE_GATE1_PROJECT";
+    // The publish (V-D): where each image goes, and the two stores it writes.
+    public const string PublishTargets = "LZ_INTAKE_PUBLISH_TARGETS";
+    public const string BuildRecordStore = "LZ_INTAKE_BUILD_RECORD_STORE";
+    public const string ArtifactStore = "LZ_INTAKE_ARTIFACT_STORE";
 }
 
 /// <summary>The repositories in one environment variable, as JSON: written by the planner, read by the intake's functions.</summary>

@@ -352,6 +352,9 @@ public static class PipelineBootstrapPlanner
     /// the store in the build account, and the deployer's Verify function in each target account is
     /// configured to accept records from it and nowhere else.
     /// </summary>
+    /// <summary>The signing profile an image repository's pushes are signed under: its push role's, and the intake's (V-D).</summary>
+    public static string SigningProfileNameFor(string systemKey, string repo) => $"{systemKey}_build_ci_{SlugFor(repo).Replace('-', '_')}";
+
     public static string BuildRecordStoreFor(string systemKey, string systemSuffix)
         => $"{systemKey}-build-records-{systemSuffix}";
 
@@ -393,7 +396,7 @@ public static class PipelineBootstrapPlanner
         var imageShaped = BuildRecordFormat.IsImageClass(cls);
         var kind = imageShaped ? "build" : "bundle";
         var slug = SlugFor(repo);
-        var profile = imageShaped ? $"{sk}_build_ci_{slug.Replace('-', '_')}" : null;
+        var profile = imageShaped ? SigningProfileNameFor(sk, repo) : null;
         var prefix = BuildRecordFormat.PrefixFor(cls, repo);
 
         // Naming the artifacts is what lets the ECR grant be exact instead of `{sk}-*`.

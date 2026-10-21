@@ -72,7 +72,15 @@ public static class IntakeCheckRunStep
         var check = RunCheck.Check(repository.Source, run, jobs);
         return check.Kind switch
         {
-            RunCheckKind.Passed => new JsonObject { ["verdict"] = "passed", ["headBranch"] = run.HeadBranch, ["updatedAt"] = run.UpdatedAt.ToString("O") },
+            // What the live intake's records name (V-D): the commit, the run's created_at (builtAt, §15.8 item 11), who ran it,
+            // the attempt's jobs and the workflow it ran, all as GitHub reported them.
+            RunCheckKind.Passed => new JsonObject
+            {
+                ["verdict"] = "passed", ["headBranch"] = run.HeadBranch, ["updatedAt"] = run.UpdatedAt.ToString("O"),
+                ["headSha"] = run.HeadSha, ["createdAt"] = run.CreatedAt.ToString("O"), ["actor"] = run.Actor,
+                ["jobIds"] = string.Join(",", jobs.Select(j => j.Id)),
+                ["workflowRef"] = $"{input.Repo}/{run.Path}@refs/heads/{run.HeadBranch}",
+            },
             RunCheckKind.Refused => Refused(check.Reasons.ToArray()),
             // Only completed attempts are started; one that is not is a fault, and the retry looks again.
             _ => throw new IntakeFault($"attempt {input.RunAttempt} of run {input.RunId} has not completed"),
@@ -106,6 +114,7 @@ public static class IntakeFetchStep
         // the configured name. The test bundle, where Gate 1 is configured, is fetched the same way (V-C).
         var expected = repository.Gate1 is { } gate1 ? repository.Artifacts.Append(gate1.Artifact).ToList() : repository.Artifacts.ToList();
         if (repository.BuiltFrom is { } builtFromArtifact) expected = expected.Append(builtFromArtifact).ToList();   // V-D
+        if (repository.Sbom is { } sbomArtifact) expected = expected.Append(sbomArtifact).ToList();                    // V-19
         var listed = await github.ArtifactsAsync(input.Repo, input.RunId);
         var check = ArtifactCheck.Check(input.RunId, input.RunAttempt, expected, listed);
         if (!check.Passed) return IntakeCheckRunStep.Refused(check.Reasons.ToArray());
@@ -115,6 +124,7 @@ public static class IntakeFetchStep
         Directory.CreateDirectory(workDirectory);
         JsonObject? tests = null;
         JsonObject? builtFrom = null;
+        JsonObject? sbom = null;
         foreach (var (configured, artifact) in expected.Select(n => (n, check.Found[n])))
         {
             var path = Path.Combine(workDirectory, $"{artifact.Name}.zip");
@@ -127,7 +137,14 @@ public static class IntakeFetchStep
 
                 var isTests = repository.Gate1?.Artifact == configured;
                 var isBuiltFrom = repository.BuiltFrom == configured;
-                if (isBuiltFrom)
+                var isSbom = repository.Sbom == configured;
+                if (isSbom)
+                {
+                    using var sbomZip = ZipFile.OpenRead(path);
+                    if (sbomZip.Entries.Count != 1 || !sbomZip.Entries[0].FullName.EndsWith(".json", StringComparison.Ordinal))
+                        return IntakeCheckRunStep.Refused($"{artifact.Name}: an SBOM artifact holds one .json document");
+                }
+                else if (isBuiltFrom)
                 {
                     try
                     {
@@ -154,6 +171,7 @@ public static class IntakeFetchStep
                 await scratch.PutFileAsync(key, path);
                 staged.Add(new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bytes"] = new FileInfo(path).Length });
                 if (isTests) tests = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
+                if (isSbom) sbom = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
             }
             finally
             {
@@ -165,6 +183,7 @@ public static class IntakeFetchStep
         if (manifestDigest is not null) result["manifestDigest"] = manifestDigest;
         if (tests is not null) result["tests"] = tests;
         if (builtFrom is not null) result["builtFrom"] = builtFrom;
+        if (sbom is not null) result["sbom"] = sbom;
         await evidence.PutOnceAsync(IntakeEvidence.Staged(executionName), result.ToJsonString());   // already there: this try's retry wrote it
         return result;
     }
@@ -181,8 +200,8 @@ public static class IntakeFetchStep
         if (zip.Entries[0].Length > 1 << 20) throw new InvalidOperationException("builtfrom.json is over a megabyte");
         using var stream = zip.Entries[0].Open();
         var root = JsonNode.Parse(stream) as JsonObject ?? throw new InvalidOperationException("builtfrom.json is not an object");
-        if (root.Count != 1 || root["packages"] is not JsonObject packages)
-            throw new InvalidOperationException("builtfrom.json must be {\"packages\": {name: version}} and nothing else");
+        if (root["packages"] is not JsonObject packages || root.Any(p => p.Key is not ("packages" or "serviceVersion" or "baseImageDigest")))
+            throw new InvalidOperationException("builtfrom.json must be {\"packages\": {name: version}}, with at most serviceVersion and baseImageDigest beside it");
         if (packages.Count == 0) throw new InvalidOperationException("builtfrom.json names no packages; the build consumes first-party packages");
         var clean = new JsonObject();
         foreach (var (name, version) in packages)
@@ -192,7 +211,15 @@ public static class IntakeFetchStep
                 throw new InvalidOperationException($"builtfrom.json's package '{name}' is not a package name and a version");
             clean[name] = text;
         }
-        return new JsonObject { ["packages"] = clean };
+        var result = new JsonObject { ["packages"] = clean };
+        // An image's record also needs these (V-19): the build's own version, and the base image it started from, by digest.
+        if (root["serviceVersion"] is { } sv)
+            result["serviceVersion"] = sv is JsonValue svv && svv.TryGetValue<string>(out var version) && Regex.IsMatch(version, @"^[0-9A-Za-z.+-]{1,100}$")
+                ? version : throw new InvalidOperationException("builtfrom.json's serviceVersion is not a version");
+        if (root["baseImageDigest"] is { } bd)
+            result["baseImageDigest"] = bd is JsonValue bdv && bdv.TryGetValue<string>(out var digest) && Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$")
+                ? digest : throw new InvalidOperationException("builtfrom.json's baseImageDigest is not a sha256 digest");
+        return result;
     }
 
     /// <summary>The image in an artifact's zip: exactly one <c>.tar</c> entry, an OCI archive.</summary>

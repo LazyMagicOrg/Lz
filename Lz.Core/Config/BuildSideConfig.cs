@@ -74,6 +74,15 @@ public class BuildSideConfig
                 p.Add($"{name}: BuiltFrom '{bf}' is not an artifact's base name");
             if (repo.BuiltFrom is { } same && (same == repo.TestBundle || (repo.Artifacts ?? new()).Contains(same)))
                 p.Add($"{name}: BuiltFrom '{same}' names an artifact that is already the image or the test bundle");
+            if (repo.Sbom is { } sb && (!Regex.IsMatch(sb, "^[a-z][a-z0-9-]*$") || sb == repo.TestBundle || sb == repo.BuiltFrom || (repo.Artifacts ?? new()).Contains(sb)))
+                p.Add($"{name}: Sbom '{sb}' is not an artifact name of its own");
+            // A LIVE INTAKE WRITES RECORDS (V-D), and a record needs builtFrom, Gate 1's pass, and for an image the SBOM (V-19).
+            if (repo.Intake == "live")
+            {
+                if (repo.BuiltFrom is null) p.Add($"{name}: Intake: live needs BuiltFrom, since its records carry builtFrom.packages");
+                if (repo.Gate1 is null) p.Add($"{name}: Intake: live needs Gate1; nothing is recorded without a pass");
+                if (repo.Class is "image" or "tooling" && repo.Sbom is null) p.Add($"{name}: Intake: live for an image needs Sbom (V-19)");
+            }
         }
         return p;
     }

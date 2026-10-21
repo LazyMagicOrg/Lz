@@ -32,7 +32,7 @@ namespace Lz.Aws.Pipeline;
 /// </summary>
 public static class PipelineBootstrapper
 {
-    public static async Task BootstrapAsync(SystemConfig config, bool apply)
+    public static async Task BootstrapAsync(SystemConfig config, bool apply, string? planOut = null)
     {
         var profile = config.Profile;
         var region = config.Region;
@@ -47,6 +47,12 @@ public static class PipelineBootstrapper
 
         Print(plan, accountId, profile, apply);
         if (intake is not null) IntakeBootstrapper.Print(intake);
+        // The intake's plan as JSON, to compare with what is live before an apply.
+        if (intake is not null && planOut is not null)
+        {
+            File.WriteAllText(planOut, System.Text.Json.JsonSerializer.Serialize(intake, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"  intake plan written to {planOut}.");
+        }
         if (!apply)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;

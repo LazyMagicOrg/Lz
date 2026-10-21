@@ -272,6 +272,9 @@ public class PipelineRepositoryConfig
     /// </summary>
     public string? BuiltFrom { get; set; }
 
+    /// <summary>The run artifact holding the build's SBOM, one <c>.json</c> document (DecoupledCd.md V-19), e.g. <c>sbom</c>.</summary>
+    public string? Sbom { get; set; }
+
     /// <summary>How Gate 1 runs <see cref="TestBundle"/>. From this file, never from the bundle (§15.4: the buildspec is fixed).</summary>
     public PipelineGate1Config? Gate1 { get; set; }
 }
