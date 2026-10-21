@@ -112,6 +112,20 @@ public sealed class IntakeGitHub
         return items.Select(MapRun).ToList();
     }
 
+    /// <summary>One attempt of a run, or null when GitHub has none (404); any other refusal throws.</summary>
+    public async Task<GitHubRun?> RunAttemptAsync(string token, string repo, long runId, int attempt, CancellationToken ct)
+    {
+        try
+        {
+            return MapRun(await GetJsonAsync($"repos/{repo}/actions/runs/{runId}/attempts/{attempt}", token,
+                $"attempt {attempt} of {repo} run {runId}", ct));
+        }
+        catch (GitHubApiException ex) when (ex.Status == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The jobs of one attempt of a run, every page.</summary>
     public async Task<IReadOnlyList<GitHubJob>> JobsAsync(string token, string repo, long runId, int attempt, CancellationToken ct)
     {

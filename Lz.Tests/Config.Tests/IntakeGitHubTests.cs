@@ -158,6 +158,28 @@ public class IntakeGitHubTests
         Assert.Equal(IntakeGitHub.MaxPages, fake.Seen.Count);
     }
 
+    [Fact]
+    public async Task OneAttempt_IsReadByItsPath_AndAMissingOneIsNull_NotAnError()
+    {
+        var (gh, fake) = With(r => r.RequestUri!.AbsolutePath.EndsWith("/attempts/2")
+            ? (HttpStatusCode.OK, Run(9001, 2))
+            : (HttpStatusCode.NotFound, """{"message": "Not Found"}"""));
+
+        var run = await gh.RunAttemptAsync("t", Repo, 9001, 2, CancellationToken.None);
+        Assert.Equal((9001L, 2), (run!.Id, run.RunAttempt));
+        Assert.Equal($"/repos/{Repo}/actions/runs/9001/attempts/2", fake.Seen[0].PathAndQuery);
+
+        Assert.Null(await gh.RunAttemptAsync("t", Repo, 9001, 3, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ARefusedAttemptRead_ThatIsNotA404_Throws()
+    {
+        var (gh, _) = With(_ => (HttpStatusCode.Forbidden, "{}"));
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(() => gh.RunAttemptAsync("t", Repo, 9001, 1, CancellationToken.None));
+        Assert.Equal(HttpStatusCode.Forbidden, ex.Status);
+    }
+
     // ---- jobs and artifacts ----
 
     [Fact]
