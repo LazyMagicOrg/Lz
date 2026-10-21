@@ -266,12 +266,21 @@ public static class IntakeBuildPlanner
                     Sid = "ReadAndWriteItsRecordsOnce", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject" },
                     Resource = repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => $"arn:aws:s3:::{recordStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
                 },
+                // Existence is read by listing the exact key, in both stores (S3PublishStores), so each lists its own prefixes.
                 new
                 {
                     Sid = "ListItsRecords", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{recordStore}",
                     Condition = new Dictionary<string, object>
                     {
-                        ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = repositories.Select(r => BuildRecordFormat.PrefixFor(r.Class, r.Repo) + "*").ToArray() },
+                        ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = OwnPrefixes(repositories) },
+                    },
+                },
+                new
+                {
+                    Sid = "ListItsArtifacts", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{artifactStore}",
+                    Condition = new Dictionary<string, object>
+                    {
+                        ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = OwnPrefixes(repositories) },
                     },
                 },
                 new
@@ -417,6 +426,10 @@ public static class IntakeBuildPlanner
     /// outcome — taken in when staged, refused when either step refused — and a fault, from any step, recorded and the
     /// execution failed. No Gate 1, push or record state exists in it, so none can be reached (V-B pushes nothing).
     /// </summary>
+    /// <summary>Each repository's two prefixes in either store, its own class's and <c>tests/</c>, as list conditions.</summary>
+    private static string[] OwnPrefixes(IReadOnlyList<IntakeRepository> repositories)
+        => repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => BuildRecordFormat.PrefixFor(c, r.Repo) + "*")).Distinct().ToArray();
+
     /// <summary>
     /// Where each image-class repository's one image is pushed (V-D): its pipeline repository and its push role's signing
     /// profile, the same names the build-side plan gives them, so the intake signs under the profile dev's hook trusts.

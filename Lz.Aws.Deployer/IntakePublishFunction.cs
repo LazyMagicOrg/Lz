@@ -64,9 +64,23 @@ internal sealed class EcrImageSignatures(IAmazonECR ecr) : IImageSignatures
     }
 }
 
-/// <summary>The two write-once stores: every write a conditional PutObject, every read of a key a plain GetObject or HEAD.</summary>
+/// <summary>
+/// The two write-once stores: every write a conditional PutObject, and every read of a key first asks whether it exists.
+///
+/// <para>EXISTENCE BY LISTING THE EXACT KEY, not by a HEAD or GET that fails. S3 answers a request for a missing key with
+/// 404 only to a caller who may list the bucket, and with 403 to anyone else; whether a list grant narrowed by
+/// <c>s3:prefix</c> counts is not documented, and the first live publish (2026-10-21, run 39668794761) met the 403 on
+/// the artifact store. A listing whose prefix is the key itself is what the narrowed grant does admit, so a missing
+/// key reads as absent and any 403 left is a real refusal.</para>
+/// </summary>
 internal sealed class S3PublishStores(IAmazonS3 s3, string recordStore, string artifactStore) : IPublishStores
 {
+    private async Task<bool> ExistsAsync(string bucket, string key)
+    {
+        var listed = await s3.ListObjectsV2Async(new ListObjectsV2Request { BucketName = bucket, Prefix = key, MaxKeys = 10 });
+        return (listed.S3Objects ?? new List<S3Object>()).Any(o => o.Key == key);
+    }
+
     public async Task<IReadOnlyList<string>> RecordKeysAsync(string prefix)
     {
         var keys = new List<string>();
@@ -82,6 +96,7 @@ internal sealed class S3PublishStores(IAmazonS3 s3, string recordStore, string a
 
     public async Task<string?> RecordAsync(string key)
     {
+        if (!await ExistsAsync(recordStore, key)) return null;
         try
         {
             using var got = await s3.GetObjectAsync(new GetObjectRequest { BucketName = recordStore, Key = key });
@@ -111,6 +126,7 @@ internal sealed class S3PublishStores(IAmazonS3 s3, string recordStore, string a
 
     public async Task<StoredArtifact?> ArtifactAsync(string key)
     {
+        if (!await ExistsAsync(artifactStore, key)) return null;
         try
         {
             var head = await s3.GetObjectMetadataAsync(new GetObjectMetadataRequest { BucketName = artifactStore, Key = key, ChecksumMode = ChecksumMode.ENABLED });

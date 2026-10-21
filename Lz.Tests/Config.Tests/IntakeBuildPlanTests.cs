@@ -298,6 +298,15 @@ public class IntakeBuildPlanTests
             Strings(Sid("WriteItsArtifactsOnce").GetProperty("Resource")));
         Assert.DoesNotContain(Actions(publish.Policy), a => a.Contains("Delete") || a == "iam:PassRole" || a == "s3:*" || a == "ecr:*");
 
+        // Existence is read by listing the exact key (measured: a HEAD of a missing key without a list grant is a 403), so
+        // each store lists, and lists only, this repository's two prefixes.
+        foreach (var (sid, bucket) in new[] { ("ListItsRecords", "scu-build-records-4df6-b9c6"), ("ListItsArtifacts", "scu-artifacts-4df6-b9c6") })
+        {
+            Assert.Equal(new[] { $"arn:aws:s3:::{bucket}" }, Strings(Sid(sid).GetProperty("Resource")));
+            Assert.Equal(new[] { "image/example/exampleservice/*", "tests/example/exampleservice/*" },
+                Strings(Sid(sid).GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix")));
+        }
+
         var target = Assert.Single(PublishTargets.Decode(publish.Environment[IntakeEnvironment.PublishTargets]));
         Assert.Equal(("Example/ExampleService", "aiphost", "scu-4df6-b9c6-aiphost"), (target.Repo, target.Artifact, target.Repository));
     }
