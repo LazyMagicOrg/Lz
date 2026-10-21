@@ -173,7 +173,7 @@ public static class IntakeBuildPlanner
         var scratchPolicy = DeployerPlanner.Policy(
             new
             {
-                Sid = "OnlyTheFetchFunctionWrites", Effect = "Deny", Principal = "*", Action = new[] { "s3:PutObject" },
+                Sid = "OnlyTheFetchFunctionWrites", Effect = "Deny", Principal = "*", Action = "s3:PutObject",   // a string: S3 returns a one-element array as one, and the read-back compares
                 Resource = $"arn:aws:s3:::{scratch}/*",
                 Condition = new Dictionary<string, object>
                 {

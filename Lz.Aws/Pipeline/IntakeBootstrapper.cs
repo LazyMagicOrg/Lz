@@ -83,15 +83,32 @@ public static class IntakeBootstrapper
         }
 
         // ONE POLL AT A TIME (§5.3 rule 1): a reserved concurrency of one, ticks at most a minute old, none retried.
-        await lambda.PutFunctionConcurrencyAsync(new Amazon.Lambda.Model.PutFunctionConcurrencyRequest
+        //
+        // AN ACCOUNT AT LAMBDA'S FLOOR CANNOT RESERVE ANY (measured 2026-10-21: scu-cicd and scu-dev both have 10 concurrent
+        // executions, and AWS keeps 10 unreserved). For the intake poller one at a time only saves work (§5.3 rule 1): two
+        // polls choose the same attempts, and their starts collapse on the execution name; its 50 s timeout is inside the
+        // one-minute schedule besides. So the refusal is reported, not fatal. Raising the account's concurrency quota
+        // restores the reservation on the next run.
+        try
         {
-            FunctionName = plan.PollerFunctionName, ReservedConcurrentExecutions = plan.PollerReservedConcurrency,
-        });
+            await lambda.PutFunctionConcurrencyAsync(new Amazon.Lambda.Model.PutFunctionConcurrencyRequest
+            {
+                FunctionName = plan.PollerFunctionName, ReservedConcurrentExecutions = plan.PollerReservedConcurrency,
+            });
+            Console.WriteLine($"  function '{plan.PollerFunctionName}': reserved concurrency {plan.PollerReservedConcurrency}.");
+        }
+        catch (Amazon.Lambda.Model.InvalidParameterValueException ex) when (ex.Message.Contains("UnreservedConcurrentExecution", StringComparison.Ordinal))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  function '{plan.PollerFunctionName}': NO reserved concurrency - the account is at Lambda's floor ({ex.Message.Trim()}). " +
+                              "Overlapping polls collapse on the execution name; raise the account's concurrency quota to restore it.");
+            Console.ResetColor();
+        }
         await lambda.PutFunctionEventInvokeConfigAsync(new Amazon.Lambda.Model.PutFunctionEventInvokeConfigRequest
         {
             FunctionName = plan.PollerFunctionName, MaximumEventAgeInSeconds = plan.PollerMaximumEventAgeSeconds, MaximumRetryAttempts = 0,
         });
-        Console.WriteLine($"  function '{plan.PollerFunctionName}': one at a time, events at most {plan.PollerMaximumEventAgeSeconds} s old, never retried.");
+        Console.WriteLine($"  function '{plan.PollerFunctionName}': events at most {plan.PollerMaximumEventAgeSeconds} s old, never retried.");
 
         var machineRoleArn = await DeployerBootstrapper.EnsureRoleAsync(iam, plan.StateMachineRoleName, plan.StateMachineTrustPolicy,
             "lz intake machine (DecoupledCd.md V-B).", ($"{plan.StateMachineRoleName}-grant", plan.StateMachineRolePolicy), plan.DenyPolicy);
