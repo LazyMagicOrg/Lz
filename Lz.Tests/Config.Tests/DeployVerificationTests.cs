@@ -56,6 +56,38 @@ public class DeployVerificationTests
     }
 
     // ---------------------------------------------------------------------------------------
+    //  Step 1b (V-D) — a Verify: live repository deploys only the intake's records
+    // ---------------------------------------------------------------------------------------
+
+    private static BuildRecord Intake() => Real() with
+    {
+        Intake = new BuildRecordIntake("34707373278", 1, "9", "Scutara/ScutaraService/.github/workflows/build-aiphost.yml@refs/heads/main",
+            Digest, new BuildRecordGate1("passed", "gate1/1035592016-34707373278-1.json")),
+    };
+
+    [Theory]
+    [InlineData("Scutara/ScutaraService")]
+    [InlineData("scutara/scutaraservice")]   // keys are lowercased; the config is not
+    public void ALiveRepositorysPushPathRecord_IsRefused(string live)
+    {
+        var refusal = Assert.Single(DeployVerification.IntakeRequired(Real(), new[] { live }));
+        Assert.Equal("intake", refusal.Check);
+        Assert.Contains("push path", refusal.Reason);
+    }
+
+    [Fact]
+    public void ALiveRepositorysIntakeRecord_Passes()
+        => Assert.Empty(DeployVerification.IntakeRequired(Intake(), new[] { "Scutara/ScutaraService" }));
+
+    [Fact]
+    public void ADryRepository_AdmitsBothKindsOfRecord()
+    {
+        Assert.Empty(DeployVerification.IntakeRequired(Real(), new[] { "Scutara/ScutaraSellerApp" }));
+        Assert.Empty(DeployVerification.IntakeRequired(Real(), Array.Empty<string>()));
+        Assert.Empty(DeployVerification.IntakeRequired(Intake(), Array.Empty<string>()));
+    }
+
+    // ---------------------------------------------------------------------------------------
     //  Verify — each refusal
     // ---------------------------------------------------------------------------------------
 

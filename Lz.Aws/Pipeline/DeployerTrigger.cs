@@ -109,7 +109,8 @@ public static class DeployerTrigger
 
     // {builtAt with its separators stripped}-{GitHub run id}.json, the file name BuildRecordFormat.KeyFor gives a
     // record and the build workflow writes. builtAt comes from `date -u +%Y-%m-%dT%H:%M:%SZ`, so the stamp is fixed width.
-    private static readonly Regex RecordFile = new(@"^(?<stamp>\d{8}T\d{6}Z)-(?<run>\d{1,20})\.json$", RegexOptions.CultureInvariant);
+    // Both key forms (DecoupledCd.md §15.4, V-D): the push path's {stamp}-{run}, and the intake's {stamp}-{run}-{attempt}.
+    private static readonly Regex RecordFile = new(@"^(?<stamp>\d{8}T\d{6}Z)-(?<run>\d{1,20})(?:-(?<attempt>[1-9]\d{0,3}))?\.json$", RegexOptions.CultureInvariant);
 
     private static readonly Regex RoutePrefix = new(@"^image/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
     private static readonly Regex ClientRoutePrefix = new(@"^client/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
@@ -128,7 +129,9 @@ public static class DeployerTrigger
     /// <c>account</c> is set by EventBridge to the account that put it, so a pinned account is the proof it came
     /// from the build account's forwarding rule.</para>
     ///
-    /// <para>The name is <c>req-{stamp}-{run id}-{tenant}-1</c>. The stamp and run id identify the build and the
+    /// <para>The name is <c>req-{stamp}-{run id}-{tenant}-1</c>, or, for the intake's record, whose key carries the run attempt,
+    /// <c>req-{stamp}-{run id}-{run attempt}-{tenant}-1</c> (§5.1): each attempt is its own build, and without the attempt a
+    /// second attempt's record would meet the first's name with another input. The stamp and run id identify the build and the
     /// tenant key the service, so a duplicate delivery of the same record produces the same names and inputs,
     /// and two tenants produce two executions that cannot collide.</para>
     /// </summary>
@@ -191,10 +194,11 @@ public static class DeployerTrigger
         var file = RecordFile.Match(key[(route?.RecordPrefix ?? clientRoute!.RecordPrefix).Length..]);
         if (!file.Success)
             throw new TriggerRefused(
-                $"'{key}' is not a build record's name ({{stamp}}-{{run id}}.json), so no execution name can be derived from it.");
+                $"'{key}' is not a build record's name ({{stamp}}-{{run id}}.json, or {{stamp}}-{{run id}}-{{run attempt}}.json), so no execution name can be derived from it.");
 
         var record = new RecordLocation(settings.BuildRecordStore, key);
         var (stamp, run) = (file.Groups["stamp"].Value, file.Groups["run"].Value);
+        if (file.Groups["attempt"].Success) run = $"{run}-{file.Groups["attempt"].Value}";   // the build is the run attempt
 
         // A CLIENT RECORD STARTS ONE EXECUTION: a repository's bundle deploys into the one app it names, under the name and
         // with the input a person starting it by hand uses (P4 stage C), so the two can only ever be one deploy.
@@ -239,7 +243,7 @@ public static class DeployerTrigger
 
     /// <summary>
     /// <c>{stamp}-{run id}-{tenant or app}</c>: the build, then the tenant whose service it rolls or the web app its bundle deploys
-    /// into.
+    /// into. For an intake record the run id is <c>{run id}-{run attempt}</c>.
     /// </summary>
     public static string RequestIdFor(string stamp, string runId, string targetKey) => $"{stamp}-{runId}-{targetKey}";
 

@@ -61,6 +61,22 @@ public enum RolloutVerdict
 public static class DeployVerification
 {
     /// <summary>
+    /// STEP 1b (DecoupledCd.md §4.4, V-D): a repository that is <c>Verify: live</c> deploys only the intake's records. One
+    /// without an <c>intake</c> block was written by the push path, so it is refused; the parser has already held an intake
+    /// record to a passed Gate 1, and the key check to the attempt-carrying key. A repository still <c>Verify: dry</c> admits
+    /// both kinds, so it keeps deploying while it switches.
+    /// </summary>
+    public static IReadOnlyList<VerifyRefusal> IntakeRequired(BuildRecord record, IReadOnlyList<string> liveRepositories)
+        => record.Intake is null && liveRepositories.Contains(record.BuiltFrom.Repo, StringComparer.OrdinalIgnoreCase)
+            ? new[]
+            {
+                new VerifyRefusal("intake",
+                    $"{record.BuiltFrom.Repo} is Verify: live, so only the intake's records deploy, and this one has no intake " +
+                    "block: it was written by the push path, not by the intake (§4.4 step 1b)."),
+            }
+            : Array.Empty<VerifyRefusal>();
+
+    /// <summary>
     /// Check a build record against this environment's pipeline config (§4.4 steps 1 and 1a).
     ///
     /// <para>EVERY CHECK RUNS, and all refusals are returned — not just the first. A Verify that

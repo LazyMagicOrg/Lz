@@ -162,6 +162,7 @@ public static class VerifyStep
         var refusals = new List<VerifyRefusal>();
         refusals.AddRange(DeployVerification.Provenance(record, location, settings.BuildRecordStore));
         refusals.AddRange(DeployVerification.Verify(record, settings.AsPipeline()).Refusals);
+        refusals.AddRange(DeployVerification.IntakeRequired(record, settings.LiveRepositories ?? Array.Empty<string>()));
 
         switch (record.Class)
         {

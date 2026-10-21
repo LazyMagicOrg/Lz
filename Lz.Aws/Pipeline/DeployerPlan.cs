@@ -540,6 +540,9 @@ public static class DeployerPlanner
             [DeployerEnvironment.ImageRepositories] = DeployerEnvironment.Join(imageRepositories),
         };
         var verifyGrants = VerifyGrants(region, acct, sk, env, buildRecordStore, imageRepositories);
+        // §4.4 step 1b (V-D): written only once a repository is Verify: live, so the plan is otherwise as it was.
+        var live = (p.Repositories ?? new List<PipelineRepositoryConfig>()).Where(r => r.Verify == "live").Select(r => r.Repo!).ToList();
+        if (live.Count > 0) verifyEnvironment[DeployerEnvironment.VerifyLiveRepositories] = DeployerEnvironment.Join(live);
         if (clientTargets.Count > 0)
         {
             verifyEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;

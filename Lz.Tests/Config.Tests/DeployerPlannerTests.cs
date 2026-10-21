@@ -53,6 +53,22 @@ public class DeployerPlannerTests
     private static DeployerFunction Function(PipelineDeployer plan, string handler)
         => plan.Functions.Single(f => f.Handler == handler);
 
+    [Fact]
+    public void VerifyLearnsTheLiveRepositories_OnlyOnceOneIsLive()
+    {
+        var verify = Function(Plan(), DeployerHandlers.Verify);
+        Assert.False(verify.Environment.ContainsKey(DeployerEnvironment.VerifyLiveRepositories));   // all dry: as it was
+
+        var config = Config(false);
+        config.Pipeline!.Repositories![0].Verify = "live";
+        config.Pipeline.Repositories[1].Verify = "dry";
+        var live = Function(DeployerPlanner.Plan(config, TargetAccount), DeployerHandlers.Verify);
+
+        Assert.Equal("Scutara/ScutaraService", live.Environment[DeployerEnvironment.VerifyLiveRepositories]);
+        Assert.Equal(new[] { "Scutara/ScutaraService" },
+            VerifySettings.Read(n => live.Environment.GetValueOrDefault(n)).LiveRepositories);
+    }
+
     /// <summary>
     /// Does an IAM resource pattern match an ARN? IAM wildcards are <c>*</c> (any run of
     /// characters) and <c>?</c> (one), which is not regex — so the pattern is translated rather

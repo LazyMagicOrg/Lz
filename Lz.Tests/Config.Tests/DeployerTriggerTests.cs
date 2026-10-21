@@ -74,6 +74,24 @@ public class DeployerTriggerTests
     }
 
     [Fact]
+    public void AnIntakeRecordsEvent_IsNamedForItsRunAttempt_SoTwoAttemptsAreTwoDeploys()
+    {
+        static TriggeredExecution For(string key)
+        {
+            var e = Event();
+            Detail(e)["object"]!["key"] = key;
+            return Assert.Single(DeployerTrigger.ExecutionsFor(e.ToJsonString(), Settings()));
+        }
+
+        var first = For("image/scutara/scutaraservice/20260912T221318Z-34722020365-1.json");
+        var second = For("image/scutara/scutaraservice/20260912T221318Z-34722020365-2.json");
+
+        Assert.Equal("req-20260912T221318Z-34722020365-1-mp-1", first.Name);
+        Assert.Equal("req-20260912T221318Z-34722020365-2-mp-1", second.Name);
+        Assert.Contains("\"key\":\"image/scutara/scutaraservice/20260912T221318Z-34722020365-1.json\"", first.Input);
+    }
+
+    [Fact]
     public void TheInput_IsTheDeployersInputFields_AndReadsBackAsTheRecordAndTarget()
     {
         var input = (JsonObject)JsonNode.Parse(DeployerTrigger.ExecutionsFor(Event().ToJsonString(), Settings()).Single().Input)!;
@@ -173,6 +191,10 @@ public class DeployerTriggerTests
     [InlineData("image/scutara/scutaraservice/20260912T221318Z-run1.json")] // not a run id
     [InlineData("image/scutara/scutaraservice/20260912T221318Z-34722020365.txt")]
     [InlineData("image/scutara/scutaraservice/")]
+    [InlineData("image/scutara/scutaraservice/20260912T221318Z-34722020365-0.json")] // GitHub numbers attempts from 1
+    [InlineData("image/scutara/scutaraservice/20260912T221318Z-34722020365-01.json")] // not the attempt's form
+    [InlineData("image/scutara/scutaraservice/20260912T221318Z-34722020365-1-2.json")] // two attempts
+    [InlineData("image/scutara/scutaraservice/20260912T221318Z-34722020365-.json")]
     public void AKeyThatIsNotARecordsName_StartsNothing(string key)
     {
         var e = Event();

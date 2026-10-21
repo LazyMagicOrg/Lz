@@ -122,6 +122,17 @@ public class DeployerStepsTests
     }
 
     [Fact]
+    public async Task APushPathRecord_OfAVerifyLiveRepository_IsRefusedAtVerify()
+    {
+        // Step 1b (V-D): the workflow's own record, no intake block, once its repository is Verify: live.
+        var live = Settings() with { LiveRepositories = new[] { "Scutara/ScutaraService" } };
+
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Verify(settings: live));
+
+        Assert.Contains(ex.Refusals, r => r.Check == "intake");
+    }
+
+    [Fact]
     public async Task ARecordOutsideTheStore_IsRefused_WithoutBeingRead()
     {
         // Not fetched and then judged — never fetched. The input does not get to choose a bucket.
