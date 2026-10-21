@@ -423,6 +423,23 @@ public static class DeployVerification
     /// </param>
     public static RolloutVerdict Rollout(
         IReadOnlyList<string?>? runningDigests, string deployedDigest, string? rolloutState)
+        => RolloutCore(runningDigests, deployedDigest, rolloutState);
+
+    /// <summary>
+    /// THE SERVICE HAS SETTLED: ECS lists exactly one deployment, the PRIMARY, and its rollout is COMPLETED. Required, by
+    /// every writer's rollout wait, on top of its own verdict before it calls a roll landed (DecoupledCd.md V-J): the
+    /// previous deployment's task drains for a while after the new one is healthy (measured on dev 2026-10-20: 47 s after
+    /// ECS's service-deployment record said SUCCESSFUL), and on a roll to the SAME digest every task already runs it, so
+    /// no digest check can see that drain. A writer that released its lease then would hand the service to the next one
+    /// mid-rollout.
+    /// </summary>
+    public static bool Settled(IReadOnlyList<DeploymentSnapshot>? deployments)
+        => deployments is { Count: 1 } list
+           && string.Equals(list[0].Status, "PRIMARY", StringComparison.Ordinal)
+           && string.Equals(list[0].RolloutState, "COMPLETED", StringComparison.Ordinal);
+
+    private static RolloutVerdict RolloutCore(
+        IReadOnlyList<string?>? runningDigests, string deployedDigest, string? rolloutState)
     {
         if (string.IsNullOrWhiteSpace(deployedDigest))
             throw new ArgumentException("a rollout cannot be verified against an empty digest.", nameof(deployedDigest));

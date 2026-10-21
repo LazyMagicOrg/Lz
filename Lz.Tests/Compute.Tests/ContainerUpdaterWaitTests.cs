@@ -1,4 +1,5 @@
 using Lz.Aws.Ops;
+using Lz.Aws.Pipeline;
 using static Lz.Aws.Ops.AwsContainerUpdater;
 
 namespace Lz.Tests.Compute.Tests;
@@ -98,6 +99,18 @@ public class ContainerUpdaterWaitTests
         public IReadOnlyList<string> Running { get; set; } = Array.Empty<string>();
         public Queue<IReadOnlyList<string>> RunningSequence { get; } = new();
 
+        // The service's deployment list, settled unless a test says otherwise; a sequence is handed out in order.
+        public int DeploymentReads { get; private set; }
+        public Queue<IReadOnlyList<DeploymentSnapshot>> DeploymentSequence { get; } = new();
+        public IReadOnlyList<DeploymentSnapshot> Deployments { get; set; } = new[] { new DeploymentSnapshot("PRIMARY", "td:2", "COMPLETED") };
+
+        public Task<IReadOnlyList<DeploymentSnapshot>> ServiceDeployments(CancellationToken _)
+        {
+            DeploymentReads++;
+            if (DeploymentSequence.Count > 0) Deployments = DeploymentSequence.Dequeue();
+            return Task.FromResult(Deployments);
+        }
+
         public Task<DeploymentLook?> Newest(CancellationToken _)
         {
             Looks++;
@@ -115,7 +128,7 @@ public class ContainerUpdaterWaitTests
     }
 
     private static Task<(bool Landed, string Reason)> Wait(Ecs ecs, string? baseline, string target, TimeSpan? timeout = null)
-        => WaitForDeploymentAsync(baseline, target, ecs.Newest, ecs.Digests,
+        => WaitForDeploymentAsync(baseline, target, ecs.Newest, ecs.Digests, ecs.ServiceDeployments,
             timeout ?? TimeSpan.FromSeconds(5), TimeSpan.Zero, CancellationToken.None);
 
     [Fact]
@@ -204,4 +217,57 @@ public class ContainerUpdaterWaitTests
     [Fact]
     public void AServiceWithNoDeploymentYet_ThatGetsOne_StartedARollout()
         => Assert.True(StartedARollout(new RolloutMark(Td175, null), new RolloutMark(Td175, DeplA)));
+
+    // ---- the service must settle before a roll counts as landed (DecoupledCd.md V-J) ----
+
+    private static readonly DeploymentSnapshot NewPrimary = new("PRIMARY", "td:177", "COMPLETED");
+    private static readonly DeploymentSnapshot OldDraining = new("ACTIVE", "td:176", "COMPLETED");
+
+    [Fact]
+    public void Settled_IsOnePrimaryCompleted_AndNothingElse()
+    {
+        Assert.True(DeployVerification.Settled(new[] { NewPrimary }));
+        Assert.False(DeployVerification.Settled(new[] { NewPrimary, OldDraining }));
+        Assert.False(DeployVerification.Settled(new[] { new DeploymentSnapshot("PRIMARY", "td:177", "IN_PROGRESS") }));
+        Assert.False(DeployVerification.Settled(new[] { new DeploymentSnapshot("ACTIVE", "td:177", "COMPLETED") }));
+        Assert.False(DeployVerification.Settled(Array.Empty<DeploymentSnapshot>()));
+        Assert.False(DeployVerification.Settled(null));
+    }
+
+    [Fact]
+    public async Task ASameDigestRoll_WaitsOutThePreviousDeploymentsDrain()
+    {
+        // As on dev 2026-10-20: SUCCESSFUL and every task on the digest (the draining task runs it too), with the
+        // previous deployment still listed for 47 s more.
+        var ecs = new Ecs(new DeploymentLook(Ours, "SUCCESSFUL", null)) { Running = new[] { Signed, Signed } };
+        ecs.DeploymentSequence.Enqueue(new[] { NewPrimary, OldDraining });
+        ecs.DeploymentSequence.Enqueue(new[] { NewPrimary, OldDraining });
+        ecs.DeploymentSequence.Enqueue(new[] { NewPrimary });
+
+        var (landed, reason) = await Wait(ecs, Previous, Signed);
+
+        Assert.True(landed);
+        Assert.Contains("settled", reason);
+        Assert.Equal(3, ecs.DeploymentReads);
+    }
+
+    [Fact]
+    public async Task AServiceThatNeverSettles_TimesOut_SayingTheDrainIsWhy()
+    {
+        var ecs = new Ecs(new DeploymentLook(Ours, "SUCCESSFUL", null)) { Running = new[] { Signed }, Deployments = new[] { NewPrimary, OldDraining } };
+
+        var (landed, reason) = await Wait(ecs, Previous, Signed, TimeSpan.Zero);
+
+        Assert.False(landed);
+        Assert.Contains("draining", reason);
+    }
+
+    [Fact]
+    public async Task ARollThatDidNotLand_IsDecidedWithoutTheDeploymentList()
+    {
+        var ecs = new Ecs(new DeploymentLook(Ours, "ROLLBACK_SUCCESSFUL", HookRefusal)) { Deployments = new[] { NewPrimary, OldDraining } };
+
+        Assert.False((await Wait(ecs, Previous, Signed)).Landed);
+        Assert.Equal(0, ecs.DeploymentReads);
+    }
 }

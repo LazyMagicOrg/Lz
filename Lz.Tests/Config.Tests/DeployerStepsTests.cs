@@ -659,6 +659,16 @@ public class DeployerStepsTests
     }
 
     [Fact]
+    public async Task ALandedRollWhosePreviousDeploymentStillDrains_IsStillRolling()
+    {
+        // Every task on the digest and ours COMPLETED, but ECS still lists the previous deployment (V-J).
+        var draining = Rolling("COMPLETED", new DeploymentSnapshot("ACTIVE", CurrentTd, "COMPLETED"));
+        var ex = await Assert.ThrowsAsync<RolloutStillRolling>(() => VerifyRolloutStep.RunAsync(
+            RolloutState(), "req-abc-1", new Services(draining, new[] { Running(Digest), Running(Digest) }), DateTimeOffset.UtcNow));
+        Assert.Contains("draining", ex.Message);
+    }
+
+    [Fact]
     public async Task ARollInProgress_IsTheRetriedError()
     {
         await Assert.ThrowsAsync<RolloutStillRolling>(() => VerifyRolloutStep.RunAsync(

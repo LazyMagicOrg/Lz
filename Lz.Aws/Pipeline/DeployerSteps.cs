@@ -527,6 +527,12 @@ public static class VerifyRolloutStep
         var verdict = DeployVerification.Rollout(running, digest, rolloutState);
         var onDigest = running.Count(d => string.Equals(d, digest, StringComparison.Ordinal));
 
+        // LANDED ONLY ONCE THE SERVICE HAS SETTLED (V-J): the previous deployment can still be draining, unseen by the
+        // digests on a roll to the same digest, and Record releases the service's lease.
+        if (verdict == RolloutVerdict.Landed && !DeployVerification.Settled(service.Deployments))
+            throw new RolloutStillRolling(
+                $"every running task is on {digest}, but ECS still lists {service.Deployments?.Count ?? 0} deployment(s); the previous one is draining.");
+
         switch (verdict)
         {
             case RolloutVerdict.StillRolling:

@@ -336,6 +336,7 @@ public class AwsContainerUpdater
             baseline, ecrDigest,
             token => NewestServiceDeploymentAsync(cluster, ecsService, token),
             async token => await GetRunningImageDigestsAsync(cluster, ecsService, sources, token),
+            token => ServiceDeploymentsAsync(cluster, ecsService, token),
             WaitTimeout, PollInterval, ct);
         return ok
             ? new(ecsService, UpdateOutcome.Verified, reason)
@@ -427,11 +428,15 @@ public class AwsContainerUpdater
     /// <para>Looks at least once, whatever the timeout. Public and static, with its AWS reads passed in, so the
     /// loop itself is tested — the sequence ECS produced for a refused deploy included.</para>
     /// </summary>
+    /// <para><b>AND THE SERVICE MUST SETTLE</b> (DecoupledCd.md V-J): a verdict of landed stands only once ECS lists one
+    /// deployment, PRIMARY and COMPLETED (<see cref="Lz.Aws.Pipeline.DeployVerification.Settled"/>), since the previous
+    /// task drains after ECS calls ours SUCCESSFUL, unseen by the digests on a roll to the same digest.</para>
     public static async Task<(bool Landed, string Reason)> WaitForDeploymentAsync(
         string? baselineArn,
         string targetDigest,
         Func<CancellationToken, Task<DeploymentLook?>> newestDeployment,
         Func<CancellationToken, Task<IReadOnlyList<string>>> runningDigests,
+        Func<CancellationToken, Task<IReadOnlyList<Lz.Aws.Pipeline.DeploymentSnapshot>>> serviceDeployments,
         TimeSpan timeout, TimeSpan pollInterval, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.Add(timeout);
@@ -449,11 +454,15 @@ public class AwsContainerUpdater
                 : Array.Empty<string>();
 
             var (verdict, reason) = JudgeDeployment(ours?.Status, ours?.StatusReason, running, targetDigest);
-            switch (verdict)
+            if (verdict == RolloutWait.Landed)
             {
-                case RolloutWait.Landed: return (true, reason);
-                case RolloutWait.NotLanded: return (false, reason);
+                var deployments = await serviceDeployments(ct);
+                if (Lz.Aws.Pipeline.DeployVerification.Settled(deployments))
+                    return (true, $"{reason}; the service has settled on one deployment");
+                verdict = RolloutWait.Waiting;
+                reason = $"{reason}, but ECS still lists {deployments.Count} deployment(s): the previous one is draining";
             }
+            if (verdict == RolloutWait.NotLanded) return (false, reason);
 
             last = reason;
             if (DateTime.UtcNow >= deadline)
@@ -499,7 +508,23 @@ public class AwsContainerUpdater
             baselineDeploymentArn, digest,
             token => NewestServiceDeploymentAsync(cluster, ecsService, token),
             async token => await GetRunningImageDigestsAsync(cluster, ecsService, sources, token),
+            token => ServiceDeploymentsAsync(cluster, ecsService, token),
             WaitTimeout, PollInterval, ct);
+
+    /// <summary>The service's deployments as DescribeServices lists them, for <see cref="Lz.Aws.Pipeline.DeployVerification.Settled"/>.</summary>
+    private async Task<IReadOnlyList<Lz.Aws.Pipeline.DeploymentSnapshot>> ServiceDeploymentsAsync(
+        string cluster, string ecsService, CancellationToken ct)
+    {
+        var svc = await _ecs.DescribeServicesAsync(new DescribeServicesRequest
+        {
+            Cluster = cluster,
+            Services = new List<string> { ecsService },
+        }, ct);
+        // SDK v4: a collection with no members is null.
+        return (svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE")?.Deployments ?? new List<Amazon.ECS.Model.Deployment>())
+            .Select(d => new Lz.Aws.Pipeline.DeploymentSnapshot(d.Status, d.TaskDefinition, d.RolloutState?.Value))
+            .ToList();
+    }
 
     /// <summary>Short "family:revision" from a task-definition ARN, for log lines.</summary>
     private static string ShortArn(string arn)
