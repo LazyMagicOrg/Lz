@@ -122,7 +122,10 @@ public static class PipelineBootstrapper
         await ApplySigningConfigurationAsync(ecr, signingRules);
 
         foreach (var role in plan.Roles)
-            await EnsureRoleAsync(iam, role, providerArn);
+        {
+            if (role.Retired) await RemoveRetiredRoleAsync(iam, role);
+            else await EnsureRoleAsync(iam, role, providerArn);
+        }
 
         // WHAT CROSSES TO THE ENVIRONMENT this run was given. Merged, never overwritten: the registry
         // has one replication configuration and the store one bucket policy, and another environment's
@@ -208,7 +211,7 @@ public static class PipelineBootstrapper
         Console.WriteLine("  roles GitHub may assume:");
         foreach (var r in plan.Roles)
         {
-            Console.WriteLine($"    {r.Name}");
+            Console.WriteLine($"    {r.Name}{(r.Retired ? "  RETIRED: Verify: live, the intake pushes; the role is removed on apply" : "")}");
             Console.WriteLine($"      for {r.Repo} building '{r.Class}'");
             Console.WriteLine($"      signing profile: {r.SigningProfile ?? "none (bundles carry no registry signature)"}");
             if (r.EcrRepositories.Count > 0)
@@ -455,6 +458,27 @@ public static class PipelineBootstrapper
 
         Console.WriteLine($"  signing profile '{profileName}' created.");
         return created.Arn;
+    }
+
+    /// <summary>
+    /// A switched repository's push role, removed (V-D): its policies, then the role. Absent already counts as done. The
+    /// OIDC provider stays while another repository's role trusts it.
+    /// </summary>
+    private static async Task RemoveRetiredRoleAsync(IAmazonIdentityManagementService iam, PipelineRole role)
+    {
+        try
+        {
+            foreach (var name in (await iam.ListRolePoliciesAsync(new ListRolePoliciesRequest { RoleName = role.Name })).PolicyNames ?? new List<string>())
+                await iam.DeleteRolePolicyAsync(new DeleteRolePolicyRequest { RoleName = role.Name, PolicyName = name });
+            foreach (var attached in (await iam.ListAttachedRolePoliciesAsync(new ListAttachedRolePoliciesRequest { RoleName = role.Name })).AttachedPolicies ?? new List<AttachedPolicyType>())
+                await iam.DetachRolePolicyAsync(new DetachRolePolicyRequest { RoleName = role.Name, PolicyArn = attached.PolicyArn });
+            await iam.DeleteRoleAsync(new DeleteRoleRequest { RoleName = role.Name });
+            Console.WriteLine($"  role '{role.Name}' REMOVED: {role.Repo} is Verify: live and its workflow pushes nothing (V-D).");
+        }
+        catch (NoSuchEntityException)
+        {
+            Console.WriteLine($"  role '{role.Name}' is absent, as planned: {role.Repo} is Verify: live.");
+        }
     }
 
     private static async Task EnsureRoleAsync(

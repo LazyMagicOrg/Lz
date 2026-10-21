@@ -110,6 +110,23 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void ASwitchedRepositorysPushRole_IsRetired_AndItsProfileRuleAndRepositoryStay()
+    {
+        // V-D: once a repository is Verify: live its workflow pushes nothing, so the role GitHub assumed goes - but the
+        // intake signs under the same profile, so the profile, its rule's repositories and the registry stay planned.
+        var live = Enabled();
+        live.Repositories![0].Verify = "live";
+        var before = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled())).Roles.Single(r => r.Class == "image");
+        var after = PipelineBootstrapPlanner.Plan(WithPipeline(live)).Roles.Single(r => r.Class == "image");
+
+        Assert.False(before.Retired);
+        Assert.True(after.Retired);
+        Assert.Equal(before.SigningProfile, after.SigningProfile);
+        Assert.Equal(before.EcrRepositories, after.EcrRepositories);
+        Assert.All(PipelineBootstrapPlanner.Plan(WithPipeline(live)).Roles.Where(r => r.Class != "image"), r => Assert.False(r.Retired));
+    }
+
+    [Fact]
     public void OnlyImageRolesGetASigningProfile()
     {
         // A bundle role with a signing profile would imply a signature that never exists: bundles

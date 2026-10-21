@@ -35,9 +35,15 @@ public sealed record PipelineStore(
 /// For image roles: the ECR repositories this role may push to, already named under the
 /// configured mode. Empty for bundle roles, which have no registry.
 /// </param>
+/// <param name="Retired">
+/// The repository has switched to the pull model (DecoupledCd.md V-D): it is <c>Verify: live</c>, its workflow pushes
+/// nothing, and the intake pushes and records its builds. So the IAM role GitHub assumed is REMOVED on apply, and no
+/// GitHub-assumable role is left for it. Everything else this record names stays: the signing profile the intake signs
+/// under, its rule, and the repositories, which dev's Verify and hook still trust by this profile.
+/// </param>
 public sealed record PipelineRole(
     string Name, string Repo, string Class, string TrustPolicy, string? SigningProfile,
-    string PermissionPolicy, IReadOnlyList<string> EcrRepositories);
+    string PermissionPolicy, IReadOnlyList<string> EcrRepositories, bool Retired = false);
 
 /// <summary>Everything <c>lz bootstrappipeline</c> would create, decided before anything is called.</summary>
 /// <param name="TargetAccountId">The environment whose config this run was given: where its images
@@ -420,7 +426,8 @@ public static class PipelineBootstrapPlanner
             SigningProfile: profile,
             PermissionPolicy: PermissionPolicyFor(
                 region, accountId, artifacts, buildRecords, prefix, ecrRepos, profile),
-            EcrRepositories: ecrRepos);
+            EcrRepositories: ecrRepos,
+            Retired: r.Verify == "live");
     }
 
     /// <summary>
