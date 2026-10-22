@@ -10,6 +10,40 @@ public class IntakePollStepTests
     private static readonly DateTimeOffset Now = new(2026, 10, 21, 2, 0, 0, TimeSpan.Zero);
     private static readonly IntakeRepository Service = new("Example/ExampleService", RepoId, OwnerId, ".github/workflows/build-aiphost.yml", "dry", "image", new[] { "aiphost" });
 
+    // ---- the repositories variable (V-D: Lambda refuses a configuration update over 5,120 bytes) ----
+
+    private static IntakeRepository WithGate1(string name, long id) => new($"Scutara/{name}", id, OwnerId, ".github/workflows/build-bundle.yml", "live", "client",
+        new[] { name.ToLowerInvariant() }, new IntakeGate1("tests", "ViewModelsTest/bin/Debug/net10.0/ViewModelsTest.dll", "FullyQualifiedName~ViewModelsTest", "10.0.301",
+            new string('c', 128), Array.Empty<IntakeImage>(), BuildRoot: $"/home/runner/work/{name}/{name}"), "builtfrom");
+
+    [Fact]
+    public void TheRepositories_RoundTripThroughTheirVariable()
+    {
+        var repos = new[] { Service, WithGate1("ScutaraSellerApp", 2) };
+        var decoded = IntakeRepositories.Decode(IntakeRepositories.Encode(repos));
+        Assert.Equal(repos.Select(r => (r.Repo, r.RepositoryId, r.Mode, r.Gate1?.Run, r.Gate1?.BuildRoot, r.BuiltFrom)),
+            decoded.Select(r => (r.Repo, r.RepositoryId, r.Mode, r.Gate1?.Run, r.Gate1?.BuildRoot, r.BuiltFrom)));
+    }
+
+    [Fact]
+    public void ThePlainJsonTodaysFunctionsCarry_StillDecodes()
+        => Assert.Equal("Example/ExampleService", Assert.Single(IntakeRepositories.Decode(System.Text.Json.JsonSerializer.Serialize(new[] { Service }))).Repo);
+
+    [Fact]
+    public void SevenRepositoriesWithGate1_FitWellInsideLambdasLimit()
+    {
+        // Measured 2026-10-22: four repositories as plain JSON (3,395 bytes) pushed the publish function's update past the
+        // 5,120 bytes Lambda allows a configuration update, beside its other variables.
+        var seven = Enumerable.Range(1, 7).Select(i => WithGate1($"ScutaraRepository{i}", 1000 + i)).ToList();
+        var encoded = IntakeRepositories.Encode(seven);
+        Assert.True(encoded.Length < 2000, $"{encoded.Length} bytes");
+        Assert.Equal(7, IntakeRepositories.Decode(encoded).Count);
+    }
+
+    [Fact]
+    public void NoRepositories_IsRefused()
+        => Assert.Throws<InvalidOperationException>(() => IntakeRepositories.Decode(IntakeRepositories.Encode(Array.Empty<IntakeRepository>())));
+
     private static string Name(long run, int attempt = 1, int retry = 0) => IntakeNames.For(RepoId, run, attempt, retry);
 
     private static GitHubRun Run(long id, int attempt = 1, string conclusion = "success", TimeSpan? ago = null) => new(

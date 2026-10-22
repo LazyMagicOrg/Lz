@@ -44,15 +44,40 @@ public static class IntakeEnvironment
     public const string ArtifactStore = "LZ_INTAKE_ARTIFACT_STORE";
 }
 
-/// <summary>The repositories in one environment variable, as JSON: written by the planner, read by the intake's functions.</summary>
+/// <summary>
+/// The repositories in one environment variable: written by the planner, read by the intake's functions.
+///
+/// <para>COMPRESSED (V-D, 2026-10-22): <c>gz:</c> and the gzipped JSON in base64. As plain JSON, four repositories with
+/// Gate 1 (3,395 bytes) pushed a function's configuration update past the 5,120 bytes Lambda allows one, and the list
+/// repeats itself (the same keys, the same SDK hash), so it compresses to about a third. Plain JSON, which a function
+/// configured before this carries, still decodes.</para>
+/// </summary>
 public static class IntakeRepositories
 {
-    public static string Encode(IReadOnlyList<IntakeRepository> repositories) => JsonSerializer.Serialize(repositories);
+    private const string Compressed = "gz:";
 
-    public static IReadOnlyList<IntakeRepository> Decode(string json)
-        => JsonSerializer.Deserialize<List<IntakeRepository>>(json) is { Count: > 0 } list
+    public static string Encode(IReadOnlyList<IntakeRepository> repositories)
+    {
+        using var buffer = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(buffer, System.IO.Compression.CompressionLevel.SmallestSize))
+            gzip.Write(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(repositories)));
+        return Compressed + Convert.ToBase64String(buffer.ToArray());
+    }
+
+    public static IReadOnlyList<IntakeRepository> Decode(string value)
+    {
+        var json = value;
+        if (value.StartsWith(Compressed, StringComparison.Ordinal))
+        {
+            using var gzip = new System.IO.Compression.GZipStream(
+                new MemoryStream(Convert.FromBase64String(value[Compressed.Length..])), System.IO.Compression.CompressionMode.Decompress);
+            using var reader = new StreamReader(gzip, Encoding.UTF8);
+            json = reader.ReadToEnd();
+        }
+        return JsonSerializer.Deserialize<List<IntakeRepository>>(json) is { Count: > 0 } list
             ? list
             : throw new InvalidOperationException("the intake is configured with no repositories");
+    }
 }
 
 /// <summary>
