@@ -262,6 +262,54 @@ public class IntakeBuildPlanTests
     }
 
     [Fact]
+    public void TheBuildspec_PrintsWhatItTests_BeforeAnythingElse()
+    {
+        var first = FirstCommand(WithGate1().Gate1!.Buildspec);
+        Assert.StartsWith("printf 'GATE1 ", first);
+        foreach (var name in new[] { "INTAKE_REPO", "INTAKE_RUN_ID", "INTAKE_RUN_ATTEMPT", "INTAKE_COMMIT", "INTAKE_WORKFLOW_REF", "INTAKE_EXECUTION", "INTAKE_TESTS", "BUNDLE_SHA256", "INTAKE_ARTIFACTS" })
+            Assert.Contains($"\"${name}\"", first);
+        Assert.DoesNotContain(": ", first);   // a plain YAML scalar, as the buildspec's other commands are
+    }
+
+    [Fact]
+    public void TheHeader_PrintsTheRunAndEveryStagedSha_UnderBash()
+    {
+        var first = FirstCommand(WithGate1().Gate1!.Buildspec);
+        // The script goes in on stdin, its variables exported in it: WSL's bash, first on a Windows PATH, drops the process's
+        // environment and expands a -c argument's variables before the script runs.
+        var variables = new Dictionary<string, string>
+        {
+            ["INTAKE_REPO"] = "Example/App", ["INTAKE_RUN_ID"] = "9001", ["INTAKE_RUN_ATTEMPT"] = "2", ["INTAKE_COMMIT"] = "abc123",
+            ["INTAKE_WORKFLOW_REF"] = "Example/App/.github/workflows/b.yml@refs/heads/main", ["INTAKE_EXECUTION"] = "1-9001-2-r1",
+            ["INTAKE_TESTS"] = "tests-2", ["BUNDLE_SHA256"] = "2222", ["INTAKE_ARTIFACTS"] = "app-2 1111\ntests-2 2222",
+        };
+        var psi = new System.Diagnostics.ProcessStartInfo("bash", "-s") { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };
+        using var bash = System.Diagnostics.Process.Start(psi)!;
+        bash.StandardInput.Write(string.Concat(variables.Select(kv => $"export {kv.Key}='{kv.Value}'\n")) + first + "\n");
+        bash.StandardInput.Close();
+        var lines = bash.StandardOutput.ReadToEnd().Replace("\r", "").TrimEnd('\n').Split('\n');
+        bash.WaitForExit();
+
+        Assert.Equal(0, bash.ExitCode);
+        Assert.Equal(new[]
+        {
+            "GATE1 Example/App run 9001 attempt 2, commit abc123 (Example/App/.github/workflows/b.yml@refs/heads/main)",
+            "GATE1 intake execution 1-9001-2-r1",
+            "GATE1 tests tests-2 2222 (the bundle under test)",
+            "GATE1 staged app-2 1111",
+            "GATE1 staged tests-2 2222",
+        }, lines);
+    }
+
+    /// <summary>The buildspec's first command: the first "- " line after the first "commands:".</summary>
+    private static string FirstCommand(string spec)
+    {
+        var lines = spec.Replace("\r", "").Split('\n');
+        var at = Array.FindIndex(lines, l => l.Trim() == "commands:");
+        return lines.Skip(at + 1).First(l => l.TrimStart().StartsWith("- ", StringComparison.Ordinal)).TrimStart()[2..];
+    }
+
+    [Fact]
     public void TheMachine_RunsGate1OnlyWhereABundleWasStaged_AndOnlyAPassIsTakenIn()
     {
         var s = JsonDocument.Parse(WithGate1().Definition).RootElement.GetProperty("States");

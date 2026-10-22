@@ -391,7 +391,8 @@ public static class IntakeBuildPlanner
     /// from the build-side file: the .NET SDK by exact version, checked against Microsoft's published SHA-512 before use;
     /// the images the tests start, pulled by digest from a mirror and tagged as the tests expect (no Docker Hub limit); the
     /// bundle by its presigned URL, checked against its SHA-256 before it is unzipped; then the filtered tests, reported to
-    /// the report group as TRX. A failing test fails the build; the report is processed either way.
+    /// the report group as TRX. A failing test fails the build; the report is processed either way. Before all of it, the
+    /// log's header: what the build tests (<see cref="Gate1Header"/>), printed from its INTAKE_ variables and trusted for nothing.
     /// </summary>
     public static string BuildspecFor(string reportGroupArn) => $$"""
         version: 0.2
@@ -400,6 +401,7 @@ public static class IntakeBuildPlanner
         phases:
           install:
             commands:
+              - printf 'GATE1 %s run %s attempt %s, commit %s (%s)\nGATE1 intake execution %s\nGATE1 tests %s %s (the bundle under test)\n' "$INTAKE_REPO" "$INTAKE_RUN_ID" "$INTAKE_RUN_ATTEMPT" "$INTAKE_COMMIT" "$INTAKE_WORKFLOW_REF" "$INTAKE_EXECUTION" "$INTAKE_TESTS" "$BUNDLE_SHA256" && printf '%s\n' "$INTAKE_ARTIFACTS" | while read -r name sha; do [ -z "$name" ] || echo "GATE1 staged $name $sha"; done
               - curl -fsSL --retry 3 -o /tmp/sdk.tgz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${SDK_VERSION}/dotnet-sdk-${SDK_VERSION}-linux-x64.tar.gz"
               - echo "${SDK_SHA512}  /tmp/sdk.tgz" | sha512sum -c -
               - mkdir -p /opt/gate1-dotnet && tar -xzf /tmp/sdk.tgz -C /opt/gate1-dotnet

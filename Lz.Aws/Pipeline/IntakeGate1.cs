@@ -98,19 +98,56 @@ public interface IScratchPresigner
 public sealed class Gate1StillRunning(string message) : Exception(message);
 
 /// <summary>
+/// WHAT A GATE 1 BUILD TESTS, FOR ITS LOG: the run and its commit, the intake execution that started it, and every artifact
+/// the fetch staged with its SHA-256 — the ones Publish later holds each file to — which the buildspec prints before anything
+/// else. DISPLAY ONLY: the build checks the test bundle by BUNDLE_SHA256 alone and trusts none of these. A field the state
+/// does not hold is printed as such rather than refused, since nothing decides on it.
+/// </summary>
+public sealed record Gate1Header(string Repo, long RunId, int RunAttempt, string Commit, string WorkflowRef, string Execution, string Tests,
+    IReadOnlyList<(string Artifact, string Sha256)> Staged)
+{
+    public const string Absent = "(not in the state)";
+
+    public static Gate1Header From(JsonObject state, string executionName)
+    {
+        var input = IntakeInput.From(state);
+        static string Read(JsonNode? node) => node?.GetValue<string>() is { Length: > 0 } v ? v : Absent;
+        var staged = (state["fetch"]?["staged"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+            .Select(a => (Read(a["artifact"]), Read(a["sha256"]))).ToList();
+        return new Gate1Header(input.Repo, input.RunId, input.RunAttempt, Read(state["check"]?["headSha"]), Read(state["check"]?["workflowRef"]),
+            executionName, Read(state["fetch"]?["tests"]?["artifact"]), staged);
+    }
+
+    /// <summary>The build's INTAKE_ variables; the staged list is one "artifact sha256" pair per line.</summary>
+    public IReadOnlyDictionary<string, string> Variables() => new Dictionary<string, string>
+    {
+        ["INTAKE_REPO"] = Repo,
+        ["INTAKE_RUN_ID"] = RunId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        ["INTAKE_RUN_ATTEMPT"] = RunAttempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        ["INTAKE_COMMIT"] = Commit,
+        ["INTAKE_WORKFLOW_REF"] = WorkflowRef,
+        ["INTAKE_EXECUTION"] = Execution,
+        ["INTAKE_TESTS"] = Tests,
+        ["INTAKE_ARTIFACTS"] = string.Join("\n", Staged.Select(a => $"{a.Artifact} {a.Sha256}")),
+    };
+}
+
+/// <summary>
 /// GATE 1, STARTED (DecoupledCd.md §15.4, V-C): the test bundle the fetch staged, handed to the CodeBuild project by a URL
 /// that grants that one object for fifteen minutes, with its SHA-256, which the build checks before it unzips; and how to
-/// run it, from the build-side file. Gate 1's own role holds no S3 right at all.
+/// run it, from the build-side file; and, for its log, what it tests (<see cref="Gate1Header"/>). Gate 1's own role holds no
+/// S3 right at all.
 /// </summary>
 public static class IntakeGate1StartStep
 {
     public static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(15);
     public const string DefaultRoot = "/tmp/bundle";
 
-    /// <summary>The build's variables: config's own first, then Gate 1's, which config cannot name. The image list is one "from as" pair per line.</summary>
-    public static IReadOnlyDictionary<string, string> VariablesFor(IntakeGate1 gate1, string url, string sha256)
+    /// <summary>The build's variables: config's own first, then the header's and Gate 1's, which config cannot name. The image list is one "from as" pair per line.</summary>
+    public static IReadOnlyDictionary<string, string> VariablesFor(IntakeGate1 gate1, string url, string sha256, Gate1Header header)
     {
         var variables = new Dictionary<string, string>(gate1.Environment ?? new Dictionary<string, string>());
+        foreach (var (name, value) in header.Variables()) variables[name] = value;
         foreach (var (name, value) in Gate1Variables(gate1, url, sha256)) variables[name] = value;   // Gate 1's own always win
         return variables;
     }
@@ -130,7 +167,7 @@ public static class IntakeGate1StartStep
     };
 
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, IReadOnlyList<IntakeRepository> repositories, IScratchPresigner presigner, IGate1Builds builds, string project)
+        JsonObject state, string executionName, IReadOnlyList<IntakeRepository> repositories, IScratchPresigner presigner, IGate1Builds builds, string project)
     {
         var input = IntakeInput.From(state);
         var gate1 = input.In(repositories)?.Gate1 ?? throw new IntakeFault($"{input.Repo} has no Gate 1; the machine should not have started one");
@@ -138,7 +175,7 @@ public static class IntakeGate1StartStep
         var key = tests["key"]!.GetValue<string>();
         var sha256 = tests["sha256"]!.GetValue<string>();
 
-        var buildId = await builds.StartAsync(project, VariablesFor(gate1, presigner.GetUrl(key, UrlLifetime), sha256));
+        var buildId = await builds.StartAsync(project, VariablesFor(gate1, presigner.GetUrl(key, UrlLifetime), sha256, Gate1Header.From(state, executionName)));
         return new JsonObject { ["buildId"] = buildId, ["bundle"] = key, ["bundleSha256"] = sha256 };
     }
 }

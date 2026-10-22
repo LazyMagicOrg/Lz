@@ -16,12 +16,18 @@ public sealed class IntakeGate1Tests : IDisposable
     private static readonly DateTimeOffset Now = new(2026, 10, 21, 3, 0, 0, TimeSpan.Zero);
     private readonly string _work = Path.Combine(Path.GetTempPath(), "lz-gate1-" + Guid.NewGuid().ToString("N")[..8]);
     private static string Exec => IntakeNames.For(RepoId, RunId, 1);
+    private static Gate1Header Header => Gate1Header.From(State(), Exec + "-r1");
 
     public void Dispose() { if (Directory.Exists(_work)) Directory.Delete(_work, true); }
 
     private static JsonObject State() => new()
     {
         ["repo"] = Service.Repo, ["repositoryId"] = RepoId, ["runId"] = RunId, ["runAttempt"] = 1, ["retry"] = 0,
+        ["check"] = new JsonObject
+        {
+            ["verdict"] = "passed", ["headSha"] = new string('d', 40),
+            ["workflowRef"] = $"{Service.Repo}/.github/workflows/build-aiphost.yml@refs/heads/main",
+        },
         ["fetch"] = new JsonObject
         {
             ["verdict"] = "staged",
@@ -110,7 +116,7 @@ public sealed class IntakeGate1Tests : IDisposable
     {
         var f = new Fakes();
 
-        var result = await IntakeGate1StartStep.RunAsync(State(), Repos, f, f, "scu-intake-gate1");
+        var result = await IntakeGate1StartStep.RunAsync(State(), Exec, Repos, f, f, "scu-intake-gate1");
 
         Assert.Equal(($"{Exec}/tests-1.zip", TimeSpan.FromMinutes(15)), f.Presigned);
         var (project, v) = f.Started!.Value;
@@ -119,7 +125,7 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal(new string('2', 64), v["BUNDLE_SHA256"]);
         Assert.Equal(Gate1.Run, v["GATE1_RUN"]);
         Assert.Equal("/tmp/bundle", v["GATE1_ROOT"]);
-        Assert.Equal("/home/runner/work/R/R", IntakeGate1StartStep.VariablesFor(Gate1 with { BuildRoot = "/home/runner/work/R/R" }, "u", "s")["GATE1_ROOT"]);
+        Assert.Equal("/home/runner/work/R/R", IntakeGate1StartStep.VariablesFor(Gate1 with { BuildRoot = "/home/runner/work/R/R" }, "u", "s", Header)["GATE1_ROOT"]);
         Assert.Equal(Gate1.Filter, v["GATE1_FILTER"]);
         Assert.Equal((Gate1.SdkVersion, Gate1.SdkSha512), (v["SDK_VERSION"], v["SDK_SHA512"]));
         Assert.Equal($"{Gate1.Images[0].From} {Gate1.Images[0].As}", v["GATE1_IMAGES"]);
@@ -127,14 +133,58 @@ public sealed class IntakeGate1Tests : IDisposable
     }
 
     [Fact]
+    public async Task TheBuild_IsToldWhatItTests_ForItsLog_TheRunTheCommitTheExecutionAndEveryStagedSha()
+    {
+        var f = new Fakes();
+
+        await IntakeGate1StartStep.RunAsync(State(), Exec + "-r1", Repos, f, f, "scu-intake-gate1");
+
+        var v = f.Started!.Value.Variables;
+        Assert.Equal(Service.Repo, v["INTAKE_REPO"]);
+        Assert.Equal(("9001", "1"), (v["INTAKE_RUN_ID"], v["INTAKE_RUN_ATTEMPT"]));
+        Assert.Equal(new string('d', 40), v["INTAKE_COMMIT"]);
+        Assert.Equal($"{Service.Repo}/.github/workflows/build-aiphost.yml@refs/heads/main", v["INTAKE_WORKFLOW_REF"]);
+        Assert.Equal(Exec + "-r1", v["INTAKE_EXECUTION"]);   // the execution's own name, a retry's suffix included
+        Assert.Equal("tests-1", v["INTAKE_TESTS"]);
+        Assert.Equal($"aiphost-1 {new string('1', 64)}\ntests-1 {new string('2', 64)}", v["INTAKE_ARTIFACTS"]);
+    }
+
+    [Fact]
+    public void TheHeader_ReadsWhatTheStateHolds_AndSaysSoWhereItHoldsNothing()
+    {
+        var bare = State();
+        bare.Remove("check");
+        var v = Gate1Header.From(bare, Exec).Variables();
+        Assert.Equal(("(not in the state)", "(not in the state)"), (v["INTAKE_COMMIT"], v["INTAKE_WORKFLOW_REF"]));
+        Assert.Equal(Service.Repo, v["INTAKE_REPO"]);
+    }
+
+    [Fact]
+    public void TheHeadersVariables_CannotBeReplacedByConfig()
+    {
+        var forged = Gate1 with { Environment = new Dictionary<string, string> { ["INTAKE_COMMIT"] = "forged", ["INTAKE_ARTIFACTS"] = "x y" } };
+        var v = IntakeGate1StartStep.VariablesFor(forged, "u", "s", Header);
+        Assert.Equal(new string('d', 40), v["INTAKE_COMMIT"]);
+        Assert.StartsWith("aiphost-1 ", v["INTAKE_ARTIFACTS"]);
+    }
+
+    [Fact]
+    public void AHeaderLine_IsNeverReadAsAGate2ListLine()
+    {
+        var lists = ListBlocks(("precondition", new[] { "P" }), ("blocking", new[] { "A" }), ("advisory", Array.Empty<string>()));
+        var withHeader = new[] { "GATE1 Example/ExampleService run 9001 attempt 1, commit d (ref)", "GATE1 staged tests-1 2222" }.Concat(lists).ToList();
+        Assert.Equal(Gate2Lists.Parse(lists)!["blocking"], Gate2Lists.Parse(withHeader)!["blocking"]);
+    }
+
+    [Fact]
     public void ConfigsVariables_GoWithTheBuild_AndCannotReplaceGate1sOwn()
     {
         var withEnv = Gate1 with { Environment = new Dictionary<string, string> { ["TESTCONTAINERS_HOST_OVERRIDE"] = "localhost", ["BUNDLE_URL"] = "https://elsewhere" } };
-        var v = IntakeGate1StartStep.VariablesFor(withEnv, "https://presigned/one-object", new string('2', 64));
+        var v = IntakeGate1StartStep.VariablesFor(withEnv, "https://presigned/one-object", new string('2', 64), Header);
         Assert.Equal("localhost", v["TESTCONTAINERS_HOST_OVERRIDE"]);
         Assert.Equal("https://presigned/one-object", v["BUNDLE_URL"]);
 
-        var lists = IntakeGate1StartStep.VariablesFor(Gate1 with { Environment = new Dictionary<string, string> { ["GATE1_LISTS"] = "blocking Category=Nothing" } }, "u", "s");
+        var lists = IntakeGate1StartStep.VariablesFor(Gate1 with { Environment = new Dictionary<string, string> { ["GATE1_LISTS"] = "blocking Category=Nothing" } }, "u", "s", Header);
         Assert.Equal(Gate2Lists.Variable(), lists["GATE1_LISTS"]);   // Gate 2's filters are fixed, never config's
     }
 
@@ -185,10 +235,10 @@ public sealed class IntakeGate1Tests : IDisposable
     public async Task NoGate1Configured_OrNoBundleStaged_IsAFault()
     {
         var bare = new[] { Service with { Gate1 = null } };
-        await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1StartStep.RunAsync(State(), bare, new Fakes(), new Fakes(), "p"));
+        await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1StartStep.RunAsync(State(), Exec, bare, new Fakes(), new Fakes(), "p"));
         var noTests = State();
         noTests["fetch"]!.AsObject().Remove("tests");
-        await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1StartStep.RunAsync(noTests, Repos, new Fakes(), new Fakes(), "p"));
+        await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1StartStep.RunAsync(noTests, Exec, Repos, new Fakes(), new Fakes(), "p"));
     }
 
     // ---- the verdict ----

@@ -21,7 +21,7 @@ public sealed class IntakeGate1StartFunction
         var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
         var repositories = IntakeRepositories.Decode(IntakeClients.Required(IntakeEnvironment.Repositories));
         var result = await IntakeGate1StartStep.RunAsync(
-            state, repositories,
+            state, executionName, repositories,
             new S3ScratchPresigner(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.ScratchBucket)),
             new CodeBuildGate1(Gate1Clients.CodeBuild.Value),
             IntakeClients.Required(IntakeEnvironment.Gate1Project));
