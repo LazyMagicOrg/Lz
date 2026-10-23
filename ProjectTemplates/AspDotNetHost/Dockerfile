@@ -1,10 +1,18 @@
+# THE LAMBDA WEB ADAPTER'S IMAGE, pinned by digest (1.0.1's manifest list: linux/amd64 and linux/arm64). A build may
+# name another registry holding the same image - a mirror copied with its digests kept - with --build-arg
+# LambdaAdapter=<registry>/<name>:1.0.1@<the same digest>; the digest makes it the same bytes wherever it is read from.
+# A system's build that cannot pull public ECR reliably (anonymous pulls are rate-limited per address) names its
+# mirror that way. The default names no system: this template is every system's.
+ARG LambdaAdapter=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1@sha256:1e5ab4d9242167500ed8a7bed8a79b448228aaa51cf382fb51fe4bf8a5f9a811
+FROM ${LambdaAdapter} AS lambda-adapter
+
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 # AWS Lambda Web Adapter: runs this ASP.NET host on AWS Lambda (Function URL / API Gateway) by
 # proxying Lambda invocations to the app's HTTP listener on AWS_LWA_PORT. The adapter is a Lambda
 # extension under /opt/extensions; it is launched only by the Lambda execution environment's
 # extension loader, so on non-Lambda hosts (ECS/Fargate, EC2, local) nothing reads /opt/extensions
 # and the binary stays dormant. This single image therefore works for both lambda-* and ecs-* topologies.
-COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 /lambda-adapter /opt/extensions/lambda-adapter
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
 # The aspnet:10.0 image already bakes ASPNETCORE_HTTP_PORTS=8080, so the app listens on 0.0.0.0:8080.
 # AWS_LWA_PORT must match that port; EXPOSE documents it.
 ENV AWS_LWA_PORT=8080

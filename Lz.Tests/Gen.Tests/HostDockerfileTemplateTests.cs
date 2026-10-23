@@ -60,6 +60,20 @@ public class HostDockerfileTemplateTests
     }
 
     [Fact]
+    public void TheLambdaAdapter_IsPinnedByDigest_AndABuildMayNameItsMirror_ButTheDefaultNamesNoSystem()
+    {
+        // A system whose builds cannot pull public ECR reliably names its own copy of the same image (Scutara, 2026-10-23:
+        // anonymous pulls from GitHub's runners met "429 Data limit exceeded"). The digest keeps that copy the same bytes.
+        Assert.Matches(@"(?m)^ARG LambdaAdapter=public\.ecr\.aws/awsguru/aws-lambda-adapter:[\d.]+@sha256:[0-9a-f]{64}\r?$", Dockerfile);
+        Assert.Contains("FROM ${LambdaAdapter} AS lambda-adapter", Dockerfile);
+        Assert.Contains("COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter", Dockerfile);
+        Assert.DoesNotContain("COPY --from=public.ecr.aws", Dockerfile);
+        Assert.DoesNotContain("ghcr.io/", Dockerfile);
+        // A global ARG is seen by a FROM only when it comes before the first FROM.
+        Assert.True(Dockerfile.IndexOf("ARG LambdaAdapter=", StringComparison.Ordinal) < Dockerfile.IndexOf("FROM ", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TheCredentialIsABuildSecret_NeverABuildArg()
     {
         Assert.Contains("--mount=type=secret,id=nuget_creds", Dockerfile);
