@@ -118,9 +118,20 @@ public sealed record BuildRecordIntake(
 
 /// <param name="Result">Always <c>passed</c> on a record: nothing is recorded for a build that failed Gate 1.</param>
 /// <param name="Evidence">The key of the verdict in the intake's evidence store.</param>
+/// <param name="Lists">A <c>tests</c> record only: the lists Gate 1 recorded from these bytes under Gate 2's fixed filters,
+/// which Gate 2's verdict holds what ran to (DecoupledCd.md §15.5). Absent from every other record, and from a tests record
+/// written before 2026-10-23.</param>
 public sealed record BuildRecordGate1(
     [property: JsonPropertyName("result")] string Result,
-    [property: JsonPropertyName("evidence")] string Evidence);
+    [property: JsonPropertyName("evidence")] string Evidence,
+    [property: JsonPropertyName("lists")] BuildRecordGate1Lists? Lists = null);
+
+/// <summary>Gate 1's lists of a test bundle: the e2e methods by Gate 2 trait, and, for the browser tests, the <c>@gate</c> count.</summary>
+public sealed record BuildRecordGate1Lists(
+    [property: JsonPropertyName("precondition")] IReadOnlyList<string> Precondition,
+    [property: JsonPropertyName("blocking")] IReadOnlyList<string> Blocking,
+    [property: JsonPropertyName("advisory")] IReadOnlyList<string> Advisory,
+    [property: JsonPropertyName("gateCount")] int? GateCount = null);
 
 /// <summary>An S3 object named by key AND version, so it names those bytes and no later ones.</summary>
 public sealed record BuildRecordObjectRef(

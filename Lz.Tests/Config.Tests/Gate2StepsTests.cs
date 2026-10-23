@@ -277,6 +277,30 @@ public sealed class Gate2StepsTests
         Assert.Equal("Passed", first["outcome"]!.GetValue<string>());
     }
 
+    private sealed class Unresolvable : IGate2Bundles
+    {
+        public Task<Gate2Bundles> ResolveAsync(JsonObject state, Gate2Running running) => throw new Gate2NotResolvable("no browser tests record");
+    }
+
+    [Fact]
+    public async Task NothingToRun_IsIncomplete_NoBuild_AndRecordedAsTestsIncomplete()
+    {
+        var leases = new InMemoryServiceLeaseStore();
+        var state = ImageState();
+        state["gate2Start"] = await Gate2StartStep.RunAsync(state, Exec, Set, leases, LeaseKey, new Services(Digest), new Markers(),
+            new Unresolvable(), "scu-dev-gate2-results-4df6-b9c6", Now);
+        Assert.Equal("incomplete", state["gate2Start"]!["verdict"]!.GetValue<string>());
+        Assert.Null(state["gate2Start"]!["variables"]);
+        var store = new Store();
+
+        var result = await Gate2ResultStep.RunAsync(state, Exec, Set, leases, LeaseKey, new Services(Digest), new Markers(),
+            new Results(), Evidence, store, store, new Alerts(), Now);
+
+        Assert.Equal("TestsIncomplete", result["outcome"]!.GetValue<string>());
+        Assert.Contains(result["reasons"]!.AsArray(), r => r!.GetValue<string>().Contains("no browser tests record"));
+        Assert.DoesNotContain(LeaseKey, leases.Live.Keys);
+    }
+
     // ---- the set ----
 
     [Fact]

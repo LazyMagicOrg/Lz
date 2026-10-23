@@ -99,6 +99,11 @@ public static class IntakePublishStep
         var packages = (builtFromNode["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>());
         var builtFrom = new BuildRecordBuiltFrom(repository.Repo, headSha, "published", packages, $"refs/heads/{Text(check, "headBranch")}");
         var gate1Evidence = IntakeEvidence.Gate1(executionName);
+        // Gate 1's lists of the test bundle, which Gate 2 holds what ran to (§15.5): carried on the tests record, beside its zip.
+        var testsLists = gate1?["gate2Lists"] is JsonObject recordedLists
+            ? new BuildRecordGate1Lists(ListOf(recordedLists["precondition"]), ListOf(recordedLists["blocking"]), ListOf(recordedLists["advisory"]))
+            : null;
+        static IReadOnlyList<string> ListOf(JsonNode? node) => (node as JsonArray ?? new JsonArray()).Select(n => n!.GetValue<string>()).ToList();
 
         (string Key, string Sha256) Passed(string artifact)
         {
@@ -188,6 +193,7 @@ public static class IntakePublishStep
         {
             if (repository.Gate1 is not { } gate) return;
             var provisional = Record("tests", new BuildRecordIdentity("bundle"), gate.Artifact, testsStaged.Sha256);
+            provisional = provisional with { Intake = provisional.Intake! with { Gate1 = provisional.Intake.Gate1 with { Lists = testsLists } } };
             var zipKey = BuildRecordFormat.BundleKeyFor(provisional);
             var stored = await PutArtifactAsync(stores, zipKey, await Fetched(testsStaged, "tests.zip"), testsStaged.Sha256);
             written.Add(await WriteRecordAsync(stores, provisional with

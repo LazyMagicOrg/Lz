@@ -185,7 +185,18 @@ public static class Gate2StartStep
             return result;
         }
 
-        var resolved = await bundles.ResolveAsync(state, before);
+        Gate2Bundles resolved;
+        try
+        {
+            resolved = await bundles.ResolveAsync(state, before);
+        }
+        catch (Gate2NotResolvable ex)
+        {
+            // Nothing to run whole: no build, and the result state records TestsIncomplete with this reason.
+            result["verdict"] = "incomplete";
+            result["reason"] = ex.Message;
+            return result;
+        }
         var variables = new Dictionary<string, string>(resolved.Variables)
         {
             ["GATE2_EXECUTION"] = executionName,
@@ -225,9 +236,13 @@ public static class Gate2ResultStep
         Gate2Outcome outcome;
         var advisoryResults = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        if (start["verdict"]?.GetValue<string>() != "ours")
+        if (start["verdict"]?.GetValue<string>() == "superseded")
         {
             (outcome, reasons) = (Gate2Outcome.TestsSuperseded, new[] { start["reason"]?.GetValue<string>() ?? "this execution's artifact was not running" });
+        }
+        else if (start["verdict"]?.GetValue<string>() != "ours")
+        {
+            (outcome, reasons) = (Gate2Outcome.TestsIncomplete, new[] { start["reason"]?.GetValue<string>() ?? "Gate2Start found nothing to run" });
         }
         else
         {

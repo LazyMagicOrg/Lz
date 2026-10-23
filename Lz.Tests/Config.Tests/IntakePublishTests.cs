@@ -187,6 +187,27 @@ public class IntakePublishTests : IDisposable
     }
 
     [Fact]
+    public async Task TheTestsRecord_CarriesTheListsGate1Recorded_ForGate2_AndTheImageRecordDoesNot()
+    {
+        var (f, state, _) = Passed();
+        state["gate1"]!["gate2Lists"] = new JsonObject
+        {
+            ["precondition"] = new JsonArray("ServiceTest.E2E.E2ELiveSmokeTests.Config_ServesAllThreePools"),
+            ["blocking"] = new JsonArray("ServiceTest.E2E.E2ELeadRowsTests.AStaffRebuild"),
+            ["advisory"] = new JsonArray(),
+        };
+
+        await Publish(f, state);
+
+        const string stem = "20261021T181739Z-39651406296-1";
+        var lists = BuildRecordFormat.Parse(f.RecordStore[$"tests/scutara/scutaraservice/{stem}.json"], Artifacts).Intake!.Gate1.Lists!;
+        Assert.Equal(new[] { "ServiceTest.E2E.E2ELiveSmokeTests.Config_ServesAllThreePools" }, lists.Precondition);
+        Assert.Equal(new[] { "ServiceTest.E2E.E2ELeadRowsTests.AStaffRebuild" }, lists.Blocking);
+        Assert.Empty(lists.Advisory);
+        Assert.Null(BuildRecordFormat.Parse(f.RecordStore[$"image/scutara/scutaraservice/{stem}.json"]).Intake!.Gate1.Lists);
+    }
+
+    [Fact]
     public async Task AnUnsignedImage_IsWaitedFor_AndNothingIsRecordedMeanwhile()
     {
         var (f, state, _) = Passed();
