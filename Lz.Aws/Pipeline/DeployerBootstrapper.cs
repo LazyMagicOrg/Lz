@@ -453,8 +453,8 @@ public static class DeployerBootstrapper
     /// so the apply stops before it writes anything.</para>
     /// </summary>
     public static string? RefusalForGate2(PipelineDeployer plan) => plan.Gate2 is null ? null :
-        "Pipeline.Gate2 is on, and Gate 2 is planned but not yet applicable: its functions' handlers, the bundles it runs and " +
-        $"its CodeBuild project ({plan.Gate2.ProjectName}) land in V-E's E1c and E2. Turn Gate2 off to apply.";
+        "Pipeline.Gate2 is on, and Gate 2 is planned but not yet applicable: its CodeBuild project " +
+        $"({plan.Gate2.ProjectName}), results bucket and the build account's grants are created in V-E's E2. Turn Gate2 off to apply.";
 
     public static string? RefusalForHookPackage(IReadOnlyList<string> missingVerifierFiles, bool enforceSignatures)
         => enforceSignatures && missingVerifierFiles.Count > 0

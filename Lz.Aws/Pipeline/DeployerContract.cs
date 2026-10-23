@@ -315,6 +315,7 @@ public static class DeployerEnvironment
     public const string Gate2Set = "LZ_GATE2_SET";
     public const string Gate2LeaseKey = "LZ_GATE2_LEASE_KEY";
     public const string Gate2ResultsBucket = "LZ_GATE2_RESULTS_BUCKET";
+    public const string Gate2BrowserPrefix = "LZ_GATE2_BROWSER_PREFIX";
     public const string TargetAccount = "LZ_TARGET_ACCOUNT";
     public const string BucketVersioning = "LZ_BUCKET_VERSIONING";
     public const string NoncurrentExpirationDays = "LZ_NONCURRENT_EXPIRATION_DAYS";

@@ -16,6 +16,7 @@ public class DeployerGate2PlanTests
         config.Pipeline!.DeployOnBuildRecord = true;
         config.Pipeline.Alerts = true;
         config.Pipeline.Gate2 = gate2;
+        config.Pipeline.Gate2BrowserTests = "Scutara/ScutaraE2ETests";
         config.Pipeline.Repositories!.Single(r => r.Repo == "Scutara/ScutaraService").Gate1 = new PipelineGate1Config
         {
             Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
@@ -158,6 +159,23 @@ public class DeployerGate2PlanTests
             Assert.Equal(new[] { $"{DeployerPlanner.Gate2LeasePrefix}*" }, leading);
         }
         Assert.Equal("lease#gate2#dev", plan.Gate2!.LeaseKey);
+    }
+
+    [Fact]
+    public void Gate2Start_ReadsTestsRecordsAndTheirZipsByVersion_ListsOnlyTheBrowserTests_AndReadsTheImagesDeployedHere()
+    {
+        var start = Function(Plan(gate2: true), DeployerHandlers.Gate2Start);
+        var statements = Statements(start.Policy).ToList();
+        string[] Resources(string sid) => Strings(statements.Single(s => s.GetProperty("Sid").GetString() == sid).GetProperty("Resource")).ToArray();
+
+        Assert.Equal(new[] { "arn:aws:s3:::scu-build-records-4df6-b9c6/tests/*" }, Resources("ReadTestsRecords"));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-artifacts-4df6-b9c6/tests/*" }, Resources("SignTheTestBundlesByVersion"));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-dev-deploy-evidence-4df6-b9c6/deploys/image/*" }, Resources("ReadTheImagesDeployed"));
+        var list = statements.Single(s => s.GetProperty("Sid").GetString() == "ListTheBrowserTestsRecords");
+        Assert.Equal(new[] { "tests/scutara/scutarae2etests/*" }, Strings(list.GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix")));
+        Assert.Equal("tests/scutara/scutarae2etests/", start.Environment[DeployerEnvironment.Gate2BrowserPrefix]);
+        // Gate2Start writes nowhere in S3.
+        Assert.DoesNotContain(statements.SelectMany(s => Strings(s.GetProperty("Action"))), a => a == "s3:PutObject");
     }
 
     [Fact]

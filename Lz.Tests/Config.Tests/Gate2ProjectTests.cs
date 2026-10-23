@@ -20,6 +20,7 @@ public class Gate2ProjectTests
         config.Pipeline!.DeployOnBuildRecord = true;
         config.Pipeline.Alerts = true;
         config.Pipeline.Gate2 = true;
+        config.Pipeline.Gate2BrowserTests = "Scutara/ScutaraE2ETests";
         config.Pipeline.Repositories!.Single(r => r.Repo == "Scutara/ScutaraService").Gate1 = new PipelineGate1Config
         {
             Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", BuildRoot = "/home/runner/work/ScutaraService/ScutaraService",

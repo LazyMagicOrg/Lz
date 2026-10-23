@@ -143,6 +143,12 @@ public class PipelineConfig
     public bool Gate2 { get; set; }
 
     /// <summary>
+    /// The repository whose tests records Gate 2's browser tier runs, the newest of them (§15.5): <c>Scutara/ScutaraE2ETests</c>.
+    /// Required with <see cref="Gate2"/>.
+    /// </summary>
+    public string? Gate2BrowserTests { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

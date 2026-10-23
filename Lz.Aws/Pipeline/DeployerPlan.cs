@@ -218,8 +218,7 @@ public static class DeployerHandlers
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
     public static readonly string DeploySite = For("DeploySiteFunction");
     public static readonly string VerifySite = For("VerifySiteFunction");
-    // Gate 2 (V-E). NOT YET IN All: their classes land with the bundles they run and the project (E1c), and Pipeline.Gate2,
-    // which alone plans them, is refused by bootstrapdeployer until then.
+    // Gate 2 (V-E), planned only under Pipeline.Gate2.
     public static readonly string Gate2Start = For("Gate2StartFunction");
     public static readonly string Gate2Result = For("Gate2ResultFunction");
 
@@ -238,6 +237,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
+        Gate2Start, Gate2Result,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 
@@ -757,10 +757,19 @@ public static class DeployerPlanner
                 [DeployerEnvironment.Gate2ResultsBucket] = results,
             };
 
+            var browserPrefix = BuildRecordFormat.PrefixFor(Gate2BundlesClass, p.Gate2BrowserTests
+                ?? throw new InvalidOperationException("Pipeline.Gate2 needs Gate2BrowserTests, the repository whose tests the browser tier runs."));
             functions.Add(new(start, DeployerHandlers.Gate2Start, $"{start}-fn",
                 Combine(Logs(region, acct, start), [.. Gate2LeaseGrants(region, acct, sk, "ClaimTheGate2Lease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"),
-                         .. Gate2ReadGrants(set)]),
-                gate2Environment, TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+                         .. Gate2ReadGrants(set), .. Gate2BundleGrants(buildRecordStore, artifactStore, evidence, browserPrefix)]),
+                new Dictionary<string, string>(gate2Environment)
+                {
+                    [DeployerEnvironment.BuildRecordStore] = buildRecordStore,
+                    [DeployerEnvironment.ArtifactStore] = artifactStore,
+                    [DeployerEnvironment.EvidenceStore] = evidence,
+                    [DeployerEnvironment.Gate2BrowserPrefix] = browserPrefix,
+                },
+                TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
             functions.Add(new(result, DeployerHandlers.Gate2Result, $"{result}-fn",
                 Combine(Logs(region, acct, result), [.. Gate2LeaseGrants(region, acct, sk, "ReleaseTheGate2Lease", "dynamodb:GetItem", "dynamodb:UpdateItem"),
@@ -1809,6 +1818,38 @@ public static class DeployerPlanner
             });
         return grants.ToArray();
     }
+
+    /// <summary>The class of the records Gate 2 runs: the test bundles the intake publishes beside a build's own record.</summary>
+    public const string Gate2BundlesClass = "tests";
+
+    /// <summary>
+    /// Gate2Start's own, to find and hand on what the gate runs (Gate2RecordBundles): the build account's tests records, the
+    /// browser tests' listed to find the newest; their zips by VERSION, which the URL it signs names; and this environment's
+    /// image deploy evidence, through which a client's gate finds the image it runs. The build account's stores must grant the
+    /// same reads to this role; their policies are bootstrappipeline's.
+    /// </summary>
+    private static object[] Gate2BundleGrants(string buildRecordStore, string artifactStore, string evidence, string browserPrefix) => new object[]
+    {
+        new { Sid = "ReadTestsRecords", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{buildRecordStore}/{Gate2BundlesClass}/*" },
+        new
+        {
+            Sid = "ListTheBrowserTestsRecords",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{buildRecordStore}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = new[] { $"{browserPrefix}*" } } },
+        },
+        new { Sid = "SignTheTestBundlesByVersion", Effect = "Allow", Action = new[] { "s3:GetObjectVersion" }, Resource = $"arn:aws:s3:::{artifactStore}/{Gate2BundlesClass}/*" },
+        new { Sid = "ReadTheImagesDeployed", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{evidence}/deploys/image/*" },
+        new
+        {
+            Sid = "ListTheImagesDeployed",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{evidence}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = new[] { "deploys/image/*" } } },
+        },
+    };
 
     /// <summary>
     /// Gate2Result's own: the result files the build uploaded, the evidence store's <c>tests/</c> — read for the previous

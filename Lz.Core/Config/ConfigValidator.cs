@@ -416,6 +416,12 @@ public static class ConfigValidator
                 "Pipeline.Gate2 is on but Pipeline.DeployOnBuildRecord or Pipeline.Alerts is off. Gate 2 reads the services the " +
                 "trigger's routes name, and publishes an advisory result that changed to the alerts topic. Turn both on, or Gate2: false.");
         }
+        if (p.Gate2 && string.IsNullOrWhiteSpace(p.Gate2BrowserTests))
+        {
+            errors.Add(
+                "Pipeline.Gate2 is on but Pipeline.Gate2BrowserTests names no repository. Gate 2's browser tier runs the newest tests " +
+                "record of that repository (Scutara/ScutaraE2ETests). Name it, or Gate2: false.");
+        }
 
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {

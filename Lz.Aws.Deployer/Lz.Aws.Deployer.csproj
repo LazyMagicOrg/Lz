@@ -62,6 +62,10 @@
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SiteDeploy.cs" Link="Linked\Lz.Aws\Pipeline\SiteDeploy.cs" />
+    <!-- Gate 2 (DecoupledCd V-E): its two functions' steps, what they run, and the verdict. -->
+    <Compile Include="..\Lz.Aws\Pipeline\Gate2Steps.cs" Link="Linked\Lz.Aws\Pipeline\Gate2Steps.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\Gate2Bundles.cs" Link="Linked\Lz.Aws\Pipeline\Gate2Bundles.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\Gate2Verdict.cs" Link="Linked\Lz.Aws\Pipeline\Gate2Verdict.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappMirrorPlanner.cs" Link="Linked\Lz.Aws\Webapp\WebappMirrorPlanner.cs" />
     <Compile Include="..\Lz.Aws\S3BucketRequests.cs" Link="Linked\Lz.Aws\S3BucketRequests.cs" />
