@@ -282,6 +282,25 @@ public class PipelineRepositoryConfig
 /// <summary>Gate 1 for one repository (DecoupledCd.md §15.4, V-C).</summary>
 public class PipelineGate1Config
 {
+    /// <summary>
+    /// <c>tests</c> (the default) runs the repository's test bundle in CodeBuild; <c>site</c> is lz's own check of a site's
+    /// bundles (DecoupledCd.md V-24), which runs no repository code and so takes none of the settings below but
+    /// <see cref="Indexed"/>.
+    /// </summary>
+    public string? Kind { get; set; }
+
+    /// <summary>
+    /// A site's check only: the environments whose site may be indexed, so carries no <c>noindex</c> (V-24: prod). Every
+    /// other environment's bundle must carry it.
+    /// </summary>
+    public List<string>? Indexed { get; set; }
+
+    /// <summary>
+    /// A site's check only: the hosts a page may load a script or stylesheet from without SRI, which a third party's changing
+    /// file cannot carry (the GoHighLevel form embed, <c>link.msgsndr.com</c>). Any other host's must carry SRI.
+    /// </summary>
+    public List<string>? ThirdPartyHosts { get; set; }
+
     /// <summary>The test assembly, relative to the unzipped bundle, e.g. <c>ServiceTest/bin/Debug/net10.0/ServiceTest.dll</c>.</summary>
     public string? Run { get; set; }
 

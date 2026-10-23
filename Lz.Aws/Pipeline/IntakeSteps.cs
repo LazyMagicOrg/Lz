@@ -127,6 +127,7 @@ public static class IntakeFetchStep
         JsonObject? sbom = null;
         JsonObject? bundle = null;
         string? bundleSha256 = null;
+        var sites = new JsonArray();
         foreach (var (configured, artifact) in expected.Select(n => (n, check.Found[n])))
         {
             var path = Path.Combine(workDirectory, $"{artifact.Name}.zip");
@@ -188,6 +189,16 @@ public static class IntakeFetchStep
                 if (isSbom) sbom = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
                 if (bundleSha256 is not null && bundle is null)
                     bundle = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bundleSha256"] = bundleSha256 };
+                // A SITE (V-24): each artifact is one environment's bundle, for the site check and the publish to tell apart.
+                if (repository.Site is { } site && !isTests && !isBuiltFrom && !isSbom)
+                    sites.Add(new JsonObject
+                    {
+                        ["artifact"] = artifact.Name, ["configured"] = configured,
+                        ["environment"] = site.Environments.TryGetValue(configured, out var environment)
+                            ? environment
+                            : throw new IntakeFault($"{input.Repo}'s site check names no environment for {configured}"),
+                        ["key"] = key, ["sha256"] = sha256, ["bundleSha256"] = bundleSha256,
+                    });
             }
             finally
             {
@@ -201,6 +212,7 @@ public static class IntakeFetchStep
         if (builtFrom is not null) result["builtFrom"] = builtFrom;
         if (sbom is not null) result["sbom"] = sbom;
         if (bundle is not null) result["bundle"] = bundle;
+        if (sites.Count > 0) result["sites"] = sites;
         await evidence.PutOnceAsync(IntakeEvidence.Staged(executionName), result.ToJsonString());   // already there: this try's retry wrote it
         return result;
     }

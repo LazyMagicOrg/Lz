@@ -11,9 +11,16 @@ namespace Lz.Aws.Pipeline;
 /// <param name="Gate1">The test bundle and how Gate 1 runs it (V-C); null for a repository with no Gate 1 yet.</param>
 /// <param name="BuiltFrom">The artifact holding the build's <c>builtfrom.json</c>; null where the repository uploads none.</param>
 /// <param name="Sbom">The artifact holding the build's SBOM, one <c>.json</c> document (V-19); null where it uploads none.</param>
+/// <param name="Site">A site's Gate 1, lz's own check of its bundles (V-24); null for every other repository.</param>
 public sealed record IntakeRepository(string Repo, long RepositoryId, long OwnerId, string WorkflowPath, string Mode, string Class,
-    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null, string? BuiltFrom = null, string? Sbom = null)
+    IReadOnlyList<string> Artifacts, IntakeGate1? Gate1 = null, string? BuiltFrom = null, string? Sbom = null, IntakeSiteCheck? Site = null)
 {
+    /// <summary>
+    /// The classes whose prefixes the publish writes under in each store: its own, and <c>tests</c> where it has a test bundle.
+    /// A site has none, so it is given no <c>tests/</c> prefix.
+    /// </summary>
+    public IReadOnlyList<string> PublishedClasses => Site is not null && Gate1 is null ? new[] { Class } : new[] { Class, "tests" };
+
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
 }
@@ -24,6 +31,12 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
 /// <param name="BuildRoot">Where the bundle is unzipped: the path it was built at, or <c>/tmp/bundle</c>.</param>
 public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images,
     IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null);
+
+/// <summary>
+/// A site's Gate 1 (DecoupledCd.md V-24): which environment each artifact's bundle was built for, read from its name by the
+/// planner, and what <see cref="SiteCheck"/> is told.
+/// </summary>
+public sealed record IntakeSiteCheck(IReadOnlyDictionary<string, string> Environments, IReadOnlyList<string> Indexed, IReadOnlyList<string> ThirdPartyHosts);
 
 /// <summary>An image Gate 1 pulls by digest and tags as the tests expect it.</summary>
 public sealed record IntakeImage(string From, string As);

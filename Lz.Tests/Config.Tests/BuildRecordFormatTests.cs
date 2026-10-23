@@ -105,12 +105,12 @@ public class BuildRecordFormatTests
     [Theory]
     [InlineData("client", "Scutara/ScutaraSellerApp")]
     [InlineData("client", "Scutara/ScutaraAdminApp")]
-    [InlineData("site", "Scutara/ScutaraWebsite")]
     [InlineData("assets", "Scutara/ScutaraTenancies")]
     [InlineData("config", "Scutara/Scutara")]
     public void ABundleRecordOfEachBundleClass_RoundTrips(string cls, string repo)
     {
-        // P4 A's done-when: a record of each class round-trips before any is written.
+        // P4 A's done-when: a record of each class round-trips before any is written. Not a site's since V-24: the intake
+        // alone writes one, naming its environment (SiteRecordTests).
         var record = Bundle(cls, repo);
         var parsed = BuildRecordFormat.Parse(BuildRecordFormat.Serialize(record), Store);
 

@@ -70,6 +70,7 @@ public class BuildSideConfig
             if (repo.Intake is not null && (repo.RepositoryId is null || repo.OwnerId is null || string.IsNullOrWhiteSpace(repo.WorkflowPath)))
                 p.Add($"{name}: an Intake mode needs RepositoryId, OwnerId and WorkflowPath, which the run check compares by id");
             p.AddRange(Gate1Problems(name, repo));
+            if (repo.Class == "site") p.AddRange(SiteProblems(name, repo, Chain));
             if (repo.BuiltFrom is { } bf && !Regex.IsMatch(bf, "^[a-z][a-z0-9-]*$"))
                 p.Add($"{name}: BuiltFrom '{bf}' is not an artifact's base name");
             if (repo.BuiltFrom is { } same && (same == repo.TestBundle || (repo.Artifacts ?? new()).Contains(same)))
@@ -79,7 +80,8 @@ public class BuildSideConfig
             // A LIVE INTAKE WRITES RECORDS (V-D), and a record needs builtFrom, Gate 1's pass, and for an image the SBOM (V-19).
             if (repo.Intake == "live")
             {
-                if (repo.BuiltFrom is null) p.Add($"{name}: Intake: live needs BuiltFrom, since its records carry builtFrom.packages");
+                // A site's records carry builtFrom.packages empty (V-24): a Hugo build consumes no first-party package.
+                if (repo.BuiltFrom is null && repo.Class != "site") p.Add($"{name}: Intake: live needs BuiltFrom, since its records carry builtFrom.packages");
                 if (repo.Gate1 is null) p.Add($"{name}: Intake: live needs Gate1; nothing is recorded without a pass");
                 if (repo.Class is "image" or "tooling" && repo.Sbom is null) p.Add($"{name}: Intake: live for an image needs Sbom (V-19)");
             }
@@ -90,6 +92,18 @@ public class BuildSideConfig
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
     private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
     {
+        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site"))
+        {
+            yield return $"{name}: Gate1.Kind '{kind}' is not tests or site";
+            yield break;
+        }
+        if (repo.Gate1?.Kind == "site")
+        {
+            foreach (var problem in SiteCheckProblems(name, repo)) yield return problem;
+            yield break;
+        }
+        if (repo.Gate1?.Indexed is not null) yield return $"{name}: Gate1.Indexed is for a site's check only (Gate1.Kind: site)";
+        if (repo.Gate1?.ThirdPartyHosts is not null) yield return $"{name}: Gate1.ThirdPartyHosts is for a site's check only (Gate1.Kind: site)";
         if (repo.TestBundle is null && repo.Gate1 is null) yield break;
         if (string.IsNullOrWhiteSpace(repo.TestBundle)) { yield return $"{name}: Gate1 is set without a TestBundle to run"; yield break; }
         if (repo.Gate1 is not { } g) { yield return $"{name}: TestBundle is set without Gate1 to say how it runs"; yield break; }
@@ -114,6 +128,53 @@ public class BuildSideConfig
             if (image.From is null || !Regex.IsMatch(image.From, "@sha256:[0-9a-f]{64}$"))
                 yield return $"{name}: Gate1 image '{image.From}' is not pulled by digest";
             if (string.IsNullOrWhiteSpace(image.As)) yield return $"{name}: Gate1 image '{image.From}' has no As";
+        }
+    }
+
+    /// <summary>
+    /// A site's Gate 1 (DecoupledCd.md V-24): lz's own check of the bundles, so none of a test bundle's settings, which would
+    /// say how to run repository code it never runs; and the environments whose site may be indexed, by name.
+    /// </summary>
+    private static IEnumerable<string> SiteCheckProblems(string name, PipelineRepositoryConfig repo)
+    {
+        if (repo.Class != "site")
+            yield return $"{name}: Gate1.Kind site is lz's check of a site's bundles; {repo.Repo} is class '{repo.Class}'";
+        var g = repo.Gate1!;
+        if (repo.TestBundle is not null) yield return $"{name}: Gate1.Kind site runs no repository code, so it takes no TestBundle";
+        foreach (var (field, set) in new[]
+                 {
+                     ("Run", g.Run is not null), ("Filter", g.Filter is not null), ("BuildRoot", g.BuildRoot is not null),
+                     ("SdkVersion", g.SdkVersion is not null), ("SdkSha512", g.SdkSha512 is not null),
+                     ("Images", g.Images is not null), ("Environment", g.Environment is not null),
+                 })
+            if (set) yield return $"{name}: Gate1.Kind site runs no repository code, so it takes no {field}";
+        foreach (var env in g.Indexed ?? new())
+            if (!Regex.IsMatch(env ?? "", SiteArtifacts.EnvironmentPattern))
+                yield return $"{name}: Gate1.Indexed '{env}' is not an environment's name";
+        foreach (var host in g.ThirdPartyHosts ?? new())
+            if (!Regex.IsMatch(host ?? "", @"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"))
+                yield return $"{name}: Gate1.ThirdPartyHosts '{host}' is not a host name";
+    }
+
+    /// <summary>
+    /// A site repository (DecoupledCd.md V-24): one bundle per environment, <c>site-{environment}</c>, each environment in the
+    /// chain where there is one; lz's site check as its Gate 1; and no BuiltFrom or SBOM, since a Hugo build has neither.
+    /// </summary>
+    private static IEnumerable<string> SiteProblems(string name, PipelineRepositoryConfig repo, List<PipelineChainEntry>? chain)
+    {
+        if (repo.Gate1 is { } g && g.Kind != "site") yield return $"{name}: a site's Gate 1 is lz's site check (Gate1.Kind: site)";
+        if (repo.BuiltFrom is not null) yield return $"{name}: a site consumes no first-party package, so it uploads no BuiltFrom";
+        if (repo.Sbom is not null) yield return $"{name}: a site uploads no Sbom";
+        var artifacts = repo.Artifacts ?? new();
+        if (artifacts.Count == 0) yield return $"{name}: a site names at least one artifact, site-{{environment}}";
+        var environments = chain?.Select(c => c.Environment).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        foreach (var artifact in artifacts.Distinct(StringComparer.Ordinal))
+        {
+            if (artifacts.Count(a => a == artifact) > 1) yield return $"{name}: names '{artifact}' twice";
+            if (SiteArtifacts.EnvironmentOf(artifact) is not { } env)
+                yield return $"{name}: a site's artifact is site-{{environment}}, not '{artifact}'";
+            else if (environments is { Count: > 0 } && !environments.Contains(env))
+                yield return $"{name}: '{artifact}' names environment '{env}', which is not in the Chain";
         }
     }
 
@@ -159,4 +220,21 @@ public class PipelineChainEntry
 {
     public string? Environment { get; set; }
     public string? AccountId { get; set; }
+}
+
+/// <summary>A site repository's artifacts (DecoupledCd.md V-24): one bundle per environment, named <c>site-{environment}</c>.</summary>
+public static class SiteArtifacts
+{
+    public const string Prefix = "site-";
+
+    /// <summary>An environment's name as the site's artifacts and records spell it: lowercase, as lz's config file names do.</summary>
+    public const string EnvironmentPattern = "^[a-z0-9][a-z0-9-]{0,31}$";
+
+    /// <summary>The environment an artifact's name says it was built for; null when it is not <c>site-{environment}</c>.</summary>
+    public static string? EnvironmentOf(string artifact)
+        => artifact.StartsWith(Prefix, StringComparison.Ordinal) && Regex.IsMatch(artifact[Prefix.Length..], EnvironmentPattern)
+            ? artifact[Prefix.Length..]
+            : null;
+
+    public static string ArtifactFor(string environment) => Prefix + environment;
 }

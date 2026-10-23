@@ -89,7 +89,14 @@ public static class IntakeBuildPlanner
                         g.Environment is { Count: > 0 } env ? new Dictionary<string, string>(env) : null,
                         g.BuildRoot)
                     : null,
-                r.BuiltFrom, r.Sbom))
+                r.BuiltFrom, r.Sbom,
+                r.Gate1 is { Kind: "site" } site
+                    ? new IntakeSiteCheck(
+                        (r.Artifacts ?? new()).ToDictionary(a => a, a => SiteArtifacts.EnvironmentOf(a)
+                            ?? throw new InvalidOperationException($"{r.Repo}: '{a}' is not site-{{environment}}")),
+                        (IReadOnlyList<string>?)site.Indexed ?? Array.Empty<string>(),
+                        (IReadOnlyList<string>?)site.ThirdPartyHosts ?? Array.Empty<string>())
+                    : null))
             .ToList();
 
     /// <summary>The intake's plan, or null when no repository has an <c>Intake</c> mode: a system that has not opted in gets none.</summary>
@@ -192,10 +199,12 @@ public static class IntakeBuildPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
         };
 
-        // GATE 1 (V-C), only where a repository has one.
+        // GATE 1 (V-C), only where a repository has one: a test bundle's in CodeBuild, a site's in a function (V-24).
         IntakeGate1Build? gate1 = null;
-        string? gate1StartArn = null, gate1VerdictArn = null, publishArn = null;
-        if (repositories.Any(r => r.Gate1 is not null))
+        string? gate1StartArn = null, gate1VerdictArn = null, siteCheckArn = null, publishArn = null;
+        var tests = repositories.Any(r => r.Gate1 is not null);
+        var sites = repositories.Any(r => r.Site is not null);
+        if (tests)
         {
             var project = Fn("gate1");
             var projectArn = $"arn:aws:codebuild:{region}:{accountId}:project/{project}";
@@ -251,6 +260,31 @@ public static class IntakeBuildPlanner
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
             (gate1StartArn, gate1VerdictArn) = (FnArn(start), FnArn(verdict));
+        }
+
+        if (sites)
+        {
+            // A SITE'S GATE 1 (V-24): lz's own check over the staged bundles, which runs no repository code, so a function
+            // reads them itself; it writes only its verdict.
+            var siteCheck = Fn("site-check");
+            functions.Add(new(siteCheck, DeployerHandlers.IntakeSiteCheck, $"{siteCheck}-fn",
+                DeployerPlanner.Combine(DeployerPlanner.Logs(region, accountId, siteCheck), new[]
+                {
+                    new { Sid = "ReadTheStagedSites", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = new[] { $"arn:aws:s3:::{scratch}/*" } },
+                    WriteEvidence("WriteTheVerdictOnce", "gate1/"),
+                }),
+                new Dictionary<string, string>
+                {
+                    [IntakeEnvironment.Repositories] = reposVariable,
+                    [IntakeEnvironment.ScratchBucket] = scratch,
+                    [IntakeEnvironment.EvidenceStore] = evidence,
+                },
+                TimeoutSeconds: FetchTimeoutSeconds, MemoryMb: FetchMemoryMb, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            siteCheckArn = FnArn(siteCheck);
+        }
+
+        if (tests || sites)
+        {
 
             // THE PUBLISH (V-D), after Gate 1's pass: a no-op for a dry repository, so the machine is one shape for all.
             var publish = Fn("publish");
@@ -264,7 +298,7 @@ public static class IntakeBuildPlanner
                 new
                 {
                     Sid = "ReadAndWriteItsRecordsOnce", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject" },
-                    Resource = repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => $"arn:aws:s3:::{recordStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
+                    Resource = repositories.SelectMany(r => r.PublishedClasses.Select(c => $"arn:aws:s3:::{recordStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
                 },
                 // Existence is read by listing the exact key, in both stores (S3PublishStores), so each lists its own prefixes.
                 new
@@ -286,7 +320,7 @@ public static class IntakeBuildPlanner
                 new
                 {
                     Sid = "WriteItsArtifactsOnce", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject" },
-                    Resource = repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => $"arn:aws:s3:::{artifactStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
+                    Resource = repositories.SelectMany(r => r.PublishedClasses.Select(c => $"arn:aws:s3:::{artifactStore}/{BuildRecordFormat.PrefixFor(c, r.Repo)}*")).Distinct().ToArray(),
                 },
             };
             if (targets.Count > 0)
@@ -375,7 +409,7 @@ public static class IntakeBuildPlanner
             StateMachineTrustPolicy: DeployerPlanner.ServiceTrustPolicy("states.amazonaws.com", accountId, $"arn:aws:states:{region}:{accountId}:stateMachine:*"),
             FunctionTrustPolicy: DeployerPlanner.ServiceTrustPolicy("lambda.amazonaws.com"),
             DenyPolicy: DeployerPlanner.DenyPolicyFor(),
-            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn, publishArn),
+            Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn, publishArn, siteCheckArn),
             ScheduleRuleName: $"{sk}-intake-poll",
             ScheduleExpression: "rate(1 minute)",
             PollerFunctionName: poller,
@@ -430,7 +464,7 @@ public static class IntakeBuildPlanner
     /// </summary>
     /// <summary>Each repository's two prefixes in either store, its own class's and <c>tests/</c>, as list conditions.</summary>
     private static string[] OwnPrefixes(IReadOnlyList<IntakeRepository> repositories)
-        => repositories.SelectMany(r => new[] { r.Class, "tests" }.Select(c => BuildRecordFormat.PrefixFor(c, r.Repo) + "*")).Distinct().ToArray();
+        => repositories.SelectMany(r => r.PublishedClasses.Select(c => BuildRecordFormat.PrefixFor(c, r.Repo) + "*")).Distinct().ToArray();
 
     /// <summary>
     /// Where each image-class repository's one image is pushed (V-D): its pipeline repository and its push role's signing
@@ -447,9 +481,10 @@ public static class IntakeBuildPlanner
     public const int SigningPollAttempts = 60;
 
     public static string DefinitionFor(string checkFn, string fetchFn, string recordFn, string? gate1StartFn = null, string? gate1VerdictFn = null,
-        string? publishFn = null)
+        string? publishFn = null, string? siteCheckFn = null)
     {
-        var gate1 = gate1StartFn is not null && gate1VerdictFn is not null;
+        var testsGate = gate1StartFn is not null && gate1VerdictFn is not null;
+        var gate1 = testsGate || siteCheckFn is not null;
         var payload = new Dictionary<string, object> { ["state.$"] = "$", ["executionName.$"] = "$$.Execution.Name" };
         object Transient() => new
         {
@@ -492,24 +527,28 @@ public static class IntakeBuildPlanner
 
         if (gate1)
         {
-            // GATE 1 (V-C): only a repository whose fetch staged a test bundle has one; the rest go straight to the outcome.
-            states["HasGate1"] = new
+            // GATE 1 (V-C): only a repository whose fetch staged a test bundle, or a site's bundles (V-24), has one; the rest go
+            // straight to the outcome. A site's verdict lands where a test bundle's does, so the outcome reads either.
+            var choices = new List<object>();
+            if (testsGate) choices.Add(new { Variable = "$.fetch.tests", IsPresent = true, Next = "Gate1Start" });
+            if (siteCheckFn is not null) choices.Add(new { Variable = "$.fetch.sites", IsPresent = true, Next = "SiteCheck" });
+            states["HasGate1"] = new { Type = "Choice", Choices = choices.ToArray(), Default = "MarkTakenIn" };
+            if (testsGate)
             {
-                Type = "Choice",
-                Choices = new object[] { new { Variable = "$.fetch.tests", IsPresent = true, Next = "Gate1Start" } },
-                Default = "MarkTakenIn",
-            };
-            states["Gate1Start"] = new { Type = "Task", Resource = gate1StartFn!, Parameters = payload, ResultPath = "$.gate1Start", Retry = new[] { Transient() }, Next = "Gate1Verdict", Catch = toFault };
-            states["Gate1Verdict"] = new
-            {
-                Type = "Task", Resource = gate1VerdictFn!, Parameters = payload, ResultPath = "$.gate1",
-                Retry = new object[]
+                states["Gate1Start"] = new { Type = "Task", Resource = gate1StartFn!, Parameters = payload, ResultPath = "$.gate1Start", Retry = new[] { Transient() }, Next = "Gate1Verdict", Catch = toFault };
+                states["Gate1Verdict"] = new
                 {
-                    new { ErrorEquals = new[] { nameof(Gate1StillRunning) }, IntervalSeconds = Gate1PollSeconds, MaxAttempts = Gate1PollAttempts, BackoffRate = 1.0 },
-                    Transient(),
-                },
-                Next = "Gate1Outcome", Catch = toFault,
-            };
+                    Type = "Task", Resource = gate1VerdictFn!, Parameters = payload, ResultPath = "$.gate1",
+                    Retry = new object[]
+                    {
+                        new { ErrorEquals = new[] { nameof(Gate1StillRunning) }, IntervalSeconds = Gate1PollSeconds, MaxAttempts = Gate1PollAttempts, BackoffRate = 1.0 },
+                        Transient(),
+                    },
+                    Next = "Gate1Outcome", Catch = toFault,
+                };
+            }
+            if (siteCheckFn is not null)
+                states["SiteCheck"] = new { Type = "Task", Resource = siteCheckFn, Parameters = payload, ResultPath = "$.gate1", Retry = new[] { Transient() }, Next = "Gate1Outcome", Catch = toFault };
             states["Gate1Outcome"] = new
             {
                 Type = "Choice",

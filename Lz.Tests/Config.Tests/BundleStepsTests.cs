@@ -426,15 +426,16 @@ public sealed class BundleStepsTests : IDisposable
     [Fact]
     public async Task AClassWithNoBranch_IsRefusedByName()
     {
-        // A well-formed site record, where the environment accepts the class: Verify has no branch for it yet.
-        var site = BuildRecordFormatTests.BundleWorkflowEmitted.Replace("\"client\"", "\"site\"").Replace("client/scutara/", "site/scutara/");
+        // A well-formed assets record, where the environment accepts the class: Verify has no branch for it yet. (A site's was the
+        // example until V-24, when a site record became the intake's alone, naming its environment.)
+        var assets = BuildRecordFormatTests.BundleWorkflowEmitted.Replace("\"client\"", "\"assets\"").Replace("client/scutara/", "assets/scutara/");
         var input = ClientInput();
-        input["record"]!["key"] = RecordKey.Replace("client/", "site/");
-        var settings = ClientSettings() with { Classes = new[] { "image", "client", "site" } };
+        input["record"]!["key"] = RecordKey.Replace("client/", "assets/");
+        var settings = ClientSettings() with { Classes = new[] { "image", "client", "assets" } };
 
-        var ex = await Assert.ThrowsAsync<DeployRefused>(() => VerifyClient(TheRealBundle(), input, settings, site));
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => VerifyClient(TheRealBundle(), input, settings, assets));
 
-        Assert.Contains(ex.Refusals, r => r.Check == "class" && r.Reason.Contains("'site'"));
+        Assert.Contains(ex.Refusals, r => r.Check == "class" && r.Reason.Contains("'assets'"));
     }
 
     // ---------------------------------------------------------------------------------------

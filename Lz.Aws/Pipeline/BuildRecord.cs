@@ -103,6 +103,7 @@ public sealed record BuildRecord(
 /// <param name="ServiceVersion">Image records: the build's NBGV version, for test's AipApi check (§15.5, T-13).</param>
 /// <param name="BaseImageDigest">Image records: the pinned base image the build started from (V-19).</param>
 /// <param name="Sbom">Image records: the SBOM, stored write-once beside the record (V-19).</param>
+/// <param name="Environment">Site records only (V-24): the environment the bundle was built for, whose domain it carries.</param>
 public sealed record BuildRecordIntake(
     [property: JsonPropertyName("runId")] string RunId,
     [property: JsonPropertyName("runAttempt")] int RunAttempt,
@@ -112,7 +113,8 @@ public sealed record BuildRecordIntake(
     [property: JsonPropertyName("gate1")] BuildRecordGate1 Gate1,
     [property: JsonPropertyName("serviceVersion")] string? ServiceVersion = null,
     [property: JsonPropertyName("baseImageDigest")] string? BaseImageDigest = null,
-    [property: JsonPropertyName("sbom")] BuildRecordObjectRef? Sbom = null);
+    [property: JsonPropertyName("sbom")] BuildRecordObjectRef? Sbom = null,
+    [property: JsonPropertyName("environment")] string? Environment = null);
 
 /// <param name="Result">Always <c>passed</c> on a record: nothing is recorded for a build that failed Gate 1.</param>
 /// <param name="Evidence">The key of the verdict in the intake's evidence store.</param>
@@ -208,7 +210,12 @@ public static class BuildRecordFormat
                 throw new InvalidOperationException(
                     $"build record's intake.runAttempt is {intake.RunAttempt}; GitHub numbers attempts from 1, and the " +
                     "attempt is part of the key.");
-            return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}-{intake.RunAttempt}{extension}";
+            // A SITE'S RECORD (V-24) sits under its environment, so the records one run writes for each environment's bundle
+            // keep apart and a route can tell its own; the writer's prefix stays the repository's.
+            var environment = record.Class == SiteClass
+                ? $"{RequireEnvironment(intake.Environment)}/"
+                : "";
+            return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{environment}{stamp}-{record.WorkflowRunId}-{intake.RunAttempt}{extension}";
         }
 
         return $"{PrefixFor(record.Class, record.BuiltFrom!.Repo)}{stamp}-{record.WorkflowRunId}{extension}";
@@ -230,6 +237,30 @@ public static class BuildRecordFormat
     /// </summary>
     public static string PrefixFor(string cls, string repo)
         => $"{cls.ToLowerInvariant()}/{repo.ToLowerInvariant().Trim('/')}/";
+
+    /// <summary>The class of a site's bundles (DecoupledCd.md V-24), one per environment, each built for that environment's domain.</summary>
+    public const string SiteClass = "site";
+
+    /// <summary>
+    /// An environment's name as a site record spells it, a directory of its key: lowercase, as lz's config file names do.
+    /// <c>SiteArtifacts.EnvironmentPattern</c> in Lz.Core says the same, which the deployer's package cannot compile; a test
+    /// holds the two equal.
+    /// </summary>
+    public const string EnvironmentPattern = "^[a-z0-9][a-z0-9-]{0,31}$";
+
+    /// <summary>The environment a site record's bundle was built for; null for every other class.</summary>
+    public static string? EnvironmentOf(BuildRecord record) => record.Class == SiteClass ? record.Intake?.Environment : null;
+
+    private static string RequireEnvironment(string? environment)
+    {
+        if (environment is null)
+            throw new InvalidOperationException(
+                "a site record names no intake.environment; each environment's bundle carries that environment's domain, so its " +
+                "record says which one it is.");
+        if (!Regex.IsMatch(environment, EnvironmentPattern))
+            throw new InvalidOperationException($"intake.environment '{environment}' is not an environment's name ({EnvironmentPattern}).");
+        return environment;
+    }
 
     /// <summary>Serialise a record for its one and only write.</summary>
     public static string Serialize(BuildRecord record) => JsonSerializer.Serialize(record, Json);
@@ -294,6 +325,20 @@ public static class BuildRecordFormat
 
         if (r.Identity is null)
             throw new InvalidOperationException("build record has no identity.");
+
+        // A SITE RECORD (V-24) is the intake's only, and names its environment; no other record names one. Checked before the
+        // identity, whose key the environment is part of.
+        if (r.Class == SiteClass)
+        {
+            if (r.Intake is null)
+                throw new InvalidOperationException(
+                    "a site record is written by the intake only, and this one has no intake block; nothing else was ever " +
+                    "entitled to write one.");
+            RequireEnvironment(r.Intake.Environment);
+        }
+        else if (r.Intake?.Environment is not null)
+            throw new InvalidOperationException(
+                $"intake.environment is '{r.Intake.Environment}' on a '{r.Class}' record; only a site record names intake.environment.");
 
         var expected = ImageClasses.Contains(r.Class) ? "image" : "bundle";
         if (r.Identity.Kind != expected)

@@ -92,7 +92,10 @@ public static class IntakePublishStep
         string Text(JsonObject o, string name) => o[name]?.GetValue<string>() is { Length: > 0 } v ? v : throw new IntakeFault($"{name} is missing");
         var headSha = Text(check, "headSha");
         var builtAt = BuildRecordFormat.BuiltAtFor(DateTimeOffset.Parse(Text(check, "createdAt"), System.Globalization.CultureInfo.InvariantCulture));
-        var builtFromNode = fetch["builtFrom"] as JsonObject ?? throw new IntakeFault($"{input.Repo} staged no builtFrom, which its records carry");
+        // A site consumes no first-party package (V-24): its records say so with an empty map rather than leaving it out.
+        var builtFromNode = repository.Class == BuildRecordFormat.SiteClass
+            ? new JsonObject { ["packages"] = new JsonObject() }
+            : fetch["builtFrom"] as JsonObject ?? throw new IntakeFault($"{input.Repo} staged no builtFrom, which its records carry");
         var packages = (builtFromNode["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>());
         var builtFrom = new BuildRecordBuiltFrom(repository.Repo, headSha, "published", packages, $"refs/heads/{Text(check, "headBranch")}");
         var gate1Evidence = IntakeEvidence.Gate1(executionName);
@@ -123,8 +126,52 @@ public static class IntakePublishStep
 
         // Everything a record needs is checked BEFORE anything is pushed or written, so a refusal leaves nothing behind.
         var isImage = BuildRecordFormat.IsImageClass(repository.Class);
-        if (!isImage && repository.Class != "client")
-            throw new IntakeFault($"{repository.Class} records are not published yet; an image's and a client's are (V-D)");
+        if (!isImage && repository.Class is not ("client" or BuildRecordFormat.SiteClass))
+            throw new IntakeFault($"{repository.Class} records are not published yet; an image's, a client's and a site's are (V-D, V-24)");
+
+        // A SITE (V-24): one zip and one record per environment's bundle, each record naming its environment, and no tests record,
+        // since a site has no test bundle. Every bundle is held to Gate 1's pass before anything is written.
+        if (repository.Class == BuildRecordFormat.SiteClass)
+        {
+            var site = repository.Site ?? throw new IntakeFault($"{input.Repo} is a site with no site check, so nothing of it passed Gate 1");
+            var bundles = repository.Artifacts
+                .Select(a => (Artifact: a,
+                    Environment: site.Environments.TryGetValue(a, out var e) ? e : throw new IntakeFault($"{input.Repo}'s site check names no environment for {a}"),
+                    Staged: Passed(a)))
+                .ToList();
+            Directory.CreateDirectory(workDirectory);
+            var siteRecords = new JsonArray();
+            var siteBundles = new JsonArray();
+            foreach (var (artifact, environment, siteStaged) in bundles)
+            {
+                var bundlePath = Path.Combine(workDirectory, $"{artifact}-{IntakeFetchStep.BundleEntry}");
+                string bundleSha;
+                try
+                {
+                    var outer = await Fetched(siteStaged, $"{artifact}.zip");
+                    bundleSha = IntakeFetchStep.ReadBundle(outer);
+                    using var zip = ZipFile.OpenRead(outer);
+                    zip.Entries.Single().ExtractToFile(bundlePath, overwrite: true);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    throw new IntakeFault($"{artifact}-{input.RunAttempt}: {ex.Message}");
+                }
+
+                var provisional = new BuildRecord(BuildRecordFormat.CurrentSchema, BuildRecordFormat.SiteClass, builtFrom, new BuildRecordIdentity("bundle"),
+                    builtAt, Text(check, "actor"), input.RunId.ToString(), Intake(artifact, siteStaged.Sha256) with { Environment = environment });
+                var key = BuildRecordFormat.BundleKeyFor(provisional);
+                var stored = await PutArtifactAsync(stores, key, bundlePath, bundleSha);
+                siteRecords.Add(await WriteRecordAsync(stores, provisional with
+                {
+                    Identity = new BuildRecordIdentity("bundle", Bucket: artifactStore, Key: key, VersionId: stored.VersionId, Sha256: bundleSha),
+                }, artifactStore));
+                siteBundles.Add(new JsonObject { ["environment"] = environment, ["key"] = key, ["versionId"] = stored.VersionId, ["sha256"] = bundleSha });
+            }
+
+            return new JsonObject { ["outcome"] = "published", ["sites"] = siteBundles, ["records"] = siteRecords };
+        }
+
         if (repository.Artifacts.Count != 1)
             throw new IntakeFault($"{input.Repo} names {repository.Artifacts.Count} artifacts; a record names one");
         var artifactName = repository.Artifacts[0];

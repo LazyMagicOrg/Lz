@@ -44,6 +44,30 @@ public sealed class IntakeGate1VerdictFunction
     }
 }
 
+/// <summary>A site's Gate 1 (DecoupledCd.md V-24): lz's own check over the staged bundles, run here rather than in CodeBuild.</summary>
+public sealed class IntakeSiteCheckFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var work = Path.Combine(Path.GetTempPath(), "site-check");
+        try
+        {
+            var result = await IntakeSiteCheckStep.RunAsync(
+                state, executionName, IntakeRepositories.Decode(IntakeClients.Required(IntakeEnvironment.Repositories)),
+                new S3ScratchReader(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.ScratchBucket)),
+                new S3IntakeEvidence(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.EvidenceStore)),
+                work, DateTimeOffset.UtcNow);
+            context.Logger.LogInformation($"{executionName}: Gate 1 {result["verdict"]}: {result["summary"]}");
+            return Io.Write(result);
+        }
+        finally
+        {
+            if (Directory.Exists(work)) Directory.Delete(work, recursive: true);
+        }
+    }
+}
+
 internal static class Gate1Clients
 {
     public static readonly Lazy<IAmazonCodeBuild> CodeBuild = new(() => new AmazonCodeBuildClient());
