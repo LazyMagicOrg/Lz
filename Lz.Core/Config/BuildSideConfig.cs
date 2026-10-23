@@ -92,9 +92,19 @@ public class BuildSideConfig
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
     private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
     {
-        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site"))
+        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection"))
         {
-            yield return $"{name}: Gate1.Kind '{kind}' is not tests or site";
+            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site or collection";
+            yield break;
+        }
+        // THE BROWSER TESTS' GATE 1 (DecoupledCd.md §15.4): their collection, which lz runs - every spec loads and none is
+        // marked .only - and their @gate count. A test bundle to collect, and none of a test run's settings.
+        if (repo.Gate1 is { Kind: "collection" } c)
+        {
+            if (string.IsNullOrWhiteSpace(repo.TestBundle)) yield return $"{name}: a collection check collects a TestBundle, and none is named";
+            foreach (var (field, set) in new[] { ("Run", c.Run is not null), ("Filter", c.Filter is not null), ("SdkVersion", c.SdkVersion is not null),
+                         ("SdkSha512", c.SdkSha512 is not null), ("Images", c.Images is { Count: > 0 }), ("Environment", c.Environment is { Count: > 0 }) })
+                if (set) yield return $"{name}: Gate1.Kind collection is lz's own check of the specs, so it takes no {field}";
             yield break;
         }
         if (repo.Gate1?.Kind == "site")

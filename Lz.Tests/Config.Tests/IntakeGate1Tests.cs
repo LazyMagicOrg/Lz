@@ -241,6 +241,53 @@ public sealed class IntakeGate1Tests : IDisposable
         await Assert.ThrowsAsync<IntakeFault>(() => IntakeGate1StartStep.RunAsync(noTests, Exec, Repos, new Fakes(), new Fakes(), "p"));
     }
 
+    // ---- the browser tests' collection check (§15.4) ----
+
+    private static readonly IntakeGate1 Collection = new("tests", "", "", "", "", Array.Empty<IntakeImage>(), Kind: "collection");
+
+    [Fact]
+    public void TheBuild_IsToldItsKind_ATestRunsOrACollectionCheck()
+    {
+        Assert.Equal("tests", IntakeGate1StartStep.VariablesFor(Gate1, "u", "s", Header)["GATE1_KIND"]);
+        Assert.Equal("collection", IntakeGate1StartStep.VariablesFor(Collection, "u", "s", Header)["GATE1_KIND"]);
+    }
+
+    [Fact]
+    public async Task TheStart_RecordsItsKind_ForTheVerdict()
+    {
+        var f = new Fakes();
+        var collection = new[] { Service with { Gate1 = Collection } };
+        Assert.Equal("collection", (await IntakeGate1StartStep.RunAsync(State(), Exec, collection, f, f, "p"))["kind"]!.GetValue<string>());
+        Assert.Equal("tests", (await IntakeGate1StartStep.RunAsync(State(), Exec, Repos, f, f, "p"))["kind"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-COLLECTED total 53 gate 12", Gate1Outcome.Passed, 12)]
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-LIST-COLLECTED failed", Gate1Outcome.Failed, null)]   // a spec that does not load, or a .only
+    [InlineData("FAILED", "PRE_BUILD: npm ci failed", null, Gate1Outcome.Fault, null)]                                      // not the specs' own failure
+    [InlineData("SUCCEEDED", null, null, Gate1Outcome.Fault, null)]                                                          // no count: it decided nothing
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-COLLECTED total 0 gate 0", Gate1Outcome.Fault, null)]                       // collected nothing
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-COLLECTED total 53 gate 0", Gate1Outcome.Fault, null)]                      // no @gate test: Gate 2 would run none
+    public void ACollectionCheck_IsJudgedFromItsLog(string status, string? phase, string? line, Gate1Outcome outcome, int? gateCount)
+    {
+        var (o, _, count) = Gate1CollectionJudge.Judge(new(status, phase, Array.Empty<string>(), null, null), line is null ? Array.Empty<string>() : new[] { line });
+        Assert.Equal((outcome, gateCount), (o, count));
+    }
+
+    [Fact]
+    public async Task ACollectionChecksPass_IsWritten_WithTheGateCount_AndReadsNoReport()
+    {
+        var f = new Fakes { Build = new("SUCCEEDED", null, Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-LIST-COLLECTED total 53 gate 12" } };
+        var state = State();
+        state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "collection" };
+
+        var verdict = await IntakeGate1VerdictStep.RunAsync(state, Exec, f, f, Now);
+
+        Assert.Equal("passed", verdict["verdict"]!.GetValue<string>());
+        Assert.Equal(12, verdict["gateCount"]!.GetValue<int>());
+        Assert.Equal(0, f.ReportReads);
+    }
+
     // ---- the verdict ----
 
     private static JsonObject Started() { var s = State(); s["gate1Start"] = new JsonObject { ["buildId"] = "build:1" }; return s; }

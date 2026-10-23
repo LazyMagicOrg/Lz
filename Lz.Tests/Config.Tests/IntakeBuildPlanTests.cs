@@ -272,6 +272,54 @@ public class IntakeBuildPlanTests
     }
 
     [Fact]
+    public void ACollectionCheck_InstallsNoSdk_ListsTheSpecsWithForbidOnly_AndPrintsItsCount()
+    {
+        var spec = WithGate1().Gate1!.Buildspec;
+        var yaml = new YamlDotNet.Serialization.DeserializerBuilder().Build().Deserialize<Dictionary<string, object>>(spec);
+        var phases = (Dictionary<object, object>)yaml["phases"];
+        List<string> Commands(string phase) => ((List<object>)((Dictionary<object, object>)phases[phase])["commands"]).Select(c => (string)c).ToList();
+
+        // The SDK and the images are a test run's: a collection check skips them.
+        Assert.All(Commands("install").Where(c => c.Contains("sdk.tgz") || c.Contains("docker pull")),
+            c => Assert.StartsWith("test \"$GATE1_KIND\" = collection ||", c));
+        var collect = Commands("build").Single(c => c.Contains("--forbid-only"));
+        Assert.StartsWith("if [ \"$GATE1_KIND\" = collection ]", collect);
+        Assert.Contains("npx playwright test --list --forbid-only", collect);
+        Assert.Contains("npx playwright test --list --forbid-only --grep @gate", collect);
+        Assert.Contains("GATE1-LIST-COLLECTED", collect);
+        Assert.StartsWith(Gate2Lists.Prefix, "GATE1-LIST-COLLECTED");   // the verdict reads only lines with this prefix
+    }
+
+    [Theory]
+    [InlineData(0, "GATE1-LIST-COLLECTED total 53 gate 12", 0)]
+    [InlineData(1, "GATE1-LIST-COLLECTED failed", 1)]   // playwright refused: a spec that does not load, or a .only
+    public void TheCollectionCommand_PrintsTheLineTheJudgeReads_UnderBash(int playwrightExit, string expected, int exit)
+    {
+        var yaml = new YamlDotNet.Serialization.DeserializerBuilder().Build().Deserialize<Dictionary<string, object>>(WithGate1().Gate1!.Buildspec);
+        var build = (Dictionary<object, object>)((Dictionary<object, object>)yaml["phases"])["build"];
+        var collect = ((List<object>)build["commands"]).Select(c => (string)c).Single(c => c.Contains("--forbid-only"));
+        // A stand-in npx printing Playwright's own summary line (1.62.1, measured 2026-10-23): 53 in all, 12 tagged @gate.
+        var script = $$"""
+            export GATE1_KIND=collection GATE1_ROOT=/tmp
+            npx() { if [ {{playwrightExit}} -ne 0 ]; then echo "Error: focused item found in the --forbid-only mode"; return {{playwrightExit}}; fi
+                    case "$*" in *@gate*) echo "Total: 12 tests in 5 files";; *) echo "Total: 53 tests in 18 files";; esac; }
+            {{collect}}
+            """;
+        var psi = new System.Diagnostics.ProcessStartInfo("bash", "-s") { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };
+        using var bash = System.Diagnostics.Process.Start(psi)!;
+        bash.StandardInput.Write(script.Replace("\r", "") + "\n");
+        bash.StandardInput.Close();
+        var lines = bash.StandardOutput.ReadToEnd().Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        bash.WaitForExit();
+
+        Assert.Equal(exit, bash.ExitCode);
+        Assert.Equal(expected, lines.Last());
+        if (exit == 0)
+            Assert.Equal((Gate1Outcome.Passed, (int?)12), (Gate1CollectionJudge.Judge(new("SUCCEEDED", null, Array.Empty<string>(), null, null), lines).Outcome,
+                Gate1CollectionJudge.Judge(new("SUCCEEDED", null, Array.Empty<string>(), null, null), lines).GateCount));
+    }
+
+    [Fact]
     public void TheHeader_PrintsTheRunAndEveryStagedSha_UnderBash()
     {
         var first = FirstCommand(WithGate1().Gate1!.Buildspec);

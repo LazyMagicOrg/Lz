@@ -46,7 +46,7 @@ public class SiteConfigTests
 
     public static TheoryData<string, PipelineRepositoryConfig> Unsound => new()
     {
-        { "Gate1.Kind 'lint' is not tests or site", Site(r => r.Gate1!.Kind = "lint") },
+        { "Gate1.Kind 'lint' is not tests, site or collection", Site(r => r.Gate1!.Kind = "lint") },
         { "a site's Gate 1 is lz's site check (Gate1.Kind: site)", Site(r => r.Gate1!.Kind = null) },
         { "Gate1.Kind site is lz's check of a site's bundles; Scutara/ScutaraWebsite is class 'client'", Site(r => r.Class = "client") },
         { "Gate1.Kind site runs no repository code, so it takes no TestBundle", Site(r => r.TestBundle = "tests") },

@@ -100,8 +100,11 @@ public static class IntakePublishStep
         var builtFrom = new BuildRecordBuiltFrom(repository.Repo, headSha, "published", packages, $"refs/heads/{Text(check, "headBranch")}");
         var gate1Evidence = IntakeEvidence.Gate1(executionName);
         // Gate 1's lists of the test bundle, which Gate 2 holds what ran to (§15.5): carried on the tests record, beside its zip.
-        var testsLists = gate1?["gate2Lists"] is JsonObject recordedLists
-            ? new BuildRecordGate1Lists(ListOf(recordedLists["precondition"]), ListOf(recordedLists["blocking"]), ListOf(recordedLists["advisory"]))
+        // A collection check's @gate count goes there too, for the browser verdict (§15.4).
+        var recordedLists = gate1?["gate2Lists"] as JsonObject;
+        var recordedGateCount = gate1?["gateCount"]?.GetValue<int>();
+        var testsLists = recordedLists is not null || recordedGateCount is not null
+            ? new BuildRecordGate1Lists(ListOf(recordedLists?["precondition"]), ListOf(recordedLists?["blocking"]), ListOf(recordedLists?["advisory"]), recordedGateCount)
             : null;
         static IReadOnlyList<string> ListOf(JsonNode? node) => (node as JsonArray ?? new JsonArray()).Select(n => n!.GetValue<string>()).ToList();
 

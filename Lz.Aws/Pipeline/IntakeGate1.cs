@@ -164,6 +164,8 @@ public static class IntakeGate1StartStep
         ["SDK_SHA512"] = gate1.SdkSha512,
         ["GATE1_IMAGES"] = string.Join("\n", gate1.Images.Select(i => $"{i.From} {i.As}")),
         ["GATE1_LISTS"] = Gate2Lists.Variable(),
+        // A test run of the bundle, or the browser tests' collection check (§15.4): the buildspec branches on it.
+        ["GATE1_KIND"] = gate1.Kind,
     };
 
     public static async Task<JsonObject> RunAsync(
@@ -176,7 +178,7 @@ public static class IntakeGate1StartStep
         var sha256 = tests["sha256"]!.GetValue<string>();
 
         var buildId = await builds.StartAsync(project, VariablesFor(gate1, presigner.GetUrl(key, UrlLifetime), sha256, Gate1Header.From(state, executionName)));
-        return new JsonObject { ["buildId"] = buildId, ["bundle"] = key, ["bundleSha256"] = sha256 };
+        return new JsonObject { ["buildId"] = buildId, ["bundle"] = key, ["bundleSha256"] = sha256, ["kind"] = gate1.Kind };
     }
 }
 
@@ -211,6 +213,35 @@ public static class Gate1Judge
 }
 
 /// <summary>
+/// THE BROWSER TESTS' GATE 1, JUDGED (DecoupledCd.md §15.4): their collection, which writes no test report, so it is judged from
+/// its log's <c>GATE1-LIST-COLLECTED</c> line. A pass is a build that succeeded and collected specs with at least one <c>@gate</c>
+/// test, whose count Gate 2's browser verdict is held to. A build that failed in its BUILD phase — a spec that does not load,
+/// or one marked <c>.only</c>, which <c>--forbid-only</c> refuses — is a decided FAILURE. Anything else decided nothing, and is
+/// a fault, retried: a failure in an earlier phase (the bundle, npm), or a success that printed no count.
+/// </summary>
+public static class Gate1CollectionJudge
+{
+    public const string Marker = "GATE1-LIST-COLLECTED";
+
+    public static (Gate1Outcome Outcome, string Reason, int? GateCount) Judge(Gate1Build build, IReadOnlyList<string> lines)
+    {
+        if (build.Status == "IN_PROGRESS") return (Gate1Outcome.Running, "the collection check is running", null);
+        if (build.Status == "FAILED" && build.FailedPhase?.StartsWith("BUILD", StringComparison.Ordinal) == true)
+            return (Gate1Outcome.Failed, $"the specs do not collect: {build.FailedPhase}", null);
+        if (build.Status != "SUCCEEDED")
+            return (Gate1Outcome.Fault, $"the collection check ended {build.Status} before collecting{(build.FailedPhase is { } p ? $": {p}" : "")}", null);
+
+        var count = lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, $@"^{Marker} total (\d+) gate (\d+)$"))
+            .FirstOrDefault(m => m.Success);
+        if (count is null) return (Gate1Outcome.Fault, "the collection check succeeded and printed no count", null);
+        var (total, gate) = (int.Parse(count.Groups[1].Value), int.Parse(count.Groups[2].Value));
+        if (total == 0) return (Gate1Outcome.Fault, "the collection check collected no spec", null);
+        if (gate == 0) return (Gate1Outcome.Fault, $"{total} test(s) collected and none tagged @gate, so Gate 2's browser tier would run nothing", null);
+        return (Gate1Outcome.Passed, $"{total} test(s) collected, {gate} tagged @gate", gate);
+    }
+}
+
+/// <summary>
 /// GATE 1, DECIDED (V-C): one look at the build; while it runs, <see cref="Gate1StillRunning"/>; when it ends, the verdict
 /// written once to the intake's evidence under <c>gate1/{executionName}</c>, BINDING THE BYTES IT RAN FOR: the image's
 /// manifest digest and every staged artifact's SHA-256, from the fetch. A failure names up to twenty failed tests. Gate 2's
@@ -223,8 +254,21 @@ public static class IntakeGate1VerdictStep
     {
         var buildId = state["gate1Start"]?["buildId"]?.GetValue<string>() ?? throw new IntakeFault("no Gate 1 build was started");
         var build = await builds.DescribeAsync(buildId);
-        var report = build.Status == "IN_PROGRESS" ? null : await builds.ReportAsync(build.ReportArns);
-        var (outcome, reason) = Gate1Judge.Judge(build, report);
+
+        // A COLLECTION CHECK writes no test report: it is judged from its log, and its @gate count is what it records.
+        var collection = state["gate1Start"]?["kind"]?.GetValue<string>() == "collection";
+        Gate1Report? report = null;
+        int? gateCount = null;
+        Gate1Outcome outcome;
+        string reason;
+        if (collection)
+            (outcome, reason, gateCount) = Gate1CollectionJudge.Judge(build,
+                build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
+        else
+        {
+            report = build.Status == "IN_PROGRESS" ? null : await builds.ReportAsync(build.ReportArns);
+            (outcome, reason) = Gate1Judge.Judge(build, report);
+        }
 
         switch (outcome)
         {
@@ -232,11 +276,11 @@ public static class IntakeGate1VerdictStep
             case Gate1Outcome.Fault: throw new IntakeFault($"Gate 1 {buildId}: {reason}");
         }
 
-        var lists = Gate2Lists.Parse(await builds.ListLinesAsync(build));
-        if (outcome == Gate1Outcome.Passed && lists is null)
+        var lists = collection ? null : Gate2Lists.Parse(await builds.ListLinesAsync(build));
+        if (!collection && outcome == Gate1Outcome.Passed && lists is null)
             throw new IntakeFault($"Gate 1 {buildId}: {reason}, but its log holds no complete Gate 2 lists");
 
-        var failing = outcome == Gate1Outcome.Failed ? await builds.FailedCasesAsync(build.ReportArns, 20) : Array.Empty<string>();
+        var failing = !collection && outcome == Gate1Outcome.Failed ? await builds.FailedCasesAsync(build.ReportArns, 20) : Array.Empty<string>();
         var fetch = state["fetch"] as JsonObject;
         var verdict = new JsonObject
         {
@@ -247,7 +291,8 @@ public static class IntakeGate1VerdictStep
             ["summary"] = reason,
             ["buildId"] = buildId,
             ["seconds"] = build.Started is { } s && build.Ended is { } e ? (int)(e - s).TotalSeconds : null,
-            ["counts"] = new JsonObject(report!.StatusCounts.Select(c => KeyValuePair.Create(c.Key, (JsonNode?)c.Value))),
+            ["counts"] = report is null ? null : new JsonObject(report.StatusCounts.Select(c => KeyValuePair.Create(c.Key, (JsonNode?)c.Value))),
+            ["gateCount"] = gateCount,
             ["manifestDigest"] = fetch?["manifestDigest"]?.DeepClone(),
             ["artifactSha256"] = new JsonObject((fetch?["staged"] as JsonArray ?? new JsonArray())
                 .Select(a => KeyValuePair.Create(a!["artifact"]!.GetValue<string>(), (JsonNode?)a["sha256"]!.GetValue<string>()))),

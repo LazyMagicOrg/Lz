@@ -231,6 +231,24 @@ public class BuildSideConfigTests : IDisposable
     public void ASoundGate1_HasNoProblems()
         => Assert.Empty(WithGate1(_ => { }).Problems());
 
+    /// <summary>The browser tests' Gate 1 (DecoupledCd.md §15.4): their collection, which lz runs; a TestBundle and nothing else.</summary>
+    [Fact]
+    public void ACollectionCheck_NeedsItsTestBundle_AndTakesNoneOfATestRunsSettings()
+    {
+        static BuildSideConfig With(Action<PipelineGate1Config> set, string? bundle = "tests")
+        {
+            var g = new PipelineGate1Config { Kind = "collection" };
+            set(g);
+            return new BuildSideConfig { BuildAccountId = "147440642635", Repositories = new() { new() { Repo = "a/b", TestBundle = bundle, Gate1 = g } } };
+        }
+
+        Assert.Empty(With(_ => { }).Problems());
+        Assert.Contains(With(_ => { }, bundle: null).Problems(), p => p.Contains("TestBundle"));
+        Assert.Contains(With(g => g.Run = "x.dll").Problems(), p => p.Contains("collection") && p.Contains("Run"));
+        Assert.Contains(With(g => g.SdkVersion = "10.0.301").Problems(), p => p.Contains("collection") && p.Contains("SdkVersion"));
+        Assert.Contains(With(g => g.Filter = "x").Problems(), p => p.Contains("collection") && p.Contains("Filter"));
+    }
+
     [Theory]
     [MemberData(nameof(Unsound))]
     public void EachUnsoundBuildSideFileIsNamed(string problem, BuildSideConfig config)

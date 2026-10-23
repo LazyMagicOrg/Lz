@@ -29,8 +29,10 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
 /// <param name="Artifact">The run artifact holding the test bundle, named for the attempt like the others.</param>
 /// <param name="Environment">Variables the tests need, from config, passed with the build.</param>
 /// <param name="BuildRoot">Where the bundle is unzipped: the path it was built at, or <c>/tmp/bundle</c>.</param>
+/// <param name="Kind"><c>tests</c>, a test run of the bundle; or <c>collection</c>, the browser tests' collection check (§15.4),
+/// which takes none of a test run's settings.</param>
 public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images,
-    IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null);
+    IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null, string Kind = "tests");
 
 /// <summary>
 /// A site's Gate 1 (DecoupledCd.md V-24): which environment each artifact's bundle was built for, read from its name by the

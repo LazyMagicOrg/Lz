@@ -208,6 +208,18 @@ public class IntakePublishTests : IDisposable
     }
 
     [Fact]
+    public async Task ACollectionChecksGateCount_IsCarriedOnTheTestsRecord()
+    {
+        var (f, state, _) = Passed();
+        state["gate1"]!["gateCount"] = 12;
+
+        await Publish(f, state);
+
+        var lists = BuildRecordFormat.Parse(f.RecordStore["tests/scutara/scutaraservice/20261021T181739Z-39651406296-1.json"], Artifacts).Intake!.Gate1.Lists!;
+        Assert.Equal(12, lists.GateCount);
+    }
+
+    [Fact]
     public async Task AnUnsignedImage_IsWaitedFor_AndNothingIsRecordedMeanwhile()
     {
         var (f, state, _) = Passed();
