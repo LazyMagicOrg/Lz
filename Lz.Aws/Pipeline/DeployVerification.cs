@@ -250,6 +250,40 @@ public static class DeployVerification
     }
 
     /// <summary>
+    /// May this site record deploy into <paramref name="bucket"/> (DecoupledCd.md V-24)? Only into this environment's website
+    /// bucket, and only when the record was built for this environment: each environment's bundle carries its own domain, so
+    /// another environment's would send this one's visitors to it. Judged before the zip is asked about.
+    /// </summary>
+    public static (SiteTarget? Target, IReadOnlyList<VerifyRefusal> Refusals) SiteTargetFor(
+        BuildRecord record, string bucket, IReadOnlyList<SiteTarget> targets)
+    {
+        if (!string.Equals(record.Class, BuildRecordFormat.SiteClass, StringComparison.Ordinal))
+            return (null, new[] { new VerifyRefusal("class", $"a site target was asked for a '{record.Class}' record.") });
+
+        var target = targets.FirstOrDefault(t => string.Equals(t.Repo, record.BuiltFrom.Repo, StringComparison.Ordinal));
+        if (target is null)
+            return (null, new[]
+            {
+                new VerifyRefusal("target.bucket",
+                    $"{record.BuiltFrom.Repo} deploys no site here: no Pipeline.Repositories entry of class site names this environment's " +
+                    "bundle (site-{environment}), or no tenant routes / to its website bucket."),
+            });
+
+        var refusals = new List<VerifyRefusal>();
+        var environment = BuildRecordFormat.EnvironmentOf(record);
+        if (!string.Equals(environment, target.Environment, StringComparison.Ordinal))
+            refusals.Add(new VerifyRefusal("intake.environment",
+                $"the site was built for {environment ?? "no environment"}, and this is {target.Environment}: its pages name another " +
+                $"environment's domain, not {target.Domain}."));
+        if (!string.Equals(target.Bucket, bucket, StringComparison.Ordinal))
+            refusals.Add(new VerifyRefusal("target.bucket",
+                $"the input names bucket '{bucket}', but {record.BuiltFrom.Repo}'s site deploys into '{target.Bucket}' only. The input " +
+                "names the target; the configuration decides which one a repository's bundle may reach."));
+
+        return refusals.Count == 0 ? (target, refusals) : (null, refusals);
+    }
+
+    /// <summary>
     /// Is the object the store holds the bundle the record names (§4.4 step 3)? Its version, and S3's own SHA-256 of it,
     /// read by a HEAD — nothing is downloaded to decide this.
     ///

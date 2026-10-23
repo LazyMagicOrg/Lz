@@ -83,7 +83,17 @@ public sealed record PipelineDeployer(
     int? LogRetentionDays,
     DeployerTriggerPlan? Trigger = null,
     DeployerAlertsPlan? Alerts = null,
-    IReadOnlyList<ClientTarget>? ClientTargets = null);
+    IReadOnlyList<ClientTarget>? ClientTargets = null,
+    IReadOnlyList<SiteTarget>? SiteTargets = null);
+
+/// <summary>
+/// The site this environment deploys (DecoupledCd.md V-24), from configuration alone: the site repository whose artifacts name
+/// this environment's bundle, and the records it writes for it — the build account's grants and the trigger need nothing more.
+/// </summary>
+public sealed record SiteApp(string Repo, string Environment, string RecordPrefix);
+
+/// <summary>What the site target needs from the workspace, which the planner cannot read: the tenant's website bucket and domain.</summary>
+public sealed record DeployerSiteInputs(string Bucket, string Domain);
 
 /// <summary>
 /// A web app a client repository's bundles deploy as, from configuration alone (P4 stage C): the build account's grants
@@ -196,6 +206,8 @@ public static class DeployerHandlers
     public static readonly string Corroborate = For("CorroborateFunction");
     public static readonly string DeployBundle = For("DeployBundleFunction");
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
+    public static readonly string DeploySite = For("DeploySiteFunction");
+    public static readonly string VerifySite = For("VerifySiteFunction");
 
     // The intake (DecoupledCd.md V-B), in the build account: the same package, its own functions and roles.
     public static readonly string IntakePoller = For("IntakePollerFunction");
@@ -211,7 +223,7 @@ public static class DeployerHandlers
     /// <summary>Every handler, for the packaging test.</summary>
     public static IReadOnlyList<string> All => new[]
     {
-        Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle,
+        Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 
@@ -472,8 +484,11 @@ public static class DeployerPlanner
     /// <c>Pipeline.DeployOnBuildRecord</c> is on, and ignored otherwise.</param>
     /// <param name="clientInputs">The distributions a client deploy invalidates. Required when a client repository names
     /// the web app it deploys as (<see cref="ClientApps"/>), and ignored otherwise.</param>
+    /// <param name="siteInputs">The tenant's website bucket and domain. Required when a site repository names this environment's
+    /// bundle (<see cref="SiteApps"/>), and ignored otherwise.</param>
     public static PipelineDeployer Plan(
-        SystemConfig config, string? accountId = null, DeployerTriggerInputs? triggerInputs = null, DeployerClientInputs? clientInputs = null)
+        SystemConfig config, string? accountId = null, DeployerTriggerInputs? triggerInputs = null, DeployerClientInputs? clientInputs = null,
+        DeployerSiteInputs? siteInputs = null)
     {
         var p = config.Pipeline
             ?? throw new InvalidOperationException("no Pipeline block; nothing to plan.");
@@ -533,6 +548,8 @@ public static class DeployerPlanner
         // is what it was before class 2 existed, byte for byte — the Verify function's environment and grants included.
         var clientTargets = ClientTargetsFor(config, clientInputs);
         var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, config.SystemSuffix);
+        // THE SITE (V-24), only where a site repository names this environment's bundle; otherwise nothing of it is planned.
+        var siteTargets = SiteTargetsFor(config, siteInputs);
 
         var verifyEnvironment = new Dictionary<string, string>
         {
@@ -550,6 +567,12 @@ public static class DeployerPlanner
             verifyEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
             verifyEnvironment[DeployerEnvironment.ClientTargets] = ClientTargets.Encode(clientTargets);
             verifyGrants = verifyGrants.Concat(VerifyClientGrants(buildRecordStore, artifactStore)).ToArray();
+        }
+        if (siteTargets.Count > 0)
+        {
+            verifyEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
+            verifyEnvironment[DeployerEnvironment.SiteTargets] = SiteTargets.Encode(siteTargets);
+            verifyGrants = verifyGrants.Concat(VerifySiteGrants(buildRecordStore, artifactStore, siteTargets)).ToArray();
         }
 
         var functions = new List<DeployerFunction>
@@ -628,6 +651,26 @@ public static class DeployerPlanner
             bundleFunctions = (FnArn(deployBundle), FnArn(verifyBundle));
         }
 
+        (string DeploySite, string VerifySite)? siteFunctions = null;
+        if (siteTargets.Count > 0)
+        {
+            var deploySite = DeploySiteFunctionName(config);
+            var verifySite = VerifySiteFunctionName(config);
+            if ($"{deploySite}-fn" != DeploySiteRoleName(config))
+                throw new InvalidOperationException("the DeploySite role name diverged from DeploySiteRoleName, which the build account's grant names.");
+
+            functions.Add(new(deploySite, DeployerHandlers.DeploySite, DeploySiteRoleName(config),
+                Combine(Logs(region, acct, deploySite), DeploySiteGrants(artifactStore, siteTargets)),
+                new Dictionary<string, string>(),
+                // A site is a few hundred files; the lease outlasts this, as DeployBundle's does.
+                TimeoutSeconds: 600, MemoryMb: 1024, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            functions.Add(new(verifySite, DeployerHandlers.VerifySite, $"{verifySite}-fn",
+                Combine(Logs(region, acct, verifySite), VerifySiteReadGrants(siteTargets)),
+                new Dictionary<string, string>(),
+                TimeoutSeconds: 120, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            siteFunctions = (FnArn(deploySite), FnArn(verifySite));
+        }
+
         // THE LEASE OUTLASTS THE SPAN IT COVERS, from Prepare's claim to Record's release: the rollout wait is its longest
         // part, and a lease that expired inside it would let another writer start on a service mid-rollout.
         if (TimeSpan.FromSeconds(RolloutRetryIntervalSeconds * RolloutRetryMaxAttempts) + TimeSpan.FromMinutes(5) > Lz.Aws.Ops.ServiceLease.Duration)
@@ -647,7 +690,7 @@ public static class DeployerPlanner
         if (p.DeployOnBuildRecord)
         {
             var (triggerPlan, startFunction) = TriggerFor(
-                config, p, region, acct, artifactAccount, buildRecordStore, machineArn, triggerInputs, alarmActions, clientTargets, artifactStore);
+                config, p, region, acct, artifactAccount, buildRecordStore, machineArn, triggerInputs, alarmActions, clientTargets, artifactStore, siteTargets);
             trigger = triggerPlan;
             functions.Add(startFunction);
         }
@@ -657,7 +700,7 @@ public static class DeployerPlanner
         if (p.Alerts)
         {
             var (alertsPlan, corroborate) = AlertsFor(
-                config, p, region, acct, artifactAccount, buildRecordStore, evidence, imageRepositories, machineArn, trigger, clientTargets, artifactStore);
+                config, p, region, acct, artifactAccount, buildRecordStore, evidence, imageRepositories, machineArn, trigger, clientTargets, artifactStore, siteTargets);
             alerts = alertsPlan;
             functions.Add(corroborate);
         }
@@ -674,7 +717,7 @@ public static class DeployerPlanner
             EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
-                                      p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions),
+                                      p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -701,8 +744,57 @@ public static class DeployerPlanner
             LogRetentionDays: config.Hygiene?.LambdaLogRetentionDays,
             Trigger: trigger,
             Alerts: alerts,
-            ClientTargets: clientTargets);
+            ClientTargets: clientTargets,
+            SiteTargets: siteTargets);
     }
+
+    /// <summary>
+    /// The site this environment deploys (DecoupledCd.md V-24), from configuration alone: the <c>site</c> repository whose
+    /// <c>Artifacts</c> name this environment's bundle, <c>site-{environment}</c>, where <c>Pipeline.Classes</c> accepts the class.
+    /// <b>ONE SITE:</b> an environment serves its site at its root domain, from one bucket; two repositories would mirror over each
+    /// other.
+    /// </summary>
+    public static IReadOnlyList<SiteApp> SiteApps(SystemConfig config)
+    {
+        if (config.Pipeline is not { Enabled: true } p || p.Classes?.Contains(BuildRecordFormat.SiteClass) != true)
+            return Array.Empty<SiteApp>();
+
+        var apps = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+            .Where(r => string.Equals(r.Class, BuildRecordFormat.SiteClass, StringComparison.Ordinal)
+                        && (r.Artifacts ?? new List<string>()).Contains(SiteArtifacts.ArtifactFor(config.Environment)))
+            .Select(r => new SiteApp(r.Repo!, config.Environment,
+                $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, r.Repo!)}{config.Environment}/"))
+            .ToList();
+        if (apps.Count > 1)
+            throw new InvalidOperationException(
+                $"{string.Join(" and ", apps.Select(a => a.Repo))} both build {config.Environment}'s site. An environment serves one site " +
+                "from one bucket, and each would delete the other's files.");
+        return apps;
+    }
+
+    private static IReadOnlyList<SiteTarget> SiteTargetsFor(SystemConfig config, DeployerSiteInputs? inputs)
+    {
+        var apps = SiteApps(config);
+        if (apps.Count == 0)
+            return Array.Empty<SiteTarget>();
+        var site = inputs ?? throw new InvalidOperationException(
+            $"{apps[0].Repo} builds {config.Environment}'s site, but the deployer was planned without the tenant's website bucket and " +
+            "domain, so a deploy could neither find the bucket nor hold the site to its domain. `lz bootstrapdeployer` reads both " +
+            "from the tenant config before it plans.");
+        return apps.Select(a => new SiteTarget(a.Repo, a.Environment, site.Bucket, site.Domain)).ToList();
+    }
+
+    /// <summary>The prefixes the trigger matches for the site (V-24): this environment's directory only.</summary>
+    public static IReadOnlyList<string> TriggerSitePrefixes(SystemConfig config) => SiteApps(config).Select(a => a.RecordPrefix).ToList();
+
+    /// <summary>The function that mirrors a site into its website bucket (V-24).</summary>
+    public static string DeploySiteFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-deploy-site";
+
+    /// <summary>DeploySite's role, which the build account's artifact store lets read this environment's site bundles.</summary>
+    public static string DeploySiteRoleName(SystemConfig config) => $"{DeploySiteFunctionName(config)}-fn";
+
+    /// <summary>The function that reads a deployed site back.</summary>
+    public static string VerifySiteFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-verify-site";
 
     /// <summary>
     /// The web apps this environment's client bundles deploy as (P4 stage C), from configuration alone: every
@@ -843,7 +935,7 @@ public static class DeployerPlanner
     private static (DeployerAlertsPlan Plan, DeployerFunction Function) AlertsFor(
         SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount, string buildRecordStore,
         string evidence, IReadOnlyList<string> imageRepositories, string stateMachineArn, DeployerTriggerPlan? trigger,
-        IReadOnlyList<ClientTarget> clientTargets, string artifactStore)
+        IReadOnlyList<ClientTarget> clientTargets, string artifactStore, IReadOnlyList<SiteTarget> siteTargets)
     {
         var sources = (p.Repositories ?? new List<PipelineRepositoryConfig>())
             .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
@@ -853,6 +945,7 @@ public static class DeployerPlanner
 
         var bundlePrefixes = clientTargets
             .Select(t => BuildRecordFormat.PrefixFor(DeployerTrigger.ClientRecordClass, t.Repo))
+            .Concat(siteTargets.Select(t => t.RecordPrefix))
             .ToList();
 
         var topicArn = AlertsTopicArn(region, acct, config);
@@ -899,7 +992,10 @@ public static class DeployerPlanner
         {
             corroborateEnvironment[DeployerEnvironment.CorroborateBundleSources] = DeployerAlerts.EncodeBundleSources(bundlePrefixes);
             corroborateEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
-            corroborateGrants = corroborateGrants.Concat(CorroborateBundleGrants(buildRecordStore, artifactStore)).ToArray();
+            if (clientTargets.Count > 0)
+                corroborateGrants = corroborateGrants.Concat(CorroborateBundleGrants(buildRecordStore, artifactStore)).ToArray();
+            if (siteTargets.Count > 0)
+                corroborateGrants = corroborateGrants.Concat(CorroborateSiteGrants(buildRecordStore, artifactStore, siteTargets)).ToArray();
         }
 
         var corroborate = new DeployerFunction(
@@ -943,7 +1039,7 @@ public static class DeployerPlanner
     private static (DeployerTriggerPlan Plan, DeployerFunction Function) TriggerFor(
         SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount,
         string buildRecordStore, string stateMachineArn, DeployerTriggerInputs? inputs, IReadOnlyList<string> alarmActions,
-        IReadOnlyList<ClientTarget> clientTargets, string artifactStore)
+        IReadOnlyList<ClientTarget> clientTargets, string artifactStore, IReadOnlyList<SiteTarget> siteTargets)
     {
         if (inputs is null)
             throw new InvalidOperationException(
@@ -985,6 +1081,8 @@ public static class DeployerPlanner
         var clientRoutes = clientTargets
             .Select(t => new ClientTriggerRoute(
                 BuildRecordFormat.PrefixFor(DeployerTrigger.ClientRecordClass, t.Repo), t.App.ToLowerInvariant(), t.Bucket))
+            // THE SITE (V-24): this environment's directory of its prefix, into its website bucket, named as a client's execution is.
+            .Concat(siteTargets.Select(t => new ClientTriggerRoute(t.RecordPrefix, BuildRecordFormat.SiteClass, t.Bucket)))
             .ToList();
 
         var busName = TriggerBusName(config);
@@ -1002,7 +1100,7 @@ public static class DeployerPlanner
             BusPolicy: CrossAccount.TriggerBusPolicy(busArn, artifactAccount, RecordForwarderRoleName(config)),
             RuleName: ruleName,
             RuleArn: ruleArn,
-            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore, TriggerRecordClasses(config)),
+            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore, TriggerRecordClasses(config), TriggerSitePrefixes(config)),
             StartFunctionName: function,
             StartFunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
             DeadLetterQueueName: queue,
@@ -1048,7 +1146,8 @@ public static class DeployerPlanner
 
         var startFunction = new DeployerFunction(
             function, DeployerHandlers.Start, StartFunctionRoleName(config),
-            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore, clientRecords: clientRoutes.Count > 0)),
+            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore,
+                clientRecords: clientTargets.Count > 0, sitePrefixes: siteTargets.Select(t => t.RecordPrefix).ToList())),
             startEnvironment,
             TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
 
@@ -1665,6 +1764,87 @@ public static class DeployerPlanner
         },
     };
 
+    /// <summary>What Verify adds for the site (V-24): read this environment's site records, and HEAD its bundles by version.</summary>
+    private static object[] VerifySiteGrants(string buildRecordStore, string artifactStore, IReadOnlyList<SiteTarget> targets)
+    {
+        var prefixes = targets.Select(t => $"{t.RecordPrefix}*").ToArray();
+        return new object[]
+        {
+            new { Sid = "ReadSiteBuildRecords", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = prefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}").ToArray() },
+            new
+            {
+                Sid = "TellAMissingSiteRecordFromADeniedOne", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{buildRecordStore}",
+                Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = prefixes } },
+            },
+            new { Sid = "HeadSiteBundleVersions", Effect = "Allow", Action = new[] { "s3:GetObjectVersion" }, Resource = prefixes.Select(p => $"arn:aws:s3:::{artifactStore}/{p}").ToArray() },
+            new
+            {
+                Sid = "TellAMissingSiteVersionFromADeniedOne", Effect = "Allow", Action = new[] { "s3:ListBucket", "s3:ListBucketVersions" }, Resource = $"arn:aws:s3:::{artifactStore}",
+                Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = prefixes } },
+            },
+        };
+    }
+
+    /// <summary>
+    /// The site-deploy role (V-24): read this environment's site bundles; mirror into the website bucket's served prefix and write its
+    /// deploy marker. It creates no bucket, writes no policy and invalidates nothing — the bucket is the tenant's, and the site's
+    /// pages expire on their own.
+    /// </summary>
+    private static object[] DeploySiteGrants(string artifactStore, IReadOnlyList<SiteTarget> targets)
+    {
+        var buckets = targets.Select(t => $"arn:aws:s3:::{t.Bucket}").Distinct().ToArray();
+        return new object[]
+        {
+            new
+            {
+                Sid = "ReadSiteBundleVersions", Effect = "Allow", Action = new[] { "s3:GetObjectVersion" },
+                Resource = targets.Select(t => $"arn:aws:s3:::{artifactStore}/{t.RecordPrefix}*").ToArray(),
+            },
+            new { Sid = "ListTheSiteBuckets", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = buckets },
+            new
+            {
+                // A mirror deletes what the site lacks, so delete is load-bearing; GetObject reads the deploy marker and each object's checksum.
+                Sid = "MirrorTheSiteAndItsMarker", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject", "s3:DeleteObject" },
+                Resource = buckets.SelectMany(b => new[] { $"{b}/{Lz.Aws.Webapp.WebappSyncRules.StoragePrefix}*", $"{b}/lz/*" }).ToArray(),
+            },
+        };
+    }
+
+    /// <summary>What VerifySite may do: list and read the site's objects and marker. It writes nothing.</summary>
+    private static object[] VerifySiteReadGrants(IReadOnlyList<SiteTarget> targets)
+    {
+        var buckets = targets.Select(t => $"arn:aws:s3:::{t.Bucket}").Distinct().ToArray();
+        return new object[]
+        {
+            new { Sid = "ListTheSiteBuckets", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = buckets },
+            new
+            {
+                Sid = "ReadTheSiteAndItsMarker", Effect = "Allow", Action = new[] { "s3:GetObject" },
+                Resource = buckets.SelectMany(b => new[] { $"{b}/{Lz.Aws.Webapp.WebappSyncRules.StoragePrefix}*", $"{b}/lz/*" }).ToArray(),
+            },
+        };
+    }
+
+    /// <summary>What the sweep may also do for the site (V-24): list this environment's site bundles' versions and read their records.</summary>
+    private static object[] CorroborateSiteGrants(string buildRecordStore, string artifactStore, IReadOnlyList<SiteTarget> targets)
+    {
+        var prefixes = targets.Select(t => $"{t.RecordPrefix}*").ToArray();
+        return new object[]
+        {
+            new
+            {
+                Sid = "ListSiteBundleVersions", Effect = "Allow", Action = new[] { "s3:ListBucketVersions" }, Resource = $"arn:aws:s3:::{artifactStore}",
+                Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = prefixes } },
+            },
+            new
+            {
+                Sid = "TellAMissingSiteRecordFromADeniedOne", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{buildRecordStore}",
+                Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = prefixes } },
+            },
+            new { Sid = "ReadSiteRecords", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = prefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}").ToArray() },
+        };
+    }
+
     /// <summary>
     /// The bundle-deploy role (§3), for class 2: read client bundles; mirror, create and harden the configured web apps'
     /// buckets — their names, not a pattern (P-7); invalidate on the distributions that serve them. Nothing of ECS, Pulumi's
@@ -1764,9 +1944,19 @@ public static class DeployerPlanner
     /// client bundles (P4 stage D) — start THIS deployer, read back an execution of it whose name is taken, and dead-letter its
     /// own failures. It judges nothing about the record but its ref — Verify does the rest — and rolls nothing.
     /// </summary>
-    private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore, bool clientRecords)
+    private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore, bool clientRecords,
+        IReadOnlyList<string>? sitePrefixes = null)
     {
         var grants = StartImageGrants(stateMachineArn, queueArn, buildRecordStore).ToList();
+        if (sitePrefixes is { Count: > 0 })
+            grants.Insert(1, new
+            {
+                // THE SITE'S RECORDS (V-24), this environment's only, read for their branch; no list, as for the others.
+                Sid = "ReadSiteRecordsBranch",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = sitePrefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}*").ToArray(),
+            });
         if (clientRecords)
             grants.Insert(1, new
             {
@@ -2023,11 +2213,12 @@ public static class DeployerPlanner
     private static string DefinitionFor(
         bool approvalRequired, string verifyFn, string prepareFn, string rolloutFn,
         string recordFn, string failureFn, int heartbeatSeconds, string? approvalTopicArn,
-        (string DeployBundle, string VerifyBundle)? bundleFunctions = null)
+        (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
+        (string DeploySite, string VerifySite)? siteFunctions = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
-        var afterVerification = bundleFunctions is null ? "Prepare" : "ByClass";
+        var afterVerification = bundleFunctions is null && siteFunctions is null ? "Prepare" : "ByClass";
         var catchAll = new object[]
         {
             new
@@ -2250,18 +2441,17 @@ public static class DeployerPlanner
             };
         }
 
-        if (bundleFunctions is { } bundle)
+        if (bundleFunctions is not null || siteFunctions is not null)
         {
-            // THE BRANCH ON THE CLASS VERIFY ESTABLISHED — the record's, never the input's. Verify refuses every class but
-            // these two, so the default is a belt: a class with no branch is a failure, recorded as one.
+            // THE BRANCH ON THE CLASS VERIFY ESTABLISHED — the record's, never the input's. Verify refuses every class it has no
+            // branch for, so the default is a belt: a class with no branch is a failure, recorded as one.
+            var choices = new List<object> { new { Variable = "$.verified.class", StringEquals = "image", Next = "Prepare" } };
+            if (bundleFunctions is not null) choices.Add(new { Variable = "$.verified.class", StringEquals = "client", Next = "DeployBundle" });
+            if (siteFunctions is not null) choices.Add(new { Variable = "$.verified.class", StringEquals = BuildRecordFormat.SiteClass, Next = "DeploySite" });
             states["ByClass"] = new
             {
                 Type = "Choice",
-                Choices = new object[]
-                {
-                    new { Variable = "$.verified.class", StringEquals = "image", Next = "Prepare" },
-                    new { Variable = "$.verified.class", StringEquals = "client", Next = "DeployBundle" },
-                },
+                Choices = choices.ToArray(),
                 Default = "NoBranchForClass",
             };
             states["NoBranchForClass"] = new
@@ -2276,71 +2466,117 @@ public static class DeployerPlanner
                 Next = "RecordFailure",
             };
 
-            // Mirrors the verified bundle into its app's bucket under the app's lease, then invalidates the app's path.
-            // Every write is idempotent and the lease is re-entrant for the execution holding it, so the whole step may run
-            // again: after an S3 or CloudFront fault, or once another execution's lease is released.
-            states["DeployBundle"] = new
+            if (bundleFunctions is { } bundle)
             {
-                Type = "Task",
-                Resource = bundle.DeployBundle,
-                Parameters = payload,
-                ResultPath = "$.deploy",
-                Retry = new[]
+                // Mirrors the verified bundle into its app's bucket under the app's lease, then invalidates the app's path.
+                // Every write is idempotent and the lease is re-entrant for the execution holding it, so the whole step may run
+                // again: after an S3 or CloudFront fault, or once another execution's lease is released.
+                states["DeployBundle"] = new
                 {
-                    new
+                    Type = "Task",
+                    Resource = bundle.DeployBundle,
+                    Parameters = payload,
+                    ResultPath = "$.deploy",
+                    Retry = new[]
                     {
-                        ErrorEquals = new[] { nameof(BundleDeployInProgress) },
-                        IntervalSeconds = BundleLeaseRetryIntervalSeconds,
-                        MaxAttempts = BundleLeaseRetryMaxAttempts,
-                        BackoffRate = 1.0,
+                        new
+                        {
+                            ErrorEquals = new[] { nameof(BundleDeployInProgress) },
+                            IntervalSeconds = BundleLeaseRetryIntervalSeconds,
+                            MaxAttempts = BundleLeaseRetryMaxAttempts,
+                            BackoffRate = 1.0,
+                        },
+                        Transient(),
+                        new
+                        {
+                            ErrorEquals = BundleTransientErrors.ToArray(),
+                            IntervalSeconds = 5,
+                            MaxAttempts = 3,
+                            BackoffRate = 2.0,
+                        },
                     },
-                    Transient(),
-                    new
-                    {
-                        ErrorEquals = BundleTransientErrors.ToArray(),
-                        IntervalSeconds = 5,
-                        MaxAttempts = 3,
-                        BackoffRate = 2.0,
-                    },
-                },
-                Next = "VerifyBundle",
-                Catch = catchAll,
-            };
+                    Next = "VerifyBundle",
+                    Catch = catchAll,
+                };
 
-            // Reads every object under the app's prefix back — S3's SHA-256 and the headers — once its invalidations have
-            // completed, and hands Record the evidence. §4.7: exit codes are not evidence, these reads are.
-            states["VerifyBundle"] = new
-            {
-                Type = "Task",
-                Resource = bundle.VerifyBundle,
-                Parameters = payload,
-                ResultPath = "$.rollout",
-                Retry = new[]
+                // Reads every object under the app's prefix back — S3's SHA-256 and the headers — once its invalidations have
+                // completed, and hands Record the evidence. §4.7: exit codes are not evidence, these reads are.
+                states["VerifyBundle"] = new
                 {
-                    new
+                    Type = "Task",
+                    Resource = bundle.VerifyBundle,
+                    Parameters = payload,
+                    ResultPath = "$.rollout",
+                    Retry = new[]
                     {
-                        ErrorEquals = new[] { nameof(BundleInvalidationInProgress) },
-                        IntervalSeconds = InvalidationRetryIntervalSeconds,
-                        MaxAttempts = InvalidationRetryMaxAttempts,
-                        BackoffRate = 1.0,
+                        new
+                        {
+                            ErrorEquals = new[] { nameof(BundleInvalidationInProgress) },
+                            IntervalSeconds = InvalidationRetryIntervalSeconds,
+                            MaxAttempts = InvalidationRetryMaxAttempts,
+                            BackoffRate = 1.0,
+                        },
+                        Transient(),
+                        new
+                        {
+                            ErrorEquals = BundleTransientErrors.ToArray(),
+                            IntervalSeconds = 5,
+                            MaxAttempts = 3,
+                            BackoffRate = 2.0,
+                        },
                     },
-                    Transient(),
-                    new
+                    Next = "Record",
+                    Catch = catchAll,
+                };
+            }
+
+            if (siteFunctions is { } site)
+            {
+                // THE SITE (V-24): mirrored into its website bucket under the same lease, held to the environment's domain first; no
+                // invalidation, so nothing to wait for before the read-back.
+                states["DeploySite"] = new
+                {
+                    Type = "Task",
+                    Resource = site.DeploySite,
+                    Parameters = payload,
+                    ResultPath = "$.deploy",
+                    Retry = new[]
                     {
-                        ErrorEquals = BundleTransientErrors.ToArray(),
-                        IntervalSeconds = 5,
-                        MaxAttempts = 3,
-                        BackoffRate = 2.0,
+                        new
+                        {
+                            ErrorEquals = new[] { nameof(BundleDeployInProgress) },
+                            IntervalSeconds = BundleLeaseRetryIntervalSeconds,
+                            MaxAttempts = BundleLeaseRetryMaxAttempts,
+                            BackoffRate = 1.0,
+                        },
+                        Transient(),
+                        new { ErrorEquals = BundleTransientErrors.ToArray(), IntervalSeconds = 5, MaxAttempts = 3, BackoffRate = 2.0 },
                     },
-                },
-                Next = "Record",
-                Catch = catchAll,
-            };
+                    Next = "VerifySite",
+                    Catch = catchAll,
+                };
+                states["VerifySite"] = new
+                {
+                    Type = "Task",
+                    Resource = site.VerifySite,
+                    Parameters = payload,
+                    ResultPath = "$.rollout",
+                    Retry = new[]
+                    {
+                        Transient(),
+                        new { ErrorEquals = BundleTransientErrors.ToArray(), IntervalSeconds = 5, MaxAttempts = 3, BackoffRate = 2.0 },
+                    },
+                    Next = "Record",
+                    Catch = catchAll,
+                };
+            }
         }
 
         return JsonSerializer.Serialize(new
         {
-            Comment = bundleFunctions is null
+            Comment = siteFunctions is not null
+                ? "lz decoupled-CD deployer — class 1 (service image), class 2 (client bundles) where configured, and class 3 (the site, V-24). DecoupledCd.md §5."
+                : bundleFunctions is null
                 ? "lz decoupled-CD deployer — class 1 (service image) only. DecoupledCd.md §5."
                 : "lz decoupled-CD deployer — class 1 (service image) and class 2 (client bundles). DecoupledCd.md §5.",
             StartAt = "Verify",

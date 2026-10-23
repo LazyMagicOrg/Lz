@@ -114,6 +114,8 @@ public static class DeployerTrigger
 
     private static readonly Regex RoutePrefix = new(@"^image/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
     private static readonly Regex ClientRoutePrefix = new(@"^client/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
+    // A site's route (V-24) is one environment's directory of its repository's prefix, so no environment routes another's bundle.
+    private static readonly Regex SiteRoutePrefix = new(@"^site/[a-z0-9._-]+/[a-z0-9._-]+/[a-z0-9][a-z0-9-]{0,31}/$", RegexOptions.CultureInvariant);
     // The last part of an execution's name, as a tenant key is: lowercase, and short enough that the name stays inside 80.
     private static readonly Regex App = new(@"^[a-z0-9][a-z0-9._-]{0,31}$", RegexOptions.CultureInvariant);
     private static readonly Regex Bucket = new(@"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", RegexOptions.CultureInvariant);
@@ -305,7 +307,10 @@ public static class DeployerTrigger
     /// <param name="classes">The record classes the trigger routes: <c>image</c>, and <c>client</c> where the environment deploys
     /// client bundles (P4 stage D, <c>DeployerPlanner.TriggerRecordClasses</c>). A class no branch starts is refused, so the
     /// rules never forward a record the start function could only dead-letter.</param>
-    public static string EventPattern(string artifactAccountId, string buildRecordStore, IReadOnlyList<string> classes)
+    /// <param name="sitePrefixes">The site's one environment's prefix, <c>site/{owner}/{name}/{environment}/</c> (V-24), matched exactly
+    /// after the classes: the forwarding rule is one environment's, so another environment's site record is never forwarded to it.</param>
+    public static string EventPattern(string artifactAccountId, string buildRecordStore, IReadOnlyList<string> classes,
+        IReadOnlyList<string>? sitePrefixes = null)
     {
         if (!Account.IsMatch(artifactAccountId))
             throw new InvalidOperationException($"'{artifactAccountId}' is not a 12-digit AWS account id.");
@@ -321,6 +326,9 @@ public static class DeployerTrigger
         }
         if (classes.Distinct(StringComparer.Ordinal).Count() != classes.Count)
             throw new InvalidOperationException($"the event pattern names a record class twice ({string.Join(", ", classes)}).");
+        foreach (var prefix in sitePrefixes ?? Array.Empty<string>())
+            if (!SiteRoutePrefix.IsMatch(prefix))
+                throw new InvalidOperationException($"'{prefix}' is not a site environment's prefix, site/{{owner}}/{{name}}/{{environment}}/.");
 
         return new JsonObject
         {
@@ -333,7 +341,8 @@ public static class DeployerTrigger
                 // One prefix matcher per class, in the order given, so ["image"] is the pattern P2 stage D wrote, byte for byte.
                 ["object"] = new JsonObject
                 {
-                    ["key"] = new JsonArray(classes.Select(c => (JsonNode?)new JsonObject { ["prefix"] = $"{c}/" }).ToArray()),
+                    ["key"] = new JsonArray(classes.Select(c => $"{c}/").Concat(sitePrefixes ?? Array.Empty<string>())
+                        .Select(p => (JsonNode?)new JsonObject { ["prefix"] = p }).ToArray()),
                 },
                 ["reason"] = new JsonArray(RecordWriteReason),
             },
@@ -406,6 +415,12 @@ public static class DeployerTrigger
     /// <summary>Whether a prefix is one client repository's, <c>client/{owner}/{name}/</c>.</summary>
     public static bool IsClientRecordPrefix(string prefix) => ClientRoutePrefix.IsMatch(prefix);
 
+    /// <summary>Whether a prefix is one environment's of a site repository, <c>site/{owner}/{name}/{environment}/</c> (V-24).</summary>
+    public static bool IsSiteRecordPrefix(string prefix) => SiteRoutePrefix.IsMatch(prefix);
+
+    /// <summary>A prefix whose records name a bundle the deployer mirrors: a client repository's, or a site environment's.</summary>
+    public static bool IsBundleRecordPrefix(string prefix) => IsClientRecordPrefix(prefix) || IsSiteRecordPrefix(prefix);
+
     private static void ValidateClientRoutes(IReadOnlyList<ClientTriggerRoute> routes)
     {
         // Written only where a client route exists, so an empty list is not "none" but a variable that lost its routes.
@@ -414,8 +429,9 @@ public static class DeployerTrigger
 
         foreach (var route in routes)
         {
-            if (!ClientRoutePrefix.IsMatch(route.RecordPrefix))
-                throw new InvalidOperationException($"client route prefix '{route.RecordPrefix}' is not client/{{owner}}/{{name}}/.");
+            if (!IsBundleRecordPrefix(route.RecordPrefix))
+                throw new InvalidOperationException(
+                    $"client route prefix '{route.RecordPrefix}' is not client/{{owner}}/{{name}}/, nor a site's site/{{owner}}/{{name}}/{{environment}}/.");
             if (!App.IsMatch(route.App))
                 throw new InvalidOperationException(
                     $"web app '{route.App}' cannot be part of an execution name (lowercase letters, digits, '.', '_' and '-', at most 32).");

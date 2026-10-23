@@ -76,6 +76,38 @@ public sealed class VerifyBundleFunction
     }
 }
 
+/// <summary>Class 3 (DecoupledCd.md V-24): mirror the verified site into its website bucket, held to the environment's domain.</summary>
+public sealed class DeploySiteFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await DeploySiteStep.RunAsync(
+            state, executionName, "/tmp/lz-site", new S3ArtifactObjects(Clients.S3.Value), new S3AppBucket(Clients.S3.Value),
+            () => DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation(
+            $"{executionName}: mirrored the site into {result["bucket"]}/{result["keyPrefix"]} for {result["domain"]}: put " +
+            $"{result["put"]!.ToJsonString()}, deleted {result["deleted"]}, unchanged {result["unchanged"]}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>Class 3 (V-24): read the deployed site back, and hand Record its evidence.</summary>
+public sealed class VerifySiteFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await VerifySiteStep.RunAsync(state, executionName, new S3AppBucket(Clients.S3.Value), DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation($"{executionName}: site {result["verdict"]}, {result["objects"]} objects, manifest {result["manifestSha256"]}");
+        return Io.Write(result);
+    }
+}
+
 public sealed class PrepareFunction
 {
     public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)

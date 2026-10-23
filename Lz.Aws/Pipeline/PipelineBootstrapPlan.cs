@@ -290,7 +290,8 @@ public static class PipelineBootstrapPlanner
             forwarding = new RecordForwardingPlan(
                 RuleName: ruleName,
                 RuleArn: ruleArn,
-                EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords, DeployerPlanner.TriggerRecordClasses(config)),
+                EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords, DeployerPlanner.TriggerRecordClasses(config),
+                    DeployerPlanner.TriggerSitePrefixes(config)),
                 TargetBusArn: busArn,
                 RoleName: roleName,
                 RoleArn: $"arn:aws:iam::{acct}:role/{roleName}",
@@ -311,6 +312,8 @@ public static class PipelineBootstrapPlanner
         // client bundles, and its DeployBundle function reads them. Nothing is planned where it deploys none, so an
         // environment without a client target keeps exactly the grants it had.
         var clientApps = target != null ? DeployerPlanner.ClientApps(config) : Array.Empty<ClientApp>();
+        // THE SITE (V-24): this environment's directory of the site's prefixes, in both stores, and nothing where it deploys none.
+        var siteApps = target != null ? DeployerPlanner.SiteApps(config) : Array.Empty<SiteApp>();
 
         var recordGrant = target != null
             ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
@@ -323,6 +326,25 @@ public static class PipelineBootstrapPlanner
                     // P4 stage D: the start function reads a client record for its branch, the sweep the record that could name a bundle.
                     p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
                     p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
+                .ToList();
+        if (recordGrant != null)
+            foreach (var site in siteApps)
+                recordGrant = recordGrant
+                    .Concat(CrossAccount.SiteRecordReadGrant(buildRecords, config.Environment, target!, site.RecordPrefix, DeployerPlanner.VerifyRoleName(config),
+                        p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
+                        p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
+                    .ToList();
+
+        IReadOnlyList<System.Text.Json.Nodes.JsonObject>? artifactGrant = clientApps.Count > 0
+            ? CrossAccount.ClientBundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
+                DeployerPlanner.DeployBundleRoleName(config),
+                // P4 stage D: the sweep lists the bundles' versions.
+                p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
+            : null;
+        foreach (var site in siteApps)
+            artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Concat(CrossAccount.SiteBundleReadGrant(artifacts, config.Environment, target!, site.RecordPrefix, DeployerPlanner.VerifyRoleName(config),
+                    DeployerPlanner.DeploySiteRoleName(config), p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
                 .ToList();
 
         return new PipelineBootstrapPlan(
@@ -337,12 +359,7 @@ public static class PipelineBootstrapPlanner
             RecordForwarding: forwarding,
             ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null,
             ArtifactStore: artifacts,
-            ArtifactReadGrant: clientApps.Count > 0
-                ? CrossAccount.ClientBundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
-                    DeployerPlanner.DeployBundleRoleName(config),
-                    // P4 stage D: the sweep lists the bundles' versions.
-                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
-                : null);
+            ArtifactReadGrant: artifactGrant);
     }
 
     /// <summary>

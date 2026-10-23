@@ -307,6 +307,8 @@ public static class DeployerEnvironment
     // Client bundles (P4 stage C).
     public const string ArtifactStore = "LZ_ARTIFACT_STORE";
     public const string ClientTargets = "LZ_CLIENT_TARGETS";
+    // The site (DecoupledCd.md V-24): the environment's one site target, read by Verify.
+    public const string SiteTargets = "LZ_SITE_TARGETS";
     // The repositories whose records Verify requires to be the intake's (DecoupledCd.md §4.4 step 1b, V-D).
     public const string VerifyLiveRepositories = "LZ_VERIFY_LIVE_REPOSITORIES";
     public const string TargetAccount = "LZ_TARGET_ACCOUNT";
@@ -369,7 +371,8 @@ public sealed record VerifySettings(
     IReadOnlyList<string> ImageRepositories,
     string? ArtifactStore = null,
     IReadOnlyList<ClientTarget>? ClientTargets = null,
-    IReadOnlyList<string>? LiveRepositories = null)
+    IReadOnlyList<string>? LiveRepositories = null,
+    IReadOnlyList<SiteTarget>? SiteTargets = null)
 {
     /// <summary>
     /// The two client-bundle variables are the exception to "a missing variable is a fault", and safely: absent, the store
@@ -386,7 +389,9 @@ public sealed record VerifySettings(
         env(DeployerEnvironment.ClientTargets) is { Length: > 0 } targets ? Pipeline.ClientTargets.Decode(targets) : Array.Empty<ClientTarget>(),
         // Absent until a repository is Verify: live, which keeps every function's environment as it was; absent, every
         // repository is still dry and both kinds of record are admitted, as before V-D.
-        env(DeployerEnvironment.VerifyLiveRepositories) is { Length: > 0 } live ? DeployerEnvironment.List(env, DeployerEnvironment.VerifyLiveRepositories) : Array.Empty<string>());
+        env(DeployerEnvironment.VerifyLiveRepositories) is { Length: > 0 } live ? DeployerEnvironment.List(env, DeployerEnvironment.VerifyLiveRepositories) : Array.Empty<string>(),
+        // Absent where the environment deploys no site (V-24), which keeps every other environment's functions as they were.
+        env(DeployerEnvironment.SiteTargets) is { Length: > 0 } sites ? Pipeline.SiteTargets.Decode(sites) : Array.Empty<SiteTarget>());
 
     /// <summary>The pipeline config C1's decisions take, rebuilt from what the planner wrote.</summary>
     public PipelineConfig AsPipeline() => new()

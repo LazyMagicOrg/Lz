@@ -169,8 +169,9 @@ public static class DeployerAlerts
         var list = prefixes.ToList();
         foreach (var prefix in list)
         {
-            if (!DeployerTrigger.IsClientRecordPrefix(prefix))
-                throw new InvalidOperationException($"'{prefix}' is not a client repository's prefix, client/{{owner}}/{{name}}/.");
+            if (!DeployerTrigger.IsBundleRecordPrefix(prefix))
+                throw new InvalidOperationException(
+                    $"'{prefix}' is not a client repository's prefix, client/{{owner}}/{{name}}/, nor a site environment's, site/{{owner}}/{{name}}/{{environment}}/.");
         }
 
         return DeployerEnvironment.Join(list);
@@ -181,9 +182,9 @@ public static class DeployerAlerts
         var prefixes = encoded.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         foreach (var prefix in prefixes)
         {
-            if (!DeployerTrigger.IsClientRecordPrefix(prefix))
+            if (!DeployerTrigger.IsBundleRecordPrefix(prefix))
                 throw new InvalidOperationException(
-                    $"'{prefix}' in {DeployerEnvironment.CorroborateBundleSources} is not client/owner/name/. " +
+                    $"'{prefix}' in {DeployerEnvironment.CorroborateBundleSources} is not client/owner/name/ or site/owner/name/environment/. " +
                     "Re-run `lz bootstrapdeployer --apply`, which is what sets it.");
         }
 

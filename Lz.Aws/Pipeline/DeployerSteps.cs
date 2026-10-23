@@ -172,9 +172,12 @@ public static class VerifyStep
             case "client":
                 return await ClientAsync(state, settings, artifacts, record, stored, refusals);
 
+            case BuildRecordFormat.SiteClass:
+                return await SiteAsync(state, settings, artifacts, record, stored, refusals);
+
             default:
                 refusals.Add(new VerifyRefusal("class",
-                    $"this deployer deploys class 'image' (DecoupledCd.md P2) and class 'client' (P4 stage C); the record is " +
+                    $"this deployer deploys class 'image' (DecoupledCd.md P2), class 'client' (P4 stage C) and class 'site' (V-24); the record is " +
                     $"'{record.Class}'. Other classes are not modelled here rather than modelled badly."));
                 throw new DeployRefused(refusals);
         }
@@ -299,6 +302,50 @@ public static class VerifyStep
                 $"web app {app.App} into s3://{app.Bucket}/{app.KeyPrefix}, invalidating {app.InvalidationPath} on " +
                 $"{string.Join(", ", app.Distributions)}. Built from {record.BuiltFrom.Repo} {ShortCommit(record)} on the " +
                 $"{record.BuiltFrom.Lane} lane, workflow run {record.WorkflowRunId}.",
+        };
+    }
+
+    /// <summary>
+    /// A site (DecoupledCd.md V-24): this environment's website bucket, a record built for this environment, and the zip the
+    /// record names, by version and S3's checksum. Nothing is downloaded, and nothing is written.
+    /// </summary>
+    private static async Task<JsonObject> SiteAsync(
+        JsonObject state, VerifySettings settings, IArtifactObjects artifacts, BuildRecord record, StoredRecord stored,
+        List<VerifyRefusal> refusals)
+    {
+        var (target, targetRefusals) = DeployVerification.SiteTargetFor(
+            record, DeployerInput.BundleBucketFrom(state), settings.SiteTargets ?? Array.Empty<SiteTarget>());
+        refusals.AddRange(targetRefusals);
+        if (refusals.Count > 0)
+            throw new DeployRefused(refusals);
+
+        var identity = record.Identity;
+        var head = await artifacts.HeadAsync(identity.Bucket!, identity.Key!, identity.VersionId!);
+        var artifactRefusals = DeployVerification.BundleArtifact(identity, head, BundleArchive.MaxZipBytes);
+        if (artifactRefusals.Count > 0)
+            throw new DeployRefused(artifactRefusals);
+
+        var site = target!;
+        return new JsonObject
+        {
+            ["class"] = record.Class,
+            ["identity"] = new JsonObject
+            {
+                ["bucket"] = identity.Bucket,
+                ["key"] = identity.Key,
+                ["versionId"] = identity.VersionId,
+                ["sha256"] = identity.Sha256,
+                ["bytes"] = head!.ContentLength,
+            },
+            ["target"] = SiteTargets.ToJson(site),
+            ["recordVersionId"] = stored.VersionId,
+            ["builtFrom"] = BuiltFrom(record),
+            ["builtAt"] = record.BuiltAt,
+            ["workflowRunId"] = record.WorkflowRunId,
+            ["summary"] =
+                $"Deploy site s3://{identity.Bucket}/{identity.Key} version {identity.VersionId} (sha256 {identity.Sha256}), built for " +
+                $"{site.Environment}, into s3://{site.Bucket}/{site.KeyPrefix} for {site.Domain}. No invalidation: pages expire in 60 s. " +
+                $"Built from {record.BuiltFrom.Repo} {ShortCommit(record)} on the {record.BuiltFrom.Lane} lane, workflow run {record.WorkflowRunId}.",
         };
     }
 

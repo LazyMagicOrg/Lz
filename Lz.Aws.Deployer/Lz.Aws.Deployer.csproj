@@ -61,6 +61,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\IntakeSiteCheck.cs" Link="Linked\Lz.Aws\Pipeline\IntakeSiteCheck.cs" />
     <!-- Client bundles (P4 stage C): the steps, and the sync rules deploywebapp shares with them (P-2). BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\BundleDeploy.cs" Link="Linked\Lz.Aws\Pipeline\BundleDeploy.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\SiteDeploy.cs" Link="Linked\Lz.Aws\Pipeline\SiteDeploy.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappSyncRules.cs" Link="Linked\Lz.Aws\Webapp\WebappSyncRules.cs" />
     <Compile Include="..\Lz.Aws\Webapp\WebappMirrorPlanner.cs" Link="Linked\Lz.Aws\Webapp\WebappMirrorPlanner.cs" />
     <Compile Include="..\Lz.Aws\S3BucketRequests.cs" Link="Linked\Lz.Aws\S3BucketRequests.cs" />

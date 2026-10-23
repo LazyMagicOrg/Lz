@@ -249,6 +249,85 @@ public static class CrossAccount
     }
 
     /// <summary>
+    /// The build-record store's grant to ONE environment for its SITE records (DecoupledCd.md V-24): its Verify function, start
+    /// function and sweep read them, and Verify and the sweep list them, under that environment's directory of the site's prefix
+    /// only, <c>site/{owner}/{name}/{environment}/</c>, so no environment reads another's.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> SiteRecordReadGrant(
+        string buildRecordStore, string environment, string targetAccountId, string sitePrefix, string verifyRoleName,
+        string? startRoleName = null, string? corroborateRoleName = null)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerReadsSiteRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObject",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/{sitePrefix}*",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, startRoleName, corroborateRoleName) },
+                },
+            },
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerListsSiteRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:ListBucket",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, corroborateRoleName) },
+                    ["StringLike"] = new JsonObject { ["s3:prefix"] = $"{sitePrefix}*" },
+                },
+            },
+        };
+    }
+
+    /// <summary>
+    /// The artifact store's grant to ONE environment for its SITE bundles (V-24): Verify HEADs and DeploySite reads one by version,
+    /// Verify and the sweep list under the environment's directory, and nothing reads any other.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> SiteBundleReadGrant(
+        string artifactStore, string environment, string targetAccountId, string sitePrefix, string verifyRoleName, string deploySiteRoleName,
+        string? corroborateRoleName = null)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerReadsSiteBundles{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObjectVersion",
+                ["Resource"] = $"arn:aws:s3:::{artifactStore}/{sitePrefix}*",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, deploySiteRoleName) },
+                },
+            },
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerListsSiteBundles{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = new JsonArray("s3:ListBucket", "s3:ListBucketVersions"),
+                ["Resource"] = $"arn:aws:s3:::{artifactStore}",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName, corroborateRoleName) },
+                    ["StringLike"] = new JsonObject { ["s3:prefix"] = $"{sitePrefix}*" },
+                },
+            },
+        };
+    }
+
+    /// <summary>
     /// Roles by ARN for an <c>aws:PrincipalArn</c> condition, the absent ones left out. ONE ROLE IS A STRING, SEVERAL AN ARRAY, so a
     /// statement naming one role is byte for byte what it was before a later role joined it.
     /// </summary>

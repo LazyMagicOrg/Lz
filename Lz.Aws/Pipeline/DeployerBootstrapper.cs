@@ -58,7 +58,10 @@ public static class DeployerBootstrapper
         var clientInputs = DeployerPlanner.ClientApps(config).Count > 0
             ? await ResolveClientInputsAsync(config, profile)
             : null;
-        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs);
+        // THE SITE'S BUCKET AND DOMAIN, read only where a site repository builds this environment's bundle (V-24): from the tenant
+        // config, as the website's own publish derived them.
+        var siteInputs = DeployerPlanner.SiteApps(config).Count > 0 ? ResolveSiteInputs(config) : null;
+        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs);
 
         // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
         // rather than half-way through an apply.
@@ -228,6 +231,9 @@ public static class DeployerBootstrapper
         if (plan.ClientTargets is { Count: > 0 })
             Console.WriteLine($"    and, for client bundles, lets {verifyRole} read client/* records and HEAD client/* bundles, and " +
                               $"{DeployerPlanner.DeployBundleRoleName(config)} read client/* bundles");
+        foreach (var site in plan.SiteTargets ?? Array.Empty<SiteTarget>())
+            Console.WriteLine($"    and, for the site, lets {verifyRole} read {site.RecordPrefix}* records and HEAD {site.RecordPrefix}* bundles, and " +
+                              $"{DeployerPlanner.DeploySiteRoleName(config)} read them");
         Console.WriteLine("  Only images pushed AFTER it runs replicate here — ECR does not copy what is already there.");
     }
 
@@ -331,6 +337,46 @@ public static class DeployerBootstrapper
                 "an ACTIVE ECS cluster in this account, so a build would have no service to roll. Deploy the system first.");
 
         return new DeployerTriggerInputs(cluster, tenants.Select(t => t.TenantKey).OrderBy(k => k, StringComparer.Ordinal).ToList());
+    }
+
+    /// <summary>
+    /// The site's bucket and domain (DecoupledCd.md V-24): the one tenant whose <c>Behaviors.StaticSites</c> hands its root,
+    /// <c>Path: /</c>, to the app <c>website</c> — the entry <c>deployassets</c> skips for the same reason — its bucket
+    /// <c>{sk}-{tk}--webapp-website-{ts}</c>, and its root domain, which the site's canonical URLs must name. Exactly one, or the
+    /// deploy could not say which bucket or domain is the site's.
+    /// </summary>
+    internal static DeployerSiteInputs ResolveSiteInputs(SystemConfig config)
+    {
+        List<(string TenantKey, TenantConfig Config)> tenants;
+        try
+        {
+            tenants = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment);
+        }
+        catch (FileNotFoundException)
+        {
+            tenants = new List<(string, TenantConfig)>();
+        }
+        return SiteInputsFor(config, tenants);
+    }
+
+    /// <summary>The site's bucket and domain from the tenant configs given, which a test can hand it.</summary>
+    internal static DeployerSiteInputs SiteInputsFor(SystemConfig config, IReadOnlyList<(string TenantKey, TenantConfig Config)> tenants)
+    {
+        const string App = "website";
+        var serving = tenants
+            .Where(t => (t.Config.Behaviors?.StaticSites ?? new List<StaticSiteBehavior>())
+                .Any(s => s.Path == "/" && string.Equals(s.AppName, App, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (serving.Count != 1)
+            throw new InvalidOperationException(
+                $"lz bootstrapdeployer refuses: a site deploys here, so exactly one tenant must route / to the app '{App}' " +
+                $"(Behaviors.StaticSites), and {serving.Count} do{(serving.Count == 0 ? " — run from the workspace that holds the tenantconfig files" : $": {string.Join(", ", serving.Select(t => t.TenantKey))}")}.");
+
+        var (tenantKey, tenant) = serving[0];
+        var suffix = string.IsNullOrEmpty(tenant.TenantSuffix) ? config.SystemSuffix : tenant.TenantSuffix;
+        if (string.IsNullOrWhiteSpace(tenant.RootDomain))
+            throw new InvalidOperationException($"lz bootstrapdeployer refuses: tenant {tenantKey} serves the site but names no RootDomain.");
+        return new DeployerSiteInputs($"{config.SystemKey}-{tenantKey}--webapp-{App}-{suffix}", tenant.RootDomain.ToLowerInvariant());
     }
 
     /// <summary>
@@ -527,6 +573,21 @@ public static class DeployerBootstrapper
         else
         {
             Console.WriteLine("  client bundles: none (no client repository names the web app it deploys as in Artifacts)");
+        }
+        Console.WriteLine();
+
+        if (plan.SiteTargets is { Count: > 0 } siteTargets)
+        {
+            Console.WriteLine(plan.Trigger is not null
+                ? "  the site (class 3, V-24), started by the trigger above or by hand:"
+                : "  the site (class 3, V-24), started by hand — the trigger is off, so nothing forwards site records:");
+            foreach (var t in siteTargets)
+                Console.WriteLine($"    {t.Repo}'s {t.Environment} bundle ({t.RecordPrefix}) deploys into s3://{t.Bucket}/{t.KeyPrefix} for {t.Domain}, " +
+                                  $"lease {BundleMarker.Key}; no invalidation, and the bucket is neither created nor re-policied");
+        }
+        else
+        {
+            Console.WriteLine("  the site: none (no site repository names this environment's bundle, site-{environment}, in Artifacts)");
         }
         Console.WriteLine();
 
