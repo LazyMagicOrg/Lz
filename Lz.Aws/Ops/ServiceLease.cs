@@ -63,11 +63,18 @@ public static class ServiceLease
         return $"{KeyPrefix}{cluster}#{service}";
     }
 
-    public static async Task<ServiceLeaseClaim> ClaimAsync(
+    public static Task<ServiceLeaseClaim> ClaimAsync(
         IServiceLeaseStore store, string cluster, string service, string holder, string purpose, DateTimeOffset now)
+        => ClaimKeyAsync(store, KeyFor(cluster, service), $"{cluster}/{service}", holder, purpose, now);
+
+    /// <summary>
+    /// A claim on any lease this store keeps, by its key: a service's (<see cref="KeyFor"/>) or another kind with its own
+    /// prefix, such as Gate 2's one-at-a-time lease on an environment. <paramref name="what"/> names it in a refusal.
+    /// </summary>
+    public static async Task<ServiceLeaseClaim> ClaimKeyAsync(
+        IServiceLeaseStore store, string key, string what, string holder, string purpose, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(holder)) throw new ArgumentException("a claim names its holder", nameof(holder));
-        var key = KeyFor(cluster, service);
         var record = new ServiceLeaseRecord(holder, purpose, now, now + Duration, Guid.NewGuid().ToString("N"));
 
         // Two tries: a lease released between our refused put and our read is free, and the second put takes it.
@@ -77,7 +84,7 @@ public static class ServiceLease
             // A lease read back expired was released (or ran out) after our put was refused: free, so put again.
             if (await store.GetAsync(key) is { } held && held.ExpiresAt > now) return new ServiceLeaseClaim.Held(held);
         }
-        throw new InvalidOperationException($"the lease on {cluster}/{service} could be neither claimed nor read; it is changing under us");
+        throw new InvalidOperationException($"the lease on {what} could be neither claimed nor read; it is changing under us");
     }
 
     /// <summary>
@@ -86,10 +93,15 @@ public static class ServiceLease
     /// Step Functions retries a state, and a retried Prepare must find its own claim, not wait it out. The CLIs' holder
     /// names a user and a machine, which two runs can share, so they never claim this way.
     /// </summary>
-    public static async Task<ServiceLeaseClaim> ClaimReentrantAsync(
+    public static Task<ServiceLeaseClaim> ClaimReentrantAsync(
         IServiceLeaseStore store, string cluster, string service, string holder, string purpose, DateTimeOffset now)
+        => ClaimKeyReentrantAsync(store, KeyFor(cluster, service), $"{cluster}/{service}", holder, purpose, now);
+
+    /// <summary><see cref="ClaimReentrantAsync"/> for a lease named by its key (<see cref="ClaimKeyAsync"/>).</summary>
+    public static async Task<ServiceLeaseClaim> ClaimKeyReentrantAsync(
+        IServiceLeaseStore store, string key, string what, string holder, string purpose, DateTimeOffset now)
     {
-        var claim = await ClaimAsync(store, cluster, service, holder, purpose, now);
+        var claim = await ClaimKeyAsync(store, key, what, holder, purpose, now);
         return claim is ServiceLeaseClaim.Held held && held.By.Holder == holder && held.By.ExpiresAt > now
             ? new ServiceLeaseClaim.Claimed(held.By)
             : claim;
@@ -100,9 +112,12 @@ public static class ServiceLease
     /// not the claim's token (the deployer's Record and RecordFailure, after a Prepare whose result may never have reached
     /// the execution's state). Null when there was no lease; false when another holds it.
     /// </summary>
-    public static async Task<bool?> ReleaseHeldByAsync(IServiceLeaseStore store, string cluster, string service, string holder)
+    public static Task<bool?> ReleaseHeldByAsync(IServiceLeaseStore store, string cluster, string service, string holder)
+        => ReleaseKeyHeldByAsync(store, KeyFor(cluster, service), holder);
+
+    /// <summary><see cref="ReleaseHeldByAsync"/> for a lease named by its key.</summary>
+    public static async Task<bool?> ReleaseKeyHeldByAsync(IServiceLeaseStore store, string key, string holder)
     {
-        var key = KeyFor(cluster, service);
         if (await store.GetAsync(key) is not { } lease) return null;
         if (lease.ExpiresAt <= DateTimeOffset.UnixEpoch) return null;
         return lease.Holder == holder && await store.ReleaseIfTokenAsync(key, lease.Token);
