@@ -16,11 +16,16 @@ public class DeployerGate2PlanTests
         config.Pipeline!.DeployOnBuildRecord = true;
         config.Pipeline.Alerts = true;
         config.Pipeline.Gate2 = gate2;
+        config.Pipeline.Repositories!.Single(r => r.Repo == "Scutara/ScutaraService").Gate1 = new PipelineGate1Config
+        {
+            Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
+        };
         return config;
     }
 
     private static PipelineDeployer Plan(bool gate2) => DeployerPlanner.Plan(Config(gate2), DeployerClientPlanTests.TargetAccount,
-        triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions);
+        triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
+        gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click"));
 
     private static JsonElement States(PipelineDeployer plan) => JsonDocument.Parse(plan.Definition).RootElement.GetProperty("States");
 

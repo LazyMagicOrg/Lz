@@ -94,7 +94,7 @@ public sealed record PipelineDeployer(
 /// </summary>
 public sealed record DeployerGate2Plan(
     string ProjectName, string ProjectArn, string ResultsBucket, string LeaseKey, Gate2Set Set,
-    string StartFunctionName, string ResultFunctionName);
+    string StartFunctionName, string ResultFunctionName, DeployerGate2Project Project);
 
 /// <summary>
 /// The site this environment deploys (DecoupledCd.md V-24), from configuration alone: the site repository whose artifacts name
@@ -513,7 +513,7 @@ public static class DeployerPlanner
     /// bundle (<see cref="SiteApps"/>), and ignored otherwise.</param>
     public static PipelineDeployer Plan(
         SystemConfig config, string? accountId = null, DeployerTriggerInputs? triggerInputs = null, DeployerClientInputs? clientInputs = null,
-        DeployerSiteInputs? siteInputs = null)
+        DeployerSiteInputs? siteInputs = null, DeployerGate2Inputs? gate2Inputs = null)
     {
         var p = config.Pipeline
             ?? throw new InvalidOperationException("no Pipeline block; nothing to plan.");
@@ -772,7 +772,16 @@ public static class DeployerPlanner
                 },
                 TimeoutSeconds: 120, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
-            gate2 = new DeployerGate2Plan(project, $"arn:aws:codebuild:{region}:{acct}:project/{project}", results, leaseKey, set, start, result);
+            var imageGate1 = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+                .Where(r => BuildRecordFormat.IsImageClass(r.Class ?? "") && r.Gate1 is { Run: not null, SdkVersion: not null, SdkSha512: not null })
+                .Select(r => r.Gate1!).FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    "Pipeline.Gate2 runs the e2e tier from the image's test bundle, and no image repository names a Gate1 with its Run, " +
+                    "SdkVersion and SdkSha512: Gate 2 runs the bundle as Gate 1 does.");
+            var gate2Project = Gate2ProjectPlanner.Plan(sk, env, region, acct, results,
+                gate2Inputs ?? throw new InvalidOperationException("Pipeline.Gate2 is on and the planner was given no Gate 2 inputs: the hosts its tiers test."),
+                imageGate1);
+            gate2 = new DeployerGate2Plan(project, $"arn:aws:codebuild:{region}:{acct}:project/{project}", results, leaseKey, set, start, result, gate2Project);
         }
 
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
