@@ -409,6 +409,14 @@ public static class ConfigValidator
                 "both ids are needed. Set both, or Alerts: false.");
         }
 
+        // GATE 2 READS WHAT THE TRIGGER ROLLS, AND ALERTS AN ADVISORY CHANGE (V-E): both must be on.
+        if (p.Gate2 && (!p.DeployOnBuildRecord || !p.Alerts))
+        {
+            errors.Add(
+                "Pipeline.Gate2 is on but Pipeline.DeployOnBuildRecord or Pipeline.Alerts is off. Gate 2 reads the services the " +
+                "trigger's routes name, and publishes an advisory result that changed to the alerts topic. Turn both on, or Gate2: false.");
+        }
+
         foreach (var s in p.Scan?.BlockOn ?? new List<string>())
         {
             if (!PipelineScanConfig.KnownSeverities.Contains(s))

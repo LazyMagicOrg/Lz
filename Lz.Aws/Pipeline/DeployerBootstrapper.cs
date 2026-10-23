@@ -86,6 +86,17 @@ public static class DeployerBootstrapper
                 throw new InvalidOperationException($"lz bootstrapdeployer refuses: {hookRefusal}");
         }
 
+        // GATE 2 IS PLANNED BEFORE IT CAN BE APPLIED (V-E): its functions' handlers, the bundles they run and the CodeBuild
+        // project are not built yet, so Pipeline.Gate2 is refused at apply, as the hook without its verifier is.
+        if (RefusalForGate2(plan) is { } gate2Refusal)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  REFUSED: {gate2Refusal}");
+            Console.ResetColor();
+            if (apply)
+                throw new InvalidOperationException($"lz bootstrapdeployer refuses: {gate2Refusal}");
+        }
+
         if (!apply)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
@@ -441,6 +452,10 @@ public static class DeployerBootstrapper
     /// <c>Pipeline.EnforceSignatures</c> writing it would turn every deploy of the service into a rollback,
     /// so the apply stops before it writes anything.</para>
     /// </summary>
+    public static string? RefusalForGate2(PipelineDeployer plan) => plan.Gate2 is null ? null :
+        "Pipeline.Gate2 is on, and Gate 2 is planned but not yet applicable: its functions' handlers, the bundles it runs and " +
+        $"its CodeBuild project ({plan.Gate2.ProjectName}) land in V-E's E1c and E2. Turn Gate2 off to apply.";
+
     public static string? RefusalForHookPackage(IReadOnlyList<string> missingVerifierFiles, bool enforceSignatures)
         => enforceSignatures && missingVerifierFiles.Count > 0
             ? "the signature-hook package has no Notation verifier (missing " +

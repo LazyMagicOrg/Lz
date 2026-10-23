@@ -84,7 +84,17 @@ public sealed record PipelineDeployer(
     DeployerTriggerPlan? Trigger = null,
     DeployerAlertsPlan? Alerts = null,
     IReadOnlyList<ClientTarget>? ClientTargets = null,
-    IReadOnlyList<SiteTarget>? SiteTargets = null);
+    IReadOnlyList<SiteTarget>? SiteTargets = null,
+    DeployerGate2Plan? Gate2 = null);
+
+/// <summary>
+/// Gate 2 in this environment (DecoupledCd.md §15.5, V-E), under <c>Pipeline.Gate2</c>: the CodeBuild project that runs the
+/// tiers, the bucket it uploads its result files to, the lease that keeps one gate at a time, and what the environment runs.
+/// The two functions are in <see cref="PipelineDeployer.Functions"/>.
+/// </summary>
+public sealed record DeployerGate2Plan(
+    string ProjectName, string ProjectArn, string ResultsBucket, string LeaseKey, Gate2Set Set,
+    string StartFunctionName, string ResultFunctionName);
 
 /// <summary>
 /// The site this environment deploys (DecoupledCd.md V-24), from configuration alone: the site repository whose artifacts name
@@ -208,6 +218,10 @@ public static class DeployerHandlers
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
     public static readonly string DeploySite = For("DeploySiteFunction");
     public static readonly string VerifySite = For("VerifySiteFunction");
+    // Gate 2 (V-E). NOT YET IN All: their classes land with the bundles they run and the project (E1c), and Pipeline.Gate2,
+    // which alone plans them, is refused by bootstrapdeployer until then.
+    public static readonly string Gate2Start = For("Gate2StartFunction");
+    public static readonly string Gate2Result = For("Gate2ResultFunction");
 
     // The intake (DecoupledCd.md V-B), in the build account: the same package, its own functions and roles.
     public static readonly string IntakePoller = For("IntakePollerFunction");
@@ -281,6 +295,17 @@ public static class DeployerPlanner
     // writer that died holding one is waited out rather than failed on.
     public const int ServiceLeaseRetryIntervalSeconds = 30;
     public const int ServiceLeaseRetryMaxAttempts = 62;
+
+    // Gate2Start's wait for the Gate 2 lease another gate holds (V-E): 31 minutes, past a lease's 30, as Prepare's is.
+    public const int Gate2LeaseRetryIntervalSeconds = 30;
+    public const int Gate2LeaseRetryMaxAttempts = 62;
+
+    /// <summary>
+    /// The longest Gate 2's build may run, as the machine waits for it: 25 minutes, inside the lease's 30 with room for the
+    /// two functions, so a slow gate never loses its lease to the next one. Measured tiers: the e2e blocking set about two
+    /// minutes, the browser wave 123 s (2026-10-23).
+    /// </summary>
+    public const int Gate2BuildTimeoutSeconds = 25 * 60;
 
     /// <summary>
     /// How long DeployBundle waits for another execution's lease on the app: 30 s × 40 attempts, twenty minutes — longer
@@ -677,6 +702,10 @@ public static class DeployerPlanner
             throw new InvalidOperationException("the service lease must outlast the rollout wait with margin, or a live roll's lease could be taken.");
         if (TimeSpan.FromSeconds(ServiceLeaseRetryIntervalSeconds * ServiceLeaseRetryMaxAttempts) <= Lz.Aws.Ops.ServiceLease.Duration)
             throw new InvalidOperationException("Prepare must wait longer than a lease lasts, or a lease whose holder died fails the deploy.");
+        if (TimeSpan.FromSeconds(Gate2BuildTimeoutSeconds) + TimeSpan.FromMinutes(5) > Lz.Aws.Ops.ServiceLease.Duration)
+            throw new InvalidOperationException("the Gate 2 lease must outlast Gate 2's build with margin, or a second gate could start inside a slow one.");
+        if (TimeSpan.FromSeconds(Gate2LeaseRetryIntervalSeconds * Gate2LeaseRetryMaxAttempts) <= Lz.Aws.Ops.ServiceLease.Duration)
+            throw new InvalidOperationException("Gate2Start must wait longer than a lease lasts, or a lease whose gate died fails the next one.");
 
         var machine = $"{sk}-{env}-deployer";
         var machineArn = $"arn:aws:states:{region}:{acct}:stateMachine:{machine}";
@@ -705,19 +734,61 @@ public static class DeployerPlanner
             functions.Add(corroborate);
         }
 
+        // GATE 2 (V-E), only under Pipeline.Gate2: off, nothing of it is planned and the machine ends at Record.
+        DeployerGate2Plan? gate2 = null;
+        if (p.Gate2)
+        {
+            if (trigger is null || alerts is null)
+                throw new InvalidOperationException("Pipeline.Gate2 needs DeployOnBuildRecord, whose routes name what it reads, and Alerts.");
+            var set = new Gate2Set(
+                trigger.Routes.SelectMany(r => r.Targets).Select(t => new Gate2Service(t.Target.Cluster, t.Target.Service, t.Target.Container))
+                    .Distinct().OrderBy(s => $"{s.Cluster}/{s.Service}", StringComparer.Ordinal).ToList(),
+                clientTargets.Select(c => new Gate2App(c.App, c.Bucket)).OrderBy(a => a.App, StringComparer.Ordinal).ToList());
+            var project = Gate2ProjectName(config);
+            var results = $"{sk}-{env}-gate2-results-{config.SystemSuffix}";
+            var leaseKey = Gate2LeaseKey(env);
+            var start = $"{sk}-{env}-deployer-gate2-start";
+            var result = $"{sk}-{env}-deployer-gate2-result";
+            var gate2Environment = new Dictionary<string, string>
+            {
+                [DeployerEnvironment.Gate2Set] = set.Encode(),
+                [DeployerEnvironment.LeaseTable] = sk,
+                [DeployerEnvironment.Gate2LeaseKey] = leaseKey,
+                [DeployerEnvironment.Gate2ResultsBucket] = results,
+            };
+
+            functions.Add(new(start, DeployerHandlers.Gate2Start, $"{start}-fn",
+                Combine(Logs(region, acct, start), [.. Gate2LeaseGrants(region, acct, sk, "ClaimTheGate2Lease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"),
+                         .. Gate2ReadGrants(set)]),
+                gate2Environment, TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+
+            functions.Add(new(result, DeployerHandlers.Gate2Result, $"{result}-fn",
+                Combine(Logs(region, acct, result), [.. Gate2LeaseGrants(region, acct, sk, "ReleaseTheGate2Lease", "dynamodb:GetItem", "dynamodb:UpdateItem"),
+                         .. Gate2ReadGrants(set), .. Gate2ResultGrants(results, evidence, alerts.TopicArn)]),
+                new Dictionary<string, string>(gate2Environment)
+                {
+                    [DeployerEnvironment.EvidenceStore] = evidence,
+                    [DeployerEnvironment.AlertsTopic] = alerts.TopicArn,
+                },
+                TimeoutSeconds: 120, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+
+            gate2 = new DeployerGate2Plan(project, $"arn:aws:codebuild:{region}:{acct}:project/{project}", results, leaseKey, set, start, result);
+        }
+
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
 
         return new PipelineDeployer(
             StateMachineName: machine,
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
-                                      approvalRequired ? p.Approval?.NotifyTopicArn : null),
+                                      approvalRequired ? p.Approval?.NotifyTopicArn : null, gate2?.ProjectArn),
             DenyPolicy: DenyPolicyFor(),
             EvidenceStore: evidence,
             EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
-                                      p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions),
+                                      p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
+                                      gate2 is null ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName)),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -745,7 +816,8 @@ public static class DeployerPlanner
             Trigger: trigger,
             Alerts: alerts,
             ClientTargets: clientTargets,
-            SiteTargets: siteTargets);
+            SiteTargets: siteTargets,
+            Gate2: gate2);
     }
 
     /// <summary>
@@ -1460,7 +1532,7 @@ public static class DeployerPlanner
     /// </summary>
     private static string RolePolicyFor(
         string region, string accountId, string sk, string env,
-        IReadOnlyList<string> functionArns, string? approvalTopicArn)
+        IReadOnlyList<string> functionArns, string? approvalTopicArn, string? gate2ProjectArn)
     {
         var statements = new List<object>
         {
@@ -1494,6 +1566,27 @@ public static class DeployerPlanner
                 Effect = "Allow",
                 Action = new[] { "sns:Publish" },
                 Resource = approvalTopicArn,
+            });
+        }
+
+        // GATE 2's BUILD (V-E), started and waited for by the machine itself (codebuild:startBuild.sync). The managed rule
+        // is the one Step Functions creates to learn a build ended; the grant follows the policy AWS documents for the
+        // CodeBuild integration, written from that documentation and not yet measured: the first gate in dev is the check.
+        if (gate2ProjectArn != null)
+        {
+            statements.Add(new
+            {
+                Sid = "RunGate2sBuild",
+                Effect = "Allow",
+                Action = new[] { "codebuild:StartBuild", "codebuild:StopBuild", "codebuild:BatchGetBuilds", "codebuild:BatchGetReports" },
+                Resource = gate2ProjectArn,
+            });
+            statements.Add(new
+            {
+                Sid = "LearnThatGate2sBuildEnded",
+                Effect = "Allow",
+                Action = new[] { "events:PutTargets", "events:PutRule", "events:DescribeRule" },
+                Resource = $"arn:aws:events:{region}:{accountId}:rule/StepFunctionsGetEventForCodeBuildStartBuildRule",
             });
         }
 
@@ -1678,7 +1771,63 @@ public static class DeployerPlanner
     /// The per-service lease's items in the system table (DecoupledCd.md V-J), and no others: every key must lead with
     /// <c>lease#ecs-service#</c>, so these grants reach no application data in the same table.
     /// </summary>
-    private static object[] LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions) => new object[]
+    /// <summary>Gate 2's CodeBuild project in this environment's account.</summary>
+    public static string Gate2ProjectName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-gate2";
+
+    /// <summary>Gate 2's one-at-a-time lease on an environment, in the same table and store as the services' leases.</summary>
+    public const string Gate2LeasePrefix = "lease#gate2#";
+
+    public static string Gate2LeaseKey(string environment) => $"{Gate2LeasePrefix}{environment}";
+
+    /// <summary>Gate 2's lease item in the system table, and no other: its key must lead with <see cref="Gate2LeasePrefix"/>.</summary>
+    private static object[] Gate2LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions)
+        => LeaseItemGrants(region, accountId, sk, sid, Gate2LeasePrefix, actions);
+
+    /// <summary>What both Gate 2 functions read of what runs: each service's tasks, and each app's <c>lz/deploy.json</c>.</summary>
+    private static object[] Gate2ReadGrants(Gate2Set set)
+    {
+        var grants = new List<object>
+        {
+            new { Sid = "ReadWhatIsRunning", Effect = "Allow", Action = new[] { "ecs:ListTasks", "ecs:DescribeTasks" }, Resource = "*" },
+        };
+        if (set.Apps.Count > 0)
+            grants.Add(new
+            {
+                Sid = "ReadWhichBundleEachAppServes",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = set.Apps.Select(a => $"arn:aws:s3:::{a.Bucket}/{BundleMarker.Key}").ToArray(),
+            });
+        return grants.ToArray();
+    }
+
+    /// <summary>
+    /// Gate2Result's own: the result files the build uploaded, the evidence store's <c>tests/</c> — read for the previous
+    /// gate's advisory results, written once for this one, the only writer there — and the alerts topic.
+    /// </summary>
+    private static object[] Gate2ResultGrants(string resultsBucket, string evidence, string topicArn) => new object[]
+    {
+        new { Sid = "ReadTheResultFiles", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{resultsBucket}/*" },
+        new { Sid = "ReadThePreviousGates", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{evidence}/{Gate2ResultStep.TestsPrefix}*" },
+        new
+        {
+            Sid = "ListThePreviousGates",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{evidence}",
+            Condition = new Dictionary<string, object>
+            {
+                ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = new[] { $"{Gate2ResultStep.TestsPrefix}*" } },
+            },
+        },
+        new { Sid = "WriteThisGatesOutcome", Effect = "Allow", Action = new[] { "s3:PutObject" }, Resource = $"arn:aws:s3:::{evidence}/{Gate2ResultStep.TestsPrefix}*" },
+        new { Sid = "AlertAPerson", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topicArn },
+    };
+
+    private static object[] LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions)
+        => LeaseItemGrants(region, accountId, sk, sid, Lz.Aws.Ops.ServiceLease.KeyPrefix, actions);
+
+    private static object[] LeaseItemGrants(string region, string accountId, string sk, string sid, string keyPrefix, string[] actions) => new object[]
     {
         new
         {
@@ -1690,7 +1839,7 @@ public static class DeployerPlanner
             {
                 ["ForAllValues:StringLike"] = new Dictionary<string, object>
                 {
-                    ["dynamodb:LeadingKeys"] = new[] { $"{Lz.Aws.Ops.ServiceLease.KeyPrefix}*" },
+                    ["dynamodb:LeadingKeys"] = new[] { $"{keyPrefix}*" },
                 },
             },
         },
@@ -2214,7 +2363,8 @@ public static class DeployerPlanner
         bool approvalRequired, string verifyFn, string prepareFn, string rolloutFn,
         string recordFn, string failureFn, int heartbeatSeconds, string? approvalTopicArn,
         (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
-        (string DeploySite, string VerifySite)? siteFunctions = null)
+        (string DeploySite, string VerifySite)? siteFunctions = null,
+        (string Start, string Result, string Project)? gate2 = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -2377,16 +2527,28 @@ public static class DeployerPlanner
             },
             // Writes the evidence VerifyRollout produced, once, under a conditional write. A function rather
             // than aws-sdk:s3:putObject so that a retry after a write that landed is success (RecordStep).
-            ["Record"] = new
-            {
-                Type = "Task",
-                Resource = recordFn,
-                Parameters = payload,
-                ResultPath = "$.recorded",
-                Retry = new[] { Transient(), EvidenceWrite() },
-                End = true,
-                Catch = catchAll,
-            },
+            // Under Pipeline.Gate2 the success branch goes on to Gate 2 (V-E); otherwise it ends here, as it always has.
+            ["Record"] = gate2 is null
+                ? new
+                {
+                    Type = "Task",
+                    Resource = recordFn,
+                    Parameters = payload,
+                    ResultPath = "$.recorded",
+                    Retry = new[] { Transient(), EvidenceWrite() },
+                    End = true,
+                    Catch = catchAll,
+                }
+                : (object)new
+                {
+                    Type = "Task",
+                    Resource = recordFn,
+                    Parameters = payload,
+                    ResultPath = "$.recorded",
+                    Retry = new[] { Transient(), EvidenceWrite() },
+                    Next = "Gate2Start",
+                    Catch = catchAll,
+                },
             ["RecordFailure"] = new
             {
                 Type = "Task",
@@ -2418,6 +2580,99 @@ public static class DeployerPlanner
                 Cause = "the failure could not be written to the evidence bucket; this execution's history holds both errors",
             },
         };
+
+        if (gate2 is { } g)
+        {
+            // GATE 2 (DecoupledCd.md §15.5, V-E), after a deploy is recorded. Its faults end in Gate2Fault, not RecordFailure:
+            // the deploy landed and is recorded, and a gate that could not run decides nothing about it. A fault leaves the
+            // Gate 2 lease to run out (ServiceLease.Duration) rather than be released.
+            var gate2Fault = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "Gate2Fault", ResultPath = "$.gate2Error" } };
+            states["Gate2Start"] = new
+            {
+                Type = "Task",
+                Resource = g.Start,
+                Parameters = payload,
+                ResultPath = "$.gate2Start",
+                Retry = new object[]
+                {
+                    Transient(),
+                    // Another gate holds the lease: wait it out, past the lease's own life, so a holder that died frees it.
+                    new { ErrorEquals = new[] { nameof(Gate2LeaseHeld) }, IntervalSeconds = Gate2LeaseRetryIntervalSeconds, MaxAttempts = Gate2LeaseRetryMaxAttempts, BackoffRate = 1.0 },
+                },
+                Next = "Gate2Ours",
+                Catch = gate2Fault,
+            };
+            states["Gate2Ours"] = new
+            {
+                Type = "Choice",
+                Choices = new[] { new { Variable = "$.gate2Start.verdict", StringEquals = "ours", Next = "Gate2Run" } },
+                // Not this execution's artifact running: no build, and the result state records TestsSuperseded.
+                Default = "Gate2Result",
+            };
+            states["Gate2Run"] = new
+            {
+                Type = "Task",
+                Resource = "arn:aws:states:::codebuild:startBuild.sync",
+                Parameters = new Dictionary<string, object>
+                {
+                    ["ProjectName"] = g.Project,
+                    ["EnvironmentVariablesOverride.$"] = "$.gate2Start.variables",
+                },
+                ResultSelector = new Dictionary<string, object>
+                {
+                    ["id.$"] = "$.Build.Id",
+                    ["status.$"] = "$.Build.BuildStatus",
+                },
+                ResultPath = "$.gate2Build",
+                TimeoutSeconds = Gate2BuildTimeoutSeconds,
+                Next = "Gate2Result",
+                // A failing test fails the build, and with it this task: the result state still reads the files, which
+                // decide, never the build's status.
+                Catch = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "Gate2Result", ResultPath = "$.gate2BuildError" } },
+            };
+            states["Gate2Result"] = new
+            {
+                Type = "Task",
+                Resource = g.Result,
+                Parameters = payload,
+                ResultPath = "$.gate2",
+                Retry = new[] { Transient(), EvidenceWrite() },
+                Next = "Gate2Outcome",
+                Catch = gate2Fault,
+            };
+            states["Gate2Outcome"] = new
+            {
+                Type = "Choice",
+                Choices = new[]
+                {
+                    new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.Passed), Next = "Gate2Passed" },
+                    new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.TestsSuperseded), Next = "Gate2Superseded" },
+                    new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.PostDeployTestsFailed), Next = nameof(Gate2Outcome.PostDeployTestsFailed) },
+                },
+                Default = nameof(Gate2Outcome.TestsIncomplete),
+            };
+            states["Gate2Passed"] = new { Type = "Succeed" };
+            // Tests that ran against other code: recorded, not alerted, nothing decided (§15.5).
+            states["Gate2Superseded"] = new { Type = "Succeed" };
+            states[nameof(Gate2Outcome.PostDeployTestsFailed)] = new
+            {
+                Type = "Fail",
+                Error = nameof(Gate2Outcome.PostDeployTestsFailed),
+                Cause = "a blocking Gate 2 test failed; the build stays deployed and nothing is promoted - see tests/ in the evidence bucket",
+            };
+            states[nameof(Gate2Outcome.TestsIncomplete)] = new
+            {
+                Type = "Fail",
+                Error = nameof(Gate2Outcome.TestsIncomplete),
+                Cause = "Gate 2 could not run its blocking set whole; nothing is promoted, and the build can be gated again - see tests/ in the evidence bucket",
+            };
+            states["Gate2Fault"] = new
+            {
+                Type = "Fail",
+                Error = "Gate2Fault",
+                Cause = "Gate 2 could not run or record its outcome; the deploy is recorded, and this execution's history holds the error",
+            };
+        }
 
         if (approvalRequired)
         {

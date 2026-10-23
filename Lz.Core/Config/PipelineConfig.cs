@@ -128,6 +128,21 @@ public class PipelineConfig
     public bool Alerts { get; set; }
 
     /// <summary>
+    /// Run Gate 2 after every deploy this environment's deployer records (DecoupledCd.md §15.5, V-E). Default <c>false</c>.
+    ///
+    /// <para>WHAT IT BUILDS. After Record, on the success branch: Gate2Start, which takes this environment's Gate 2 lease and
+    /// reads what the environment runs; a CodeBuild project that runs the e2e and browser tiers against it; and
+    /// Gate2Result, which judges the result files, reads what runs again, and writes <c>tests/{execution}.json</c>. A
+    /// blocking failure ends the execution <c>PostDeployTestsFailed</c> and anything incomplete <c>TestsIncomplete</c>, each
+    /// a Fail state the failed-execution rule alerts; a pass, or tests that ran against other code, ends in Succeed.</para>
+    ///
+    /// <para>ITS OWN FLAG, NOT IMPLIED BY <see cref="Enabled"/>: off, the machine ends at Record as it always has, and the
+    /// plan is byte for byte what it was. Requires <see cref="DeployOnBuildRecord"/>, whose routes name the services Gate 2
+    /// reads, and <see cref="Alerts"/>, whose topic an advisory change is published to.</para>
+    /// </summary>
+    public bool Gate2 { get; set; }
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

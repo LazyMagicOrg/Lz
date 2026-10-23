@@ -311,6 +311,10 @@ public static class DeployerEnvironment
     public const string SiteTargets = "LZ_SITE_TARGETS";
     // The repositories whose records Verify requires to be the intake's (DecoupledCd.md §4.4 step 1b, V-D).
     public const string VerifyLiveRepositories = "LZ_VERIFY_LIVE_REPOSITORIES";
+    // Gate 2 (DecoupledCd.md §15.5, V-E): what the environment runs, its one-at-a-time lease, and where the build uploads.
+    public const string Gate2Set = "LZ_GATE2_SET";
+    public const string Gate2LeaseKey = "LZ_GATE2_LEASE_KEY";
+    public const string Gate2ResultsBucket = "LZ_GATE2_RESULTS_BUCKET";
     public const string TargetAccount = "LZ_TARGET_ACCOUNT";
     public const string BucketVersioning = "LZ_BUCKET_VERSIONING";
     public const string NoncurrentExpirationDays = "LZ_NONCURRENT_EXPIRATION_DAYS";
