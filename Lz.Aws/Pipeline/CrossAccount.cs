@@ -201,6 +201,61 @@ public static class CrossAccount
     public static string BuildRecordListSid(string environment) => $"DeployerListsImageRecords{Suffix(environment)}";
 
     /// <summary>
+    /// The build-record store's grant to ONE environment's Gate2Start (V-E): read the tests records, and list only the browser
+    /// tests' prefix to find the newest. Planned only where that environment's Gate 2 is provisioned or on.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> Gate2RecordReadGrant(string buildRecordStore, string environment, string targetAccountId, string gate2StartRoleName, string browserPrefix)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"Gate2ReadsTestsRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObject",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/{DeployerPlanner.Gate2BundlesClass}/*",
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, gate2StartRoleName) } },
+            },
+            new JsonObject
+            {
+                ["Sid"] = $"Gate2ListsBrowserTestsRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:ListBucket",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, gate2StartRoleName) },
+                    ["StringLike"] = new JsonObject { ["s3:prefix"] = $"{browserPrefix}*" },
+                },
+            },
+        };
+    }
+
+    /// <summary>
+    /// The artifact store's grant to ONE environment's Gate2Start (V-E): the test bundles BY VERSION, which the URL it signs names.
+    /// Nothing else of the store, and planned only where that environment's Gate 2 is provisioned or on.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> Gate2BundleReadGrant(string artifactStore, string environment, string targetAccountId, string gate2StartRoleName)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"Gate2ReadsTestBundlesByVersion{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObjectVersion",
+                ["Resource"] = $"arn:aws:s3:::{artifactStore}/{DeployerPlanner.Gate2BundlesClass}/*",
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, gate2StartRoleName) } },
+            },
+        };
+    }
+
+    /// <summary>
     /// The build-record store's grant to ONE environment's Verify function for CLIENT records (P4 stage C): read them, and
     /// list under <c>client/</c> so a missing record is a 404. Statements of their own beside the image grant, which stays
     /// byte for byte what it was, and planned only where the environment has a client target.

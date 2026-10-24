@@ -51,6 +51,34 @@ public class DeployerGate2PlanTests
         Assert.DoesNotContain("codebuild", plan.RolePolicy);
     }
 
+    // ---- the build account's grants to Gate2Start ----
+
+    private static IEnumerable<System.Text.Json.Nodes.JsonObject> BuildGrants(string gate2)
+    {
+        var build = PipelineBootstrapPlanner.Plan(Config(gate2), "147440642635");
+        return (build.BuildRecordReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+            .Concat(build.ArtifactReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>());
+    }
+
+    [Fact]
+    public void Provisioned_TheBuildAccountGrantsGate2StartTheTestsRecordsTheBrowserListingAndTheBundlesByVersion_AndNoOneElse()
+    {
+        var gate2 = BuildGrants("provisioned").Where(g => g["Sid"]!.GetValue<string>().StartsWith("Gate2", StringComparison.Ordinal)).ToList();
+        string Of(string sid, string field) => gate2.Single(g => g["Sid"]!.GetValue<string>().StartsWith(sid, StringComparison.Ordinal))[field]!.ToJsonString();
+
+        Assert.Equal(3, gate2.Count);
+        Assert.Contains("scu-build-records-4df6-b9c6/tests/*", Of("Gate2ReadsTestsRecords", "Resource"));
+        Assert.Contains("tests/scutara/scutarae2etests/*", Of("Gate2ListsBrowserTestsRecords", "Condition"));
+        Assert.Contains("s3:GetObjectVersion", Of("Gate2ReadsTestBundlesByVersion", "Action"));
+        Assert.Contains("scu-artifacts-4df6-b9c6/tests/*", Of("Gate2ReadsTestBundlesByVersion", "Resource"));
+        Assert.All(gate2, g => Assert.Equal($"arn:aws:iam::503947800380:role/{DeployerPlanner.Gate2StartRoleName(Config("provisioned"))}",
+            g["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void Off_TheBuildAccountGrantsGate2Nothing()
+        => Assert.DoesNotContain(BuildGrants("off"), g => g["Sid"]!.GetValue<string>().StartsWith("Gate2", StringComparison.Ordinal));
+
     // ---- provisioned: the resources, not the states ----
 
     [Fact]

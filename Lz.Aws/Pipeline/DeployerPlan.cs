@@ -759,6 +759,8 @@ public static class DeployerPlanner
 
             var browserPrefix = BuildRecordFormat.PrefixFor(Gate2BundlesClass, p.Gate2BrowserTests
                 ?? throw new InvalidOperationException("Pipeline.Gate2 needs Gate2BrowserTests, the repository whose tests the browser tier runs."));
+            if ($"{start}-fn" != Gate2StartRoleName(config))
+                throw new InvalidOperationException("Gate2Start's role name diverged from Gate2StartRoleName, which the build account's grant names.");
             functions.Add(new(start, DeployerHandlers.Gate2Start, $"{start}-fn",
                 Combine(Logs(region, acct, start), [.. Gate2LeaseGrants(region, acct, sk, "ClaimTheGate2Lease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"),
                          .. Gate2ReadGrants(set), .. Gate2BundleGrants(buildRecordStore, artifactStore, evidence, browserPrefix)]),
@@ -1538,6 +1540,13 @@ public static class DeployerPlanner
     /// alone would leave Verify unable to read a single record, with an access denial that names neither.
     /// </summary>
     public static string VerifyRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-verify-fn";
+
+    /// <summary>Gate2Start's role, which the build account's stores grant the tests records and bundles to (V-E).</summary>
+    public static string Gate2StartRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-gate2-start-fn";
+
+    /// <summary>The prefix of the browser tests' records, the newest of which Gate 2's browser tier runs (V-E).</summary>
+    public static string? Gate2BrowserPrefix(SystemConfig config)
+        => config.Pipeline?.Gate2BrowserTests is { } repo ? BuildRecordFormat.PrefixFor(Gate2BundlesClass, repo) : null;
 
     /// <summary>
     /// The state machine's role: invoke its functions, roll the service, and — only when approval is

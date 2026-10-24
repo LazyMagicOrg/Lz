@@ -335,6 +335,15 @@ public static class PipelineBootstrapPlanner
                         p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
                     .ToList();
 
+        // GATE 2 (V-E): where this environment's Gate 2 is provisioned or on, its Gate2Start reads the tests records, lists the
+        // browser tests', and signs the test bundles by version. Nothing of it otherwise, so an environment without it keeps its grants.
+        var gate2Grants = target != null && p.Gate2IsProvisioned && DeployerPlanner.Gate2BrowserPrefix(config) is { } browserPrefix;
+        if (recordGrant != null && gate2Grants)
+            recordGrant = recordGrant
+                .Concat(CrossAccount.Gate2RecordReadGrant(buildRecords, config.Environment, target!, DeployerPlanner.Gate2StartRoleName(config),
+                    DeployerPlanner.Gate2BrowserPrefix(config)!))
+                .ToList();
+
         IReadOnlyList<System.Text.Json.Nodes.JsonObject>? artifactGrant = clientApps.Count > 0
             ? CrossAccount.ClientBundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
                 DeployerPlanner.DeployBundleRoleName(config),
@@ -345,6 +354,10 @@ public static class PipelineBootstrapPlanner
             artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.SiteBundleReadGrant(artifacts, config.Environment, target!, site.RecordPrefix, DeployerPlanner.VerifyRoleName(config),
                     DeployerPlanner.DeploySiteRoleName(config), p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
+                .ToList();
+        if (gate2Grants)
+            artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Concat(CrossAccount.Gate2BundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.Gate2StartRoleName(config)))
                 .ToList();
 
         return new PipelineBootstrapPlan(
