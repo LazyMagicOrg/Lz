@@ -232,7 +232,9 @@ public static class PipelineBootstrapPlanner
         // overwrite another's artifacts. Derived from the repository NAME rather than the class,
         // because two repositories can produce the same class (SellerApp and AdminApp are both
         // `client`) and must not share a prefix.
+        // GitHub's writers only: a build-side class (tests, V-E) has no role, and only the intake writes its prefix.
         var prefixes = repos
+            .Where(r => !PipelineConfig.BuildSideClasses.Contains(r.Class ?? ""))
             .Select(r => BuildRecordFormat.PrefixFor(
                 RequireNonEmpty(r.Class, "Pipeline.Repositories[].Class"),
                 RequireNonEmpty(r.Repo, "Pipeline.Repositories[].Repo")))

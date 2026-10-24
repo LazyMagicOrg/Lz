@@ -52,6 +52,8 @@ public sealed class TestsClassTests
         var plan = PipelineBootstrapPlanner.Plan(Config(), "147440642635");
         Assert.DoesNotContain(plan.Roles, r => r.Name.Contains("scutarae2etests", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(plan.Roles, r => r.Name.Contains("scutarasellerapp", StringComparison.OrdinalIgnoreCase));
+        // And no store says GitHub may write its prefix: only the intake does.
+        Assert.All(plan.Stores, s => Assert.DoesNotContain("tests/scutara/scutarae2etests/", s.WriterPrefixes));
     }
 
     [Fact]
