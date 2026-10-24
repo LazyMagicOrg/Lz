@@ -60,10 +60,10 @@ internal sealed class S3Gate2Markers(IAppBucket bucket) : IGate2Markers
         => await bucket.ReadMarkerAsync(appBucket, BundleMarker.Key) is { } read ? BundleMarker.Parse(read.Json).Deployed?.BundleVersionId : null;
 }
 
-/// <summary>The build's result files, at <c>{execution}/{file}</c> in the results bucket; null when the build left none.</summary>
+/// <summary>The build's result files, at <c>results/{execution}/{file}</c> in the results bucket; null when the build left none.</summary>
 internal sealed class S3Gate2Results(IAmazonS3 s3, string bucket) : IGate2Results
 {
-    public Task<string?> ReadAsync(string execution, string file) => S3Gate2Objects.TextOrNullAsync(s3, bucket, $"{execution}/{file}");
+    public Task<string?> ReadAsync(string execution, string file) => S3Gate2Objects.TextOrNullAsync(s3, bucket, $"{Gate2ResultStep.ResultsPrefix}{execution}/{file}");
 }
 
 /// <summary>Listing and reading S3 for Gate 2: the evidence store's <c>tests/</c> and <c>deploys/image/</c>, the build account's tests records.</summary>

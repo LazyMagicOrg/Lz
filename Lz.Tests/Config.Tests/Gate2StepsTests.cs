@@ -110,7 +110,7 @@ public sealed class Gate2StepsTests
         var vars = start["variables"]!.AsArray().OfType<JsonObject>().ToDictionary(v => v["Name"]!.GetValue<string>(), v => v["Value"]!.GetValue<string>());
         Assert.Equal("https://presigned/tests", vars["GATE2_E2E_BUNDLE_URL"]);
         Assert.Equal(Exec, vars["GATE2_EXECUTION"]);
-        Assert.Equal($"s3://scu-dev-gate2-results-4df6-b9c6/{Exec}/", vars["GATE2_RESULTS"]);
+        Assert.Equal($"s3://scu-dev-gate2-results-4df6-b9c6/results/{Exec}/", vars["GATE2_RESULTS"]);
         Assert.All(start["variables"]!.AsArray().OfType<JsonObject>(), v => Assert.Equal("PLAINTEXT", v["Type"]!.GetValue<string>()));
         Assert.Equal("v-admin", start["before"]!["bundles"]!["adminapp"]!.GetValue<string>());
     }

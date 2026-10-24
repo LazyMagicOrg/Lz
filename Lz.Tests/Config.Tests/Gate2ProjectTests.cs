@@ -12,14 +12,15 @@ namespace Lz.Tests.Config.Tests;
 /// </summary>
 public class Gate2ProjectTests
 {
-    private static readonly DeployerGate2Inputs Inputs = new("match.aiproxydev.click", "aiproxydev.click");
+    private static readonly DeployerGate2Inputs Inputs = new("match.aiproxydev.click", "aiproxydev.click",
+        "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc", "subnet-08e81426ad2fcbdba" });
 
     private static SystemConfig Config()
     {
         var config = DeployerClientPlanTests.Config();
         config.Pipeline!.DeployOnBuildRecord = true;
         config.Pipeline.Alerts = true;
-        config.Pipeline.Gate2 = true;
+        config.Pipeline.Gate2 = "on";
         config.Pipeline.Gate2BrowserTests = "Scutara/ScutaraE2ETests";
         config.Pipeline.Repositories!.Single(r => r.Repo == "Scutara/ScutaraService").Gate1 = new PipelineGate1Config
         {
@@ -134,14 +135,12 @@ public class Gate2ProjectTests
         => e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().Select(x => x.GetString()!) : new[] { e.GetString()! };
 
     [Fact]
-    public void TheRole_WritesOnlyResults_AndCannotOverwriteTheStagedCache()
+    public void TheRole_WritesOnlyUnderResults_SoNeverTheStagedCache()
     {
         var statements = Statements(Project().RolePolicy).ToList();
         var puts = statements.Where(s => s.GetProperty("Effect").GetString() == "Allow" && Strings(s.GetProperty("Action")).Contains("s3:PutObject")).ToList();
-        Assert.Equal(new[] { "arn:aws:s3:::scu-dev-gate2-results-4df6-b9c6/*" }, puts.SelectMany(s => Strings(s.GetProperty("Resource"))));
-        var deny = statements.Single(s => s.GetProperty("Effect").GetString() == "Deny");
-        Assert.Contains("s3:PutObject", Strings(deny.GetProperty("Action")));
-        Assert.Equal(new[] { "arn:aws:s3:::scu-dev-gate2-results-4df6-b9c6/fixtures/*" }, Strings(deny.GetProperty("Resource")));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-dev-gate2-results-4df6-b9c6/results/*" }, puts.SelectMany(s => Strings(s.GetProperty("Resource"))));
+        Assert.DoesNotContain(statements.SelectMany(s => Strings(s.GetProperty("Action"))), a => a.Contains("Delete", StringComparison.Ordinal) && a.StartsWith("s3:", StringComparison.Ordinal));
         // Nothing in the evidence store: tests/ has one writer, Gate2Result (§15.5).
         Assert.DoesNotContain("deploy-evidence", Project().RolePolicy);
     }
@@ -156,6 +155,35 @@ public class Gate2ProjectTests
         var cognito = statements.Single(s => Strings(s.GetProperty("Action")).Contains("cognito-idp:AdminCreateUser"));
         Assert.Equal(new[] { "arn:aws:cognito-idp:us-west-2:503947800380:userpool/*" }, Strings(cognito.GetProperty("Resource")));
         Assert.Contains("cognito-idp:ListUserPoolClients", Strings(cognito.GetProperty("Action")));
+    }
+
+    [Fact]
+    public void TheBuild_RunsInThePrivateSubnets_SoItLeavesThroughTheNatAddress_WithItsOwnSecurityGroup()
+    {
+        var project = Project();
+        Assert.Equal("vpc-0c9d2cd926f4959a7", project.VpcId);
+        Assert.Equal(new[] { "subnet-01e0ec2475ecf0bfc", "subnet-08e81426ad2fcbdba" }, project.SubnetIds);
+        Assert.Equal("scu-dev-gate2-build", project.SecurityGroupName);
+    }
+
+    [Fact]
+    public void TheRole_MayAttachANetworkInterface_OnlyInThoseSubnets_ForCodeBuild()
+    {
+        var statements = Statements(Project().RolePolicy).ToList();
+        var permission = statements.Single(s => Strings(s.GetProperty("Action")).Contains("ec2:CreateNetworkInterfacePermission"));
+        var condition = permission.GetProperty("Condition");
+        Assert.Equal(new[] { "arn:aws:ec2:us-west-2:503947800380:subnet/subnet-01e0ec2475ecf0bfc", "arn:aws:ec2:us-west-2:503947800380:subnet/subnet-08e81426ad2fcbdba" },
+            Strings(condition.GetProperty("ArnEquals").GetProperty("ec2:Subnet")));
+        Assert.Equal(new[] { "codebuild.amazonaws.com" }, Strings(condition.GetProperty("StringEquals").GetProperty("ec2:AuthorizedService")));
+        Assert.Contains(statements, s => Strings(s.GetProperty("Action")).Contains("ec2:CreateNetworkInterface"));
+    }
+
+    [Fact]
+    public void ResultsExpireAfterThirtyDays_AndTheStagedCacheNever()
+    {
+        var expiry = Project().ResultsExpiry;
+        Assert.Equal(("results/", 30), (expiry.Single(e => e.Prefix == "results/").Prefix, expiry.Single(e => e.Prefix == "results/").Days));
+        Assert.DoesNotContain(expiry, e => "fixtures/icecat/".StartsWith(e.Prefix, StringComparison.Ordinal));
     }
 
     [Fact]

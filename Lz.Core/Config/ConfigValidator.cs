@@ -410,13 +410,17 @@ public static class ConfigValidator
         }
 
         // GATE 2 READS WHAT THE TRIGGER ROLLS, AND ALERTS AN ADVISORY CHANGE (V-E): both must be on.
-        if (p.Gate2 && (!p.DeployOnBuildRecord || !p.Alerts))
+        if (p.Gate2 is not (null or PipelineConfig.Gate2Off or PipelineConfig.Gate2Provisioned or PipelineConfig.Gate2On))
+        {
+            errors.Add($"Pipeline.Gate2 is '{p.Gate2}'; it is off, provisioned or on.");
+        }
+        if (p.Gate2IsProvisioned && (!p.DeployOnBuildRecord || !p.Alerts))
         {
             errors.Add(
                 "Pipeline.Gate2 is on but Pipeline.DeployOnBuildRecord or Pipeline.Alerts is off. Gate 2 reads the services the " +
                 "trigger's routes name, and publishes an advisory result that changed to the alerts topic. Turn both on, or Gate2: false.");
         }
-        if (p.Gate2 && string.IsNullOrWhiteSpace(p.Gate2BrowserTests))
+        if (p.Gate2IsProvisioned && string.IsNullOrWhiteSpace(p.Gate2BrowserTests))
         {
             errors.Add(
                 "Pipeline.Gate2 is on but Pipeline.Gate2BrowserTests names no repository. Gate 2's browser tier runs the newest tests " +

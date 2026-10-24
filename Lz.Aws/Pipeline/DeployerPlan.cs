@@ -734,9 +734,9 @@ public static class DeployerPlanner
             functions.Add(corroborate);
         }
 
-        // GATE 2 (V-E), only under Pipeline.Gate2: off, nothing of it is planned and the machine ends at Record.
+        // GATE 2 (V-E): provisioned or on plans its resources and functions; only on puts its states in the machine.
         DeployerGate2Plan? gate2 = null;
-        if (p.Gate2)
+        if (p.Gate2IsProvisioned)
         {
             if (trigger is null || alerts is null)
                 throw new InvalidOperationException("Pipeline.Gate2 needs DeployOnBuildRecord, whose routes name what it reads, and Alerts.");
@@ -799,14 +799,14 @@ public static class DeployerPlanner
             StateMachineName: machine,
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
-                                      approvalRequired ? p.Approval?.NotifyTopicArn : null, gate2?.ProjectArn),
+                                      approvalRequired ? p.Approval?.NotifyTopicArn : null, p.Gate2IsOn ? gate2?.ProjectArn : null),
             DenyPolicy: DenyPolicyFor(),
             EvidenceStore: evidence,
             EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
-                                      gate2 is null ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName)),
+                                      gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName)),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),

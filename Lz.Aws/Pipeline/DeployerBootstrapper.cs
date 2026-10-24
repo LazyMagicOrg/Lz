@@ -61,7 +61,17 @@ public static class DeployerBootstrapper
         // THE SITE'S BUCKET AND DOMAIN, read only where a site repository builds this environment's bundle (V-24): from the tenant
         // config, as the website's own publish derived them.
         var siteInputs = DeployerPlanner.SiteApps(config).Count > 0 ? ResolveSiteInputs(config) : null;
-        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs);
+        // GATE 2'S HOSTS AND SUBNETS, read only under Pipeline.Gate2 provisioned or on (V-E): the tenant config's, and the
+        // private subnets by their tags, so the dry run shows where its build would run.
+        DeployerGate2Inputs? gate2Inputs = null;
+        if (config.Pipeline?.Gate2IsProvisioned == true)
+        {
+            var gate2Creds = AwsCredentialsFactory.ResolveOrThrow(profile);
+            var gate2Endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+            using var ec2Reads = gate2Creds != null ? new Amazon.EC2.AmazonEC2Client(gate2Creds, gate2Endpoint) : new Amazon.EC2.AmazonEC2Client(gate2Endpoint);
+            gate2Inputs = await Gate2Bootstrapper.ResolveInputsAsync(config, ec2Reads);
+        }
+        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs, gate2Inputs);
 
         // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
         // rather than half-way through an apply.
@@ -86,16 +96,8 @@ public static class DeployerBootstrapper
                 throw new InvalidOperationException($"lz bootstrapdeployer refuses: {hookRefusal}");
         }
 
-        // GATE 2 IS PLANNED BEFORE IT CAN BE APPLIED (V-E): its functions' handlers, the bundles they run and the CodeBuild
-        // project are not built yet, so Pipeline.Gate2 is refused at apply, as the hook without its verifier is.
-        if (RefusalForGate2(plan) is { } gate2Refusal)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"  REFUSED: {gate2Refusal}");
-            Console.ResetColor();
-            if (apply)
-                throw new InvalidOperationException($"lz bootstrapdeployer refuses: {gate2Refusal}");
-        }
+        if (plan.Gate2 is { } plannedGate2)
+            PrintGate2(config, plannedGate2);
 
         if (!apply)
         {
@@ -163,6 +165,15 @@ public static class DeployerBootstrapper
 
             await ApplyReplicationPermissionAsync(ecr, plan.ReplicationPermission
                 ?? throw new InvalidOperationException("the plan has no replication permission; it was planned without an account."));
+        }
+
+        // GATE 2'S RESOURCES BEFORE THE MACHINE (V-E), so a machine under Gate2: on never names a project that does not exist.
+        if (plan.Gate2 is not null)
+        {
+            using var ec2 = creds != null ? new Amazon.EC2.AmazonEC2Client(creds, endpoint) : new Amazon.EC2.AmazonEC2Client(endpoint);
+            using var codeBuild = creds != null ? new Amazon.CodeBuild.AmazonCodeBuildClient(creds, endpoint) : new Amazon.CodeBuild.AmazonCodeBuildClient(endpoint);
+            await Gate2Bootstrapper.ApplyAsync(plan, region, s3, iam, ec2, codeBuild, logs, plan.LogRetentionDays ?? 14,
+                Gate2Bootstrapper.LocalCacheDir(Directory.GetCurrentDirectory()));
         }
 
         var roleArn = await EnsureRoleAsync(iam, plan.RoleName, plan.StateMachineTrustPolicy,
@@ -452,9 +463,20 @@ public static class DeployerBootstrapper
     /// <c>Pipeline.EnforceSignatures</c> writing it would turn every deploy of the service into a rollback,
     /// so the apply stops before it writes anything.</para>
     /// </summary>
-    public static string? RefusalForGate2(PipelineDeployer plan) => plan.Gate2 is null ? null :
-        "Pipeline.Gate2 is on, and Gate 2 is planned but not yet applicable: its CodeBuild project " +
-        $"({plan.Gate2.ProjectName}), results bucket and the build account's grants are created in V-E's E2. Turn Gate2 off to apply.";
+    /// <summary>What a run creates for Gate 2, printed in the dry run as in the apply.</summary>
+    private static void PrintGate2(SystemConfig config, DeployerGate2Plan g)
+    {
+        var p = g.Project;
+        Console.WriteLine();
+        Console.WriteLine($"  Gate 2 (Pipeline.Gate2: {config.Pipeline?.Gate2}{(config.Pipeline?.Gate2IsOn == true ? ", its states in the machine" : ", the machine unchanged")}):");
+        Console.WriteLine($"    project {g.ProjectName}: {p.Image}, {p.ComputeType}, {p.TimeoutMinutes} min, role {p.RoleName}");
+        Console.WriteLine($"      in {p.VpcId} ({string.Join(", ", p.SubnetIds)}), security group {p.SecurityGroupName}, leaving through the NAT");
+        Console.WriteLine($"      testing https://{p.Environment["E2E__BaseHost"]} (apex {p.Environment["E2E__ApexHost"]})");
+        Console.WriteLine($"    results bucket {g.ResultsBucket}: {string.Join(", ", p.ResultsExpiry.Select(e => $"{e.Prefix} expires after {e.Days} days"))}; " +
+                          $"{Gate2ProjectPlanner.FixturesPrefix} staged from the local cache, never expired");
+        Console.WriteLine($"    functions {g.StartFunctionName}, {g.ResultFunctionName}; lease {g.LeaseKey}");
+        Console.WriteLine($"    reads {g.Set.Services.Count} service(s) and {g.Set.Apps.Count} app(s): {string.Join(", ", g.Set.Services.Select(s => s.Service).Concat(g.Set.Apps.Select(a => a.App)))}");
+    }
 
     public static string? RefusalForHookPackage(IReadOnlyList<string> missingVerifierFiles, bool enforceSignatures)
         => enforceSignatures && missingVerifierFiles.Count > 0

@@ -200,7 +200,7 @@ public static class Gate2StartStep
         var variables = new Dictionary<string, string>(resolved.Variables)
         {
             ["GATE2_EXECUTION"] = executionName,
-            ["GATE2_RESULTS"] = $"s3://{resultsBucket}/{executionName}/",
+            ["GATE2_RESULTS"] = $"s3://{resultsBucket}/{Gate2ResultStep.ResultsPrefix}{executionName}/",
         };
         result["verdict"] = "ours";
         result["recorded"] = resolved.Recorded.ToJson();
@@ -218,6 +218,10 @@ public static class Gate2StartStep
 public static class Gate2ResultStep
 {
     public const string TestsPrefix = "tests/";
+
+    /// <summary>Where the builds upload in the results bucket, <c>results/{execution}/</c>: the only prefix the build's role may
+    /// write, and the one that expires. The deployer package links this file and not the project's planner, so it lives here.</summary>
+    public const string ResultsPrefix = "results/";
 
     /// <summary>The files the build uploads under <c>{results}/{execution}/</c>.</summary>
     public static readonly (string File, string Tier)[] Files =

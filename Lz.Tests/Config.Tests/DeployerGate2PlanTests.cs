@@ -10,7 +10,7 @@ namespace Lz.Tests.Config.Tests;
 /// </summary>
 public class DeployerGate2PlanTests
 {
-    private static SystemConfig Config(bool gate2)
+    private static SystemConfig Config(string gate2)
     {
         var config = DeployerClientPlanTests.Config();
         config.Pipeline!.DeployOnBuildRecord = true;
@@ -24,9 +24,9 @@ public class DeployerGate2PlanTests
         return config;
     }
 
-    private static PipelineDeployer Plan(bool gate2) => DeployerPlanner.Plan(Config(gate2), DeployerClientPlanTests.TargetAccount,
+    private static PipelineDeployer Plan(string gate2) => DeployerPlanner.Plan(Config(gate2), DeployerClientPlanTests.TargetAccount,
         triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
-        gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click"));
+        gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click", "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc", "subnet-08e81426ad2fcbdba" }));
 
     private static JsonElement States(PipelineDeployer plan) => JsonDocument.Parse(plan.Definition).RootElement.GetProperty("States");
 
@@ -42,7 +42,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void Off_NothingOfGate2IsPlanned_AndTheMachineEndsAtRecord()
     {
-        var plan = Plan(gate2: false);
+        var plan = Plan("off");
 
         Assert.Null(plan.Gate2);
         Assert.DoesNotContain(plan.Functions, f => f.Name.Contains("gate2"));
@@ -51,12 +51,37 @@ public class DeployerGate2PlanTests
         Assert.DoesNotContain("codebuild", plan.RolePolicy);
     }
 
+    // ---- provisioned: the resources, not the states ----
+
+    [Fact]
+    public void Provisioned_PlansGate2sResources_AndLeavesTheMachineAsItIs()
+    {
+        var plan = Plan("provisioned");
+
+        Assert.NotNull(plan.Gate2);
+        Assert.Equal("scu-dev-gate2", plan.Gate2!.ProjectName);
+        Assert.True(States(plan).GetProperty("Record").GetProperty("End").GetBoolean());
+        Assert.DoesNotContain(States(plan).EnumerateObject(), s => s.Name.StartsWith("Gate2", StringComparison.Ordinal));
+        Assert.DoesNotContain("codebuild", plan.RolePolicy);
+        Assert.Equal(Plan("off").Definition, plan.Definition);
+    }
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("maybe")]
+    public void AGate2ValueThatIsNotOffProvisionedOrOn_IsRefused(string value)
+    {
+        var config = Config(value);
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(config, "systemconfig.scu.dev.yaml"));
+        Assert.Contains($"Pipeline.Gate2 is '{value}'", ex.Message);
+    }
+
     // ---- on: the states ----
 
     [Fact]
     public void On_RecordGoesOnToGate2_StartThenTheBuildThenTheResult()
     {
-        var s = States(Plan(gate2: true));
+        var s = States(Plan("on"));
 
         Assert.Equal("Gate2Start", s.GetProperty("Record").GetProperty("Next").GetString());
         Assert.False(s.GetProperty("Record").TryGetProperty("End", out _));
@@ -83,7 +108,7 @@ public class DeployerGate2PlanTests
     [InlineData("PostDeployTestsFailed", "PostDeployTestsFailed", "Fail")]
     public void EachOutcome_EndsInItsOwnState(string outcome, string next, string type)
     {
-        var s = States(Plan(gate2: true));
+        var s = States(Plan("on"));
         var choice = s.GetProperty("Gate2Outcome").GetProperty("Choices").EnumerateArray().Single(c => c.GetProperty("StringEquals").GetString() == outcome);
 
         Assert.Equal(next, choice.GetProperty("Next").GetString());
@@ -93,7 +118,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void AnythingElse_IsTestsIncomplete_AFailThatTheFailedExecutionRuleAlerts()
     {
-        var s = States(Plan(gate2: true));
+        var s = States(Plan("on"));
         Assert.Equal("TestsIncomplete", s.GetProperty("Gate2Outcome").GetProperty("Default").GetString());
         Assert.Equal(("Fail", "TestsIncomplete"), (s.GetProperty("TestsIncomplete").GetProperty("Type").GetString(),
             s.GetProperty("TestsIncomplete").GetProperty("Error").GetString()));
@@ -102,7 +127,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void AGate2Fault_EndsInGate2Fault_NotRecordFailure_SinceTheDeployIsRecorded()
     {
-        var s = States(Plan(gate2: true));
+        var s = States(Plan("on"));
         foreach (var state in new[] { "Gate2Start", "Gate2Result" })
             Assert.Equal("Gate2Fault", s.GetProperty(state).GetProperty("Catch")[0].GetProperty("Next").GetString());
         Assert.Equal("Fail", s.GetProperty("Gate2Fault").GetProperty("Type").GetString());
@@ -111,7 +136,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void AHeldGate2Lease_IsWaitedOut_PastTheLeasesLife()
     {
-        var retry = States(Plan(gate2: true)).GetProperty("Gate2Start").GetProperty("Retry").EnumerateArray()
+        var retry = States(Plan("on")).GetProperty("Gate2Start").GetProperty("Retry").EnumerateArray()
             .Single(r => r.GetProperty("ErrorEquals")[0].GetString() == nameof(Gate2LeaseHeld));
         Assert.True(retry.GetProperty("IntervalSeconds").GetInt32() * retry.GetProperty("MaxAttempts").GetInt32() > Lz.Aws.Ops.ServiceLease.Duration.TotalSeconds);
     }
@@ -119,7 +144,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void ThePlannedMachine_HasNoContractGaps()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         Assert.Empty(DeployerPlanner.ContractGaps(plan.Definition, plan.RolePolicy));
     }
 
@@ -128,18 +153,18 @@ public class DeployerGate2PlanTests
     [Fact]
     public void TheSet_IsWhatTheTriggerRollsAndEveryClientApp()
     {
-        var set = Plan(gate2: true).Gate2!.Set;
+        var set = Plan("on").Gate2!.Set;
 
         Assert.Equal(new[] { "scu-dev-cluster" }, set.Services.Select(s => s.Cluster).Distinct());
         Assert.NotEmpty(set.Services);
         Assert.Equal(new[] { "adminapp", "sellerapp" }, set.Apps.Select(a => a.App));
-        Assert.Equal(Gate2Set.Decode(Function(Plan(gate2: true), DeployerHandlers.Gate2Start).Environment[DeployerEnvironment.Gate2Set]).Encode(), set.Encode());
+        Assert.Equal(Gate2Set.Decode(Function(Plan("on"), DeployerHandlers.Gate2Start).Environment[DeployerEnvironment.Gate2Set]).Encode(), set.Encode());
     }
 
     [Fact]
     public void OnlyGate2Result_WritesUnderTests_AndNothingElseThereDoes()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         var writers = plan.Functions.Where(f => Statements(f.Policy).Any(st =>
             Strings(st.GetProperty("Action")).Contains("s3:PutObject") && Strings(st.GetProperty("Resource")).Any(r => r.EndsWith("/tests/*", StringComparison.Ordinal))));
         Assert.Equal(new[] { DeployerHandlers.Gate2Result }, writers.Select(f => f.Handler));
@@ -148,7 +173,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void TheGate2Lease_IsReachedByItsKeysAlone_AndTheServiceLeaseByNeither()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         foreach (var handler in new[] { DeployerHandlers.Gate2Start, DeployerHandlers.Gate2Result })
         {
             var leading = Statements(Function(plan, handler).Policy)
@@ -164,7 +189,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void Gate2Start_ReadsTestsRecordsAndTheirZipsByVersion_ListsOnlyTheBrowserTests_AndReadsTheImagesDeployedHere()
     {
-        var start = Function(Plan(gate2: true), DeployerHandlers.Gate2Start);
+        var start = Function(Plan("on"), DeployerHandlers.Gate2Start);
         var statements = Statements(start.Policy).ToList();
         string[] Resources(string sid) => Strings(statements.Single(s => s.GetProperty("Sid").GetString() == sid).GetProperty("Resource")).ToArray();
 
@@ -181,7 +206,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void OnlyGate2Start_MayClaimTheGate2Lease()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         bool Claims(string handler) => Statements(Function(plan, handler).Policy).Any(st => Strings(st.GetProperty("Action")).Contains("dynamodb:PutItem"));
         Assert.True(Claims(DeployerHandlers.Gate2Start));
         Assert.False(Claims(DeployerHandlers.Gate2Result));
@@ -190,7 +215,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void TheMachine_MayRunOnlyGate2sProject()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         var run = Statements(plan.RolePolicy).Single(st => st.GetProperty("Sid").GetString() == "RunGate2sBuild");
         Assert.Equal(new[] { "arn:aws:codebuild:us-west-2:503947800380:project/scu-dev-gate2" }, Strings(run.GetProperty("Resource")));
         Assert.Contains("lambda:InvokeFunction", plan.RolePolicy);
@@ -201,7 +226,7 @@ public class DeployerGate2PlanTests
     [Fact]
     public void NeitherGate2Function_MayDeleteAnything()
     {
-        var plan = Plan(gate2: true);
+        var plan = Plan("on");
         foreach (var handler in new[] { DeployerHandlers.Gate2Start, DeployerHandlers.Gate2Result })
             Assert.DoesNotContain(Statements(Function(plan, handler).Policy).SelectMany(st => Strings(st.GetProperty("Action"))),
                 a => a.Contains("Delete", StringComparison.Ordinal));
@@ -209,17 +234,11 @@ public class DeployerGate2PlanTests
 
     // ---- the switch's requirements ----
 
-    [Fact]
-    public void BootstrapDeployer_RefusesToApplyGate2_UntilItsHandlersAndProjectExist()
-    {
-        Assert.Contains("scu-dev-gate2", DeployerBootstrapper.RefusalForGate2(Plan(gate2: true)));
-        Assert.Null(DeployerBootstrapper.RefusalForGate2(Plan(gate2: false)));
-    }
 
     [Fact]
     public void Gate2WithoutTheTriggerOrAlerts_IsRefusedByTheValidator()
     {
-        var config = Config(gate2: true);
+        var config = Config("on");
         config.Pipeline!.Alerts = false;
         var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(config, "systemconfig.scu.dev.yaml"));
         Assert.Contains("Pipeline.Gate2", ex.Message);

@@ -136,11 +136,21 @@ public class PipelineConfig
     /// blocking failure ends the execution <c>PostDeployTestsFailed</c> and anything incomplete <c>TestsIncomplete</c>, each
     /// a Fail state the failed-execution rule alerts; a pass, or tests that ran against other code, ends in Succeed.</para>
     ///
-    /// <para>ITS OWN FLAG, NOT IMPLIED BY <see cref="Enabled"/>: off, the machine ends at Record as it always has, and the
-    /// plan is byte for byte what it was. Requires <see cref="DeployOnBuildRecord"/>, whose routes name the services Gate 2
-    /// reads, and <see cref="Alerts"/>, whose topic an advisory change is published to.</para>
+    /// <para>THREE VALUES. <c>off</c> (or absent): nothing of Gate 2, and the plan is byte for byte what it was.
+    /// <c>provisioned</c>: its project, results bucket, role, security group, functions and the build account's grants
+    /// exist, so the project can be run by hand, and the machine still ends at Record. <c>on</c>: the states too. Its own
+    /// setting, not implied by <see cref="Enabled"/>. Requires <see cref="DeployOnBuildRecord"/>, whose routes name the
+    /// services Gate 2 reads, and <see cref="Alerts"/>, whose topic an advisory change is published to.</para>
     /// </summary>
-    public bool Gate2 { get; set; }
+    public string? Gate2 { get; set; }
+
+    public const string Gate2Off = "off", Gate2Provisioned = "provisioned", Gate2On = "on";
+
+    /// <summary>Gate 2's resources exist: <c>provisioned</c> or <c>on</c>.</summary>
+    public bool Gate2IsProvisioned => Gate2 is Gate2Provisioned or Gate2On;
+
+    /// <summary>Gate 2's states are in the machine: <c>on</c>.</summary>
+    public bool Gate2IsOn => Gate2 == Gate2On;
 
     /// <summary>
     /// The repository whose tests records Gate 2's browser tier runs, the newest of them (§15.5): <c>Scutara/ScutaraE2ETests</c>.

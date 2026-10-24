@@ -3,9 +3,13 @@ using Lz.Core.Config;
 
 namespace Lz.Aws.Pipeline;
 
-/// <summary>What Gate 2's project needs from the workspace, which the planner cannot read: the environment's hosts, from its
-/// tenant and subtenant config, which the e2e and browser tiers test.</summary>
-public sealed record DeployerGate2Inputs(string BaseHost, string ApexHost);
+/// <summary>What Gate 2's project needs from the workspace and the account, which the planner cannot read: the environment's
+/// hosts, from its tenant and subtenant config, which the tiers test; and its VPC and private subnets, found by their tags, where
+/// the build runs so its traffic leaves through the NAT address the edge's rate cap exempts.</summary>
+public sealed record DeployerGate2Inputs(string BaseHost, string ApexHost, string VpcId, IReadOnlyList<string> SubnetIds);
+
+/// <summary>An S3 lifecycle expiry: objects under the prefix are removed this many days after they are written.</summary>
+public sealed record Gate2Expiry(string Prefix, int Days);
 
 /// <summary>
 /// Gate 2's CodeBuild project (DecoupledCd.md §15.5, V-E): its role and the policy that role holds, the buildspec fixed in the
@@ -14,7 +18,8 @@ public sealed record DeployerGate2Inputs(string BaseHost, string ApexHost);
 /// </summary>
 public sealed record DeployerGate2Project(
     string RoleName, string RolePolicy, string TrustPolicy, string LogGroupName, string Buildspec,
-    string Image, string ComputeType, int TimeoutMinutes, IReadOnlyDictionary<string, string> Environment);
+    string Image, string ComputeType, int TimeoutMinutes, IReadOnlyDictionary<string, string> Environment,
+    string VpcId, IReadOnlyList<string> SubnetIds, string SecurityGroupName, IReadOnlyList<Gate2Expiry> ResultsExpiry);
 
 public static class Gate2ProjectPlanner
 {
@@ -22,6 +27,11 @@ public static class Gate2ProjectPlanner
     public const string ComputeType = "BUILD_GENERAL1_MEDIUM";
     /// <summary>Where the staged Icecat fixture cache lives in the results bucket, which the role may read and not write.</summary>
     public const string FixturesPrefix = "fixtures/icecat/";
+    /// <summary>Where the builds upload, <c>results/{execution}/</c>: the only prefix the role may write, and the one that expires.</summary>
+    public const string ResultsPrefix = Gate2ResultStep.ResultsPrefix;
+    /// <summary>A hand-started build's own bundles (E2's proof): written by a person, not by the role, and expired.</summary>
+    public const string ScratchPrefix = "scratch/";
+    public const int ResultsDays = 30, ScratchDays = 7;
     public const string FixtureCacheDir = "/tmp/icecat";
     /// <summary>The secrets the tiers read: the durable test logins, and the members the party-membership test signs in as.</summary>
     public static readonly string[] Secrets = { "e2e-users", "party-members" };
@@ -83,9 +93,34 @@ public static class Gate2ProjectPlanner
                 Resource = $"arn:aws:s3:::{resultsBucket}",
                 Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = new[] { $"{FixturesPrefix}*" } } },
             },
-            new { Sid = "UploadItsResults", Effect = "Allow", Action = new[] { "s3:PutObject" }, Resource = $"arn:aws:s3:::{resultsBucket}/*" },
-            // The build runs the repositories' own test code: it may not replace the cache that code is tested with.
-            new { Sid = "NeverTheStagedFixtures", Effect = "Deny", Action = new[] { "s3:PutObject", "s3:DeleteObject" }, Resource = $"arn:aws:s3:::{resultsBucket}/fixtures/*" },
+            // Only under results/: the build runs the repositories' own test code, which may not replace the cache it is tested with.
+            new { Sid = "UploadItsResults", Effect = "Allow", Action = new[] { "s3:PutObject" }, Resource = $"arn:aws:s3:::{resultsBucket}/{ResultsPrefix}*" },
+            // A VPC BUILD: CodeBuild attaches a network interface in the private subnets, so the build's traffic leaves through the
+            // NAT address. The grant follows the policy AWS documents for CodeBuild in a VPC, written from that documentation and
+            // not yet measured: the first build in the subnets is the check.
+            new
+            {
+                Sid = "RunInTheVpc",
+                Effect = "Allow",
+                Action = new[]
+                {
+                    "ec2:CreateNetworkInterface", "ec2:DescribeDhcpOptions", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface",
+                    "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeVpcs",
+                },
+                Resource = "*",
+            },
+            new
+            {
+                Sid = "AttachOnlyInItsSubnets",
+                Effect = "Allow",
+                Action = new[] { "ec2:CreateNetworkInterfacePermission" },
+                Resource = $"arn:aws:ec2:{region}:{accountId}:network-interface/*",
+                Condition = new Dictionary<string, object>
+                {
+                    ["ArnEquals"] = new Dictionary<string, object> { ["ec2:Subnet"] = inputs.SubnetIds.Select(s => $"arn:aws:ec2:{region}:{accountId}:subnet/{s}").ToArray() },
+                    ["StringEquals"] = new Dictionary<string, object> { ["ec2:AuthorizedService"] = new[] { "codebuild.amazonaws.com" } },
+                },
+            },
             new
             {
                 Sid = "ReadTheTestLogins",
@@ -115,7 +150,11 @@ public static class Gate2ProjectPlanner
             Image: Image,
             ComputeType: ComputeType,
             TimeoutMinutes: DeployerPlanner.Gate2BuildTimeoutSeconds / 60,
-            Environment: environment);
+            Environment: environment,
+            VpcId: inputs.VpcId,
+            SubnetIds: inputs.SubnetIds,
+            SecurityGroupName: $"{project}-build",
+            ResultsExpiry: new[] { new Gate2Expiry(ResultsPrefix, ResultsDays), new Gate2Expiry(ScratchPrefix, ScratchDays) });
     }
 
     /// <summary>
