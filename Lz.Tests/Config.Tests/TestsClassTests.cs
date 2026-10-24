@@ -62,6 +62,25 @@ public sealed class TestsClassTests
         Assert.DoesNotContain("tests", classes);
     }
 
+    [Fact]
+    public void TheIntake_TakesATestsRepositoryIn_ItsTestBundleBeingWhatItFetches()
+    {
+        var plan = IntakeBuildPlanner.Plan(Config(), "147440642635");   // ScutaraE2ETests is the one repository in the intake here
+        Assert.NotNull(plan);
+        Assert.Contains(IntakeBuildPlanner.RepositoriesFor(Config()), r => r.Repo == "Scutara/ScutaraE2ETests" && r.Gate1 is { Kind: "collection", Artifact: "tests" });
+    }
+
+    [Fact]
+    public void ARepositoryWithNothingToFetch_IsStillRefusedByTheIntake()
+    {
+        var empty = Config(new PipelineRepositoryConfig
+        {
+            Repo = "a/b", Class = "client", RepositoryId = 1, OwnerId = 2, WorkflowPath = "w.yml", Intake = "dry",
+        });
+        var ex = Assert.Throws<InvalidOperationException>(() => IntakeBuildPlanner.Plan(empty, "147440642635"));
+        Assert.Contains("nothing to fetch", ex.Message);
+    }
+
     // ---- the build-side file's rules for a tests entry ----
 
     private static IEnumerable<string> Problems(Action<PipelineRepositoryConfig> change)

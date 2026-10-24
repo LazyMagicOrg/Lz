@@ -108,7 +108,8 @@ public static class IntakeBuildPlanner
         if (repositories.Count == 0) return null;
         if (repositories.FirstOrDefault(r => r.Mode is not ("dry" or "live")) is { } unknown)
             throw new InvalidOperationException($"{unknown.Repo} is Intake: {unknown.Mode}, not dry or live.");
-        if (repositories.FirstOrDefault(r => r.Artifacts.Count == 0) is { } none)
+        // NOTHING TO FETCH: no artifact and no test bundle. A tests repository (V-E) names no artifact; its test bundle is the fetch.
+        if (repositories.FirstOrDefault(r => r.Artifacts.Count == 0 && r.Gate1 is null) is { } none)
             throw new InvalidOperationException($"{none.Repo} takes part in the intake and names no Artifacts, so there is nothing to fetch.");
 
         var sk = config.SystemKey;
