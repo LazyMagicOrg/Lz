@@ -207,6 +207,43 @@ public class IntakePublishTests : IDisposable
         Assert.Null(BuildRecordFormat.Parse(f.RecordStore[$"image/scutara/scutaraservice/{stem}.json"]).Intake!.Gate1.Lists);
     }
 
+    /// <summary>The browser tests (DecoupledCd.md V-E): a tests-class repository, its Gate 1 the collection check.</summary>
+    private static IntakeRepository BrowserTests() => new("Scutara/ScutaraE2ETests", 1343104872, 320723031, ".github/workflows/publish-tests.yml", "live",
+        "tests", Array.Empty<string>(), new IntakeGate1("tests", "", "", "", "", Array.Empty<IntakeImage>(), Kind: "collection"), null, null);
+
+    [Fact]
+    public async Task ATestsRepository_PublishesItsTestsZipAndRecordAlone_WithTheGateCount_AndNoPackages()
+    {
+        var f = new Fakes();
+        var tests = ZipOf("package.json", Encoding.UTF8.GetBytes("{\"name\":\"scutara-browser-e2e\"}"));
+        var exec = IntakeNames.For(1343104872, 77, 1, 0);
+        f.Scratch[$"{exec}/tests-1.zip"] = tests;
+        var staged = new JsonObject { ["artifact"] = "tests-1", ["key"] = $"{exec}/tests-1.zip", ["sha256"] = Hex(tests) };
+        var state = new JsonObject
+        {
+            ["repo"] = "Scutara/ScutaraE2ETests", ["repositoryId"] = 1343104872L, ["runId"] = 77L, ["runAttempt"] = 1, ["retry"] = 0,
+            ["check"] = new JsonObject
+            {
+                ["verdict"] = "passed", ["headBranch"] = "main", ["headSha"] = Sha, ["createdAt"] = "2026-10-24T14:00:00.0000000+00:00",
+                ["actor"] = "tmay57", ["jobIds"] = "201", ["workflowRef"] = "Scutara/ScutaraE2ETests/.github/workflows/publish-tests.yml@refs/heads/main",
+            },
+            ["fetch"] = new JsonObject { ["verdict"] = "staged", ["staged"] = new JsonArray(staged.DeepClone()), ["tests"] = staged },
+            ["gate1"] = new JsonObject { ["verdict"] = "passed", ["gateCount"] = 12, ["artifactSha256"] = new JsonObject { ["tests-1"] = Hex(tests) } },
+        };
+
+        var result = await IntakePublishStep.RunAsync(state, exec, new[] { BrowserTests() }, Targets, Records, Artifacts, f, f, f, f, _work);
+
+        Assert.Equal("published", result["outcome"]!.GetValue<string>());
+        const string stem = "20261024T140000Z-77-1";
+        Assert.Equal(new[] { $"tests/scutara/scutarae2etests/{stem}.json" }, f.RecordWrites);
+        Assert.Equal(new[] { $"tests/scutara/scutarae2etests/{stem}.zip" }, f.ArtifactStore.Keys);
+        var record = BuildRecordFormat.Parse(f.RecordStore[$"tests/scutara/scutarae2etests/{stem}.json"], Artifacts);
+        Assert.Equal("tests", record.Class);
+        Assert.Equal(12, record.Intake!.Gate1.Lists!.GateCount);
+        Assert.Empty(record.BuiltFrom.Packages);   // a test bundle consumes no first-party package, and says so
+        Assert.Equal(0, f.Pushes);
+    }
+
     [Fact]
     public async Task ACollectionChecksGateCount_IsCarriedOnTheTestsRecord()
     {

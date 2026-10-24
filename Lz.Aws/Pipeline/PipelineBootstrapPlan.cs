@@ -219,7 +219,9 @@ public static class PipelineBootstrapPlanner
         var requests = $"{sk}-deploy-requests-{suffix}";
 
         var acct = accountId ?? "<build-account-id>";
+        // A BUILD-SIDE CLASS (tests, V-E) is taken in by the intake alone: no role GitHub could assume is planned for it.
         var roles = repos
+            .Where(r => !PipelineConfig.BuildSideClasses.Contains(r.Class ?? ""))
             .Select(r => BuildRole(config, sk, region, acct, artifacts, buildRecords, r))
             .ToList();
 

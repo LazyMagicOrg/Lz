@@ -277,7 +277,7 @@ public static class ConfigValidator
                     "workspace folder (repos/Service is Scutara/ScutaraService).");
             }
 
-            if (r.Class is null || !PipelineConfig.KnownClasses.Contains(r.Class))
+            if (r.Class is null || !(PipelineConfig.KnownClasses.Contains(r.Class) || PipelineConfig.BuildSideClasses.Contains(r.Class)))
             {
                 errors.Add(
                     $"Pipeline.Repositories entry '{r.Repo}' names class '{r.Class}'. Valid: " +
@@ -287,7 +287,8 @@ public static class ConfigValidator
             }
             // A CLASS THIS ENVIRONMENT REFUSES (DecoupledCd.md §12, P4 stage A). Classes is the allowlist Verify
             // applies, so such an entry is a role and prefixes GitHub can use, for records that are all refused.
-            else if (p.Classes is { Count: > 0 } classes && !classes.Contains(r.Class))
+            // A build-side class (tests) is deployed by no environment, so no Classes names it, and it has no role to refuse.
+            else if (p.Classes is { Count: > 0 } classes && !classes.Contains(r.Class) && !PipelineConfig.BuildSideClasses.Contains(r.Class))
             {
                 errors.Add(
                     $"Pipeline.Repositories entry '{r.Repo}' builds class '{r.Class}', which Pipeline.Classes does " +

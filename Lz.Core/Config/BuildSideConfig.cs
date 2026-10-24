@@ -71,6 +71,7 @@ public class BuildSideConfig
                 p.Add($"{name}: an Intake mode needs RepositoryId, OwnerId and WorkflowPath, which the run check compares by id");
             p.AddRange(Gate1Problems(name, repo));
             if (repo.Class == "site") p.AddRange(SiteProblems(name, repo, Chain));
+            if (repo.Class == "tests") p.AddRange(TestsProblems(name, repo));
             if (repo.BuiltFrom is { } bf && !Regex.IsMatch(bf, "^[a-z][a-z0-9-]*$"))
                 p.Add($"{name}: BuiltFrom '{bf}' is not an artifact's base name");
             if (repo.BuiltFrom is { } same && (same == repo.TestBundle || (repo.Artifacts ?? new()).Contains(same)))
@@ -81,12 +82,27 @@ public class BuildSideConfig
             if (repo.Intake == "live")
             {
                 // A site's records carry builtFrom.packages empty (V-24): a Hugo build consumes no first-party package.
-                if (repo.BuiltFrom is null && repo.Class != "site") p.Add($"{name}: Intake: live needs BuiltFrom, since its records carry builtFrom.packages");
+                // A tests repository's record carries it empty too (V-E): a test bundle is published, not built from packages.
+                if (repo.BuiltFrom is null && repo.Class is not ("site" or "tests")) p.Add($"{name}: Intake: live needs BuiltFrom, since its records carry builtFrom.packages");
                 if (repo.Gate1 is null) p.Add($"{name}: Intake: live needs Gate1; nothing is recorded without a pass");
                 if (repo.Class is "image" or "tooling" && repo.Sbom is null) p.Add($"{name}: Intake: live for an image needs Sbom (V-19)");
             }
         }
         return p;
+    }
+
+    /// <summary>
+    /// A TESTS REPOSITORY (DecoupledCd.md V-E): its one artifact is its test bundle, checked by the collection check, and it builds
+    /// nothing a deployer or a record of its own would carry - no Artifacts, no SBOM, no builtFrom - and no Verify, since nothing
+    /// deploys it.
+    /// </summary>
+    private static IEnumerable<string> TestsProblems(string name, PipelineRepositoryConfig repo)
+    {
+        if (repo.Gate1 is not { Kind: "collection" }) yield return $"{name}: a tests repository's Gate 1 is the collection check (Gate1.Kind: collection)";
+        if (repo.Artifacts is { Count: > 0 }) yield return $"{name}: a tests repository publishes its test bundle alone, so it takes no Artifacts";
+        if (repo.Sbom is not null) yield return $"{name}: a tests repository takes no Sbom; its record names a test bundle, not an image";
+        if (repo.BuiltFrom is not null) yield return $"{name}: a tests repository takes no BuiltFrom; its record carries builtFrom.packages empty";
+        if (repo.Verify is not null) yield return $"{name}: a tests repository takes no Verify; no deployer deploys its records";
     }
 
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>

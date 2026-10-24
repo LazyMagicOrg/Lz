@@ -219,6 +219,12 @@ public class PipelineConfig
     /// <summary>The class names <see cref="Classes"/> accepts. See that property for the mapping.</summary>
     public static readonly string[] KnownClasses =
         { "image", "client", "site", "assets", "config", "tooling" };
+
+    /// <summary>
+    /// Classes a repository may build that no environment deploys, so <see cref="Classes"/> never names them: <c>tests</c>, the
+    /// browser tests' bundles, which Gate 2 reads (DecoupledCd.md V-E). Taken in by the intake alone, so they get no role.
+    /// </summary>
+    public static readonly string[] BuildSideClasses = { "tests" };
 }
 
 /// <summary>

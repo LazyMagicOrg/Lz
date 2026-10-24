@@ -92,8 +92,8 @@ public static class IntakePublishStep
         string Text(JsonObject o, string name) => o[name]?.GetValue<string>() is { Length: > 0 } v ? v : throw new IntakeFault($"{name} is missing");
         var headSha = Text(check, "headSha");
         var builtAt = BuildRecordFormat.BuiltAtFor(DateTimeOffset.Parse(Text(check, "createdAt"), System.Globalization.CultureInfo.InvariantCulture));
-        // A site consumes no first-party package (V-24): its records say so with an empty map rather than leaving it out.
-        var builtFromNode = repository.Class == BuildRecordFormat.SiteClass
+        // A site consumes no first-party package (V-24), nor does a test bundle (V-E): their records say so with an empty map.
+        var builtFromNode = repository.Class is BuildRecordFormat.SiteClass or "tests"
             ? new JsonObject { ["packages"] = new JsonObject() }
             : fetch["builtFrom"] as JsonObject ?? throw new IntakeFault($"{input.Repo} staged no builtFrom, which its records carry");
         var packages = (builtFromNode["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>());
@@ -134,8 +134,8 @@ public static class IntakePublishStep
 
         // Everything a record needs is checked BEFORE anything is pushed or written, so a refusal leaves nothing behind.
         var isImage = BuildRecordFormat.IsImageClass(repository.Class);
-        if (!isImage && repository.Class is not ("client" or BuildRecordFormat.SiteClass))
-            throw new IntakeFault($"{repository.Class} records are not published yet; an image's, a client's and a site's are (V-D, V-24)");
+        if (!isImage && repository.Class is not ("client" or BuildRecordFormat.SiteClass or "tests"))
+            throw new IntakeFault($"{repository.Class} records are not published yet; an image's, a client's, a site's and a test bundle's are (V-D, V-24, V-E)");
 
         // A SITE (V-24): one zip and one record per environment's bundle, each record naming its environment, and no tests record,
         // since a site has no test bundle. Every bundle is held to Gate 1's pass before anything is written.
@@ -180,10 +180,12 @@ public static class IntakePublishStep
             return new JsonObject { ["outcome"] = "published", ["sites"] = siteBundles, ["records"] = siteRecords };
         }
 
-        if (repository.Artifacts.Count != 1)
+        // A TESTS REPOSITORY (V-E) builds nothing but its test bundle, so it names no artifact of its own.
+        var isTests = repository.Class == "tests";
+        if (!isTests && repository.Artifacts.Count != 1)
             throw new IntakeFault($"{input.Repo} names {repository.Artifacts.Count} artifacts; a record names one");
-        var artifactName = repository.Artifacts[0];
-        var staged = Passed(artifactName);
+        var artifactName = isTests ? "" : repository.Artifacts[0];
+        var staged = isTests ? default : Passed(artifactName);
         var testsStaged = repository.Gate1 is { } g ? Passed(g.Artifact) : default;
         Directory.CreateDirectory(workDirectory);
         var written = new JsonArray();
@@ -203,6 +205,13 @@ public static class IntakePublishStep
             {
                 Identity = new BuildRecordIdentity("bundle", Bucket: artifactStore, Key: zipKey, VersionId: stored.VersionId, Sha256: testsStaged.Sha256),
             }, artifactStore));
+        }
+
+        if (isTests)
+        {
+            // A TESTS REPOSITORY (V-E): its test bundle and record alone, which Gate 2 reads and no deployer deploys.
+            await WriteTestsAsync();
+            return new JsonObject { ["outcome"] = "published", ["records"] = written };
         }
 
         if (!isImage)
