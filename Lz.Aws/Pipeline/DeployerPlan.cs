@@ -1874,7 +1874,10 @@ public static class DeployerPlanner
                 {
                     ["ArnNotLike"] = new System.Text.Json.Nodes.JsonObject
                     {
-                        ["aws:PrincipalArn"] = new System.Text.Json.Nodes.JsonArray(writers.Select(w => (System.Text.Json.Nodes.JsonNode?)w).ToArray()),
+                        // ONE WRITER IS A STRING, as S3 holds it (measured 2026-10-26): a one-element array never reads back as written.
+                        ["aws:PrincipalArn"] = writers.Count == 1
+                            ? System.Text.Json.Nodes.JsonValue.Create(writers[0])
+                            : new System.Text.Json.Nodes.JsonArray(writers.Select(w => (System.Text.Json.Nodes.JsonNode?)w).ToArray()),
                     },
                 };
             yield return statement;

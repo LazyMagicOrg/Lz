@@ -55,7 +55,12 @@ public class EvidencePinPlanTests
         var s = p.EvidenceStorePolicy.Single(st => st["Resource"]?.ToString() == $"arn:aws:s3:::{p.EvidenceStore}/{prefix}*" && st["Effect"]!.GetValue<string>() == "Deny");
         Assert.Equal("s3:PutObject", s["Action"]!.GetValue<string>());
         Assert.Equal("*", s["Principal"]!.GetValue<string>());
-        return s["Condition"]?["ArnNotLike"]?["aws:PrincipalArn"] is JsonArray a ? a.Select(x => x!.GetValue<string>()).ToList() : Array.Empty<string>();
+        return s["Condition"]?["ArnNotLike"]?["aws:PrincipalArn"] switch
+        {
+            JsonArray a => a.Select(x => x!.GetValue<string>()).ToList(),
+            JsonValue v => new[] { v.GetValue<string>() },
+            _ => Array.Empty<string>(),
+        };
     }
 
     private static string Role(string account, string name) => $"arn:aws:iam::{account}:role/{name}";
@@ -81,6 +86,19 @@ public class EvidencePinPlanTests
         Assert.Equal(new[] { Role(Test, "scu-test-deployer-record-revert-fn") }, Writers(p, "reverts/"));
         Assert.Empty(Writers(p, "passed/"));   // test writes no marker until P6
         Assert.Empty(Writers(p, "tests/"));    // and runs no Gate 2
+    }
+
+    [Fact]
+    public void AOneWriterPin_NamesItsRoleAsAString_AsS3HoldsIt()
+    {
+        // Measured 2026-10-26 applying to test: S3 reads a one-element aws:PrincipalArn back as a string, so a planned array
+        // never reads back as written.
+        foreach (var p in new[] { PlanDev(), PlanTest() })
+            foreach (var st in p.EvidenceStorePolicy.Where(st => st["Condition"]?["ArnNotLike"]?["aws:PrincipalArn"] is { } arns))
+            {
+                var arns = st["Condition"]!["ArnNotLike"]!["aws:PrincipalArn"]!;
+                Assert.False(arns is JsonArray { Count: 1 }, $"{st["Sid"]} names one writer as an array");
+            }
     }
 
     [Fact]
