@@ -47,6 +47,64 @@ public class DeployerSitePromotionPlanTests
         return choice.GetProperty("Next").GetString()!;
     }
 
+    // ---- test's machine, promoted into ----
+
+    private const string TestStoreOwn = TestStore;
+
+    internal static SystemConfig TestConfig(bool site = true)
+    {
+        var c = DeployerClientPlanTests.Config(classes: site ? new List<string> { "image", "client", "site" } : null);
+        c.Environment = "test";
+        c.SystemSuffix = "d5e0-b27f";
+        c.Pipeline!.TargetAccountId = Test;
+        c.Pipeline.BuildSuffix = "4df6-b9c6";
+        c.Pipeline.ChainEvidenceStore = TestStoreOwn;
+        c.Pipeline.Predecessor = new PipelineNeighbour("dev", Dev, "scu-dev-deploy-evidence-4df6-b9c6");
+        c.Pipeline.Alerts = true;
+        if (site)
+            c.Pipeline.Repositories!.Add(new PipelineRepositoryConfig { Repo = "Scutara/ScutaraWebsite", Class = "site", Artifacts = new List<string> { "site-dev", "site-test" } });
+        return c;
+    }
+
+    internal static PipelineDeployer PlanTest(SystemConfig config) => DeployerPlanner.Plan(config, Test,
+        triggerInputs: new DeployerTriggerInputs("scu-test-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
+        siteInputs: DeployerPlanner.SiteApps(config).Count > 0 ? new DeployerSiteInputs("scu-mp--webapp-website-d5e0-b27f", "scutara-test.click") : null);
+
+    [Fact]
+    public void ASiteVerifyAdmitted_IsLiftedIntoPlace_ThenDeployedVerifiedRecordedAndDecided()
+    {
+        var s = States(PlanTest(TestConfig()));
+        var choice = s.GetProperty("IsRevert").GetProperty("Choices").EnumerateArray()
+            .Single(c => c.TryGetProperty("Variable", out var v) && v.GetString() == "$.set.site");
+        Assert.True(choice.GetProperty("IsPresent").GetBoolean());
+        Assert.Equal("SiteMember", choice.GetProperty("Next").GetString());
+
+        var member = s.GetProperty("SiteMember");
+        Assert.Equal("Pass", member.GetProperty("Type").GetString());
+        var p = member.GetProperty("Parameters");
+        Assert.Equal(("$.set.site.record", "$.set.site.target", "$.set.site.verified", "$.set", "$.marker"),
+            (p.GetProperty("record.$").GetString(), p.GetProperty("target.$").GetString(), p.GetProperty("verified.$").GetString(),
+             p.GetProperty("set.$").GetString(), p.GetProperty("marker.$").GetString()));
+        Assert.False(p.GetProperty("allowOlderBuild").GetBoolean());   // a promotion never goes back past what the site serves
+
+        Assert.Equal("DeploySite", member.GetProperty("Next").GetString());
+        Assert.Equal("VerifySite", s.GetProperty("DeploySite").GetProperty("Next").GetString());
+        Assert.Equal("Record", s.GetProperty("VerifySite").GetProperty("Next").GetString());
+        Assert.Equal("RecordFailure", s.GetProperty("DeploySite").GetProperty("Catch")[0].GetProperty("Next").GetString());
+        // Record goes on through the bundles (none, for a site) to AfterSet and Decide, as a set's does.
+        Assert.Equal("Bundles", s.GetProperty("Record").GetProperty("Next").GetString());
+        Assert.Equal("$.set.bundles", s.GetProperty("Bundles").GetProperty("ItemsPath").GetString());
+    }
+
+    [Fact]
+    public void ATestThatDeploysNoSite_HasNoSiteBranch_AsBefore()
+    {
+        var s = States(PlanTest(TestConfig(site: false)));
+        Assert.False(s.TryGetProperty("SiteMember", out _));
+        Assert.False(s.TryGetProperty("DeploySite", out _));
+        Assert.DoesNotContain("$.set.site", PlanTest(TestConfig(site: false)).Definition);
+    }
+
     [Fact]
     public void WhereTheSuccessorTakesTheSite_ASiteExecution_WritesItsMarker_ThenEndsRecorded()
     {

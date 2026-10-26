@@ -2378,7 +2378,7 @@ public static class DeployerPlanner
     /// each member is.
     /// </summary>
     private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
-        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite)
+        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false)
     {
         System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
 
@@ -2388,10 +2388,13 @@ public static class DeployerPlanner
         states["Verify"] = verify;
 
         // A REVERT (stage J, T-14) - what Verify admitted, never what the input claims - sets the hold first.
+        // A SITE (V-K step 5) - Verify admitted a site marker, and its result names the site - goes to the site's own states.
+        var choices = new List<object> { new { Variable = "$.set.revert", BooleanEquals = true, Next = "SetHold" } };
+        if (site) choices.Add(new { Variable = "$.set.site", IsPresent = true, Next = "SiteMember" });
         states["IsRevert"] = new
         {
             Type = "Choice",
-            Choices = new[] { new { Variable = "$.set.revert", BooleanEquals = true, Next = "SetHold" } },
+            Choices = choices,
             Default = "ImageMember",
         };
         states["SetHold"] = new
@@ -2422,6 +2425,24 @@ public static class DeployerPlanner
         }
         states["ImageMember"] = new { Type = "Pass", Parameters = Member(revert: false), Next = "Prepare" };
         states["RevertImageMember"] = new { Type = "Pass", Parameters = Member(revert: true), Next = "Prepare" };
+
+        // THE SITE, lifted into place as the image is, then dev's DeploySite and VerifySite, then the same Record. Never a
+        // revert (choice 3), so never past what the site serves.
+        if (site)
+            states["SiteMember"] = new
+            {
+                Type = "Pass",
+                Parameters = new Dictionary<string, object>
+                {
+                    ["set.$"] = "$.set",
+                    ["record.$"] = "$.set.site.record",
+                    ["target.$"] = "$.set.site.target",
+                    ["verified.$"] = "$.set.site.verified",
+                    ["allowOlderBuild"] = false,
+                    ["marker.$"] = "$.marker",
+                },
+                Next = "DeploySite",
+            };
 
         var record = Node("Record");
         if (bundles)
@@ -2469,7 +2490,7 @@ public static class DeployerPlanner
         record["Next"] = bundles ? "Bundles" : "AfterSet";
         states["Record"] = record;
 
-        foreach (var name in new[] { "ByClass", "NoBranchForClass", "DeployBundle", "VerifyBundle", "DeploySite", "VerifySite" })
+        foreach (var name in new[] { "ByClass", "NoBranchForClass", "DeployBundle", "VerifyBundle" }.Concat(site ? Array.Empty<string>() : new[] { "DeploySite", "VerifySite" }))
             states.Remove(name);
 
         // AFTER THE SET: a revert is recorded under reverts/ and decides nothing; a promotion is decided.
@@ -3594,7 +3615,8 @@ public static class DeployerPlanner
         }
 
         if (decideFn is not null)
-            Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite());
+            Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite(),
+                site: siteFunctions is not null);
 
         return JsonSerializer.Serialize(new
         {

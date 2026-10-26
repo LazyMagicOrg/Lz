@@ -284,7 +284,8 @@ public static class DecisionStep
 {
     public const string Deployed = "deployed", Refused = "refused", Failed = "failed";
 
-    private static readonly System.Text.RegularExpressions.Regex SetKey = new(@$"^{PassMarkerFormat.Prefix}(sets/[0-9a-f]{{64}})\.json$");
+    // A set's or a site's (V-K step 5): either, undecided, would alarm at every poll and never be started again.
+    private static readonly System.Text.RegularExpressions.Regex SetKey = new(@$"^{PassMarkerFormat.Prefix}((?:sets|site)/[0-9a-f]{{64}})\.json$");
 
     public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now)
     {

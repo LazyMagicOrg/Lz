@@ -66,6 +66,22 @@ public class DecisionStepTests
     }
 
     [Fact]
+    public async Task ASiteRefusedBeforeItWasRead_IsDecidedByItsKeyToo()
+    {
+        // V-K step 5: a site marker undecided would alarm at every poll and never be started again.
+        var site = "site/" + new string('b', 64);
+        var w = new Writer();
+        var state = new JsonObject
+        {
+            ["marker"] = Marker(site), ["set"] = null,
+            ["error"] = new JsonObject { ["Error"] = nameof(DeployRefused), ["Cause"] = "why" },
+        };
+        var result = await DecisionStep.RunAsync(state, Execution, Store, w, Now);
+        Assert.Equal(PassMarkerFormat.DecisionKeyFor(site), result["key"]!.GetValue<string>());
+        Assert.StartsWith("decisions/site/", result["key"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ARefusalBeforeTheSetWasRead_IsDecidedByTheMarkersKey()
     {
         // VerifySet refused before $.set existed: the marker's own key names the set it refused.
