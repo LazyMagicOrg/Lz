@@ -110,12 +110,24 @@ public class VerifySetTests
         ["target"] = new JsonObject { ["cluster"] = "scu-test-cluster", ["service"] = "scu-mp-aiphost", ["container"] = "aiphost", ["repository"] = "scu-4df6-b9c6-aiphost" },
     };
 
-    private static Task<JsonObject> Run(Fixture f, JsonObject? input = null, MemberVerify? verify = null)
-        => VerifySetStep.RunAsync(input ?? Input(f.Key, f.Version), Promotion, Settings, f.Store, f.Store, (verify ?? new MemberVerify()).RunAsync);
-
-    private static async Task<string> Refused(Fixture f, string check, JsonObject? input = null, MemberVerify? verify = null)
+    /// <summary>This environment's own decisions and executions, as a revert's Verify reads them.</summary>
+    private sealed class Here : IRevertReads
     {
-        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Run(f, input, verify));
+        public Dictionary<string, (string Outcome, DateTimeOffset At)> Decisions { get; } = new();
+        public List<string> Running { get; } = new();
+        public Task<string?> DecisionOutcomeAsync(string markerId) => Task.FromResult(Decisions.TryGetValue(markerId, out var d) ? d.Outcome : null);
+        public Task<IReadOnlyList<string>> OtherRunningAsync(string ownExecution) => Task.FromResult<IReadOnlyList<string>>(Running.Where(r => r != ownExecution).ToList());
+        public Task<string?> NewestDeployedAsync() => Task.FromResult(Decisions.Where(d => d.Value.Outcome == "deployed").OrderByDescending(d => d.Value.At).Select(d => d.Key).FirstOrDefault());
+    }
+
+    private const string Execution = "pm-0123456789abcdef0123-1";
+
+    private static Task<JsonObject> Run(Fixture f, JsonObject? input = null, MemberVerify? verify = null, Here? here = null)
+        => VerifySetStep.RunAsync(input ?? Input(f.Key, f.Version), Execution, Promotion, Settings, f.Store, f.Store, here ?? new Here(), (verify ?? new MemberVerify()).RunAsync);
+
+    private static async Task<string> Refused(Fixture f, string check, JsonObject? input = null, MemberVerify? verify = null, Here? here = null)
+    {
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => Run(f, input, verify, here));
         Assert.Contains(ex.Refusals, r => r.Check == check);
         return ex.Message;
     }
@@ -266,6 +278,70 @@ public class VerifySetTests
         var verify = new MemberVerify { Answer = _ => throw new DeployRefused("scan", "a CRITICAL finding") };
         await Refused(Set(), "scan", verify: verify);
     }
+
+    // ---- a revert (stage J, T-14, §4.4 step 2a) ----
+
+    private static JsonObject RevertInput(string key, string version) => new()
+    {
+        ["revertTo"] = new JsonObject { ["key"] = key, ["versionId"] = version },
+        ["target"] = Input(key, version)["target"]!.DeepClone(),
+    };
+
+    [Fact]
+    public async Task ARevert_IsAdmitted_ForASetDeployedAndDecidedDeployedHere_AndNamesWhatItReplaces()
+    {
+        var f = Set();
+        var here = new Here();
+        var newer = "sets/" + new string('d', 64);
+        here.Decisions[f.Marker.MarkerId] = ("deployed", DateTimeOffset.Parse("2026-10-25T10:00:00Z"));
+        here.Decisions[newer] = ("deployed", DateTimeOffset.Parse("2026-10-25T20:00:00Z"));
+        f.Store.OwnKeys.Add(PassMarkerFormat.DecisionKeyFor(f.Marker.MarkerId));
+
+        var result = await Run(f, RevertInput(f.Key, f.Version), here: here);
+        Assert.True(result["revert"]!.GetValue<bool>());
+        Assert.Equal(newer, result["replaces"]!.GetValue<string>());
+        Assert.Equal(f.Marker.MarkerId, result["markerId"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("refused")]
+    [InlineData("failed")]
+    [InlineData("superseded")]
+    public async Task ARevertToASetNotDeployedHere_IsRefused(string? outcome)
+    {
+        var f = Set();
+        var here = new Here();
+        if (outcome is not null) here.Decisions[f.Marker.MarkerId] = (outcome, DateTimeOffset.Parse("2026-10-25T10:00:00Z"));
+        await Refused(f, "revertTo", RevertInput(f.Key, f.Version), here: here);
+    }
+
+    [Fact]
+    public async Task ARevert_IsRefusedWhileAnotherExecutionRuns()
+    {
+        var f = Set();
+        var here = new Here();
+        here.Decisions[f.Marker.MarkerId] = ("deployed", DateTimeOffset.Parse("2026-10-25T10:00:00Z"));
+        here.Running.Add("pm-other-1");
+        here.Running.Add(Execution);   // itself, which does not count
+        Assert.Contains("pm-other-1", await Refused(f, "executions", RevertInput(f.Key, f.Version), here: here));
+    }
+
+    [Fact]
+    public async Task AnInputNamingBothAMarkerAndRevertTo_IsRefused()
+    {
+        var f = Set();
+        var both = Input(f.Key, f.Version);
+        both["revertTo"] = new JsonObject { ["key"] = f.Key, ["versionId"] = f.Version };
+        // The set was deployed here, so only the two fields together can refuse it.
+        var here = new Here();
+        here.Decisions[f.Marker.MarkerId] = ("deployed", DateTimeOffset.Parse("2026-10-25T10:00:00Z"));
+        Assert.Contains("both", await Refused(f, "revertTo", both, here: here));
+    }
+
+    [Fact]
+    public async Task APromotion_IsNoRevert()
+        => Assert.False((await Run(Set()))["revert"]!.GetValue<bool>());
 
     // ---- the AipApi check (T-13) ----
 

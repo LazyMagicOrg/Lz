@@ -9,6 +9,19 @@ namespace Lz.Aws.Pipeline;
 /// </summary>
 public sealed record PromotionSettings(string Predecessor, string PredecessorEvidenceStore, string EvidenceStore);
 
+/// <summary>What a revert's Verify reads of this environment (P5 stage J): its decisions and its deployer's executions.</summary>
+public interface IRevertReads
+{
+    /// <summary>The outcome decided here for this marker, or null when it is undecided.</summary>
+    Task<string?> DecisionOutcomeAsync(string markerId);
+
+    /// <summary>The executions of this environment's deployer that are running or awaiting approval, but this one.</summary>
+    Task<IReadOnlyList<string>> OtherRunningAsync(string ownExecution);
+
+    /// <summary>The marker id of the set decided deployed here most recently, or null when none was.</summary>
+    Task<string?> NewestDeployedAsync();
+}
+
 public interface IVersionedObjects
 {
     /// <summary>The object at exactly this version, or null when the store serves no such version.</summary>
@@ -27,10 +40,14 @@ public interface IVersionedObjects
 /// </summary>
 public static class VerifySetStep
 {
-    public static async Task<JsonObject> RunAsync(JsonObject state, PromotionSettings promotion, VerifySettings settings,
-        IVersionedObjects versions, IEvidenceProbe own, Func<JsonObject, Task<JsonObject>> verifyMember)
+    public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, PromotionSettings promotion, VerifySettings settings,
+        IVersionedObjects versions, IEvidenceProbe own, IRevertReads here, Func<JsonObject, Task<JsonObject>> verifyMember)
     {
-        var (key, versionId) = MarkerFrom(state);
+        // A REVERT (stage J, T-14) names the set it goes back to as revertTo; a promotion names the predecessor's marker. Never both.
+        var revert = state["revertTo"] is not null;
+        if (revert && state["marker"] is not null)
+            throw new DeployRefused("revertTo", "the input names both a marker and revertTo; a promotion and a revert are different executions.");
+        var (key, versionId) = MarkerFrom(state, revert ? "revertTo" : "marker");
 
         // BEFORE ANY READ: a promoted environment admits pass markers only, and a key elsewhere in the predecessor's store is
         // evidence of something else.
@@ -46,7 +63,21 @@ public static class VerifySetStep
         if (!string.Equals(PassMarkerFormat.KeyFor(marker.MarkerId), key, StringComparison.Ordinal))
             throw new DeployRefused("marker.key", $"the marker at {key} is {marker.MarkerId}, whose key is {PassMarkerFormat.KeyFor(marker.MarkerId)}.");
 
-        if (await own.ExistsAsync(promotion.EvidenceStore, PassMarkerFormat.DecisionKeyFor(marker.MarkerId)))
+        string? replaces = null;
+        if (revert)
+        {
+            // ADMITTED ONLY FOR A SET THIS ENVIRONMENT DEPLOYED AND DECIDED DEPLOYED, and only with nothing else in flight (§4.4 step 2a).
+            var outcome = await here.DecisionOutcomeAsync(marker.MarkerId);
+            if (outcome != DecisionStep.Deployed)
+                throw new DeployRefused("revertTo",
+                    $"{marker.MarkerId} was {(outcome is null ? "never decided" : $"decided {outcome}")} here; a revert goes back only to a set this environment deployed.");
+            var others = await here.OtherRunningAsync(executionName);
+            if (others.Count > 0)
+                throw new DeployRefused("executions", $"{string.Join(", ", others)} is running or awaiting approval; a revert runs alone.");
+            var newest = await here.NewestDeployedAsync();
+            replaces = newest == marker.MarkerId ? null : newest;
+        }
+        else if (await own.ExistsAsync(promotion.EvidenceStore, PassMarkerFormat.DecisionKeyFor(marker.MarkerId)))
             throw new DeployRefused("decision",
                 $"{marker.MarkerId} is decided here already ({PassMarkerFormat.DecisionKeyFor(marker.MarkerId)}): what was decided stays decided, and a " +
                 "set is promoted once per environment (§5.3 rule 2).");
@@ -117,19 +148,21 @@ public static class VerifySetStep
             ["markerId"] = marker.MarkerId,
             ["marker"] = new JsonObject { ["key"] = key, ["versionId"] = versionId },
             ["predecessor"] = promotion.Predecessor,
+            ["revert"] = revert,
+            ["replaces"] = replaces,
             ["image"] = image,
             ["bundles"] = bundles,
         };
     }
 
-    private static (string Key, string VersionId) MarkerFrom(JsonObject state)
+    private static (string Key, string VersionId) MarkerFrom(JsonObject state, string field)
     {
-        var marker = state["marker"] as JsonObject
-            ?? throw new DeployRefused("marker",
+        var marker = state[field] as JsonObject
+            ?? throw new DeployRefused(field,
                 "the input names no marker. This environment deploys only what its predecessor passed, by marker; a person " +
                 "going back starts a revert, not a hand-made execution.");
         string Field(string name) => marker[name] is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s)
-            ? s : throw new DeployRefused("marker", $"the input's marker has no {name}.");
+            ? s : throw new DeployRefused(field, $"the input's {field} has no {name}.");
         return (Field("key"), Field("versionId"));
     }
 

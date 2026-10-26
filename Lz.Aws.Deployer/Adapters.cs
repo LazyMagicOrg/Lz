@@ -520,7 +520,10 @@ internal sealed class PromotionReads(IAmazonS3 s3, Amazon.SimpleSystemsManagemen
 
     public Task<StoredRecord?> ReadMarkerAsync(string bucket, string key) => new S3RecordStore(s3).ReadAsync(bucket, key);
 
-    public async Task<IReadOnlyDictionary<string, string>> DecisionsAsync(string bucket)
+    public Task<IReadOnlyDictionary<string, string>> DecisionsAsync(string bucket) => DecisionsIn(s3, bucket);
+
+    /// <summary>The decisions in a store, by marker id, with their outcome: the poller's read, and a revert's.</summary>
+    internal static async Task<IReadOnlyDictionary<string, string>> DecisionsIn(IAmazonS3 s3, string bucket)
     {
         var decisions = new Dictionary<string, string>(StringComparer.Ordinal);
         string? token = null;
@@ -554,6 +557,39 @@ internal sealed class PromotionReads(IAmazonS3 s3, Amazon.SimpleSystemsManagemen
             token = page.NextToken;
         } while (!string.IsNullOrEmpty(token));
         return executions;
+    }
+}
+
+/// <summary>What a revert's Verify reads of this environment (P5 stage J): its decisions, and its deployer's running executions.</summary>
+internal sealed class PromotionRevertReads(IAmazonS3 s3, Amazon.StepFunctions.IAmazonStepFunctions sfn, string evidenceStore, string stateMachineArn)
+    : IRevertReads
+{
+    public async Task<string?> DecisionOutcomeAsync(string markerId)
+    {
+        var stored = await new S3RecordStore(s3).ReadAsync(evidenceStore, PassMarkerFormat.DecisionKeyFor(markerId));
+        return stored is null ? null : System.Text.Json.Nodes.JsonNode.Parse(stored.Json)?["outcome"]?.GetValue<string>();
+    }
+
+    public async Task<IReadOnlyList<string>> OtherRunningAsync(string ownExecution)
+    {
+        var page = await sfn.ListExecutionsAsync(new Amazon.StepFunctions.Model.ListExecutionsRequest
+        {
+            StateMachineArn = stateMachineArn, StatusFilter = Amazon.StepFunctions.ExecutionStatus.RUNNING,
+        });
+        return (page.Executions ?? new List<Amazon.StepFunctions.Model.ExecutionListItem>()).Select(e => e.Name).Where(n => n != ownExecution).ToList();
+    }
+
+    public async Task<string?> NewestDeployedAsync()
+    {
+        var decided = new List<(string Id, DateTimeOffset At)>();
+        foreach (var (id, outcome) in await PromotionReads.DecisionsIn(s3, evidenceStore))
+        {
+            if (outcome != DecisionStep.Deployed) continue;
+            var stored = await new S3RecordStore(s3).ReadAsync(evidenceStore, PassMarkerFormat.DecisionKeyFor(id));
+            var at = stored is null ? null : System.Text.Json.Nodes.JsonNode.Parse(stored.Json)?["decidedAt"]?.GetValue<string>();
+            if (at is not null && DateTimeOffset.TryParse(at, out var when)) decided.Add((id, when));
+        }
+        return decided.OrderByDescending(d => d.At).Select(d => d.Id).FirstOrDefault();
     }
 }
 

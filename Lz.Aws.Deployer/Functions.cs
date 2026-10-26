@@ -32,14 +32,18 @@ public sealed class VerifyFunction
         // A PROMOTED ENVIRONMENT (P5 stage F) admits a set by its predecessor's marker, then verifies each member here.
         if (Environment.GetEnvironmentVariable(DeployerEnvironment.Predecessor) is { Length: > 0 } predecessor)
         {
+            var evidenceStore = DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore);
             var set = await VerifySetStep.RunAsync(
                 state,
+                executionName,
                 new PromotionSettings(predecessor,
                     DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.PredecessorEvidenceStore),
-                    DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore)),
+                    evidenceStore),
                 settings,
                 new S3VersionedObjects(Clients.S3.Value),
                 new S3EvidenceProbe(Clients.S3.Value),
+                new PromotionRevertReads(Clients.S3.Value, Clients.Sfn.Value, evidenceStore,
+                    DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.StateMachine)),
                 Verify);
             context.Logger.LogInformation($"{executionName}: admitted {set["markerId"]} from {predecessor}, {set["bundles"]!.AsArray().Count} bundle member(s) beside the image");
             return Io.Write(set);
