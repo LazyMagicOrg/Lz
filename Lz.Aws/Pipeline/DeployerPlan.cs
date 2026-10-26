@@ -223,6 +223,10 @@ public static class DeployerHandlers
     public static readonly string Verify = For("VerifyFunction");
     public static readonly string Decide = For("DecideFunction");
     public static readonly string PromotionPoller = For("PromotionPollerFunction");
+    // A revert (P5 stage J): the hold set before Prepare, its record, and the function a person starts it with.
+    public static readonly string SetHold = For("SetHoldFunction");
+    public static readonly string RecordRevert = For("RecordRevertFunction");
+    public static readonly string RevertStart = For("RevertStartFunction");
     public static readonly string Prepare = For("PrepareFunction");
     public static readonly string VerifyRollout = For("VerifyRolloutFunction");
     public static readonly string Record = For("RecordFunction");
@@ -253,7 +257,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        Gate2Start, Gate2Result, Decide, PromotionPoller,
+        Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 
@@ -692,7 +696,12 @@ public static class DeployerPlanner
             verifyEnvironment[DeployerEnvironment.Predecessor] = promoted.Environment;
             verifyEnvironment[DeployerEnvironment.PredecessorEvidenceStore] = promoted.EvidenceStore;
             verifyEnvironment[DeployerEnvironment.EvidenceStore] = evidence;
-            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence)).ToArray();
+            // A REVERT (stage J) runs alone: Verify lists this machine's executions to refuse one beside another.
+            var ownMachine = $"arn:aws:states:{region}:{acct}:stateMachine:{sk}-{env}-deployer";
+            verifyEnvironment[DeployerEnvironment.StateMachine] = ownMachine;
+            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence))
+                .Append(new { Sid = "ListItsOwnExecutions", Effect = "Allow", Action = new[] { "states:ListExecutions" }, Resource = ownMachine })
+                .ToArray();
         }
 
         var functions = new List<DeployerFunction>
@@ -795,6 +804,7 @@ public static class DeployerPlanner
         // failure. Its role may write decisions/ and nothing else.
         string? decideFn = null;
         DeployerPromotionPlan? promotionPlan = null;
+        string? setHoldFn = null, recordRevertFn = null;
         if (promoted is not null)
         {
             var decide = $"{sk}-{env}-deployer-decide";
@@ -830,6 +840,40 @@ public static class DeployerPlanner
                 },
                 TimeoutSeconds: 50, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false));
             promotionPlan = new DeployerPromotionPlan(poller, $"{poller}-schedule", "rate(1 minute)", 1, 60, hold, PollerAlarms(config));
+
+            // THE REVERT (stage J, T-14): the hold before Prepare, its record, and the function the operator set starts it with.
+            var setHold = $"{sk}-{env}-deployer-set-hold";
+            functions.Add(new(setHold, DeployerHandlers.SetHold, $"{setHold}-fn",
+                Combine(Logs(region, acct, setHold), new object[]
+                {
+                    new { Sid = "SetTheHold", Effect = "Allow", Action = new[] { "ssm:PutParameter" }, Resource = $"arn:aws:ssm:{region}:{acct}:parameter{hold}" },
+                }),
+                new Dictionary<string, string> { [DeployerEnvironment.HoldParameter] = hold },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            setHoldFn = FnArn(setHold);
+
+            var recordRevert = $"{sk}-{env}-deployer-record-revert";
+            functions.Add(new(recordRevert, DeployerHandlers.RecordRevert, $"{recordRevert}-fn",
+                Combine(Logs(region, acct, recordRevert), new object[]
+                {
+                    new { Sid = "WriteReverts", Effect = "Allow", Action = new[] { "s3:PutObject" }, Resource = $"arn:aws:s3:::{evidence}/reverts/*" },
+                }),
+                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            recordRevertFn = FnArn(recordRevert);
+
+            var revertStart = $"{sk}-{env}-deployer-revert-start";
+            functions.Add(new(revertStart, DeployerHandlers.RevertStart, $"{revertStart}-fn",
+                Combine(Logs(region, acct, revertStart), new object[]
+                {
+                    new { Sid = "ListAndStartItsDeployer", Effect = "Allow", Action = new[] { "states:ListExecutions", "states:StartExecution" }, Resource = pollsMachine },
+                }),
+                new Dictionary<string, string>
+                {
+                    [DeployerEnvironment.StateMachine] = pollsMachine,
+                    [DeployerEnvironment.PromotionTarget] = target.ToJsonString(),
+                },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false));
         }
 
         // THE LEASE OUTLASTS THE SPAN IT COVERS, from Prepare's claim to Record's release: the rollout wait is its longest
@@ -945,7 +989,7 @@ public static class DeployerPlanner
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
                                       gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName),
-                                      decideFn),
+                                      decideFn, setHoldFn, recordRevertFn),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -2170,29 +2214,51 @@ public static class DeployerPlanner
     /// Map's processor); then Decide. A failure is recorded and then decided. No branch on a class remains: the set says what
     /// each member is.
     /// </summary>
-    private static void Promote(Dictionary<string, object> states, string decideFn, bool bundles, Dictionary<string, object> payload,
-        object[] catchAll, object transient, object evidenceWrite)
+    private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
+        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite)
     {
         System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
 
         var verify = Node("Verify");
         verify["ResultPath"] = "$.set";
-        verify["Next"] = "ImageMember";
+        verify["Next"] = "IsRevert";
         states["Verify"] = verify;
 
-        states["ImageMember"] = new
+        // A REVERT (stage J, T-14) - what Verify admitted, never what the input claims - sets the hold first.
+        states["IsRevert"] = new
         {
-            Type = "Pass",
-            Parameters = new Dictionary<string, object>
+            Type = "Choice",
+            Choices = new[] { new { Variable = "$.set.revert", BooleanEquals = true, Next = "SetHold" } },
+            Default = "ImageMember",
+        };
+        states["SetHold"] = new
+        {
+            Type = "Task",
+            Resource = setHoldFn,
+            Parameters = payload,
+            ResultPath = "$.hold",
+            Retry = new[] { transient },
+            Next = "RevertImageMember",
+            Catch = catchAll,
+        };
+
+        // THE IMAGE MEMBER, lifted into place. A promotion keeps Prepare's and DeployBundle's refusal of an older build,
+        // whatever its input says; a revert goes back past it.
+        Dictionary<string, object> Member(bool revert)
+        {
+            var p = new Dictionary<string, object>
             {
-                ["marker.$"] = "$.marker",
                 ["set.$"] = "$.set",
                 ["record.$"] = "$.set.image.record",
                 ["target.$"] = "$.set.image.target",
                 ["verified.$"] = "$.set.image.verified",
-            },
-            Next = "Prepare",
-        };
+                ["allowOlderBuild"] = revert,
+            };
+            if (revert) p["revertTo.$"] = "$.revertTo"; else p["marker.$"] = "$.marker";
+            return p;
+        }
+        states["ImageMember"] = new { Type = "Pass", Parameters = Member(revert: false), Next = "Prepare" };
+        states["RevertImageMember"] = new { Type = "Pass", Parameters = Member(revert: true), Next = "Prepare" };
 
         var record = Node("Record");
         if (bundles)
@@ -2218,7 +2284,7 @@ public static class DeployerPlanner
                     ["record.$"] = "$$.Map.Item.Value.record",
                     ["target.$"] = "$$.Map.Item.Value.target",
                     ["verified.$"] = "$$.Map.Item.Value.verified",
-                    ["marker.$"] = "$.marker",
+                    ["allowOlderBuild.$"] = "$.allowOlderBuild",
                 },
                 ItemProcessor = new
                 {
@@ -2232,16 +2298,35 @@ public static class DeployerPlanner
                     },
                 },
                 ResultPath = "$.bundlesRecorded",
-                Next = "Decide",
+                Next = "AfterSet",
                 Catch = catchAll,
             };
         }
         record.Remove("End");
-        record["Next"] = bundles ? "Bundles" : "Decide";
+        record["Next"] = bundles ? "Bundles" : "AfterSet";
         states["Record"] = record;
 
         foreach (var name in new[] { "ByClass", "NoBranchForClass", "DeployBundle", "VerifyBundle", "DeploySite", "VerifySite" })
             states.Remove(name);
+
+        // AFTER THE SET: a revert is recorded under reverts/ and decides nothing; a promotion is decided.
+        states["AfterSet"] = new
+        {
+            Type = "Choice",
+            Choices = new[] { new { Variable = "$.set.revert", BooleanEquals = true, Next = "RecordRevert" } },
+            Default = "Decide",
+        };
+        states["RecordRevert"] = new
+        {
+            Type = "Task",
+            Resource = recordRevertFn,
+            Parameters = payload,
+            ResultPath = "$.reverted",
+            Retry = new[] { transient, evidenceWrite },
+            Next = "Reverted",
+            Catch = catchAll,
+        };
+        states["Reverted"] = new { Type = "Succeed" };
 
         states["Decide"] = new
         {
@@ -2819,7 +2904,7 @@ public static class DeployerPlanner
         (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
         (string DeploySite, string VerifySite)? siteFunctions = null,
         (string Start, string Result, string Project)? gate2 = null,
-        string? decideFn = null)
+        string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -3293,7 +3378,7 @@ public static class DeployerPlanner
         }
 
         if (decideFn is not null)
-            Promote(states, decideFn, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite());
+            Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite());
 
         return JsonSerializer.Serialize(new
         {

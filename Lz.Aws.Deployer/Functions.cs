@@ -209,6 +209,50 @@ public sealed class PromotionPollerFunction
     }
 }
 
+/// <summary>A revert's hold (P5 stage J), set before Prepare, in a revert only.</summary>
+public sealed class SetHoldFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var result = await SetHoldStep.RunAsync(state, executionName,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.HoldParameter), new SsmHoldWriter(Clients.Ssm.Value));
+        context.Logger.LogInformation($"{executionName}: hold {result["hold"]} set {result["value"]}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>A revert's record (P5 stage J): reverts/{execution}.json, and no decision.</summary>
+public sealed class RecordRevertFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var result = await RecordRevertStep.RunAsync(state, executionName,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore), new S3EvidenceWriter(Clients.S3.Value), DateTimeOffset.UtcNow);
+        context.Logger.LogInformation($"{executionName}: revert recorded at {result["key"]} (written: {result["written"]})");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>
+/// The revert-start function (P5 stage J), invoked by a person through the operator set: {"revertTo": {"key", "versionId"}}
+/// starts this deployer going back to that set, unless anything else is in flight.
+/// </summary>
+public sealed class RevertStartFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var request = JsonNode.Parse(await new StreamReader(input).ReadToEndAsync()) as JsonObject ?? new JsonObject();
+        var result = await RevertStartStep.RunAsync(request,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.StateMachine),
+            JsonNode.Parse(DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.PromotionTarget))!.AsObject(),
+            new SfnPromotionExecutions(Clients.Sfn.Value), DateTimeOffset.UtcNow);
+        context.Logger.LogInformation($"revert started: {result.ToJsonString()}");
+        return Io.Write(result);
+    }
+}
+
 /// <summary>A promoted environment's decision (P5 stage F): deployed after the set, refused or failed after RecordFailure.</summary>
 public sealed class DecideFunction
 {

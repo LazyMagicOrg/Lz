@@ -593,6 +593,34 @@ internal sealed class PromotionRevertReads(IAmazonS3 s3, Amazon.StepFunctions.IA
     }
 }
 
+/// <summary>Sets the hold (P5 stage J): a revert's, before Prepare.</summary>
+internal sealed class SsmHoldWriter(Amazon.SimpleSystemsManagement.IAmazonSimpleSystemsManagement ssm) : IHoldWriter
+{
+    // System's Task: Amazon.ECS.Model, imported above, has its own.
+    public async System.Threading.Tasks.Task SetAsync(string parameter, string value)
+        => await ssm.PutParameterAsync(new Amazon.SimpleSystemsManagement.Model.PutParameterRequest
+        {
+            Name = parameter, Value = value, Type = Amazon.SimpleSystemsManagement.ParameterType.String, Overwrite = true,
+        });
+}
+
+/// <summary>The revert-start function's calls (P5 stage J): this deployer's executions, listed and started.</summary>
+internal sealed class SfnPromotionExecutions(Amazon.StepFunctions.IAmazonStepFunctions sfn) : IPromotionExecutions
+{
+    public async Task<IReadOnlyList<PromotionExecution>> ExecutionsAsync(string stateMachineArn)
+    {
+        var page = await sfn.ListExecutionsAsync(new Amazon.StepFunctions.Model.ListExecutionsRequest
+        {
+            StateMachineArn = stateMachineArn, StatusFilter = Amazon.StepFunctions.ExecutionStatus.RUNNING,
+        });
+        return (page.Executions ?? new List<Amazon.StepFunctions.Model.ExecutionListItem>())
+            .Select(e => new PromotionExecution(e.Name, e.Status?.Value ?? "", new DateTimeOffset(e.StartDate ?? DateTime.UtcNow, TimeSpan.Zero), null))
+            .ToList();
+    }
+
+    public Task<bool> StartAsync(string stateMachineArn, string name, string input) => new SfnExecutionStarter(sfn).StartAsync(stateMachineArn, name, input);
+}
+
 /// <summary>Starts an execution under the poller's name; a name already taken is an execution already started, not an error.</summary>
 internal sealed class SfnExecutionStarter(Amazon.StepFunctions.IAmazonStepFunctions sfn) : IExecutionStarter
 {

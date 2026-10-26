@@ -52,7 +52,8 @@ public class DeployerPromotedPlanTests
     {
         var s = States(Plan());
         Assert.Equal("Verify", JsonDocument.Parse(Plan().Definition).RootElement.GetProperty("StartAt").GetString());
-        Assert.Equal(("$.set", "ImageMember"), (s.GetProperty("Verify").GetProperty("ResultPath").GetString(), s.GetProperty("Verify").GetProperty("Next").GetString()));
+        Assert.Equal(("$.set", "IsRevert"), (s.GetProperty("Verify").GetProperty("ResultPath").GetString(), s.GetProperty("Verify").GetProperty("Next").GetString()));
+        Assert.Equal("ImageMember", s.GetProperty("IsRevert").GetProperty("Default").GetString());
 
         var image = s.GetProperty("ImageMember");
         Assert.Equal("Pass", image.GetProperty("Type").GetString());
@@ -60,6 +61,8 @@ public class DeployerPromotedPlanTests
         Assert.Equal(("$.set.image.record", "$.set.image.target", "$.set.image.verified"),
             (p.GetProperty("record.$").GetString(), p.GetProperty("target.$").GetString(), p.GetProperty("verified.$").GetString()));
         Assert.Equal("Prepare", image.GetProperty("Next").GetString());
+        // A promotion keeps Prepare's and DeployBundle's refusal of an older build, whatever its input says.
+        Assert.False(p.GetProperty("allowOlderBuild").GetBoolean());
         Assert.Equal(("Deploy", "VerifyRollout", "Record"), (s.GetProperty("Prepare").GetProperty("Next").GetString(),
             s.GetProperty("Deploy").GetProperty("Next").GetString(), s.GetProperty("VerifyRollout").GetProperty("Next").GetString()));
     }
@@ -73,7 +76,8 @@ public class DeployerPromotedPlanTests
         var map = s.GetProperty("Bundles");
         Assert.Equal(("Map", "$.set.bundles", 1), (map.GetProperty("Type").GetString(), map.GetProperty("ItemsPath").GetString(), map.GetProperty("MaxConcurrency").GetInt32()));
         Assert.Equal("$$.Map.Item.Value.record", map.GetProperty("ItemSelector").GetProperty("record.$").GetString());
-        Assert.Equal("Decide", map.GetProperty("Next").GetString());
+        Assert.Equal("AfterSet", map.GetProperty("Next").GetString());   // a revert is recorded there instead of decided (stage J)
+        Assert.Equal("$.allowOlderBuild", map.GetProperty("ItemSelector").GetProperty("allowOlderBuild.$").GetString());
         Assert.Equal("RecordFailure", map.GetProperty("Catch")[0].GetProperty("Next").GetString());
 
         var inner = map.GetProperty("ItemProcessor");
@@ -84,6 +88,7 @@ public class DeployerPromotedPlanTests
         // A Catch cannot leave a Map's processor: a bundle's failure is the Map's, caught there.
         Assert.All(st.EnumerateObject(), x => Assert.False(x.Value.TryGetProperty("Catch", out _), x.Name));
 
+        Assert.Equal("Decide", s.GetProperty("AfterSet").GetProperty("Default").GetString());
         Assert.Equal(("Task", "Decided"), (s.GetProperty("Decide").GetProperty("Type").GetString(), s.GetProperty("Decide").GetProperty("Next").GetString()));
         Assert.Equal("Succeed", s.GetProperty("Decided").GetProperty("Type").GetString());
     }
@@ -142,6 +147,64 @@ public class DeployerPromotedPlanTests
         var writes = Statements(decide.Policy).Where(s => Strings(s.GetProperty("Action")).Contains("s3:PutObject")).SelectMany(s => Strings(s.GetProperty("Resource"))).ToList();
         Assert.Equal(new[] { $"arn:aws:s3:::{OwnStore}/decisions/*" }, writes);
         Assert.Equal(OwnStore, decide.Environment[DeployerEnvironment.EvidenceStore]);
+    }
+
+    // ---- the revert (stage J) ----
+
+    [Fact]
+    public void ARevert_SetsTheHoldBeforePrepare_AndItsImageMemberMayBeOlderThanWhatRuns()
+    {
+        var s = States(Plan());
+        var choice = s.GetProperty("IsRevert").GetProperty("Choices")[0];
+        Assert.Equal(("$.set.revert", true, "SetHold"), (choice.GetProperty("Variable").GetString(), choice.GetProperty("BooleanEquals").GetBoolean(), choice.GetProperty("Next").GetString()));
+        Assert.Equal(("Task", "RevertImageMember"), (s.GetProperty("SetHold").GetProperty("Type").GetString(), s.GetProperty("SetHold").GetProperty("Next").GetString()));
+        Assert.Equal("RecordFailure", s.GetProperty("SetHold").GetProperty("Catch")[0].GetProperty("Next").GetString());
+
+        var p = s.GetProperty("RevertImageMember").GetProperty("Parameters");
+        Assert.True(p.GetProperty("allowOlderBuild").GetBoolean());
+        Assert.Equal("$.revertTo", p.GetProperty("revertTo.$").GetString());
+        Assert.Equal("$.set.image.verified", p.GetProperty("verified.$").GetString());
+        Assert.Equal("Prepare", s.GetProperty("RevertImageMember").GetProperty("Next").GetString());
+    }
+
+    [Fact]
+    public void AfterItsSet_ARevertIsRecordedUnderReverts_AndDecidesNothing()
+    {
+        var s = States(Plan());
+        var choice = s.GetProperty("AfterSet").GetProperty("Choices")[0];
+        Assert.Equal(("$.set.revert", true, "RecordRevert"), (choice.GetProperty("Variable").GetString(), choice.GetProperty("BooleanEquals").GetBoolean(), choice.GetProperty("Next").GetString()));
+        Assert.Equal("Reverted", s.GetProperty("RecordRevert").GetProperty("Next").GetString());
+        Assert.Equal("Succeed", s.GetProperty("Reverted").GetProperty("Type").GetString());
+    }
+
+    [Fact]
+    public void TheRevertsFunctions_MayDoTheirOneThing()
+    {
+        var plan = Plan();
+        var machine = $"arn:aws:states:us-west-2:{TestAccount}:stateMachine:{plan.StateMachineName}";
+        var hold = $"arn:aws:ssm:us-west-2:{TestAccount}:parameter/scu/test/pipeline/hold";
+
+        var setHold = plan.Functions.Single(f => f.Handler == DeployerHandlers.SetHold);
+        Assert.Equal(new[] { hold }, Statements(setHold.Policy).Where(s => Strings(s.GetProperty("Action")).Contains("ssm:PutParameter")).SelectMany(s => Strings(s.GetProperty("Resource"))));
+        Assert.Equal("/scu/test/pipeline/hold", setHold.Environment[DeployerEnvironment.HoldParameter]);
+
+        var record = plan.Functions.Single(f => f.Handler == DeployerHandlers.RecordRevert);
+        Assert.Equal(new[] { $"arn:aws:s3:::{OwnStore}/reverts/*" },
+            Statements(record.Policy).Where(s => Strings(s.GetProperty("Action")).Contains("s3:PutObject")).SelectMany(s => Strings(s.GetProperty("Resource"))));
+
+        var start = plan.Functions.Single(f => f.Handler == DeployerHandlers.RevertStart);
+        Assert.False(start.InvokedByStateMachine);   // a person invokes it, through the operator set
+        Assert.True(Grants(start.Policy, "states:StartExecution", machine));
+        Assert.True(Grants(start.Policy, "states:ListExecutions", machine));
+        Assert.Equal(Poller(plan).Environment[DeployerEnvironment.PromotionTarget], start.Environment[DeployerEnvironment.PromotionTarget]);
+        Assert.DoesNotContain(Statements(start.Policy), s => Strings(s.GetProperty("Action")).Any(a => a.StartsWith("ssm:", StringComparison.Ordinal)));
+
+        var verify = plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        Assert.Equal(machine, verify.Environment[DeployerEnvironment.StateMachine]);
+        Assert.True(Grants(verify.Policy, "states:ListExecutions", machine));
+
+        foreach (var f in new[] { setHold, record, start, verify }) Assert.Empty(DeployerPlanner.DenyGaps(f.Policy, plan.DenyPolicy));
+        Assert.DoesNotContain(plan.RolePolicy, "revert-start");   // the machine never starts a revert
     }
 
     // ---- the promotion poller (stage I) ----
