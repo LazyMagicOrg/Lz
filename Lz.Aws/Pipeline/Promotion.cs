@@ -172,3 +172,55 @@ public static class VerifySetStep
     private static string Canonical(BuildRecordBuiltFrom b) => $"{b.Repo}|{b.Commit}|{b.Lane}|{b.Ref}|" +
         string.Join(",", b.Packages.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => $"{p.Key}={p.Value}"));
 }
+
+/// <summary>A deployed set's decision was already written: another execution decided the same marker. Alerted, as a failure.</summary>
+public sealed class DecisionAlreadyWritten(string message) : Exception(message);
+
+/// <summary>
+/// A PROMOTED ENVIRONMENT'S DECISION (§12 P5 stage F, §5.3 rule 2), written once at <c>decisions/{markerId}.json</c> in its
+/// own evidence store: <c>deployed</c> after the set's last member is recorded, and, after RecordFailure, <c>refused</c> for a
+/// Verify refusal or <c>failed</c> for anything else. What is decided stays decided: a set is promoted once per environment,
+/// and a refused or failed one is never deployed from the same marker again.
+///
+/// <para>The marker's id is the set's, from <c>$.set</c>, or, where Verify refused before reading it, from the input's marker
+/// key. A failure with no set marker to name decides nothing; the failure path never throws, since RecordFailure's evidence is
+/// already written by then. A deployed set whose decision already exists does throw: two executions raced to it.</para>
+/// </summary>
+public static class DecisionStep
+{
+    public const string Deployed = "deployed", Refused = "refused", Failed = "failed";
+
+    private static readonly System.Text.RegularExpressions.Regex SetKey = new(@$"^{PassMarkerFormat.Prefix}(sets/[0-9a-f]{{64}})\.json$");
+
+    public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now)
+    {
+        var error = state["error"] as JsonObject;
+        var outcome = error is null ? Deployed : error["Error"]?.GetValue<string>() == nameof(DeployRefused) ? Refused : Failed;
+
+        var markerId = state["set"]?["markerId"]?.GetValue<string>();
+        var key = state["marker"]?["key"] is JsonValue k && k.TryGetValue<string>(out var s) ? s : null;
+        if (markerId is null && key is not null && SetKey.Match(key) is { Success: true } m) markerId = m.Groups[1].Value;
+        if (markerId is null)
+        {
+            if (outcome == Deployed) throw new InvalidOperationException("a deployed set names no marker, so it cannot be decided.");
+            return new JsonObject { ["written"] = false, ["outcome"] = outcome, ["reason"] = "the input names no set marker to decide" };
+        }
+
+        var decisionKey = PassMarkerFormat.DecisionKeyFor(markerId);
+        var body = new JsonObject
+        {
+            ["schema"] = 1,
+            ["markerId"] = markerId,
+            ["marker"] = state["marker"]?.DeepClone(),
+            ["outcome"] = outcome,
+            ["execution"] = executionName,
+            ["decidedAt"] = now.ToString("O"),
+        };
+        if (error is not null) body["error"] = new JsonObject { ["type"] = error["Error"]?.DeepClone(), ["cause"] = error["Cause"]?.DeepClone() };
+
+        var written = await writer.PutOnceAsync(evidenceStore, decisionKey, body.ToJsonString());
+        if (!written && outcome == Deployed)
+            throw new DecisionAlreadyWritten($"{decisionKey} was already written when {executionName} deployed its set: another execution decided it.");
+        return new JsonObject { ["key"] = decisionKey, ["outcome"] = outcome, ["written"] = written };
+    }
+}
