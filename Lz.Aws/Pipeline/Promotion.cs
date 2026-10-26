@@ -51,8 +51,14 @@ public static class VerifySetStep
 
         // BEFORE ANY READ: a promoted environment admits pass markers only, and a key elsewhere in the predecessor's store is
         // evidence of something else.
-        if (!key.StartsWith(PassMarkerFormat.Prefix + PassMarkerFormat.SetsSegment, StringComparison.Ordinal))
-            throw new DeployRefused("marker.key", $"the input names '{key}', which is not a set marker under {PassMarkerFormat.Prefix}{PassMarkerFormat.SetsSegment}.");
+        var isSite = key.StartsWith(PassMarkerFormat.Prefix + PassMarkerFormat.SiteSegment, StringComparison.Ordinal);
+        if (!isSite && !key.StartsWith(PassMarkerFormat.Prefix + PassMarkerFormat.SetsSegment, StringComparison.Ordinal))
+            throw new DeployRefused("marker.key",
+                $"the input names '{key}', which is not a set marker under {PassMarkerFormat.Prefix}{PassMarkerFormat.SetsSegment} " +
+                $"or a site marker under {PassMarkerFormat.Prefix}{PassMarkerFormat.SiteSegment}.");
+        // NO REVERT FOR A SITE (V-K step 5, choice 3): a bad site is fixed forward, by a push to the site's main.
+        if (isSite && revert)
+            throw new DeployRefused("revertTo", $"'{key}' is a site marker; a site is never reverted - it is fixed forward, by a push to its main.");
 
         var stored = await versions.ReadVersionAsync(promotion.PredecessorEvidenceStore, key, versionId)
             ?? throw new DeployRefused("marker", $"{promotion.Predecessor}'s store {promotion.PredecessorEvidenceStore} serves no {key} at version {versionId}.");
@@ -81,6 +87,9 @@ public static class VerifySetStep
             throw new DeployRefused("decision",
                 $"{marker.MarkerId} is decided here already ({PassMarkerFormat.DecisionKeyFor(marker.MarkerId)}): what was decided stays decided, and a " +
                 "set is promoted once per environment (§5.3 rule 2).");
+
+        if (PassMarkerFormat.IsSite(marker))
+            return await AdmitSiteAsync(marker, key, versionId, promotion, settings, versions, verifyMember);
 
         var tests = await Outcome(versions, promotion.PredecessorEvidenceStore,
             marker.Evidence.Tests ?? throw new DeployRefused("evidence.tests", "a set marker names no test evidence."), "evidence.tests");
@@ -153,6 +162,57 @@ public static class VerifySetStep
             ["replaces"] = replaces,
             ["image"] = image,
             ["bundles"] = bundles,
+        };
+    }
+
+    /// <summary>
+    /// A SITE, ADMITTED BY ITS MARKER (V-K step 5): dev's deploy landed and dev's record says what the marker says; then this
+    /// environment's own bundle of the same run - the record beside dev's, under this environment's directory, same stem -
+    /// through this environment's site Verify, which must find it built from what dev's was. The two bundles' bytes differ by
+    /// their hosts only, which Gate 1 checked when it took the run in.
+    /// </summary>
+    private static async Task<JsonObject> AdmitSiteAsync(PassMarker marker, string key, string versionId, PromotionSettings promotion,
+        VerifySettings settings, IVersionedObjects versions, Func<JsonObject, Task<JsonObject>> verifyMember)
+    {
+        var m = marker.Members[0];
+        var deployed = await Outcome(versions, promotion.PredecessorEvidenceStore, m.Deploy, "members[0].deploy");
+        if (deployed != "deployed")
+            throw new DeployRefused("members[0].deploy", $"{m.Repo}'s site deploy in {promotion.Predecessor} ended {deployed}, not deployed.");
+        await RecordAsync(versions, settings, m, "members[0].record");
+
+        var target = (settings.SiteTargets ?? Array.Empty<SiteTarget>()).FirstOrDefault(t => t.Repo == m.Repo)
+            ?? throw new DeployRefused("site.target", $"{m.Repo} deploys no site in this environment, so its marker has nothing to deploy here.");
+        var predecessorDirectory = $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, m.Repo)}{promotion.Predecessor}/";
+        if (!m.Record.Key.StartsWith(predecessorDirectory, StringComparison.Ordinal))
+            throw new DeployRefused("members[0].record", $"{m.Record.Key} is not {promotion.Predecessor}'s site record, under {predecessorDirectory}.");
+        var ownKey = $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, m.Repo)}{target.Environment}/{m.Record.Key[predecessorDirectory.Length..]}";
+
+        var memberState = new JsonObject
+        {
+            ["record"] = new JsonObject { ["bucket"] = m.Record.Bucket, ["key"] = ownKey },
+            ["target"] = new JsonObject { ["bucket"] = target.Bucket },
+        };
+        var verified = await verifyMember(memberState);
+        var built = verified["builtFrom"] as JsonObject ?? throw new DeployRefused("site.builtFrom", $"this environment's Verify of {ownKey} names no builtFrom.");
+        var ownBuiltFrom = new BuildRecordBuiltFrom(
+            built["repo"]?.GetValue<string>() ?? "", built["commit"]?.GetValue<string>() ?? "", built["lane"]?.GetValue<string>() ?? "",
+            (built["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value?.GetValue<string>() ?? ""),
+            built["ref"]?.GetValue<string>());
+        if (Canonical(ownBuiltFrom) != Canonical(m.BuiltFrom))
+            throw new DeployRefused("site.builtFrom",
+                $"{ownKey} was built from {ownBuiltFrom.Repo}@{ownBuiltFrom.Commit}, and the site {promotion.Predecessor} passed from {m.BuiltFrom.Repo}@{m.BuiltFrom.Commit}.");
+        memberState["verified"] = verified;
+
+        return new JsonObject
+        {
+            ["markerId"] = marker.MarkerId,
+            ["marker"] = new JsonObject { ["key"] = key, ["versionId"] = versionId },
+            ["predecessor"] = promotion.Predecessor,
+            ["revert"] = false,
+            ["replaces"] = null,
+            ["image"] = null,
+            ["bundles"] = new JsonArray(),
+            ["site"] = memberState,
         };
     }
 
