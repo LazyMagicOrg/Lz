@@ -205,6 +205,72 @@ public class BuildSuffixTests : IDisposable
         Assert.Equal("scu-test-deploy-evidence-d5e0-b27f", plan.EvidenceStore);
     }
 
+    // ---- B: bootstrappipeline from a second environment changes nothing of the first's ----
+
+    private static (SystemConfig Dev, SystemConfig Test) Both()
+    {
+        (SystemConfig, SystemConfig) pair = (InMemory("dev", "4df6-b9c6", "503947800380"), InMemory("test", "d5e0-b27f", "456687462751"));
+        foreach (var c in new[] { pair.Item1, pair.Item2 })
+            c.Pipeline!.Repositories!.Add(new PipelineRepositoryConfig
+            {
+                Repo = "Scutara/ScutaraE2ETests", Class = "tests", RepositoryId = 1343104872, OwnerId = 320723031,
+                WorkflowPath = ".github/workflows/publish-tests.yml", Intake = "live", TestBundle = "tests",
+                Gate1 = new PipelineGate1Config { Kind = "collection" },
+            });
+        pair.Item1.Pipeline!.DeployOnBuildRecord = true;   // dev heads the chain
+        return pair;
+    }
+
+    [Fact]
+    public void TheIntake_IsPlannedTheSameFromEitherEnvironment()
+    {
+        var (dev, test) = Both();
+        var fromDev = IntakeBuildPlanner.Plan(dev, "147440642635");
+        Assert.NotNull(fromDev);
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(fromDev), System.Text.Json.JsonSerializer.Serialize(IntakeBuildPlanner.Plan(test, "147440642635")));
+    }
+
+    [Fact]
+    public void TheSigningRules_ArePlannedTheSameFromEitherEnvironment()
+    {
+        // MergeSigning keys a rule by its profile, which both environments share: a different repository filter from test
+        // would replace dev's. Planned from one build side, the profile signs the same repository either way.
+        var (dev, test) = Both();
+        static string Signing(SystemConfig c) => string.Join(";", PipelineBootstrapPlanner.Plan(c, "147440642635").Roles
+            .Where(r => r.SigningProfile is not null).Select(r => $"{r.SigningProfile}={string.Join(",", r.EcrRepositories)}"));
+        Assert.NotEmpty(Signing(dev));
+        Assert.Equal(Signing(dev), Signing(test));
+    }
+
+    [Fact]
+    public void TheBuildAccountsGrants_ToEachEnvironment_NeverShareAStatementId()
+    {
+        // Each environment's grants are merged into the same store policies by Sid: a Sid both planned would let the second
+        // run replace the first's grant.
+        var (dev, test) = Both();
+        static IEnumerable<string> Sids(SystemConfig c)
+        {
+            var plan = PipelineBootstrapPlanner.Plan(c, "147440642635");
+            return (plan.BuildRecordReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Concat(plan.ArtifactReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Select(s => s["Sid"]!.GetValue<string>());
+        }
+        Assert.NotEmpty(Sids(test));
+        Assert.Empty(Sids(dev).Intersect(Sids(test)));
+    }
+
+    [Fact]
+    public void TestsReplication_IsMergedBesideDevs_AndLeavesItAsItWas()
+    {
+        var (dev, test) = Both();
+        var devRule = PipelineBootstrapPlanner.Plan(dev, "147440642635").Replication!;
+        var merged = CrossAccount.MergeReplication(new Amazon.ECR.Model.ReplicationConfiguration { Rules = new() { devRule } },
+            PipelineBootstrapPlanner.Plan(test, "147440642635").Replication!);
+        Assert.Equal(2, merged.Rules.Count);
+        Assert.Same(devRule.RepositoryFilters, merged.Rules.Single(r => r.Destinations.Single().RegistryId == "503947800380").RepositoryFilters);
+        Assert.Equal(merged.Rules[0].RepositoryFilters.Select(f => f.Filter), merged.Rules[1].RepositoryFilters.Select(f => f.Filter));
+    }
+
     [Fact]
     public void WithoutABuildSuffix_EveryNameIsTheSystemSuffixs_AsItWasBefore()
     {
