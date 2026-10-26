@@ -504,17 +504,21 @@ internal sealed class PromotionReads(IAmazonS3 s3, Amazon.SimpleSystemsManagemen
 
     public async Task<IReadOnlyList<(string Key, DateTimeOffset LastModified)>> ListMarkersAsync(string bucket)
     {
+        // BOTH KINDS (V-K step 5): passed/sets/ and passed/site/.
         var found = new List<(string, DateTimeOffset)>();
-        string? token = null;
-        do
+        foreach (var segment in PassMarkerFormat.Segments)
         {
-            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+            string? token = null;
+            do
             {
-                BucketName = bucket, Prefix = PassMarkerFormat.Prefix + PassMarkerFormat.SetsSegment, ContinuationToken = token,
-            });
-            found.AddRange((page.S3Objects ?? new List<S3Object>()).Select(o => (o.Key, new DateTimeOffset(o.LastModified ?? DateTime.UtcNow, TimeSpan.Zero))));
-            token = page.IsTruncated == true ? page.NextContinuationToken : null;
-        } while (token is not null);
+                var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+                {
+                    BucketName = bucket, Prefix = PassMarkerFormat.Prefix + segment, ContinuationToken = token,
+                });
+                found.AddRange((page.S3Objects ?? new List<S3Object>()).Select(o => (o.Key, new DateTimeOffset(o.LastModified ?? DateTime.UtcNow, TimeSpan.Zero))));
+                token = page.IsTruncated == true ? page.NextContinuationToken : null;
+            } while (token is not null);
+        }
         return found;
     }
 
@@ -526,21 +530,24 @@ internal sealed class PromotionReads(IAmazonS3 s3, Amazon.SimpleSystemsManagemen
     internal static async Task<IReadOnlyDictionary<string, string>> DecisionsIn(IAmazonS3 s3, string bucket)
     {
         var decisions = new Dictionary<string, string>(StringComparer.Ordinal);
-        string? token = null;
-        do
+        foreach (var segment in PassMarkerFormat.Segments)
         {
-            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+            string? token = null;
+            do
             {
-                BucketName = bucket, Prefix = PassMarkerFormat.DecisionsPrefix + PassMarkerFormat.SetsSegment, ContinuationToken = token,
-            });
-            foreach (var o in page.S3Objects ?? new List<S3Object>())
-            {
-                var stored = await new S3RecordStore(s3).ReadAsync(bucket, o.Key);
-                var body = stored is null ? null : System.Text.Json.Nodes.JsonNode.Parse(stored.Json);
-                if (body?["markerId"]?.GetValue<string>() is { } id) decisions[id] = body["outcome"]?.GetValue<string>() ?? "";
-            }
-            token = page.IsTruncated == true ? page.NextContinuationToken : null;
-        } while (token is not null);
+                var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+                {
+                    BucketName = bucket, Prefix = PassMarkerFormat.DecisionsPrefix + segment, ContinuationToken = token,
+                });
+                foreach (var o in page.S3Objects ?? new List<S3Object>())
+                {
+                    var stored = await new S3RecordStore(s3).ReadAsync(bucket, o.Key);
+                    var body = stored is null ? null : System.Text.Json.Nodes.JsonNode.Parse(stored.Json);
+                    if (body?["markerId"]?.GetValue<string>() is { } id) decisions[id] = body["outcome"]?.GetValue<string>() ?? "";
+                }
+                token = page.IsTruncated == true ? page.NextContinuationToken : null;
+            } while (token is not null);
+        }
         return decisions;
     }
 

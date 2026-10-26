@@ -32,6 +32,16 @@ public class PromotionPollStepTests
 
     private static readonly PassMarker Older = Marker("20261025T100000Z-1-1"), Newer = Marker("20261025T200000Z-2-1");
 
+    private static PassMarker SiteMarker(string stem)
+    {
+        var m = new PassMarkerMember("site", "Scutara/ScutaraWebsite",
+            new PassMarkerRecordReference("scu-build-records-4df6-b9c6", $"site/scutara/scutarawebsite/dev/{stem}.json", "rv"),
+            new BuildRecordIdentity("bundle", Bucket: "scu-artifacts-4df6-b9c6", Key: $"site/scutara/scutarawebsite/dev/{stem}.zip", VersionId: "bv-" + stem, Sha256: new string('c', 64)),
+            "bv-" + stem, new BuildRecordBuiltFrom("Scutara/ScutaraWebsite", new string('3', 40), "published", new Dictionary<string, string>()),
+            new PassMarkerReference($"deploys/site/scutara/scutarawebsite/{stem}.json", "dv"));
+        return new PassMarker(1, PassMarkerFormat.MarkerIdFor(new[] { m }), "dev", new[] { m }, new PassMarkerEvidence(null), "req-s", "2026-10-26T00:00:00Z");
+    }
+
     private sealed class World : IPromotionReads, IExecutionStarter, IEvidenceWriter, IAlertPublisher
     {
         public string? Hold { get; set; } = "off";
@@ -81,6 +91,38 @@ public class PromotionPollStepTests
         Assert.StartsWith("mv-", body["marker"]!["versionId"]!.GetValue<string>());
         Assert.Equal("scu-test-cluster", body["target"]!["cluster"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task ASiteMarker_IsStarted_WithItsKeyAndVersion_AndNoImageTarget()
+    {
+        var w = new World();
+        var site = SiteMarker("20261026T193011Z-40387310346-1");
+        w.Pass(site);
+        await Tick(w);
+
+        var (name, input) = Assert.Single(w.Started);
+        Assert.Equal(PromotionPoll.ExecutionNameFor(site.MarkerId), name);
+        Assert.StartsWith("ps-", name);
+        var body = JsonNode.Parse(input)!.AsObject();
+        Assert.Equal(PassMarkerFormat.KeyFor(site.MarkerId), body["marker"]!["key"]!.GetValue<string>());
+        Assert.Null(body["target"]);   // the site's target is test's own website, from its Verify's settings
+    }
+
+    [Fact]
+    public async Task ASupersededSite_IsDecidedUnderDecisionsSite()
+    {
+        var w = new World();
+        var older = SiteMarker("20261025T100000Z-7-1"); var newer = SiteMarker("20261026T193011Z-40387310346-1");
+        w.Pass(older); w.Pass(newer);
+        w.Decisions[newer.MarkerId] = "deployed";
+        await Tick(w);
+        Assert.Equal(new[] { PassMarkerFormat.DecisionKeyFor(older.MarkerId) }, w.Written.Keys);
+        Assert.StartsWith("decisions/site/", w.Written.Keys.Single());
+    }
+
+    [Fact]
+    public void ThePollerLists_BothKindsOfMarker()
+        => Assert.Equal(new[] { "sets/", "site/" }, PassMarkerFormat.Segments);
 
     [Theory]
     [InlineData(null)]

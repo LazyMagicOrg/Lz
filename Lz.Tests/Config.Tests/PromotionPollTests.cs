@@ -29,6 +29,18 @@ public class PromotionPollTests
         return new SeenMarker(PassMarkerFormat.KeyFor(id), "mv-" + id[5..11], marker, Now.AddMinutes(-minutesAgo));
     }
 
+    /// <summary>A site marker (V-K step 5) for the Website run at <paramref name="stem"/>.</summary>
+    private static SeenMarker Site(string stem, int minutesAgo = 1)
+    {
+        var members = new[] { Member("site", "scutara/scutarawebsite", stem) };
+        var id = PassMarkerFormat.MarkerIdFor(members);
+        var marker = new PassMarker(1, id, "dev", members, new PassMarkerEvidence(null), "req-s", "2026-10-26T00:00:00Z");
+        return new SeenMarker(PassMarkerFormat.KeyFor(id), "mv-" + id[5..11], marker, Now.AddMinutes(-minutesAgo));
+    }
+
+    private static readonly SeenMarker OldSite = Site("20261025T100000Z-7-1");
+    private static readonly SeenMarker NewSite = Site("20261026T010000Z-8-1");
+
     private static readonly SeenMarker Old = Set("20261025T100000Z-1-1", "20261024T100000Z-9-1");
     private static readonly SeenMarker NewService = Set("20261025T200000Z-2-1", "20261024T100000Z-9-1");
     private static readonly SeenMarker NewSeller = Set("20261025T100000Z-1-1", "20261025T210000Z-8-1");
@@ -166,6 +178,57 @@ public class PromotionPollTests
     }
 
     // ---- the execution it starts ----
+
+    // ---- the site, beside the sets (V-K step 5) ----
+
+    [Fact]
+    public void ASiteMarker_IsStarted_AsASiteExecution()
+    {
+        var d = PromotionPoll.Decide(new[] { NewSite }, State(), Now);
+        Assert.Same(NewSite, d.Start);
+        Assert.StartsWith("ps-", PromotionPoll.ExecutionNameFor(NewSite.Marker.MarkerId));
+        Assert.Equal(PromotionPoll.ExecutionNameFor(NewSite.Marker.MarkerId), PromotionPoll.ExecutionNameFor(NewSite.Marker.MarkerId));
+    }
+
+    [Fact]
+    public void ASetAndASite_NeverJudgeEachOther()
+    {
+        // They share no member, so each "dominates" the other vacuously: neither may start nothing for that, nor supersede.
+        var d = PromotionPoll.Decide(new[] { Both, NewSite }, State(), Now);
+        Assert.NotNull(d.Start);
+        Assert.Empty(d.Supersede);
+        Assert.Empty(d.Alerts);
+
+        var deployedSet = PromotionPoll.Decide(new[] { Both, NewSite }, State(decided: new Dictionary<SeenMarker, string> { [Both] = "deployed" }), Now);
+        Assert.Same(NewSite, deployedSet.Start);
+        Assert.Empty(deployedSet.Supersede);
+    }
+
+    [Fact]
+    public void OfASetAndASite_TheOneWrittenFirst_StartsFirst_AndTheOtherWaits()
+    {
+        var site = Site("20261026T010000Z-8-1", minutesAgo: 5);
+        var set = Set("20261025T200000Z-2-1", "20261025T210000Z-8-1", minutesAgo: 2);
+        var d = PromotionPoll.Decide(new[] { set, site }, State(), Now);
+        Assert.Same(site, d.Start);
+        Assert.Empty(d.Supersede);
+
+        Assert.Same(set, PromotionPoll.Decide(new[] { Site("20261026T010000Z-8-1", minutesAgo: 1), set }, State(), Now).Start);
+    }
+
+    [Fact]
+    public void OneExecutionAtATime_AcrossSetsAndSites()
+        => Assert.Null(PromotionPoll.Decide(new[] { NewSite }, State(inFlight: true), Now).Start);
+
+    [Fact]
+    public void AnOlderSite_IsSupersededByANewerSiteDeployedHere_AndOnlyByASite()
+    {
+        var d = PromotionPoll.Decide(new[] { OldSite, NewSite }, State(decided: new Dictionary<SeenMarker, string> { [NewSite] = "deployed" }), Now);
+        Assert.Equal(new[] { OldSite }, d.Supersede);
+        Assert.Null(d.Start);
+
+        Assert.Same(NewSite, PromotionPoll.Decide(new[] { OldSite, NewSite }, State(), Now).Start);
+    }
 
     [Fact]
     public void TheExecutionsName_IsDerivedFromTheMarker()

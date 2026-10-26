@@ -61,6 +61,9 @@ public static class PassMarkerFormat
     /// </summary>
     public const string SiteSegment = "site/";
 
+    /// <summary>Both kinds of marker, as the promotion poller lists them and their decisions.</summary>
+    public static readonly string[] Segments = { SetsSegment, SiteSegment };
+
     /// <summary>The classes a set names (T-13): the Service image and the clients. The site has a marker of its own.</summary>
     public static readonly string[] MemberClasses = { "image", "client" };
 

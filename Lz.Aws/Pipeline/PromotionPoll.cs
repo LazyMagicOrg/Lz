@@ -82,34 +82,50 @@ public static class PromotionPoll
             foreach (var m in markers.Where(m => Started(m) && !Decided(m)))
                 alerts.Add($"{Id(m)} was started here and its execution closed without a decision; it is not restarted. A person decides what happens to it.");
 
+        // SETS AND SITES APART (V-K step 5): they share no member, so one would "dominate" the other vacuously. Each is ordered
+        // and superseded among its own kind only; one execution at a time across both (choice 2).
         var deployed = markers.Where(m => state.Decided.TryGetValue(Id(m), out var o) && o == DecisionStep.Deployed).ToList();
         var supersede = markers
-            .Where(m => !Decided(m) && !Started(m) && deployed.Any(d => Id(d) != Id(m) && Dominates(d.Marker, m.Marker)))
+            .Where(m => !Decided(m) && !Started(m)
+                        && deployed.Any(d => Id(d) != Id(m) && SameKind(d, m) && Dominates(d.Marker, m.Marker)))
             .ToList();
 
         if (state.InFlight) return new(null, supersede, alerts);
 
-        var candidates = markers.Where(m => !Decided(m) && !Started(m) && !supersede.Contains(m)).ToList();
-        if (candidates.Count == 0) return new(null, supersede, alerts);
-
-        var newest = candidates.Where(c => candidates.All(o => o == c || Dominates(c.Marker, o.Marker))).ToList();
-        if (newest.Count != 1)
+        var startable = new List<SeenMarker>();
+        foreach (var kind in markers.Where(m => !Decided(m) && !Started(m) && !supersede.Contains(m)).GroupBy(Kind))
         {
-            alerts.Add($"of {candidates.Count} undecided set markers, neither of two dominates the other ({string.Join(", ", candidates.Select(Id))}); " +
-                       "nothing is started. A break-glass deploy can leave such sets; a person decides which goes on.");
-            return new(null, supersede, alerts);
+            var candidates = kind.ToList();
+            var newest = candidates.Where(c => candidates.All(o => o == c || Dominates(c.Marker, o.Marker))).ToList();
+            if (newest.Count != 1)
+            {
+                alerts.Add($"of {candidates.Count} undecided {kind.Key} markers, neither of two dominates the other ({string.Join(", ", candidates.Select(Id))}); " +
+                           "nothing of them is started. A break-glass deploy can leave such markers; a person decides which goes on.");
+                continue;
+            }
+            startable.Add(newest[0]);
         }
+        if (startable.Count == 0) return new(null, supersede, alerts);
 
-        var start = newest[0];
-        var startable = state.LastClosedAt is { } closed && closed > start.WrittenAt ? closed : start.WrittenAt;
-        if (now - startable > LateAfter)
-            alerts.Add($"{Id(start)} became startable at {startable:O} and is started only now, more than ten minutes later.");
+        // THE ONE WRITTEN FIRST goes first; the other kind's waits for it, as a newer set waits for a running one.
+        var start = startable.OrderBy(m => m.WrittenAt).ThenBy(Id, StringComparer.Ordinal).First();
+        var startableAt = state.LastClosedAt is { } closed && closed > start.WrittenAt ? closed : start.WrittenAt;
+        if (now - startableAt > LateAfter)
+            alerts.Add($"{Id(start)} became startable at {startableAt:O} and is started only now, more than ten minutes later.");
         return new(start, supersede, alerts);
     }
 
-    /// <summary><c>pm-{20 hex of the set's hash}-1</c>: derived from the marker, so two pollers racing name one execution.</summary>
+    private static string Kind(SeenMarker m) => PassMarkerFormat.IsSite(m.Marker) ? "site" : "set";
+    private static bool SameKind(SeenMarker a, SeenMarker b) => Kind(a) == Kind(b);
+
+    /// <summary>
+    /// <c>pm-{20 hex of the set's hash}-1</c>, or <c>ps-</c> for a site (V-K step 5): derived from the marker, so two pollers
+    /// racing name one execution.
+    /// </summary>
     public static string ExecutionNameFor(string markerId)
     {
+        if (markerId.StartsWith(PassMarkerFormat.SiteSegment, StringComparison.Ordinal))
+            return $"ps-{markerId[PassMarkerFormat.SiteSegment.Length..][..20]}-1";
         var hash = markerId.StartsWith(PassMarkerFormat.SetsSegment, StringComparison.Ordinal) ? markerId[PassMarkerFormat.SetsSegment.Length..] : markerId;
         return $"pm-{hash[..20]}-1";
     }
@@ -129,7 +145,7 @@ public interface IPromotionReads
     /// <summary>The hold parameter's value, or null when there is no such parameter.</summary>
     Task<string?> HoldAsync(string parameter);
 
-    /// <summary>The keys under <c>passed/sets/</c> in the predecessor's store, with when each was written.</summary>
+    /// <summary>The keys under <c>passed/sets/</c> and <c>passed/site/</c> in the predecessor's store, with when each was written.</summary>
     Task<IReadOnlyList<(string Key, DateTimeOffset LastModified)>> ListMarkersAsync(string bucket);
 
     /// <summary>A marker as read, with the version S3 served; null when it is not there.</summary>
@@ -206,8 +222,9 @@ public static class PromotionPollStep
             var input = new System.Text.Json.Nodes.JsonObject
             {
                 ["marker"] = new System.Text.Json.Nodes.JsonObject { ["key"] = start.Key, ["versionId"] = start.VersionId },
-                ["target"] = settings.Target.DeepClone(),
             };
+            // A SET'S IMAGE TARGET; a site's is test's own website, which its Verify knows from its settings (V-K step 5).
+            if (!PassMarkerFormat.IsSite(start.Marker)) input["target"] = settings.Target.DeepClone();
             started = PromotionPoll.ExecutionNameFor(start.Marker.MarkerId);
             await starter.StartAsync(settings.StateMachineArn, started, input.ToJsonString());
         }
