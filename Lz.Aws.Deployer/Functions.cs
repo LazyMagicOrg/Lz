@@ -20,15 +20,32 @@ public sealed class VerifyFunction
     public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
     {
         var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
-
-        var result = await VerifyStep.RunAsync(
-            state,
-            VerifySettings.Read(Environment.GetEnvironmentVariable),
+        var settings = VerifySettings.Read(Environment.GetEnvironmentVariable);
+        Task<JsonObject> Verify(JsonObject s) => VerifyStep.RunAsync(
+            s, settings,
             new S3RecordStore(Clients.S3.Value),
             new EcrImages(Clients.Ecr.Value),
             new EcsServices(Clients.Ecs.Value),
             new EcsTaskDefinitions(Clients.Ecs.Value),
             new S3ArtifactObjects(Clients.S3.Value));
+
+        // A PROMOTED ENVIRONMENT (P5 stage F) admits a set by its predecessor's marker, then verifies each member here.
+        if (Environment.GetEnvironmentVariable(DeployerEnvironment.Predecessor) is { Length: > 0 } predecessor)
+        {
+            var set = await VerifySetStep.RunAsync(
+                state,
+                new PromotionSettings(predecessor,
+                    DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.PredecessorEvidenceStore),
+                    DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore)),
+                settings,
+                new S3VersionedObjects(Clients.S3.Value),
+                new S3EvidenceProbe(Clients.S3.Value),
+                Verify);
+            context.Logger.LogInformation($"{executionName}: admitted {set["markerId"]} from {predecessor}, {set["bundles"]!.AsArray().Count} bundle member(s) beside the image");
+            return Io.Write(set);
+        }
+
+        var result = await Verify(state);
 
         context.Logger.LogInformation(result["class"]?.GetValue<string>() == "client"
             ? $"{executionName}: verified bundle {result["identity"]?["key"]} version {result["identity"]?["versionId"]} for {result["target"]?["bucket"]}"
@@ -157,6 +174,25 @@ public sealed class RecordFunction
             Clients.Leases());
 
         context.Logger.LogInformation($"{executionName}: deploy recorded at {result["key"]} (written: {result["written"]}); lease {result["lease"]}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>A promoted environment's decision (P5 stage F): deployed after the set, refused or failed after RecordFailure.</summary>
+public sealed class DecideFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+
+        var result = await DecisionStep.RunAsync(
+            state,
+            executionName,
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
+            new S3EvidenceWriter(Clients.S3.Value),
+            DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation($"{executionName}: decided {result["outcome"]} at {result["key"]} (written: {result["written"]})");
         return Io.Write(result);
     }
 }

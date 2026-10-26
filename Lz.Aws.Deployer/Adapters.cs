@@ -453,6 +453,33 @@ internal sealed class S3RecordStore(IAmazonS3 s3) : IRecordStore
     }
 }
 
+/// <summary>
+/// An object at exactly one version (P5 stage F): a predecessor's marker and the evidence it names, and a build record at the
+/// version a marker names. A version the store does not serve is null, never the current object.
+/// </summary>
+internal sealed class S3VersionedObjects(IAmazonS3 s3) : IVersionedObjects
+{
+    // A marker, a record or a piece of evidence is a few kilobytes. Anything this large is none of them, and is not read.
+    private const long MaxBytes = 1024 * 1024;
+
+    public async Task<StoredRecord?> ReadVersionAsync(string bucket, string key, string versionId)
+    {
+        try
+        {
+            using var response = await s3.GetObjectAsync(new GetObjectRequest { BucketName = bucket, Key = key, VersionId = versionId });
+            if (response.ContentLength > MaxBytes)
+                throw new DeployRefused("object", $"s3://{bucket}/{key} version {versionId} is {response.ContentLength} bytes; nothing the deployer reads is that large.");
+            using var reader = new StreamReader(response.ResponseStream);
+            return new StoredRecord(await reader.ReadToEndAsync(), response.VersionId);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound
+                                           || ex.ErrorCode is "NoSuchKey" or "NoSuchVersion" or "InvalidArgument")
+        {
+            return null;
+        }
+    }
+}
+
 internal sealed class S3EvidenceWriter(IAmazonS3 s3) : IEvidenceWriter
 {
     public async Task<bool> PutOnceAsync(string bucket, string key, string body)

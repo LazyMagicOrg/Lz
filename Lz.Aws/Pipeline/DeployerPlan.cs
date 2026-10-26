@@ -238,7 +238,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        Gate2Start, Gate2Result,
+        Gate2Start, Gate2Result, Decide,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 

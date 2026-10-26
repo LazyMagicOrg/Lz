@@ -39,6 +39,9 @@
     <Compile Include="..\Lz.Aws\Pipeline\DeployVerification.cs" Link="Linked\Lz.Aws\Pipeline\DeployVerification.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerContract.cs" Link="Linked\Lz.Aws\Pipeline\DeployerContract.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerSteps.cs" Link="Linked\Lz.Aws\Pipeline\DeployerSteps.cs" />
+    <!-- Promotion (DecoupledCd P5): the pass marker, VerifySet and the decision. BCL-only. -->
+    <Compile Include="..\Lz.Aws\Pipeline\PassMarker.cs" Link="Linked\Lz.Aws\Pipeline\PassMarker.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
