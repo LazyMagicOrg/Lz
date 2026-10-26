@@ -140,6 +140,28 @@ public class DeployerPromotedPlanTests
     }
 
     [Fact]
+    public void Verify_ReadsEachMembersRecordAtTheMarkersVersion_OnBothSidesOfTheAccountBoundary()
+    {
+        // VerifySet reads a record by its version (GetObject with a VersionId), which S3 authorises as s3:GetObjectVersion.
+        var verify = Plan().Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        foreach (var cls in new[] { "image", "client" })
+            Assert.True(Grants(verify.Policy, "s3:GetObjectVersion", $"arn:aws:s3:::scu-build-records-4df6-b9c6/{cls}/*"), cls);
+
+        var build = PipelineBootstrapPlanner.Plan(Test(), "147440642635");
+        foreach (var cls in new[] { "image", "client" })
+            Assert.Contains(build.BuildRecordReadGrant!, st => st["Resource"]!.ToString() == $"arn:aws:s3:::scu-build-records-4df6-b9c6/{cls}/*"
+                && st["Action"] is System.Text.Json.Nodes.JsonArray a && a.Select(x => x!.GetValue<string>()).Contains("s3:GetObjectVersion"));
+    }
+
+    [Fact]
+    public void TheFirstEnvironmentsRecordGrants_AreAsTheyWere()
+    {
+        var build = PipelineBootstrapPlanner.Plan(DeployerClientPlanTests.Config(), "147440642635");
+        Assert.All(build.BuildRecordReadGrant!.Where(st => st["Resource"]!.ToString().EndsWith("/*")),
+            st => Assert.Equal("s3:GetObject", st["Action"]!.GetValue<string>()));
+    }
+
+    [Fact]
     public void TheDecisionFunction_MayWriteOnlyDecisions_InItsOwnStore()
     {
         var decide = Plan().Functions.Single(f => f.Handler == DeployerHandlers.Decide);

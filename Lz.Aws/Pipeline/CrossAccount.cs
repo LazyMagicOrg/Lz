@@ -143,7 +143,7 @@ public static class CrossAccount
     /// </param>
     public static IReadOnlyList<JsonObject> BuildRecordReadGrant(
         string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null,
-        string? corroborateRoleName = null)
+        string? corroborateRoleName = null, bool byVersion = false)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
 
@@ -176,7 +176,7 @@ public static class CrossAccount
                 ["Sid"] = BuildRecordReadSid(environment),
                 ["Effect"] = "Allow",
                 ["Principal"] = Principal(),
-                ["Action"] = "s3:GetObject",
+                ["Action"] = ReadAction(byVersion),
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/image/*",
                 ["Condition"] = Readers(),
             },
@@ -197,6 +197,14 @@ public static class CrossAccount
     }
 
     public static string BuildRecordReadSid(string environment) => $"DeployerReadsImageRecords{Suffix(environment)}";
+
+    /// <summary>
+    /// A record read, and - for an environment promoted into (P5 stage F), whose Verify reads each member's record at the
+    /// version its predecessor's marker names - a read of a version too, which S3 authorises as <c>s3:GetObjectVersion</c>.
+    /// Otherwise the one string it always was.
+    /// </summary>
+    private static JsonNode ReadAction(bool byVersion)
+        => byVersion ? new JsonArray("s3:GetObject", "s3:GetObjectVersion") : JsonValue.Create("s3:GetObject")!;
 
     public static string BuildRecordListSid(string environment) => $"DeployerListsImageRecords{Suffix(environment)}";
 
@@ -266,7 +274,7 @@ public static class CrossAccount
     /// bundle and must see a missing one as missing: added to both statements. Null leaves both as stage C wrote them.</param>
     public static IReadOnlyList<JsonObject> ClientRecordReadGrant(
         string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string? startRoleName = null,
-        string? corroborateRoleName = null)
+        string? corroborateRoleName = null, bool byVersion = false)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
 
@@ -277,7 +285,7 @@ public static class CrossAccount
                 ["Sid"] = $"DeployerReadsClientRecords{Suffix(environment)}",
                 ["Effect"] = "Allow",
                 ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
-                ["Action"] = "s3:GetObject",
+                ["Action"] = ReadAction(byVersion),
                 ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/client/*",
                 ["Condition"] = new JsonObject
                 {

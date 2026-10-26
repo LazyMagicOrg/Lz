@@ -701,7 +701,7 @@ public static class DeployerPlanner
             // A REVERT (stage J) runs alone: Verify lists this machine's executions to refuse one beside another.
             var ownMachine = $"arn:aws:states:{region}:{acct}:stateMachine:{sk}-{env}-deployer";
             verifyEnvironment[DeployerEnvironment.StateMachine] = ownMachine;
-            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence))
+            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence, buildRecordStore))
                 .Append(new { Sid = "ListItsOwnExecutions", Effect = "Allow", Action = new[] { "states:ListExecutions" }, Resource = ownMachine })
                 .ToArray();
         }
@@ -2289,8 +2289,16 @@ public static class DeployerPlanner
     /// across the account boundary (the predecessor's store grants the other half, stage D), and its own decisions/, to refuse
     /// a marker decided here. Listing its own decisions is what lets a missing one read as absent rather than denied.
     /// </summary>
-    private static object[] PromotedVerifyGrants(string predecessorStore, string evidence) => new object[]
+    private static object[] PromotedVerifyGrants(string predecessorStore, string evidence, string buildRecordStore) => new object[]
     {
+        new
+        {
+            // Each member's record at the version the marker names: a GetObject with a VersionId, which S3 authorises as this.
+            Sid = "ReadTheSetsRecordsByVersion",
+            Effect = "Allow",
+            Action = new[] { "s3:GetObjectVersion" },
+            Resource = new[] { $"arn:aws:s3:::{buildRecordStore}/image/*", $"arn:aws:s3:::{buildRecordStore}/client/*" },
+        },
         new
         {
             Sid = "ReadThePredecessorsMarkersAndEvidenceByVersion",

@@ -322,14 +322,16 @@ public static class PipelineBootstrapPlanner
         var recordGrant = target != null
             ? CrossAccount.BuildRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
                 p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
-                p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null)
+                p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null,
+                byVersion: p.Predecessor is not null)
             : null;
         if (recordGrant != null && clientApps.Count > 0)
             recordGrant = recordGrant
                 .Concat(CrossAccount.ClientRecordReadGrant(buildRecords, config.Environment, target!, DeployerPlanner.VerifyRoleName(config),
                     // P4 stage D: the start function reads a client record for its branch, the sweep the record that could name a bundle.
                     p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
-                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
+                    p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null,
+                    byVersion: p.Predecessor is not null))
                 .ToList();
         if (recordGrant != null)
             foreach (var site in siteApps)
