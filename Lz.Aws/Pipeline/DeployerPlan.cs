@@ -223,6 +223,8 @@ public static class DeployerHandlers
     public static readonly string Verify = For("VerifyFunction");
     public static readonly string Decide = For("DecideFunction");
     public static readonly string PromotionPoller = For("PromotionPollerFunction");
+    // MarkPassed (P5 stage D), after a passed Gate 2 where the chain gives this environment a successor.
+    public static readonly string MarkPassed = For("MarkPassedFunction");
     // A revert (P5 stage J): the hold set before Prepare, its record, and the function a person starts it with.
     public static readonly string SetHold = For("SetHoldFunction");
     public static readonly string RecordRevert = For("RecordRevertFunction");
@@ -257,7 +259,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart,
+        Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart, MarkPassed,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 
@@ -975,6 +977,33 @@ public static class DeployerPlanner
             gate2 = new DeployerGate2Plan(project, $"arn:aws:codebuild:{region}:{acct}:project/{project}", results, leaseKey, set, start, result, gate2Project);
         }
 
+        // MARKPASSED (P5 stage D), where the chain gives this environment a successor: a passed Gate 2 is written as the
+        // set's pass marker, for the successor's poller and Verify to read. Without Gate 2 on there is nothing to mark.
+        string? markPassedFn = null;
+        if (p.Successor is { } successor)
+        {
+            if (!p.Gate2IsOn || gate2 is null)
+                throw new InvalidOperationException(
+                    $"the chain promotes {env} into {successor.Environment}, and a set is promoted only once Gate 2 passed it: set Pipeline.Gate2: on.");
+            var members = gate2.Set.Services
+                .Select(s => new MarkMember("image",
+                    p.AcceptedRepositories.Single(r => r.Class == "image" && (r.Artifacts ?? new List<string>()).Contains(s.Container)).Repo!,
+                    $"{s.Cluster}/{s.Service}"))
+                .Concat(clientTargets.Select(c => new MarkMember("client", c.Repo, c.App)))
+                .ToList();
+            var markPassed = $"{sk}-{env}-deployer-mark-passed";
+            functions.Add(new(markPassed, DeployerHandlers.MarkPassed, $"{markPassed}-fn",
+                Combine(Logs(region, acct, markPassed), MarkPassedGrants(evidence)),
+                new Dictionary<string, string>
+                {
+                    [DeployerEnvironment.EvidenceStore] = evidence,
+                    [DeployerEnvironment.MarkEnvironment] = env,
+                    [DeployerEnvironment.MarkMembers] = JsonSerializer.Serialize(members, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                },
+                TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            markPassedFn = FnArn(markPassed);
+        }
+
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
 
         return new PipelineDeployer(
@@ -989,7 +1018,7 @@ public static class DeployerPlanner
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
                                       gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName),
-                                      decideFn, setHoldFn, recordRevertFn),
+                                      decideFn, setHoldFn, recordRevertFn, markPassedFn),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -2194,6 +2223,25 @@ public static class DeployerPlanner
         },
     };
 
+    /// <summary>
+    /// MarkPassed's reads and its one write (P5 stage D): this environment's deploy evidence, listed and read, and its tests
+    /// evidence, read; the marker written under passed/, write-once by the store's own statement.
+    /// </summary>
+    private static object[] MarkPassedGrants(string evidence) => new object[]
+    {
+        new
+        {
+            Sid = "ListTheDeployEvidence", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{evidence}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "deploys/*" } },
+        },
+        new
+        {
+            Sid = "ReadTheDeployAndTestsEvidence", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:GetObjectVersion" },
+            Resource = new[] { $"arn:aws:s3:::{evidence}/deploys/*", $"arn:aws:s3:::{evidence}/tests/*" },
+        },
+        new { Sid = "WriteThePassMarker", Effect = "Allow", Action = new[] { "s3:PutObject" }, Resource = $"arn:aws:s3:::{evidence}/passed/*" },
+    };
+
     /// <summary>The decision function's one write (P5 stage F): write-once, by the store's own statement, under decisions/.</summary>
     private static object[] DecisionGrants(string evidence) => new object[]
     {
@@ -2904,7 +2952,7 @@ public static class DeployerPlanner
         (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
         (string DeploySite, string VerifySite)? siteFunctions = null,
         (string Start, string Result, string Project)? gate2 = null,
-        string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null)
+        string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null, string? markPassedFn = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -3195,13 +3243,34 @@ public static class DeployerPlanner
                 Type = "Choice",
                 Choices = new[]
                 {
-                    new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.Passed), Next = "Gate2Passed" },
+                    new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.Passed), Next = markPassedFn is null ? "Gate2Passed" : "MarkPassed" },
                     new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.TestsSuperseded), Next = "Gate2Superseded" },
                     new { Variable = "$.gate2.outcome", StringEquals = nameof(Gate2Outcome.PostDeployTestsFailed), Next = nameof(Gate2Outcome.PostDeployTestsFailed) },
                 },
                 Default = nameof(Gate2Outcome.TestsIncomplete),
             };
             states["Gate2Passed"] = new { Type = "Succeed" };
+            if (markPassedFn is not null)
+            {
+                // THE PASS MARKER (P5 stage D). Its faults end MarkPassedFailed: the deploy is recorded and its gate passed, and
+                // what failed is only that the successor will not see it - alerted, as a failed execution is.
+                states["MarkPassed"] = new
+                {
+                    Type = "Task",
+                    Resource = markPassedFn,
+                    Parameters = payload,
+                    ResultPath = "$.marked",
+                    Retry = new[] { Transient(), EvidenceWrite() },
+                    Next = "Gate2Passed",
+                    Catch = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "MarkPassedFailed", ResultPath = "$.markError" } },
+                };
+                states["MarkPassedFailed"] = new
+                {
+                    Type = "Fail",
+                    Error = "MarkPassedFailed",
+                    Cause = "the set deployed, was recorded and passed Gate 2, and its pass marker could not be written; nothing was promoted - this execution's history holds the error",
+                };
+            }
             // Tests that ran against other code: recorded, not alerted, nothing decided (§15.5).
             states["Gate2Superseded"] = new { Type = "Succeed" };
             states[nameof(Gate2Outcome.PostDeployTestsFailed)] = new

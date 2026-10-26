@@ -299,6 +299,9 @@ public static class DeployerEnvironment
     // The promotion poller (P5 stage I): the hold it reads before every start, and the image target each execution names.
     public const string HoldParameter = "LZ_HOLD_PARAMETER";
     public const string PromotionTarget = "LZ_PROMOTION_TARGET";
+    // MarkPassed (P5 stage D): the members a set may name, and the environment its markers are written for.
+    public const string MarkMembers = "LZ_MARK_MEMBERS";
+    public const string MarkEnvironment = "LZ_MARK_ENVIRONMENT";
     /// <summary>The DynamoDB table holding the per-service lease (DecoupledCd.md V-J): the environment's system table.</summary>
     public const string LeaseTable = "LZ_LEASE_TABLE";
     public const string TrustedProfiles = "LZ_TRUSTED_SIGNING_PROFILES";

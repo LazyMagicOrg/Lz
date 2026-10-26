@@ -295,9 +295,9 @@ public class DeployerPromotedPlanTests
     [Fact]
     public void AnEnvironmentWithoutAPredecessor_GetsNoneOfThePromotedMachine()
     {
-        // Dev heads the chain: it is fed by build records, and gains MarkPassed for its successor in stage D, never a set's loop.
+        // Dev heads the chain: it is fed by build records, and gains MarkPassed for its successor (stage D, which needs Gate 2
+        // on - DeployerGate2PlanTests), never a set's loop.
         var dev = DeployerClientPlanTests.Config();
-        dev.Pipeline!.Successor = new PipelineNeighbour("test", TestAccount, OwnStore);
         var plan = DeployerPlanner.Plan(dev, DeployerClientPlanTests.TargetAccount, clientInputs: DeployerClientPlanTests.Distributions);
         var s = States(plan);
 

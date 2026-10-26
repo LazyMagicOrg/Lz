@@ -43,6 +43,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\PassMarker.cs" Link="Linked\Lz.Aws\Pipeline\PassMarker.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\PromotionPoll.cs" Link="Linked\Lz.Aws\Pipeline\PromotionPoll.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\MarkPassed.cs" Link="Linked\Lz.Aws\Pipeline\MarkPassed.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />

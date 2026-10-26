@@ -32,6 +32,27 @@ public sealed class Gate2StartFunction
     }
 }
 
+/// <summary>
+/// MarkPassed (P5 stage D): after a passed Gate 2, the set it found running written once as this environment's pass marker,
+/// for the next environment in the chain to read.
+/// </summary>
+public sealed class MarkPassedFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        string Required(string name) => DeployerEnvironment.Required(Environment.GetEnvironmentVariable, name);
+        var settings = new MarkPassedSettings(Required(DeployerEnvironment.MarkEnvironment), Required(DeployerEnvironment.EvidenceStore),
+            System.Text.Json.JsonSerializer.Deserialize<List<MarkMember>>(Required(DeployerEnvironment.MarkMembers),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!);
+
+        var result = await MarkPassedStep.RunAsync(state, executionName, settings,
+            new S3Gate2Objects(Clients.S3.Value), new S3RecordStore(Clients.S3.Value), new S3EvidenceWriter(Clients.S3.Value), DateTimeOffset.UtcNow);
+        context.Logger.LogInformation($"{executionName}: pass marker {result["key"]} for {result["members"]} member(s) (written: {result["written"]})");
+        return Io.Write(result);
+    }
+}
+
 public sealed class Gate2ResultFunction
 {
     public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)

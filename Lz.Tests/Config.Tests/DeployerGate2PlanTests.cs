@@ -131,6 +131,68 @@ public class DeployerGate2PlanTests
         Assert.Equal("Gate2Outcome", s.GetProperty("Gate2Result").GetProperty("Next").GetString());
     }
 
+    // ---- MarkPassed, where the chain gives this environment a successor (P5 stage D) ----
+
+    private static PipelineDeployer PlanWithSuccessor(string gate2 = "on")
+    {
+        var config = Config(gate2);
+        config.Pipeline!.Successor = new PipelineNeighbour("test", "456687462751", "scu-test-deploy-evidence-d5e0-b27f");
+        return DeployerPlanner.Plan(config, DeployerClientPlanTests.TargetAccount,
+            triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
+            gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click", "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc", "subnet-08e81426ad2fcbdba" }));
+    }
+
+    [Fact]
+    public void WithASuccessor_APassedGate2IsMarked_AndAMarkingThatFailsEndsMarkPassedFailed()
+    {
+        var s = States(PlanWithSuccessor());
+        var passed = s.GetProperty("Gate2Outcome").GetProperty("Choices").EnumerateArray().Single(c => c.GetProperty("StringEquals").GetString() == "Passed");
+        Assert.Equal("MarkPassed", passed.GetProperty("Next").GetString());
+        Assert.Equal(("Task", "Gate2Passed"), (s.GetProperty("MarkPassed").GetProperty("Type").GetString(), s.GetProperty("MarkPassed").GetProperty("Next").GetString()));
+        Assert.Equal("MarkPassedFailed", s.GetProperty("MarkPassed").GetProperty("Catch")[0].GetProperty("Next").GetString());
+        Assert.Equal(("Fail", "MarkPassedFailed"), (s.GetProperty("MarkPassedFailed").GetProperty("Type").GetString(), s.GetProperty("MarkPassedFailed").GetProperty("Error").GetString()));
+        // Only a pass is marked: a superseded gate ends as it did.
+        Assert.Equal("Gate2Superseded", s.GetProperty("Gate2Outcome").GetProperty("Choices").EnumerateArray()
+            .Single(c => c.GetProperty("StringEquals").GetString() == "TestsSuperseded").GetProperty("Next").GetString());
+    }
+
+    [Fact]
+    public void MarkPassed_ReadsDeploysAndTests_AndWritesOnlyPassed()
+    {
+        var plan = PlanWithSuccessor();
+        var f = Function(plan, DeployerHandlers.MarkPassed);
+        const string store = "scu-dev-deploy-evidence-4df6-b9c6";
+        var writes = Statements(f.Policy).Where(st => Strings(st.GetProperty("Action")).Contains("s3:PutObject")).SelectMany(st => Strings(st.GetProperty("Resource")));
+        Assert.Equal(new[] { $"arn:aws:s3:::{store}/passed/*" }, writes);
+        var reads = Statements(f.Policy).Where(st => Strings(st.GetProperty("Action")).Contains("s3:GetObject")).SelectMany(st => Strings(st.GetProperty("Resource"))).ToHashSet();
+        Assert.Equal(new[] { $"arn:aws:s3:::{store}/deploys/*", $"arn:aws:s3:::{store}/tests/*" }.ToHashSet(), reads);
+        Assert.Empty(DeployerPlanner.DenyGaps(f.Policy, plan.DenyPolicy));
+    }
+
+    [Fact]
+    public void MarkPassedsMembers_AreGate2sSet_WithTheRepositoriesBehindThem()
+    {
+        var f = Function(PlanWithSuccessor(), DeployerHandlers.MarkPassed);
+        var members = System.Text.Json.JsonSerializer.Deserialize<List<MarkMember>>(f.Environment[DeployerEnvironment.MarkMembers], new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+        Assert.Contains(new MarkMember("image", "Scutara/ScutaraService", "scu-dev-cluster/scu-mp-aiphost"), members);
+        Assert.Contains(new MarkMember("client", "Scutara/ScutaraSellerApp", "sellerapp"), members);
+        Assert.Contains(new MarkMember("client", "Scutara/ScutaraAdminApp", "adminapp"), members);
+        Assert.Equal("dev", f.Environment[DeployerEnvironment.MarkEnvironment]);
+    }
+
+    [Fact]
+    public void ASuccessorWithoutGate2On_IsRefused_SinceNothingWouldBeMarked()
+        => Assert.Contains("Gate2", Assert.Throws<InvalidOperationException>(() => PlanWithSuccessor("provisioned")).Message);
+
+    [Fact]
+    public void WithoutASuccessor_Gate2EndsAsBefore_AndThereIsNoMarkPassed()
+    {
+        var plan = Plan("on");
+        Assert.Equal("Gate2Passed", States(plan).GetProperty("Gate2Outcome").GetProperty("Choices").EnumerateArray()
+            .Single(c => c.GetProperty("StringEquals").GetString() == "Passed").GetProperty("Next").GetString());
+        Assert.DoesNotContain(plan.Functions, fn => fn.Handler == DeployerHandlers.MarkPassed);
+    }
+
     // ---- on: the site is not gated (V-24) ----
 
     /// <summary>Dev with its site beside the image and the clients, as dev runs (V-24): the site branch shares Record.</summary>
