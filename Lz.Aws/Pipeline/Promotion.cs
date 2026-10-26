@@ -82,7 +82,8 @@ public static class VerifySetStep
                 $"{marker.MarkerId} is decided here already ({PassMarkerFormat.DecisionKeyFor(marker.MarkerId)}): what was decided stays decided, and a " +
                 "set is promoted once per environment (§5.3 rule 2).");
 
-        var tests = await Outcome(versions, promotion.PredecessorEvidenceStore, marker.Evidence.Tests, "evidence.tests");
+        var tests = await Outcome(versions, promotion.PredecessorEvidenceStore,
+            marker.Evidence.Tests ?? throw new DeployRefused("evidence.tests", "a set marker names no test evidence."), "evidence.tests");
         if (tests != "Passed")
             throw new DeployRefused("evidence.tests", $"{promotion.Predecessor}'s Gate 2 for this set ended {tests}, not Passed.");
 

@@ -11,14 +11,17 @@ public sealed record PassMarkerReference(string Key, string VersionId);
 /// <summary>A member's build record, in the build account's record store, at the version the environment deployed from.</summary>
 public sealed record PassMarkerRecordReference(string Bucket, string Key, string VersionId);
 
-/// <summary>The set's test evidence: Gate 2's <c>tests/{execution}.json</c>, which passed its blocking set with no skip.</summary>
-public sealed record PassMarkerEvidence(PassMarkerReference Tests);
+/// <summary>
+/// The set's test evidence: Gate 2's <c>tests/{execution}.json</c>, which passed its blocking set with no skip. Null in a site
+/// marker, since the site has no Gate 2 (V-24).
+/// </summary>
+public sealed record PassMarkerEvidence(PassMarkerReference? Tests);
 
 /// <summary>
 /// One member of the tested set (T-13): the Service image or a client bundle, with the record it was deployed from and the
 /// environment's deploy evidence for it.
 /// </summary>
-/// <param name="Class"><c>image</c> or <c>client</c>; the site is never promoted (V-24).</param>
+/// <param name="Class"><c>image</c> or <c>client</c> in a set; <c>site</c>, alone, in a site marker (V-K step 5).</param>
 /// <param name="Version">What the member names itself by: an image's Service version (its record's
 /// <c>intake.serviceVersion</c>), a bundle's object version.</param>
 /// <param name="BuiltFrom">Copied from the record, so the next environment compares the record it reads against it.</param>
@@ -31,7 +34,8 @@ public sealed record PassMarkerMember(
 /// <summary>
 /// THE PASS MARKER, schema 1 (DecoupledCd.md §12 P5 stage C; T-12, T-13). Written once by an environment's MarkPassed, after
 /// its Record and its Gate 2, at <c>passed/{markerId}.json</c> in its own evidence store, and read there by the next
-/// environment in the chain. It promotes the SET the environment ran - everything but the site - never one artifact.
+/// environment in the chain. It promotes the SET the environment ran - everything but the site - never one artifact; or, as a
+/// SITE MARKER (V-K step 5, <c>site/{sha256}</c>), the one site an execution deployed and verified.
 /// </summary>
 /// <param name="MarkerId"><c>sets/{sha256}</c> over the member identities (<see cref="PassMarkerFormat.MarkerIdFor"/>): the key
 /// the marker is written under and the key its decisions take. Not the execution's name, which Step Functions frees after 90
@@ -51,8 +55,20 @@ public static class PassMarkerFormat
     public const string DecisionsPrefix = "decisions/";
     public const string SetsSegment = "sets/";
 
-    /// <summary>The classes a marker names (T-13): the Service image and the clients. The site is never promoted (V-24).</summary>
+    /// <summary>
+    /// A SITE MARKER's segment (V-K step 5): one run's site, passed by deploying and verifying it, with no Gate 2 (V-24). It is
+    /// listed and decided apart from the sets, under <c>passed/site/</c> and <c>decisions/site/</c>.
+    /// </summary>
+    public const string SiteSegment = "site/";
+
+    /// <summary>The classes a set names (T-13): the Service image and the clients. The site has a marker of its own.</summary>
     public static readonly string[] MemberClasses = { "image", "client" };
+
+    /// <summary>The class a site marker's one member is of.</summary>
+    public const string SiteClass = "site";
+
+    /// <summary>Whether this is a site marker: its id is under <see cref="SiteSegment"/>, as its one site member makes it.</summary>
+    public static bool IsSite(PassMarker marker) => marker.MarkerId.StartsWith(SiteSegment, StringComparison.Ordinal);
 
     public static string KeyFor(string markerId) => $"{Prefix}{markerId}.json";
     public static string DecisionKeyFor(string markerId) => $"{DecisionsPrefix}{markerId}.json";
@@ -65,12 +81,17 @@ public static class PassMarkerFormat
     /// </summary>
     public static string MarkerIdFor(IEnumerable<PassMarkerMember> members)
     {
-        var identities = members.Select(IdentityOf).ToList();
+        var list = members.ToList();
+        var sites = list.Count(m => m.Class == SiteClass);
+        if (sites > 0 && list.Count != 1)
+            throw new InvalidOperationException(
+                $"a site marker names its one site and nothing else; this one names {sites} site(s) among {list.Count} member(s).");
+        var identities = list.Select(IdentityOf).ToList();
         if (identities.Count == 0) throw new InvalidOperationException("a pass marker names at least one member.");
         var twice = identities.GroupBy(i => i, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1);
         if (twice is not null) throw new InvalidOperationException($"a pass marker names {twice.Key} twice.");
         var canonical = string.Join("\n", identities.OrderBy(i => i, StringComparer.Ordinal));
-        return SetsSegment + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        return (sites == 1 ? SiteSegment : SetsSegment) + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     private static string IdentityOf(PassMarkerMember m) => m.Identity.Kind == "image"
@@ -121,8 +142,13 @@ public static class PassMarkerFormat
         if (root["members"] is not JsonArray array || array.Count == 0) throw new InvalidOperationException("pass marker names no members.");
         var members = array.Select((n, i) => Member(n as JsonObject ?? throw new InvalidOperationException($"members[{i}] is not an object."), i)).ToList();
 
-        var tests = Object(Object(root, "evidence", "evidence"), "tests", "evidence.tests");
-        var evidence = new PassMarkerEvidence(Reference(tests, "evidence.tests"));
+        // A SET names the test evidence its Gate 2 wrote; a SITE has no Gate 2 (V-24), so its marker names none, and one that
+        // did would claim a test that never ran.
+        var evidenceObject = Object(root, "evidence", "evidence");
+        var isSite = members.Any(m => m.Class == SiteClass);
+        if (isSite && evidenceObject.Count > 0)
+            throw new InvalidOperationException("a site marker names evidence; the site has no Gate 2, so it has none to name.");
+        var evidence = new PassMarkerEvidence(isSite ? null : Reference(Object(evidenceObject, "tests", "evidence.tests"), "evidence.tests"));
 
         var markerId = String(root, "markerId");
         var expected = MarkerIdFor(members);
@@ -140,8 +166,9 @@ public static class PassMarkerFormat
         foreach (var field in MemberFields) if (m[field] is null) throw Missing($"{at}.{field}");
 
         var cls = String(m, "class", at);
-        if (!MemberClasses.Contains(cls))
-            throw new InvalidOperationException($"{at} is of class '{cls}'; a pass marker names {string.Join(" and ", MemberClasses)} members only.");
+        if (!MemberClasses.Contains(cls) && cls != SiteClass)
+            throw new InvalidOperationException(
+                $"{at} is of class '{cls}'; a pass marker names {string.Join(" and ", MemberClasses)} members, or one {SiteClass}, only.");
 
         var record = Object(m, "record", $"{at}.record");
         var recordRef = new PassMarkerRecordReference(String(record, "bucket", $"{at}.record"), String(record, "key", $"{at}.record"),

@@ -30,6 +30,22 @@ public class PassMarkerTests
         BuiltFrom: new BuildRecordBuiltFrom($"Scutara/{app}", new string('2', 40), "published", new Dictionary<string, string> { ["AipApi"] = "1.4.210" }, "refs/heads/main"),
         Deploy: new PassMarkerReference($"deploys/req-20261024T101100Z-40000000001-{app}-1.json", "dep-v2"));
 
+    private static PassMarkerMember Site(string version = "site-v4") => new(
+        Class: "site", Repo: "Scutara/ScutaraWebsite",
+        Record: new PassMarkerRecordReference(Records, "site/scutara/scutarawebsite/dev/20261026T193011Z-40387310346-1.json", "rec-v3"),
+        Identity: new BuildRecordIdentity("bundle", Bucket: "scu-artifacts-4df6-b9c6", Key: "site/scutara/scutarawebsite/dev/20261026T193011Z-40387310346-1.zip", VersionId: version, Sha256: new string('c', 64)),
+        Version: version,
+        BuiltFrom: new BuildRecordBuiltFrom("Scutara/ScutaraWebsite", new string('3', 40), "published", new Dictionary<string, string>(), "refs/heads/main"),
+        Deploy: new PassMarkerReference("deploys/site/scutara/scutarawebsite/req-20261026T193011Z-40387310346-1-site-1.json", "dep-v3"));
+
+    /// <summary>A site marker (V-K step 5): the one site member, and no test evidence, since the site has no Gate 2.</summary>
+    private static PassMarker SiteMarker(PassMarkerMember? site = null)
+    {
+        var m = new[] { site ?? Site() };
+        return new PassMarker(1, PassMarkerFormat.MarkerIdFor(m), "dev", m, new PassMarkerEvidence(null),
+            "req-20261026T193011Z-40387310346-1-site-1", "2026-10-26T19:31:28Z");
+    }
+
     private static PassMarker Marker(params PassMarkerMember[] members)
     {
         var m = members.Length == 0 ? new[] { Image(), Client(), Client("adminapp", "bun-v3") } : members;
@@ -167,8 +183,49 @@ public class PassMarkerTests
 
     [Fact]
     public void AMemberOfAClassAMarkerNeverNames_IsRefused()
-        // The site is never promoted (V-24); a marker names the image and the clients.
-        => Assert.Contains("'site'", Refusal(With(m => Member0(m)["class"] = "site")));
+        => Assert.Contains("'assets'", Refusal(With(m => Member0(m)["class"] = "assets")));
+
+    // ---- the site marker (V-K step 5) ----
+
+    [Fact]
+    public void ASiteMarker_RoundTrips_UnderItsOwnSegment_WithNoTestEvidence()
+    {
+        var marker = SiteMarker();
+        Assert.Matches("^site/[0-9a-f]{64}$", marker.MarkerId);
+        Assert.Equal($"passed/{marker.MarkerId}.json", PassMarkerFormat.KeyFor(marker.MarkerId));
+        Assert.Equal($"decisions/{marker.MarkerId}.json", PassMarkerFormat.DecisionKeyFor(marker.MarkerId));
+        Assert.DoesNotContain("tests", JsonNode.Parse(PassMarkerFormat.Write(marker))!["evidence"]!.AsObject().Select(p => p.Key));
+
+        var parsed = PassMarkerFormat.Parse(PassMarkerFormat.Write(marker), "dev");
+        Assert.Equal(PassMarkerFormat.Write(marker), PassMarkerFormat.Write(parsed));
+        Assert.True(PassMarkerFormat.IsSite(parsed));
+        Assert.False(PassMarkerFormat.IsSite(Marker()));
+    }
+
+    [Fact]
+    public void ASiteMarker_NamingTestEvidence_IsRefused()
+        => Assert.Contains("site", Refusal(With(m => m["evidence"] = new JsonObject
+            { ["tests"] = new JsonObject { ["key"] = "tests/x.json", ["versionId"] = "t1" } }, SiteMarker())));
+
+    [Fact]
+    public void ASetMarker_WithoutTestEvidence_IsRefused()
+        => Assert.Contains("evidence.tests", Refusal(With(m => m["evidence"] = new JsonObject())));
+
+    [Fact]
+    public void ASiteBesideAnyOtherMember_OrTwoSites_IsNotAMarker()
+    {
+        Assert.Contains("site", Assert.Throws<InvalidOperationException>(() => PassMarkerFormat.MarkerIdFor(new[] { Site(), Image() })).Message);
+        Assert.Contains("site", Assert.Throws<InvalidOperationException>(() => PassMarkerFormat.MarkerIdFor(new[] { Site(), Site("site-v5") })).Message);
+        Assert.Contains("site", Refusal(With(m => ((JsonArray)m["members"]!).Add(JsonNode.Parse(PassMarkerFormat.Write(Marker(Image())))!["members"]![0]!.DeepClone()), SiteMarker())));
+    }
+
+    [Fact]
+    public void ASiteMarkersId_IsNotASetsId_ForTheSameMember()
+    {
+        // Filed under sets/, a site marker would be listed with the sets and decided by their rules.
+        var asSet = With(m => m["markerId"] = "sets/" + m["markerId"]!.GetValue<string>()["site/".Length..], SiteMarker());
+        Assert.Contains("hash to", Refusal(asSet));
+    }
 
     [Fact]
     public void NoMembers_OrTheSameMemberTwice_IsRefused()
