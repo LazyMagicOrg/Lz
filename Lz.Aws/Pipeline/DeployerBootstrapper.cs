@@ -625,13 +625,17 @@ public static class DeployerBootstrapper
 
         if (plan.ClientTargets is { Count: > 0 } clientTargets)
         {
-            Console.WriteLine(plan.Trigger is { ClientRoutes.Count: > 0 }
+            var promotedInto = plan.Promotion is not null;
+            Console.WriteLine(promotedInto
+                ? "  client bundles (class 2), deployed one at a time after the image, as members of a set the predecessor passed:"
+                : plan.Trigger is { ClientRoutes.Count: > 0 }
                 ? "  client bundles (class 2), started by the trigger above or by hand:"
                 : "  client bundles (class 2), started by hand — the trigger is off, so nothing forwards client records:");
             foreach (var t in clientTargets)
                 Console.WriteLine($"    {t.Repo} deploys as {t.App}: s3://{t.Bucket}/{t.KeyPrefix}, lease {BundleMarker.Key}, " +
                                   $"invalidates {t.InvalidationPath} on {string.Join(", ", t.Distributions)}");
-            Console.WriteLine($"    the machine branches on the verified class after Verify{(plan.ApprovalRequired ? " and Approve" : "")}");
+            if (!promotedInto)
+                Console.WriteLine($"    the machine branches on the verified class after Verify{(plan.ApprovalRequired ? " and Approve" : "")}");
         }
         else
         {
