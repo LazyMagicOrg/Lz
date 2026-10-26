@@ -236,6 +236,7 @@ public static class ConfigLoader
             else if (File.Exists(sibling)) classes[e.Environment] = Deserializer.Deserialize<SystemConfig>(File.ReadAllText(sibling))?.Pipeline?.Classes;
         }
         problems.AddRange(buildSide.UnacceptedRepositories(classes));
+        problems.AddRange(buildSide.SiteArtifactMismatches(classes));
         if (problems.Count > 0)
             throw new InvalidOperationException(
                 $"{BuildSideConfig.FileNameFor(systemKey)}: {string.Join("; ", problems)}.");

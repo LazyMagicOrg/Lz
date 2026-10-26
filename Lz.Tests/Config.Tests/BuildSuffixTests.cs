@@ -161,13 +161,26 @@ public class BuildSuffixTests : IDisposable
         const string site = """
               - Repo: Scutara/ScutaraWebsite
                 Class: site
-                Artifacts: [site-dev, site-test]
+                Artifacts: [site-dev]
             """;
         var config = Load("test", BuildSide(extraRepo: site), devPipeline: EnvPipeline("503947800380", "[image, client, site]"));
 
         Assert.Contains(config.Pipeline!.Repositories!, r => r.Class == "site");             // the build side keeps every repository
         Assert.DoesNotContain(config.Pipeline.AcceptedRepositories, r => r.Class == "site"); // test accepts no site
         Assert.Empty(DeployerPlanner.SiteApps(config));
+    }
+
+    [Fact]
+    public void ASiteBundleForAnEnvironmentThatTakesNoSite_IsRefusedWhenTheFileIsRead()
+    {
+        // V-K step 5 (S8): dev would mark every site, and test would refuse each one.
+        const string site = """
+              - Repo: Scutara/ScutaraWebsite
+                Class: site
+                Artifacts: [site-dev, site-test]
+            """;
+        var message = Refusal(() => Load("test", BuildSide(extraRepo: site), devPipeline: EnvPipeline("503947800380", "[image, client, site]")));
+        Assert.Contains("builds site-test, and test does not accept class 'site'", message);
     }
 
     [Fact]

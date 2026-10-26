@@ -294,3 +294,42 @@ public class BuildSideConfigTests : IDisposable
         Assert.Equal(new[] { "Registry" }, BuildSideConfig.MovedFieldsNamedIn("Pipeline:\n  Registry:\n    RepositoryNaming: neutral\n"));
     }
 }
+
+/// <summary>
+/// The site and the environments that take it (DecoupledCd.md V-K step 5, S8): an environment accepts class <c>site</c>
+/// exactly when the site repository builds its bundle, <c>site-{environment}</c>. Otherwise dev would mark sites the next
+/// environment refuses on every run, or an environment would wait for a bundle that is never built. An environment whose
+/// config is not beside the file is left out, as for <see cref="BuildSideConfig.UnacceptedRepositories"/>.
+/// </summary>
+public class SiteArtifactAgreementTests
+{
+    private static BuildSideConfig With(params string[] artifacts) => new()
+    {
+        BuildAccountId = "147440642635",
+        Repositories = new() { new() { Repo = "Scutara/ScutaraWebsite", Class = "site", Artifacts = artifacts.ToList() } },
+    };
+
+    private static Dictionary<string, IReadOnlyList<string>?> Classes(params (string Env, string[]? Classes)[] envs)
+        => envs.ToDictionary(e => e.Env, e => (IReadOnlyList<string>?)e.Classes?.ToList(), StringComparer.OrdinalIgnoreCase);
+
+    [Fact]
+    public void EachEnvironmentThatTakesTheSite_HasItsBundle_AndOnlyThose()
+    {
+        Assert.Empty(With("site-dev").SiteArtifactMismatches(Classes(("dev", new[] { "image", "site" }), ("test", new[] { "image", "client" }))));
+        Assert.Empty(With("site-dev", "site-test").SiteArtifactMismatches(Classes(("dev", new[] { "site" }), ("test", new[] { "image", "site" }))));
+    }
+
+    [Fact]
+    public void ABundleForAnEnvironmentThatTakesNoSite_IsRefused()
+        => Assert.Contains("site-test", Assert.Single(With("site-dev", "site-test").SiteArtifactMismatches(
+            Classes(("dev", new[] { "site" }), ("test", new[] { "image", "client" })))));
+
+    [Fact]
+    public void AnEnvironmentThatTakesTheSite_WithNoBundleBuilt_IsRefused()
+        => Assert.Contains("site-test", Assert.Single(With("site-dev").SiteArtifactMismatches(
+            Classes(("dev", new[] { "site" }), ("test", new[] { "site" })))));
+
+    [Fact]
+    public void AnEnvironmentWhoseConfigIsNotBesideTheFile_IsLeftOut()
+        => Assert.Empty(With("site-dev", "site-test").SiteArtifactMismatches(Classes(("dev", new[] { "site" }), ("test", null))));
+}

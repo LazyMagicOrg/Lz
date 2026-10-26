@@ -253,6 +253,31 @@ public class BuildSideConfig
             .ToList();
 
     /// <summary>
+    /// THE SITE AND THE ENVIRONMENTS THAT TAKE IT (DecoupledCd.md V-K step 5): an environment accepts class <c>site</c> exactly
+    /// when a site repository builds its bundle, <c>site-{environment}</c>. A bundle for an environment that takes no site has
+    /// its predecessor write site markers it refuses on every run; an environment that takes the site with no bundle built
+    /// waits for one that never comes. An environment whose config is not beside this file is left out.
+    /// </summary>
+    public IReadOnlyList<string> SiteArtifactMismatches(IReadOnlyDictionary<string, IReadOnlyList<string>?> classesByEnvironment)
+    {
+        var problems = new List<string>();
+        foreach (var repo in (Repositories ?? new()).Where(r => r.Class == "site"))
+        {
+            var built = (repo.Artifacts ?? new()).Select(SiteArtifacts.EnvironmentOf).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var (env, classes) in classesByEnvironment)
+            {
+                if (classes is not { Count: > 0 }) continue;
+                var takes = classes.Contains("site");
+                if (takes && !built.Contains(env))
+                    problems.Add($"{env} accepts class 'site', and {repo.Repo} builds no {SiteArtifacts.ArtifactFor(env)} for it");
+                else if (!takes && built.Contains(env))
+                    problems.Add($"{repo.Repo} builds {SiteArtifacts.ArtifactFor(env)}, and {env} does not accept class 'site'");
+            }
+        }
+        return problems;
+    }
+
+    /// <summary>
     /// Fills the moved fields into one environment's in-memory <see cref="PipelineConfig"/>. A chain entry for this
     /// environment must name the account the environment deploys into; anything else is two files disagreeing about
     /// where an environment is.
