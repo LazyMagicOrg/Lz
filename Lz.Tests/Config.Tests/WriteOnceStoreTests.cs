@@ -88,6 +88,28 @@ public class WriteOnceStoreTests
     }
 
     [Fact]
+    public void AListS3HandsBackInAnotherOrder_IsStillHeld_ButNotOneMissingAMember()
+    {
+        // Measured 2026-10-26 on dev's evidence store: of six reads of one policy, five listed a grant's two principals
+        // as written and one the other way round. IAM reads such a list as a set; so does the read-back.
+        static JsonObject Grant(params string[] principals) => new()
+        {
+            ["Sid"] = "LzTheSuccessorListsMarkers",
+            ["Effect"] = "Allow",
+            ["Principal"] = new JsonObject { ["AWS"] = new JsonArray(principals.Select(p => (JsonNode?)p).ToArray()) },
+            ["Action"] = "s3:ListBucket",
+            ["Resource"] = $"arn:aws:s3:::{Bucket}",
+        };
+        const string verify = "arn:aws:iam::456687462751:role/scu-test-deployer-verify-fn", poller = "arn:aws:iam::456687462751:role/scu-test-deployer-poller-fn";
+        var owned = new[] { Grant(verify, poller) };
+        string Policy(JsonObject s) => new JsonObject { ["Version"] = "2012-10-17", ["Statement"] = new JsonArray(s) }.ToJsonString();
+
+        Assert.Empty(WriteOnceStore.StatementsNotHeld(Policy(Grant(poller, verify)), owned));
+        Assert.Equal(new[] { "LzTheSuccessorListsMarkers" }, WriteOnceStore.StatementsNotHeld(Policy(Grant(verify)), owned));
+        Assert.Equal(new[] { "LzTheSuccessorListsMarkers" }, WriteOnceStore.StatementsNotHeld(Policy(Grant(verify, verify)), owned));
+    }
+
+    [Fact]
     public void TheRecordStoresTwoMerges_KeepEachOther()
     {
         // The record store's policy is written twice in one run: write-once when the store is ensured, and the

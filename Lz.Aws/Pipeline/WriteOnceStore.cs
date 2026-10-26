@@ -87,12 +87,25 @@ public static class WriteOnceStore
         foreach (var statement in owned)
         {
             var sid = statement["Sid"]!.GetValue<string>();
-            if (!held.TryGetValue(sid, out var found) || !JsonNode.DeepEquals(found, statement))
+            if (!held.TryGetValue(sid, out var found) || !JsonNode.DeepEquals(Canonical(found), Canonical(statement)))
                 notHeld.Add(sid);
         }
 
         return notHeld;
     }
+
+    /// <summary>
+    /// A statement with every list of strings in ordinal order, duplicates kept. S3 does not hand a policy's lists back in
+    /// a stable order (measured 2026-10-26: one read in six reversed a grant's two principals), and IAM reads them as sets.
+    /// </summary>
+    private static JsonNode? Canonical(JsonNode? node) => node switch
+    {
+        JsonObject o => new JsonObject(o.Select(p => KeyValuePair.Create(p.Key, Canonical(p.Value)))),
+        JsonArray a when a.All(e => e is JsonValue v && v.GetValueKind() == JsonValueKind.String)
+            => new JsonArray(a.Select(e => e!.GetValue<string>()).Order(StringComparer.Ordinal).Select(s => (JsonNode?)s).ToArray()),
+        JsonArray a => new JsonArray(a.Select(Canonical).ToArray()),
+        _ => node?.DeepClone(),
+    };
 }
 
 /// <summary>
