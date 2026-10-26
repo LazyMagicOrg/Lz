@@ -111,8 +111,9 @@ public class DeployerGate2PlanTests
     {
         var s = States(Plan("on"));
 
-        Assert.Equal("Gate2Start", s.GetProperty("Record").GetProperty("Next").GetString());
+        Assert.Equal("GatesThisClass", s.GetProperty("Record").GetProperty("Next").GetString());
         Assert.False(s.GetProperty("Record").TryGetProperty("End", out _));
+        Assert.Equal("Gate2Start", s.GetProperty("GatesThisClass").GetProperty("Default").GetString());
         Assert.Equal("Gate2Ours", s.GetProperty("Gate2Start").GetProperty("Next").GetString());
         var ours = s.GetProperty("Gate2Ours");
         Assert.Equal(("$.gate2Start.verdict", "ours", "Gate2Run"),
@@ -128,6 +129,91 @@ public class DeployerGate2PlanTests
         // A failing test fails the build: its failure goes to the result state, which reads the files.
         Assert.Equal("Gate2Result", run.GetProperty("Catch")[0].GetProperty("Next").GetString());
         Assert.Equal("Gate2Outcome", s.GetProperty("Gate2Result").GetProperty("Next").GetString());
+    }
+
+    // ---- on: the site is not gated (V-24) ----
+
+    /// <summary>Dev with its site beside the image and the clients, as dev runs (V-24): the site branch shares Record.</summary>
+    private static PipelineDeployer PlanWithSite(string gate2)
+    {
+        var config = Config(gate2);
+        config.Pipeline!.Classes = new List<string> { "image", "client", "site" };
+        config.Pipeline.Repositories!.Add(new PipelineRepositoryConfig
+        {
+            Repo = "Scutara/ScutaraWebsite", Class = "site", Artifacts = new List<string> { "site-dev", "site-test" },
+        });
+        return DeployerPlanner.Plan(config, DeployerClientPlanTests.TargetAccount,
+            triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
+            siteInputs: new DeployerSiteInputs("scu-mp--webapp-website-4df6-b9c6", "aiproxydev.click"),
+            gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click", "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc", "subnet-08e81426ad2fcbdba" }));
+    }
+
+    /// <summary>
+    /// The states an execution of this class passes through from <paramref name="from"/> on its success path, as Step
+    /// Functions would take them: a Task's Next, a Choice's first match on <c>$.verified.class</c> (StringEquals) or its
+    /// Default, to the first state that ends.
+    /// </summary>
+    private static List<string> SuccessPath(JsonElement states, string from, string cls)
+    {
+        var path = new List<string>();
+        for (var name = from; ; )
+        {
+            Assert.True(path.Count < 50, $"no end from {from}: {string.Join(" > ", path)}");
+            path.Add(name);
+            var s = states.GetProperty(name);
+            var type = s.GetProperty("Type").GetString();
+            if (type is "Succeed" or "Fail" || (s.TryGetProperty("End", out var end) && end.GetBoolean())) return path;
+            if (type == "Choice")
+            {
+                var match = s.GetProperty("Choices").EnumerateArray().FirstOrDefault(c =>
+                    c.GetProperty("Variable").GetString() == "$.verified.class" && c.GetProperty("StringEquals").GetString() == cls);
+                name = match.ValueKind == JsonValueKind.Object ? match.GetProperty("Next").GetString()! : s.GetProperty("Default").GetString()!;
+            }
+            else name = s.GetProperty("Next").GetString()!;
+        }
+    }
+
+    [Fact]
+    public void On_ASiteExecution_EndsRecorded_AndRunsNoGate2()
+    {
+        var s = States(PlanWithSite("on"));
+        var path = SuccessPath(s, "VerifySite", "site");
+
+        Assert.Equal("Recorded", path[^1]);
+        Assert.Equal("Succeed", s.GetProperty("Recorded").GetProperty("Type").GetString());
+        Assert.Contains("Record", path);
+        Assert.DoesNotContain(path, p => p.StartsWith("Gate2", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("VerifyRollout", "image")]
+    [InlineData("VerifyBundle", "client")]
+    public void On_EveryOtherClass_GoesFromRecordToGate2Start(string from, string cls)
+    {
+        // The walk takes Gate 2's own choices by their Default, so it ends past Gate2Start; that it gets there is the point.
+        var path = SuccessPath(States(PlanWithSite("on")), from, cls);
+        Assert.Contains("Record", path);
+        Assert.Contains("Gate2Start", path);
+        Assert.True(path.IndexOf("Gate2Start") > path.IndexOf("Record"));
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("provisioned")]
+    public void NotOn_TheSiteAndEveryOtherClassStillEndAtRecord(string gate2)
+    {
+        var s = States(PlanWithSite(gate2));
+        foreach (var (from, cls) in new[] { ("VerifySite", "site"), ("VerifyRollout", "image"), ("VerifyBundle", "client") })
+            Assert.Equal("Record", SuccessPath(s, from, cls)[^1]);
+        Assert.False(s.TryGetProperty("Recorded", out _));
+        Assert.False(s.TryGetProperty("GatesThisClass", out _));
+    }
+
+    [Fact]
+    public void On_WithASite_ThePlannedMachineHasNoContractGaps()
+    {
+        var plan = PlanWithSite("on");
+        Assert.Empty(DeployerPlanner.ContractGaps(plan.Definition, plan.RolePolicy));
     }
 
     [Theory]

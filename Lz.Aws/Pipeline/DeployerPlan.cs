@@ -2586,7 +2586,8 @@ public static class DeployerPlanner
             },
             // Writes the evidence VerifyRollout produced, once, under a conditional write. A function rather
             // than aws-sdk:s3:putObject so that a retry after a write that landed is success (RecordStep).
-            // Under Pipeline.Gate2 the success branch goes on to Gate 2 (V-E); otherwise it ends here, as it always has.
+            // Under Pipeline.Gate2 the success branch goes on to Gate 2 (V-E), through GatesThisClass, since the site branch
+            // records here too and is never gated (V-24); otherwise it ends here, as it always has.
             ["Record"] = gate2 is null
                 ? new
                 {
@@ -2605,7 +2606,7 @@ public static class DeployerPlanner
                     Parameters = payload,
                     ResultPath = "$.recorded",
                     Retry = new[] { Transient(), EvidenceWrite() },
-                    Next = "Gate2Start",
+                    Next = "GatesThisClass",
                     Catch = catchAll,
                 },
             ["RecordFailure"] = new
@@ -2646,6 +2647,15 @@ public static class DeployerPlanner
             // the deploy landed and is recorded, and a gate that could not run decides nothing about it. A fault leaves the
             // Gate 2 lease to run out (ServiceLease.Duration) rather than be released.
             var gate2Fault = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "Gate2Fault", ResultPath = "$.gate2Error" } };
+            // THE SITE IS NOT GATED (V-24): its execution ends recorded. Gate 2 tests the set a marker would name, which leaves
+            // the site out, and Gate2Start reads an image's digest from any class but a client's, so a site would fault there.
+            states["GatesThisClass"] = new
+            {
+                Type = "Choice",
+                Choices = new[] { new { Variable = "$.verified.class", StringEquals = BuildRecordFormat.SiteClass, Next = "Recorded" } },
+                Default = "Gate2Start",
+            };
+            states["Recorded"] = new { Type = "Succeed" };
             states["Gate2Start"] = new
             {
                 Type = "Task",
