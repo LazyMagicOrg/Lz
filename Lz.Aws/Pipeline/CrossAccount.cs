@@ -355,6 +355,29 @@ public static class CrossAccount
     /// The artifact store's grant to ONE environment for its SITE bundles (V-24): Verify HEADs and DeploySite reads one by version,
     /// Verify and the sweep list under the environment's directory, and nothing reads any other.
     /// </summary>
+    /// <summary>
+    /// A PROMOTED ENVIRONMENT'S READ OF ITS PREDECESSOR'S SITE RECORDS (V-K step 5): its Verify reads the record the predecessor
+    /// deployed, at the version the site marker names, under the predecessor's directory of the site's prefix - and nothing
+    /// else there, and no other role.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> PredecessorSiteRecordReadGrant(
+        string buildRecordStore, string environment, string targetAccountId, string predecessorSitePrefix, string verifyRoleName)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerReadsPredecessorSiteRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObjectVersion",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/{predecessorSitePrefix}*",
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = RoleArns(targetAccountId, verifyRoleName) } },
+            },
+        };
+    }
+
     public static IReadOnlyList<JsonObject> SiteBundleReadGrant(
         string artifactStore, string environment, string targetAccountId, string sitePrefix, string verifyRoleName, string deploySiteRoleName,
         string? corroborateRoleName = null)

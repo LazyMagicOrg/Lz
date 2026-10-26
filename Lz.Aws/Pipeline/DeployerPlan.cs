@@ -701,7 +701,9 @@ public static class DeployerPlanner
             // A REVERT (stage J) runs alone: Verify lists this machine's executions to refuse one beside another.
             var ownMachine = $"arn:aws:states:{region}:{acct}:stateMachine:{sk}-{env}-deployer";
             verifyEnvironment[DeployerEnvironment.StateMachine] = ownMachine;
-            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence, buildRecordStore))
+            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence, buildRecordStore,
+                    // A SITE (V-K step 5): the predecessor's record of the run, by version, beside this environment's own.
+                    siteTargets.Select(t => $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, t.Repo)}{promoted.Environment}/").ToList()))
                 .Append(new { Sid = "ListItsOwnExecutions", Effect = "Allow", Action = new[] { "states:ListExecutions" }, Resource = ownMachine })
                 .ToArray();
         }
@@ -1573,7 +1575,11 @@ public static class DeployerPlanner
         {
             Sid = "ListThePredecessorsSetMarkers", Effect = "Allow", Action = new[] { "s3:ListBucket" },
             Resource = $"arn:aws:s3:::{predecessorStore}",
-            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "passed/sets/*" } },
+            // Every kind the poller lists (V-K step 5): sets and sites; a segment it lists and may not would fail every tick.
+            Condition = new Dictionary<string, object>
+            {
+                ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = PassMarkerFormat.Segments.Select(seg => $"{PassMarkerFormat.Prefix}{seg}*").ToArray() },
+            },
         },
         new { Sid = "ReadThePredecessorsMarkers", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:GetObjectVersion" }, Resource = $"arn:aws:s3:::{predecessorStore}/passed/*" },
         new
@@ -2299,15 +2305,18 @@ public static class DeployerPlanner
     /// across the account boundary (the predecessor's store grants the other half, stage D), and its own decisions/, to refuse
     /// a marker decided here. Listing its own decisions is what lets a missing one read as absent rather than denied.
     /// </summary>
-    private static object[] PromotedVerifyGrants(string predecessorStore, string evidence, string buildRecordStore) => new object[]
+    private static object[] PromotedVerifyGrants(string predecessorStore, string evidence, string buildRecordStore,
+        IReadOnlyList<string> predecessorSitePrefixes) => new object[]
     {
         new
         {
-            // Each member's record at the version the marker names: a GetObject with a VersionId, which S3 authorises as this.
+            // Each member's record at the version the marker names: a GetObject with a VersionId, which S3 authorises as this;
+            // and a site's, in the predecessor's directory, where this environment deploys one (V-K step 5).
             Sid = "ReadTheSetsRecordsByVersion",
             Effect = "Allow",
             Action = new[] { "s3:GetObjectVersion" },
-            Resource = new[] { $"arn:aws:s3:::{buildRecordStore}/image/*", $"arn:aws:s3:::{buildRecordStore}/client/*" },
+            Resource = new[] { $"arn:aws:s3:::{buildRecordStore}/image/*", $"arn:aws:s3:::{buildRecordStore}/client/*" }
+                .Concat(predecessorSitePrefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}*")).ToArray(),
         },
         new
         {

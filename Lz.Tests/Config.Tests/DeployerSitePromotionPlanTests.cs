@@ -105,6 +105,62 @@ public class DeployerSitePromotionPlanTests
         Assert.DoesNotContain("$.set.site", PlanTest(TestConfig(site: false)).Definition);
     }
 
+    // ---- the reads a promoted site needs (S7) ----
+
+    private const string DevSiteRecords = "arn:aws:s3:::scu-build-records-4df6-b9c6/site/scutara/scutarawebsite/dev/*";
+
+    private static IEnumerable<(string Action, string Resource)> Grants(DeployerFunction f)
+    {
+        static IEnumerable<string> Strings(JsonElement e) => e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().Select(x => x.GetString()!) : new[] { e.GetString()! };
+        return JsonDocument.Parse(f.Policy).RootElement.GetProperty("Statement").EnumerateArray()
+            .Where(st => st.GetProperty("Effect").GetString() == "Allow")
+            .SelectMany(st => Strings(st.GetProperty("Action")).SelectMany(a => Strings(st.GetProperty("Resource")).Select(r => (a, r))));
+    }
+
+    [Fact]
+    public void TestsVerify_ReadsDevsSiteRecords_ByVersion_OnlyWhereTestDeploysASite()
+    {
+        var verify = PlanTest(TestConfig()).Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        Assert.Contains(("s3:GetObjectVersion", DevSiteRecords), Grants(verify));
+
+        var noSite = PlanTest(TestConfig(site: false)).Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        Assert.DoesNotContain(Grants(noSite), g => g.Resource.Contains("/site/"));
+    }
+
+    [Fact]
+    public void ThePollersListGrant_CoversEverySegmentItLists()
+    {
+        // Found writing S7: the grant named passed/sets/* alone, so the adapter's listing of passed/site/ would have been
+        // denied, and every tick - sets included - would have failed.
+        var poller = PlanTest(TestConfig()).Functions.Single(f => f.Handler == DeployerHandlers.PromotionPoller);
+        var prefixes = JsonDocument.Parse(poller.Policy).RootElement.GetProperty("Statement").EnumerateArray()
+            .Where(st => st.GetProperty("Action").ToString().Contains("s3:ListBucket")
+                         && st.GetProperty("Resource").GetString() == "arn:aws:s3:::scu-dev-deploy-evidence-4df6-b9c6")
+            .SelectMany(st =>
+            {
+                var prefix = st.GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix");
+                return prefix.ValueKind == JsonValueKind.Array ? prefix.EnumerateArray().Select(x => x.GetString()!) : new[] { prefix.GetString()! };
+            })
+            .ToList();
+        foreach (var segment in PassMarkerFormat.Segments)
+            Assert.Contains($"{PassMarkerFormat.Prefix}{segment}*", prefixes);
+    }
+
+    [Fact]
+    public void TheBuildAccount_LetsTestsVerify_ReadDevsSiteRecordsByVersion_AndNoOneElse()
+    {
+        var build = PipelineBootstrapPlanner.Plan(TestConfig(), "147440642635");
+        var grant = build.BuildRecordReadGrant!.Single(st => st["Sid"]!.GetValue<string>() == "DeployerReadsPredecessorSiteRecordsTest");
+        Assert.Equal(DevSiteRecords, grant["Resource"]!.GetValue<string>());
+        Assert.Equal("s3:GetObjectVersion", grant["Action"]!.GetValue<string>());
+        Assert.Equal($"arn:aws:iam::{Test}:role/scu-test-deployer-verify-fn", grant["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>());
+
+        Assert.DoesNotContain(PipelineBootstrapPlanner.Plan(TestConfig(site: false), "147440642635").BuildRecordReadGrant!,
+            st => st["Sid"]!.GetValue<string>().StartsWith("DeployerReadsPredecessorSiteRecords", StringComparison.Ordinal));
+        Assert.DoesNotContain(PipelineBootstrapPlanner.Plan(DevConfig(), "147440642635").BuildRecordReadGrant!,
+            st => st["Sid"]!.GetValue<string>().StartsWith("DeployerReadsPredecessorSiteRecords", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void WhereTheSuccessorTakesTheSite_ASiteExecution_WritesItsMarker_ThenEndsRecorded()
     {

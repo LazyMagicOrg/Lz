@@ -335,11 +335,19 @@ public static class PipelineBootstrapPlanner
                 .ToList();
         if (recordGrant != null)
             foreach (var site in siteApps)
+            {
                 recordGrant = recordGrant
                     .Concat(CrossAccount.SiteRecordReadGrant(buildRecords, config.Environment, target!, site.RecordPrefix, DeployerPlanner.VerifyRoleName(config),
                         p.DeployOnBuildRecord ? DeployerPlanner.StartFunctionRoleName(config) : null,
                         p.Alerts ? DeployerPlanner.CorroborateFunctionRoleName(config) : null))
                     .ToList();
+                // PROMOTED (V-K step 5): Verify also reads the predecessor's record of the run, by version.
+                if (p.Predecessor is { } predecessor)
+                    recordGrant = recordGrant
+                        .Concat(CrossAccount.PredecessorSiteRecordReadGrant(buildRecords, config.Environment, target!,
+                            $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, site.Repo)}{predecessor.Environment}/", DeployerPlanner.VerifyRoleName(config)))
+                        .ToList();
+            }
 
         // GATE 2 (V-E): where this environment's Gate 2 is provisioned or on, its Gate2Start reads the tests records, lists the
         // browser tests', and signs the test bundles by version. Nothing of it otherwise, so an environment without it keeps its grants.
