@@ -194,6 +194,11 @@ public static class DecisionStep
 
     public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now)
     {
+        // A REVERT DECIDES NOTHING (stage J, T-14): both sets were decided when first deployed here, so its failure is the
+        // failure evidence and the alert, and its success is reverts/.
+        if (state["revertTo"] is JsonObject)
+            return new JsonObject { ["written"] = false, ["reason"] = "a revert writes no decision" };
+
         var error = state["error"] as JsonObject;
         var outcome = error is null ? Deployed : error["Error"]?.GetValue<string>() == nameof(DeployRefused) ? Refused : Failed;
 
@@ -222,5 +227,95 @@ public static class DecisionStep
         if (!written && outcome == Deployed)
             throw new DecisionAlreadyWritten($"{decisionKey} was already written when {executionName} deployed its set: another execution decided it.");
         return new JsonObject { ["key"] = decisionKey, ["outcome"] = outcome, ["written"] = written };
+    }
+}
+
+/// <summary>This environment's deployer's executions, listed and started: the revert-start function's only calls.</summary>
+public interface IPromotionExecutions
+{
+    Task<IReadOnlyList<PromotionExecution>> ExecutionsAsync(string stateMachineArn);
+
+    /// <summary>Start an execution under this name; false when one by that name already exists.</summary>
+    Task<bool> StartAsync(string stateMachineArn, string name, string input);
+}
+
+/// <summary>Writes the hold (P5 stage J): a revert's, only.</summary>
+public interface IHoldWriter
+{
+    Task SetAsync(string parameter, string value);
+}
+
+/// <summary>
+/// THE REVERT-START FUNCTION (§12 P5 stage J, T-14, §4.4 step 2a), invoked by the operator set in test (the approver set in
+/// prod): starts this environment's deployer only with an input naming <c>revertTo</c> - an earlier set marker, by key and
+/// version - under a name derived from it and the minute, and refuses while any other execution is running or awaiting
+/// approval. It reads no hold: the hold is for automated starts, and a revert is the way back under one.
+/// </summary>
+public static class RevertStartStep
+{
+    public static async Task<JsonObject> RunAsync(JsonObject input, string stateMachineArn, JsonObject target, IPromotionExecutions sfn, DateTimeOffset now)
+    {
+        var revertTo = input["revertTo"] as JsonObject
+            ?? throw new DeployRefused("revertTo", "a revert names the set it goes back to: {\"revertTo\": {\"key\": \"passed/sets/...json\", \"versionId\": \"...\"}}.");
+        var key = revertTo["key"] is JsonValue k && k.TryGetValue<string>(out var ks) ? ks : null;
+        var version = revertTo["versionId"] is JsonValue v && v.TryGetValue<string>(out var vs) ? vs : null;
+        if (key is null || !key.StartsWith(PassMarkerFormat.Prefix + PassMarkerFormat.SetsSegment, StringComparison.Ordinal) || !key.EndsWith(".json", StringComparison.Ordinal))
+            throw new DeployRefused("revertTo.key", $"'{key}' is not a set marker under {PassMarkerFormat.Prefix}{PassMarkerFormat.SetsSegment}.");
+        if (string.IsNullOrWhiteSpace(version))
+            throw new DeployRefused("revertTo.versionId", "a revert names the marker's version, as every promotion does.");
+
+        var running = (await sfn.ExecutionsAsync(stateMachineArn)).Where(e => e.Status == "RUNNING").Select(e => e.Name).ToList();
+        if (running.Count > 0)
+            throw new DeployRefused("executions", $"{string.Join(", ", running)} is running or awaiting approval; a revert starts only when nothing else is in flight.");
+
+        var hash = key[(PassMarkerFormat.Prefix.Length + PassMarkerFormat.SetsSegment.Length)..^".json".Length];
+        var name = $"rv-{hash[..Math.Min(20, hash.Length)]}-{now.UtcDateTime:yyyyMMddHHmm}";
+        var body = new JsonObject
+        {
+            ["revertTo"] = new JsonObject { ["key"] = key, ["versionId"] = version },
+            ["target"] = target.DeepClone(),
+        };
+        var started = await sfn.StartAsync(stateMachineArn, name, body.ToJsonString());
+        return new JsonObject { ["started"] = name, ["new"] = started };
+    }
+}
+
+/// <summary>
+/// THE REVERT'S HOLD (§12 P5 stage J, T-14): set before Prepare, in an execution whose input names <c>revertTo</c> and in no
+/// other, so nothing automated starts on top of the way back. It is released by a person, once the predecessor has passed a
+/// set beyond the fault.
+/// </summary>
+public static class SetHoldStep
+{
+    public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, string holdParameter, IHoldWriter ssm)
+    {
+        if (state["revertTo"] is not JsonObject)
+            throw new DeployRefused("revertTo", $"{executionName} is not a revert; only a revert sets the hold.");
+        await ssm.SetAsync(holdParameter, "on");
+        return new JsonObject { ["hold"] = holdParameter, ["value"] = "on" };
+    }
+}
+
+/// <summary>
+/// A REVERT'S RECORD (§12 P5 stage J, T-14): <c>reverts/{execution}.json</c>, naming the set restored and the set it replaced.
+/// No decision is written: both sets were decided when they were first deployed here.
+/// </summary>
+public static class RecordRevertStep
+{
+    public const string Prefix = "reverts/";
+
+    public static async Task<JsonObject> RunAsync(JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now)
+    {
+        var key = $"{Prefix}{executionName}.json";
+        var body = new JsonObject
+        {
+            ["schema"] = 1,
+            ["execution"] = executionName,
+            ["restored"] = new JsonObject { ["markerId"] = state["set"]?["markerId"]?.DeepClone(), ["marker"] = state["revertTo"]?.DeepClone() },
+            ["replaced"] = state["set"]?["replaces"]?.DeepClone(),
+            ["recordedAt"] = now.ToString("O"),
+        };
+        var written = await writer.PutOnceAsync(evidenceStore, key, body.ToJsonString());
+        return new JsonObject { ["key"] = key, ["written"] = written };
     }
 }
