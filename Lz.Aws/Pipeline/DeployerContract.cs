@@ -296,6 +296,9 @@ public static class DeployerEnvironment
     // A promoted environment (P5 stage F): the predecessor whose markers its Verify admits, and the store they are in.
     public const string Predecessor = "LZ_PREDECESSOR";
     public const string PredecessorEvidenceStore = "LZ_PREDECESSOR_EVIDENCE_STORE";
+    // The promotion poller (P5 stage I): the hold it reads before every start, and the image target each execution names.
+    public const string HoldParameter = "LZ_HOLD_PARAMETER";
+    public const string PromotionTarget = "LZ_PROMOTION_TARGET";
     /// <summary>The DynamoDB table holding the per-service lease (DecoupledCd.md V-J): the environment's system table.</summary>
     public const string LeaseTable = "LZ_LEASE_TABLE";
     public const string TrustedProfiles = "LZ_TRUSTED_SIGNING_PROFILES";

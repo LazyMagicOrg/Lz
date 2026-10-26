@@ -178,6 +178,33 @@ public sealed class RecordFunction
     }
 }
 
+/// <summary>
+/// The promotion poller (P5 stage I), a promoted environment's only trigger: every minute, the newest set its predecessor passed
+/// that is neither decided nor started here, unless a set is in flight or the hold is on or missing.
+/// </summary>
+public sealed class PromotionPollerFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        string Required(string name) => DeployerEnvironment.Required(Environment.GetEnvironmentVariable, name);
+        var settings = new PromotionPollSettings(
+            Required(DeployerEnvironment.Predecessor), Required(DeployerEnvironment.PredecessorEvidenceStore), Required(DeployerEnvironment.EvidenceStore),
+            Required(DeployerEnvironment.StateMachine), Required(DeployerEnvironment.HoldParameter), Required(DeployerEnvironment.AlertsTopic),
+            JsonNode.Parse(Required(DeployerEnvironment.PromotionTarget))!.AsObject());
+
+        var result = await PromotionPollStep.RunAsync(
+            settings,
+            new PromotionReads(Clients.S3.Value, Clients.Ssm.Value, Clients.Sfn.Value),
+            new SfnExecutionStarter(Clients.Sfn.Value),
+            new S3EvidenceWriter(Clients.S3.Value),
+            new SnsAlerts(Clients.Sns.Value),
+            DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation($"promotion poll: {result.ToJsonString()}");
+        return Io.Write(result);
+    }
+}
+
 /// <summary>A promoted environment's decision (P5 stage F): deployed after the set, refused or failed after RecordFailure.</summary>
 public sealed class DecideFunction
 {

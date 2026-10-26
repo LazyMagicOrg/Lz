@@ -25,11 +25,14 @@ public class DeployerPromotedPlanTests
         c.Pipeline.BuildSuffix = "4df6-b9c6";
         c.Pipeline.ChainEvidenceStore = OwnStore;
         c.Pipeline.Predecessor = new PipelineNeighbour("dev", "503947800380", DevStore);
+        c.Pipeline.Alerts = true;
         return c;
     }
 
-    private static PipelineDeployer Plan(SystemConfig? c = null)
-        => DeployerPlanner.Plan(c ?? Test(), TestAccount, clientInputs: DeployerClientPlanTests.Distributions);
+    private static readonly DeployerTriggerInputs Cluster = new("scu-test-cluster", new[] { "mp" });
+
+    private static PipelineDeployer Plan(SystemConfig? c = null, DeployerTriggerInputs? cluster = null)
+        => DeployerPlanner.Plan(c ?? Test(), TestAccount, triggerInputs: cluster ?? Cluster, clientInputs: DeployerClientPlanTests.Distributions);
 
     private static JsonElement States(PipelineDeployer p) => JsonDocument.Parse(p.Definition).RootElement.GetProperty("States");
 
@@ -139,6 +142,89 @@ public class DeployerPromotedPlanTests
         var writes = Statements(decide.Policy).Where(s => Strings(s.GetProperty("Action")).Contains("s3:PutObject")).SelectMany(s => Strings(s.GetProperty("Resource"))).ToList();
         Assert.Equal(new[] { $"arn:aws:s3:::{OwnStore}/decisions/*" }, writes);
         Assert.Equal(OwnStore, decide.Environment[DeployerEnvironment.EvidenceStore]);
+    }
+
+    // ---- the promotion poller (stage I) ----
+
+    private static DeployerFunction Poller(PipelineDeployer p) => p.Functions.Single(f => f.Handler == DeployerHandlers.PromotionPoller);
+
+    [Fact]
+    public void ThePoller_RunsEveryMinute_OneAtATime_OnTicksAMinuteOld()
+    {
+        var plan = Plan();
+        var poll = plan.Promotion!;
+        Assert.Equal(("scu-test-deployer-poller", "scu-test-deployer-poller-schedule", "rate(1 minute)", 1, 60),
+            (poll.PollerFunctionName, poll.ScheduleRuleName, poll.ScheduleExpression, poll.ReservedConcurrency, poll.MaximumEventAgeSeconds));
+        Assert.False(Poller(plan).InvokedByStateMachine);
+        Assert.Equal("/scu/test/pipeline/hold", poll.HoldParameter);
+    }
+
+    [Fact]
+    public void ThePoller_AlarmsOnItsErrorsAndItsSilence_AndTheTopicAdmitsBoth()
+    {
+        var plan = Plan();
+        Assert.Equal(new[] { "scu-test-deployer-poller-errors", "scu-test-deployer-poller-silent" }, plan.Promotion!.Alarms.Select(a => a.Name));
+        Assert.Equal("breaching", plan.Promotion.Alarms.Single(a => a.Name.EndsWith("-silent")).TreatMissingData);
+        foreach (var alarm in plan.Promotion.Alarms)
+            Assert.Contains($"arn:aws:cloudwatch:us-west-2:{TestAccount}:alarm:{alarm.Name}", plan.Alerts!.TopicPolicy);
+    }
+
+    [Fact]
+    public void ThePoller_StartsTheImageTarget_ItsServiceInItsCluster()
+    {
+        var target = System.Text.Json.Nodes.JsonNode.Parse(Poller(Plan()).Environment[DeployerEnvironment.PromotionTarget])!;
+        Assert.Equal(("scu-test-cluster", "scu-mp-aiphost", "aiphost", "scu-4df6-b9c6-aiphost"),
+            (target["cluster"]!.GetValue<string>(), target["service"]!.GetValue<string>(), target["container"]!.GetValue<string>(), target["repository"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void ThePoller_ReadsWhatItDecidesOn_AndMayStartOnlyItsOwnDeployer()
+    {
+        var plan = Plan();
+        var f = Poller(plan);
+        var machine = $"arn:aws:states:us-west-2:{TestAccount}:stateMachine:{plan.StateMachineName}";
+        Assert.True(Grants(f.Policy, "s3:GetObject", $"arn:aws:s3:::{DevStore}/passed/*"));
+        Assert.True(Grants(f.Policy, "s3:ListBucket", $"arn:aws:s3:::{DevStore}"));
+        Assert.True(Grants(f.Policy, "s3:GetObject", $"arn:aws:s3:::{OwnStore}/decisions/*"));
+        Assert.True(Grants(f.Policy, "s3:PutObject", $"arn:aws:s3:::{OwnStore}/decisions/*"));
+        Assert.True(Grants(f.Policy, "states:StartExecution", machine));
+        Assert.True(Grants(f.Policy, "states:ListExecutions", machine));
+        Assert.True(Grants(f.Policy, "ssm:GetParameter", $"arn:aws:ssm:us-west-2:{TestAccount}:parameter/scu/test/pipeline/hold"));
+        Assert.True(Grants(f.Policy, "sns:Publish", plan.Alerts!.TopicArn));
+        // Nothing of the predecessor's but its markers; nothing written but decisions.
+        Assert.False(Grants(f.Policy, "s3:GetObject", $"arn:aws:s3:::{DevStore}/deploys/*"));
+        Assert.DoesNotContain(Statements(f.Policy), s => Strings(s.GetProperty("Action")).Contains("s3:PutObject")
+            && Strings(s.GetProperty("Resource")).Any(r => r != $"arn:aws:s3:::{OwnStore}/decisions/*"));
+        Assert.Empty(DeployerPlanner.DenyGaps(f.Policy, plan.DenyPolicy));
+    }
+
+    [Fact]
+    public void ThePollersListing_IsLimitedToSetMarkers_AndItsOwnDecisions()
+    {
+        var f = Poller(Plan());
+        var lists = Statements(f.Policy).Where(s => Strings(s.GetProperty("Action")).Contains("s3:ListBucket")).ToList();
+        Assert.All(lists, s => Assert.True(s.TryGetProperty("Condition", out _), "an unconditioned ListBucket"));
+        Assert.Contains(lists, s => s.GetRawText().Contains("passed/sets/*"));
+        Assert.Contains(lists, s => s.GetRawText().Contains("decisions/*"));
+    }
+
+    [Fact]
+    public void APromotedEnvironmentWithoutAlerts_OrWithoutItsCluster_OrWithTwoTenants_IsRefused()
+    {
+        var quiet = Test();
+        quiet.Pipeline!.Alerts = false;
+        Assert.Contains("Alerts", Assert.Throws<InvalidOperationException>(() => Plan(quiet)).Message);
+        Assert.Contains("cluster", Assert.Throws<InvalidOperationException>(() => DeployerPlanner.Plan(Test(), TestAccount, clientInputs: DeployerClientPlanTests.Distributions)).Message);
+        Assert.Contains("tenant", Assert.Throws<InvalidOperationException>(() => Plan(cluster: new DeployerTriggerInputs("scu-test-cluster", new[] { "mp", "xx" }))).Message);
+    }
+
+    [Fact]
+    public void ThePoller_IsPlannedOnlyWhereThereIsAPredecessor()
+    {
+        var dev = DeployerClientPlanTests.Config();
+        var plan = DeployerPlanner.Plan(dev, DeployerClientPlanTests.TargetAccount, clientInputs: DeployerClientPlanTests.Distributions);
+        Assert.Null(plan.Promotion);
+        Assert.DoesNotContain(plan.Functions, f => f.Handler == DeployerHandlers.PromotionPoller);
     }
 
     // ---- the first environment is as it was ----

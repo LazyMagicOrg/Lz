@@ -28,6 +28,8 @@ internal static class Clients
         => new Lz.Aws.Ops.DynamoDbServiceLeaseStore(DynamoDb.Value,
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.LeaseTable));
     public static readonly Lazy<Amazon.StepFunctions.IAmazonStepFunctions> Sfn = new(() => new Amazon.StepFunctions.AmazonStepFunctionsClient());
+    public static readonly Lazy<Amazon.SimpleSystemsManagement.IAmazonSimpleSystemsManagement> Ssm =
+        new(() => new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient());
     public static readonly Lazy<Amazon.SimpleNotificationService.IAmazonSimpleNotificationService> Sns =
         new(() => new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient());
     // CloudFront is global; its API is reached through us-east-1, as lz's CLI reaches it.
@@ -477,6 +479,88 @@ internal sealed class S3VersionedObjects(IAmazonS3 s3) : IVersionedObjects
         {
             return null;
         }
+    }
+}
+
+/// <summary>
+/// What the promotion poller reads (P5 stage I): the hold, the predecessor's set markers, this environment's decisions and its
+/// deployer's executions. A denied read throws, so a missing grant is a failed tick and an alarm, never "nothing there".
+/// </summary>
+internal sealed class PromotionReads(IAmazonS3 s3, Amazon.SimpleSystemsManagement.IAmazonSimpleSystemsManagement ssm,
+    Amazon.StepFunctions.IAmazonStepFunctions sfn) : IPromotionReads
+{
+    public async Task<string?> HoldAsync(string parameter)
+    {
+        try { return (await ssm.GetParameterAsync(new Amazon.SimpleSystemsManagement.Model.GetParameterRequest { Name = parameter })).Parameter?.Value; }
+        catch (Amazon.SimpleSystemsManagement.Model.ParameterNotFoundException) { return null; }
+    }
+
+    public async Task<IReadOnlyList<(string Key, DateTimeOffset LastModified)>> ListMarkersAsync(string bucket)
+    {
+        var found = new List<(string, DateTimeOffset)>();
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = bucket, Prefix = PassMarkerFormat.Prefix + PassMarkerFormat.SetsSegment, ContinuationToken = token,
+            });
+            found.AddRange((page.S3Objects ?? new List<S3Object>()).Select(o => (o.Key, new DateTimeOffset(o.LastModified ?? DateTime.UtcNow, TimeSpan.Zero))));
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token is not null);
+        return found;
+    }
+
+    public Task<StoredRecord?> ReadMarkerAsync(string bucket, string key) => new S3RecordStore(s3).ReadAsync(bucket, key);
+
+    public async Task<IReadOnlyDictionary<string, string>> DecisionsAsync(string bucket)
+    {
+        var decisions = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = bucket, Prefix = PassMarkerFormat.DecisionsPrefix + PassMarkerFormat.SetsSegment, ContinuationToken = token,
+            });
+            foreach (var o in page.S3Objects ?? new List<S3Object>())
+            {
+                var stored = await new S3RecordStore(s3).ReadAsync(bucket, o.Key);
+                var body = stored is null ? null : System.Text.Json.Nodes.JsonNode.Parse(stored.Json);
+                if (body?["markerId"]?.GetValue<string>() is { } id) decisions[id] = body["outcome"]?.GetValue<string>() ?? "";
+            }
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token is not null);
+        return decisions;
+    }
+
+    public async Task<IReadOnlyList<PromotionExecution>> ExecutionsAsync(string stateMachineArn)
+    {
+        var executions = new List<PromotionExecution>();
+        string? token = null;
+        do
+        {
+            var page = await sfn.ListExecutionsAsync(new Amazon.StepFunctions.Model.ListExecutionsRequest { StateMachineArn = stateMachineArn, NextToken = token });
+            executions.AddRange((page.Executions ?? new List<Amazon.StepFunctions.Model.ExecutionListItem>()).Select(e => new PromotionExecution(
+                e.Name, e.Status?.Value ?? "", new DateTimeOffset(e.StartDate ?? DateTime.UtcNow, TimeSpan.Zero),
+                e.StopDate is { } stop ? new DateTimeOffset(stop, TimeSpan.Zero) : null)));
+            token = page.NextToken;
+        } while (!string.IsNullOrEmpty(token));
+        return executions;
+    }
+}
+
+/// <summary>Starts an execution under the poller's name; a name already taken is an execution already started, not an error.</summary>
+internal sealed class SfnExecutionStarter(Amazon.StepFunctions.IAmazonStepFunctions sfn) : IExecutionStarter
+{
+    public async Task<bool> StartAsync(string stateMachineArn, string name, string input)
+    {
+        try
+        {
+            await sfn.StartExecutionAsync(new Amazon.StepFunctions.Model.StartExecutionRequest { StateMachineArn = stateMachineArn, Name = name, Input = input });
+            return true;
+        }
+        catch (Amazon.StepFunctions.Model.ExecutionAlreadyExistsException) { return false; }
     }
 }
 

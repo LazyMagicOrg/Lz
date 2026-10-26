@@ -42,6 +42,7 @@
     <!-- Promotion (DecoupledCd P5): the pass marker, VerifySet and the decision. BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\PassMarker.cs" Link="Linked\Lz.Aws\Pipeline\PassMarker.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\PromotionPoll.cs" Link="Linked\Lz.Aws\Pipeline\PromotionPoll.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
@@ -89,6 +90,8 @@
     <PackageReference Include="AWSSDK.S3" Version="4.0.103.2" />
     <!-- The start function (P2 stage D) starts executions and reads a taken name back. -->
     <PackageReference Include="AWSSDK.StepFunctions" Version="4.0.100.14" />
+    <!-- The promotion poller (P5 stage I) reads the hold before every start. The version Lz.Aws resolves. -->
+    <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.0.104.6" />
     <!-- The sweep (P2 stage D3) publishes an alert for an image no build record names. -->
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
     <!-- The bundle deploy (P4 stage C) invalidates the app's path and waits for it. -->

@@ -85,7 +85,17 @@ public sealed record PipelineDeployer(
     DeployerAlertsPlan? Alerts = null,
     IReadOnlyList<ClientTarget>? ClientTargets = null,
     IReadOnlyList<SiteTarget>? SiteTargets = null,
-    DeployerGate2Plan? Gate2 = null);
+    DeployerGate2Plan? Gate2 = null,
+    DeployerPromotionPlan? Promotion = null);
+
+/// <summary>
+/// A promoted environment's poller (DecoupledCd.md §12 P5 stage I), its only trigger: a function the schedule invokes every
+/// minute, one at a time, on ticks at most a minute old and never retried; the hold it reads before every start; and its
+/// alarms, on its errors and on its silence. The function itself is in <see cref="PipelineDeployer.Functions"/>.
+/// </summary>
+public sealed record DeployerPromotionPlan(
+    string PollerFunctionName, string ScheduleRuleName, string ScheduleExpression, int ReservedConcurrency,
+    int MaximumEventAgeSeconds, string HoldParameter, IReadOnlyList<IntakeAlarm> Alarms);
 
 /// <summary>
 /// Gate 2 in this environment (DecoupledCd.md §15.5, V-E), under <c>Pipeline.Gate2</c>: the CodeBuild project that runs the
@@ -208,6 +218,7 @@ public static class DeployerHandlers
 
     public static readonly string Verify = For("VerifyFunction");
     public static readonly string Decide = For("DecideFunction");
+    public static readonly string PromotionPoller = For("PromotionPollerFunction");
     public static readonly string Prepare = For("PrepareFunction");
     public static readonly string VerifyRollout = For("VerifyRolloutFunction");
     public static readonly string Record = For("RecordFunction");
@@ -238,7 +249,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        Gate2Start, Gate2Result, Decide,
+        Gate2Start, Gate2Result, Decide, PromotionPoller,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
 
@@ -668,6 +679,12 @@ public static class DeployerPlanner
                     "predecessor's marker and a promoted environment's own Gate 2 arrive with P6 (DecoupledCd.md §12), and are not planned yet.");
             if (string.IsNullOrWhiteSpace(promoted.EvidenceStore))
                 throw new InvalidOperationException($"the chain names no EvidenceStore for {promoted.Environment}, where {env} reads its markers.");
+            if (!p.Alerts)
+                throw new InvalidOperationException($"{env} is promoted into, and its poller alarms on what needs a person (§5.3); set Pipeline.Alerts.");
+            if (triggerInputs is null)
+                throw new InvalidOperationException($"{env} is promoted into, and its poller names the image's service: the planner needs this account's cluster and tenants.");
+            if (triggerInputs.TenantKeys.Count != 1)
+                throw new InvalidOperationException($"{env} runs {triggerInputs.TenantKeys.Count} tenant services; a promoted set deploys the image to one, and more than one tenant is not modelled.");
             verifyEnvironment[DeployerEnvironment.Predecessor] = promoted.Environment;
             verifyEnvironment[DeployerEnvironment.PredecessorEvidenceStore] = promoted.EvidenceStore;
             verifyEnvironment[DeployerEnvironment.EvidenceStore] = evidence;
@@ -773,6 +790,7 @@ public static class DeployerPlanner
         // THE DECISION (P5 stage F): written once per marker in this environment's own store, after the set or after its
         // failure. Its role may write decisions/ and nothing else.
         string? decideFn = null;
+        DeployerPromotionPlan? promotionPlan = null;
         if (promoted is not null)
         {
             var decide = $"{sk}-{env}-deployer-decide";
@@ -781,6 +799,33 @@ public static class DeployerPlanner
                 new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
             decideFn = FnArn(decide);
+
+            var poller = PromotionPollerFunctionName(config);
+            var artifact = p.AcceptedRepositories.Where(r => r.Class == "image").SelectMany(r => r.Artifacts ?? new List<string>()).Single();
+            var target = new System.Text.Json.Nodes.JsonObject
+            {
+                ["cluster"] = triggerInputs!.Cluster,
+                ["service"] = $"{sk}-{triggerInputs.TenantKeys[0]}-{artifact}",
+                ["container"] = artifact,
+                ["repository"] = EcrRepositoryNaming.For(config, artifact),
+            };
+            var topic = AlertsTopicArn(region, acct, config);
+            var hold = HoldParameterName(config);
+            var pollsMachine = $"arn:aws:states:{region}:{acct}:stateMachine:{sk}-{env}-deployer";
+            functions.Add(new(poller, DeployerHandlers.PromotionPoller, $"{poller}-fn",
+                Combine(Logs(region, acct, poller), PollerGrants(region, acct, promoted!.EvidenceStore!, evidence, pollsMachine, hold, topic)),
+                new Dictionary<string, string>
+                {
+                    [DeployerEnvironment.Predecessor] = promoted.Environment,
+                    [DeployerEnvironment.PredecessorEvidenceStore] = promoted.EvidenceStore!,
+                    [DeployerEnvironment.EvidenceStore] = evidence,
+                    [DeployerEnvironment.StateMachine] = pollsMachine,
+                    [DeployerEnvironment.HoldParameter] = hold,
+                    [DeployerEnvironment.AlertsTopic] = topic,
+                    [DeployerEnvironment.PromotionTarget] = target.ToJsonString(),
+                },
+                TimeoutSeconds: 50, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false));
+            promotionPlan = new DeployerPromotionPlan(poller, $"{poller}-schedule", "rate(1 minute)", 1, 60, hold, PollerAlarms(config));
         }
 
         // THE LEASE OUTLASTS THE SPAN IT COVERS, from Prepare's claim to Record's release: the rollout wait is its longest
@@ -925,7 +970,8 @@ public static class DeployerPlanner
             Alerts: alerts,
             ClientTargets: clientTargets,
             SiteTargets: siteTargets,
-            Gate2: gate2);
+            Gate2: gate2,
+            Promotion: promotionPlan);
     }
 
     /// <summary>
@@ -1140,6 +1186,8 @@ public static class DeployerPlanner
         // THE ALARMS THAT MAY PUBLISH, BY ARN: this account's sweep and trigger queue, and the build account's forwarding
         // queue — the last two only where the trigger exists.
         var localAlarms = new List<string> { AlarmArn(acct, errorsAlarm) };
+        if (p.Predecessor is not null)
+            localAlarms.AddRange(PollerAlarms(config).Select(a => AlarmArn(acct, a.Name)));
         if (trigger != null)
             localAlarms.Add(AlarmArn(acct, trigger.AlarmName));
         var buildAlarm = trigger != null ? AlarmArn(artifactAccount, ForwardDeadLetterAlarmName(config)) : null;
@@ -1378,6 +1426,48 @@ public static class DeployerPlanner
     public static string AlertsTopicName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-pipeline-alerts";
 
     /// <summary>The alerts topic's ARN, in <paramref name="targetAccountId"/>.</summary>
+    /// <summary>The promotion poller (P5 stage I), in an environment promoted into.</summary>
+    public static string PromotionPollerFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-poller";
+
+    /// <summary>The hold (P5 stage J, §5.3 rule 5), read before every automated start; missing counts as held.</summary>
+    public static string HoldParameterName(SystemConfig config) => $"/{config.SystemKey}/{config.Environment}/pipeline/hold";
+
+    /// <summary>The poller's two alarms: a tick that failed, and no tick for five minutes, missing data counting as silence.</summary>
+    public static IReadOnlyList<IntakeAlarm> PollerAlarms(SystemConfig config)
+    {
+        var poller = PromotionPollerFunctionName(config);
+        return new[]
+        {
+            new IntakeAlarm($"{poller}-errors", "a promotion poll failed", poller, "Errors", "Sum", "GreaterThanOrEqualToThreshold", 1, 300, "notBreaching"),
+            new IntakeAlarm($"{poller}-silent", "the promotion poller has not run for five minutes", poller, "Invocations", "Sum", "LessThanThreshold", 1, 300, "breaching"),
+        };
+    }
+
+    /// <summary>
+    /// What the poller reads and does (P5 stage I): the predecessor's set markers, listed and read; this environment's
+    /// decisions, listed, read and - for superseded - written; its own deployer's executions, listed and started; the hold;
+    /// and its alerts topic. Nothing else of the predecessor's, and nothing written but decisions.
+    /// </summary>
+    private static object[] PollerGrants(string region, string acct, string predecessorStore, string evidence, string machineArn, string hold, string topic) => new object[]
+    {
+        new
+        {
+            Sid = "ListThePredecessorsSetMarkers", Effect = "Allow", Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{predecessorStore}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "passed/sets/*" } },
+        },
+        new { Sid = "ReadThePredecessorsMarkers", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:GetObjectVersion" }, Resource = $"arn:aws:s3:::{predecessorStore}/passed/*" },
+        new
+        {
+            Sid = "ListItsDecisions", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{evidence}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "decisions/*" } },
+        },
+        new { Sid = "ReadAndWriteItsDecisions", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject" }, Resource = $"arn:aws:s3:::{evidence}/decisions/*" },
+        new { Sid = "ListAndStartItsDeployer", Effect = "Allow", Action = new[] { "states:ListExecutions", "states:StartExecution" }, Resource = machineArn },
+        new { Sid = "ReadTheHold", Effect = "Allow", Action = new[] { "ssm:GetParameter" }, Resource = $"arn:aws:ssm:{region}:{acct}:parameter{hold}" },
+        new { Sid = "PublishItsAlarms", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topic },
+    };
+
     public static string AlertsTopicArn(string region, string targetAccountId, SystemConfig config)
         => $"arn:aws:sns:{region}:{targetAccountId}:{AlertsTopicName(config)}";
 
