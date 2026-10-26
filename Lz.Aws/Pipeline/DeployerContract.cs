@@ -293,6 +293,9 @@ public static class DeployerEnvironment
     public const string ImageRepositories = "LZ_IMAGE_REPOSITORIES";
     public const string Registry = "LZ_REGISTRY";
     public const string EvidenceStore = "LZ_EVIDENCE_STORE";
+    // A promoted environment (P5 stage F): the predecessor whose markers its Verify admits, and the store they are in.
+    public const string Predecessor = "LZ_PREDECESSOR";
+    public const string PredecessorEvidenceStore = "LZ_PREDECESSOR_EVIDENCE_STORE";
     /// <summary>The DynamoDB table holding the per-service lease (DecoupledCd.md V-J): the environment's system table.</summary>
     public const string LeaseTable = "LZ_LEASE_TABLE";
     public const string TrustedProfiles = "LZ_TRUSTED_SIGNING_PROFILES";

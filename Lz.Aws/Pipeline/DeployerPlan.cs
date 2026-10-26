@@ -207,6 +207,7 @@ public static class DeployerHandlers
     public const string Assembly = "Lz.Aws.Deployer";
 
     public static readonly string Verify = For("VerifyFunction");
+    public static readonly string Decide = For("DecideFunction");
     public static readonly string Prepare = For("PrepareFunction");
     public static readonly string VerifyRollout = For("VerifyRolloutFunction");
     public static readonly string Record = For("RecordFunction");
@@ -655,6 +656,24 @@ public static class DeployerPlanner
             verifyGrants = verifyGrants.Concat(VerifySiteGrants(buildRecordStore, artifactStore, siteTargets)).ToArray();
         }
 
+        // A PROMOTED ENVIRONMENT (P5 stage F): the build-side chain names a predecessor, so this environment deploys only sets
+        // its predecessor passed. Verify admits a set by the predecessor's marker, read where it was written; the machine
+        // deploys the set and decides it. Prod's approval and a promoted environment's own Gate 2 come with P6.
+        var promoted = p.Predecessor;
+        if (promoted is not null)
+        {
+            if (approvalRequired || p.Gate2IsProvisioned)
+                throw new InvalidOperationException(
+                    $"{env} is promoted into from {promoted.Environment}, and its Approval or Gate2 is set: an approval after a " +
+                    "predecessor's marker and a promoted environment's own Gate 2 arrive with P6 (DecoupledCd.md §12), and are not planned yet.");
+            if (string.IsNullOrWhiteSpace(promoted.EvidenceStore))
+                throw new InvalidOperationException($"the chain names no EvidenceStore for {promoted.Environment}, where {env} reads its markers.");
+            verifyEnvironment[DeployerEnvironment.Predecessor] = promoted.Environment;
+            verifyEnvironment[DeployerEnvironment.PredecessorEvidenceStore] = promoted.EvidenceStore;
+            verifyEnvironment[DeployerEnvironment.EvidenceStore] = evidence;
+            verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence)).ToArray();
+        }
+
         var functions = new List<DeployerFunction>
         {
             new(verify, DeployerHandlers.Verify, $"{verify}-fn",
@@ -749,6 +768,19 @@ public static class DeployerPlanner
                 new Dictionary<string, string>(),
                 TimeoutSeconds: 120, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
             siteFunctions = (FnArn(deploySite), FnArn(verifySite));
+        }
+
+        // THE DECISION (P5 stage F): written once per marker in this environment's own store, after the set or after its
+        // failure. Its role may write decisions/ and nothing else.
+        string? decideFn = null;
+        if (promoted is not null)
+        {
+            var decide = $"{sk}-{env}-deployer-decide";
+            functions.Add(new(decide, DeployerHandlers.Decide, $"{decide}-fn",
+                Combine(Logs(region, acct, decide), DecisionGrants(evidence)),
+                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+            decideFn = FnArn(decide);
         }
 
         // THE LEASE OUTLASTS THE SPAN IT COVERS, from Prepare's claim to Record's release: the rollout wait is its longest
@@ -863,7 +895,8 @@ public static class DeployerPlanner
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
-                                      gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName)),
+                                      gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName),
+                                      decideFn),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -1959,6 +1992,162 @@ public static class DeployerPlanner
         },
     };
 
+    /// <summary>
+    /// A promoted environment's Verify (P5 stage F): its predecessor's markers and the evidence they name, read by version
+    /// across the account boundary (the predecessor's store grants the other half, stage D), and its own decisions/, to refuse
+    /// a marker decided here. Listing its own decisions is what lets a missing one read as absent rather than denied.
+    /// </summary>
+    private static object[] PromotedVerifyGrants(string predecessorStore, string evidence) => new object[]
+    {
+        new
+        {
+            Sid = "ReadThePredecessorsMarkersAndEvidenceByVersion",
+            Effect = "Allow",
+            Action = new[] { "s3:GetObject", "s3:GetObjectVersion" },
+            Resource = new[]
+            {
+                $"arn:aws:s3:::{predecessorStore}/passed/*",
+                $"arn:aws:s3:::{predecessorStore}/deploys/*",
+                $"arn:aws:s3:::{predecessorStore}/tests/*",
+            },
+        },
+        new
+        {
+            Sid = "ReadItsOwnDecisions",
+            Effect = "Allow",
+            Action = new[] { "s3:GetObject" },
+            Resource = $"arn:aws:s3:::{evidence}/decisions/*",
+        },
+        new
+        {
+            Sid = "ListItsOwnDecisions",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{evidence}",
+            Condition = new Dictionary<string, object> { ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = "decisions/*" } },
+        },
+    };
+
+    /// <summary>The decision function's one write (P5 stage F): write-once, by the store's own statement, under decisions/.</summary>
+    private static object[] DecisionGrants(string evidence) => new object[]
+    {
+        new
+        {
+            Sid = "WriteDecisions",
+            Effect = "Allow",
+            Action = new[] { "s3:PutObject" },
+            Resource = $"arn:aws:s3:::{evidence}/decisions/*",
+        },
+    };
+
+    /// <summary>
+    /// THE PROMOTED MACHINE (P5 stage F), from the table dev's machine is planned from. Verify admits the set into
+    /// <c>$.set</c>; ImageMember lifts the image member into <c>$.record</c>, <c>$.target</c> and <c>$.verified</c>, so Prepare,
+    /// Deploy, VerifyRollout and Record run as they do in dev; then each bundle member, one at a time, through copies of
+    /// DeployBundle and VerifyBundle and a Record of its own, inside a Map whose Catch is the bundle's (a Catch cannot leave a
+    /// Map's processor); then Decide. A failure is recorded and then decided. No branch on a class remains: the set says what
+    /// each member is.
+    /// </summary>
+    private static void Promote(Dictionary<string, object> states, string decideFn, bool bundles, Dictionary<string, object> payload,
+        object[] catchAll, object transient, object evidenceWrite)
+    {
+        System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
+
+        var verify = Node("Verify");
+        verify["ResultPath"] = "$.set";
+        verify["Next"] = "ImageMember";
+        states["Verify"] = verify;
+
+        states["ImageMember"] = new
+        {
+            Type = "Pass",
+            Parameters = new Dictionary<string, object>
+            {
+                ["marker.$"] = "$.marker",
+                ["set.$"] = "$.set",
+                ["record.$"] = "$.set.image.record",
+                ["target.$"] = "$.set.image.target",
+                ["verified.$"] = "$.set.image.verified",
+            },
+            Next = "Prepare",
+        };
+
+        var record = Node("Record");
+        if (bundles)
+        {
+            var deployBundle = Node("DeployBundle");
+            deployBundle.Remove("Catch");
+            var verifyBundle = Node("VerifyBundle");
+            verifyBundle.Remove("Catch");
+            verifyBundle["Next"] = "RecordBundle";
+            var recordBundle = record.DeepClone().AsObject();
+            recordBundle.Remove("Catch");
+            recordBundle.Remove("Next");
+            recordBundle.Remove("End");
+            recordBundle["End"] = true;
+
+            states["Bundles"] = new
+            {
+                Type = "Map",
+                ItemsPath = "$.set.bundles",
+                MaxConcurrency = 1,
+                ItemSelector = new Dictionary<string, object>
+                {
+                    ["record.$"] = "$$.Map.Item.Value.record",
+                    ["target.$"] = "$$.Map.Item.Value.target",
+                    ["verified.$"] = "$$.Map.Item.Value.verified",
+                    ["marker.$"] = "$.marker",
+                },
+                ItemProcessor = new
+                {
+                    ProcessorConfig = new { Mode = "INLINE" },
+                    StartAt = "DeployBundle",
+                    States = new Dictionary<string, object>
+                    {
+                        ["DeployBundle"] = deployBundle,
+                        ["VerifyBundle"] = verifyBundle,
+                        ["RecordBundle"] = recordBundle,
+                    },
+                },
+                ResultPath = "$.bundlesRecorded",
+                Next = "Decide",
+                Catch = catchAll,
+            };
+        }
+        record.Remove("End");
+        record["Next"] = bundles ? "Bundles" : "Decide";
+        states["Record"] = record;
+
+        foreach (var name in new[] { "ByClass", "NoBranchForClass", "DeployBundle", "VerifyBundle", "DeploySite", "VerifySite" })
+            states.Remove(name);
+
+        states["Decide"] = new
+        {
+            Type = "Task",
+            Resource = decideFn,
+            Parameters = payload,
+            ResultPath = "$.decision",
+            Retry = new[] { transient, evidenceWrite },
+            Next = "Decided",
+            Catch = catchAll,
+        };
+        states["Decided"] = new { Type = "Succeed" };
+
+        var failure = Node("RecordFailure");
+        failure["Next"] = "DecideFailure";
+        states["RecordFailure"] = failure;
+        states["DecideFailure"] = new
+        {
+            Type = "Task",
+            Resource = decideFn,
+            Parameters = payload,
+            ResultPath = "$.decision",
+            Retry = new[] { transient, evidenceWrite },
+            Next = "Failed",
+            Catch = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "Failed", ResultPath = "$.decisionError" } },
+        };
+    }
+
     private static object[] RecordGrants(string evidence) => new object[]
     {
         new
@@ -2507,7 +2696,8 @@ public static class DeployerPlanner
         string recordFn, string failureFn, int heartbeatSeconds, string? approvalTopicArn,
         (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
         (string DeploySite, string VerifySite)? siteFunctions = null,
-        (string Start, string Result, string Project)? gate2 = null)
+        (string Start, string Result, string Project)? gate2 = null,
+        string? decideFn = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -2980,9 +3170,14 @@ public static class DeployerPlanner
             }
         }
 
+        if (decideFn is not null)
+            Promote(states, decideFn, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite());
+
         return JsonSerializer.Serialize(new
         {
-            Comment = siteFunctions is not null
+            Comment = decideFn is not null
+                ? "lz decoupled-CD deployer, promoted into - a set its predecessor passed: the image member, then each client bundle, then the decision (P5). DecoupledCd.md §5."
+                : siteFunctions is not null
                 ? "lz decoupled-CD deployer — class 1 (service image), class 2 (client bundles) where configured, and class 3 (the site, V-24). DecoupledCd.md §5."
                 : bundleFunctions is null
                 ? "lz decoupled-CD deployer — class 1 (service image) only. DecoupledCd.md §5."
