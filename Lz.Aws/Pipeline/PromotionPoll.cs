@@ -114,3 +114,114 @@ public static class PromotionPoll
         return $"pm-{hash[..20]}-1";
     }
 }
+
+/// <summary>An execution of this environment's deployer, as the poller reads it.</summary>
+public sealed record PromotionExecution(string Name, string Status, DateTimeOffset StartedAt, DateTimeOffset? StoppedAt);
+
+/// <summary>The poller's settings: its predecessor and that environment's store, its own store, deployer, hold, alerts topic and image target.</summary>
+public sealed record PromotionPollSettings(
+    string Predecessor, string PredecessorEvidenceStore, string EvidenceStore, string StateMachineArn, string HoldParameter,
+    string AlertsTopicArn, System.Text.Json.Nodes.JsonObject Target);
+
+/// <summary>What the poller reads.</summary>
+public interface IPromotionReads
+{
+    /// <summary>The hold parameter's value, or null when there is no such parameter.</summary>
+    Task<string?> HoldAsync(string parameter);
+
+    /// <summary>The keys under <c>passed/sets/</c> in the predecessor's store, with when each was written.</summary>
+    Task<IReadOnlyList<(string Key, DateTimeOffset LastModified)>> ListMarkersAsync(string bucket);
+
+    /// <summary>A marker as read, with the version S3 served; null when it is not there.</summary>
+    Task<StoredRecord?> ReadMarkerAsync(string bucket, string key);
+
+    /// <summary>The decisions in this environment's store, by marker id, with their outcome.</summary>
+    Task<IReadOnlyDictionary<string, string>> DecisionsAsync(string bucket);
+
+    /// <summary>This environment's deployer's executions.</summary>
+    Task<IReadOnlyList<PromotionExecution>> ExecutionsAsync(string stateMachineArn);
+}
+
+public interface IExecutionStarter
+{
+    /// <summary>Start an execution under this name; false when one by that name already exists.</summary>
+    Task<bool> StartAsync(string stateMachineArn, string name, string input);
+}
+
+/// <summary>
+/// THE POLLER'S TICK (§12 P5 stage I): the hold first, and nothing else under one; then the predecessor's set markers, this
+/// environment's decisions and its deployer's executions; then what <see cref="PromotionPoll.Decide"/> says. A marker that
+/// does not parse is alarmed and left out, never started. Superseded markers are decided here, write-once, by the poller.
+/// </summary>
+public static class PromotionPollStep
+{
+    public const string Superseded = "superseded";
+
+    public static async Task<System.Text.Json.Nodes.JsonObject> RunAsync(
+        PromotionPollSettings settings, IPromotionReads reads, IExecutionStarter starter, IEvidenceWriter writer, IAlertPublisher alerts, DateTimeOffset now)
+    {
+        var hold = await reads.HoldAsync(settings.HoldParameter);
+        if (!string.Equals(hold?.Trim(), "off", StringComparison.Ordinal))
+            return new System.Text.Json.Nodes.JsonObject { ["held"] = true, ["hold"] = hold };
+
+        var problems = new List<string>();
+        var seen = new List<SeenMarker>();
+        foreach (var (key, at) in await reads.ListMarkersAsync(settings.PredecessorEvidenceStore))
+        {
+            var stored = await reads.ReadMarkerAsync(settings.PredecessorEvidenceStore, key);
+            if (stored?.VersionId is not { Length: > 0 } version || version == "null") { problems.Add($"{key} was listed and could not be read at a version."); continue; }
+            try
+            {
+                var marker = PassMarkerFormat.Parse(stored.Json, settings.Predecessor);
+                if (PassMarkerFormat.KeyFor(marker.MarkerId) != key) { problems.Add($"{key} holds {marker.MarkerId}, whose key is another."); continue; }
+                seen.Add(new SeenMarker(key, version, marker, at));
+            }
+            catch (InvalidOperationException ex) { problems.Add($"{key} is left out: {ex.Message}"); }
+        }
+
+        var executions = await reads.ExecutionsAsync(settings.StateMachineArn);
+        var names = executions.Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
+        var state = new PollState(
+            Held: false,
+            InFlight: executions.Any(e => e.Status == "RUNNING"),
+            Started: seen.Where(m => names.Contains(PromotionPoll.ExecutionNameFor(m.Marker.MarkerId))).Select(m => m.Marker.MarkerId).ToHashSet(),
+            Decided: await reads.DecisionsAsync(settings.EvidenceStore),
+            LastClosedAt: executions.Where(e => e.StoppedAt is not null).Select(e => e.StoppedAt).Max());
+        var decision = PromotionPoll.Decide(seen, state, now);
+
+        foreach (var m in decision.Supersede)
+        {
+            var body = new System.Text.Json.Nodes.JsonObject
+            {
+                ["schema"] = 1, ["markerId"] = m.Marker.MarkerId,
+                ["marker"] = new System.Text.Json.Nodes.JsonObject { ["key"] = m.Key, ["versionId"] = m.VersionId },
+                ["outcome"] = Superseded, ["execution"] = "promotion-poller", ["decidedAt"] = now.ToString("O"),
+            };
+            await writer.PutOnceAsync(settings.EvidenceStore, PassMarkerFormat.DecisionKeyFor(m.Marker.MarkerId), body.ToJsonString());
+        }
+
+        string? started = null;
+        if (decision.Start is { } start)
+        {
+            var input = new System.Text.Json.Nodes.JsonObject
+            {
+                ["marker"] = new System.Text.Json.Nodes.JsonObject { ["key"] = start.Key, ["versionId"] = start.VersionId },
+                ["target"] = settings.Target.DeepClone(),
+            };
+            started = PromotionPoll.ExecutionNameFor(start.Marker.MarkerId);
+            await starter.StartAsync(settings.StateMachineArn, started, input.ToJsonString());
+        }
+
+        foreach (var message in problems.Concat(decision.Alerts))
+            await alerts.PublishAsync(settings.AlertsTopicArn, "lz promotion poller", message);
+
+        return new System.Text.Json.Nodes.JsonObject
+        {
+            ["held"] = false,
+            ["markers"] = seen.Count,
+            ["started"] = started,
+            ["superseded"] = decision.Supersede.Count,
+            ["alerts"] = problems.Count + decision.Alerts.Count,
+        };
+    }
+}
