@@ -70,6 +70,68 @@ public static class MarkPassedStep
         return new JsonObject { ["markerId"] = marker.MarkerId, ["key"] = key, ["written"] = written, ["members"] = members.Count };
     }
 
+    /// <summary>
+    /// The one MarkPassed function's choice (V-K step 5): a verified site is marked as a site; anything else as a set.
+    /// </summary>
+    public static Task<JsonObject> RunForStateAsync(JsonObject state, string executionName, MarkPassedSettings settings,
+        IGate2EvidenceReader keys, IRecordStore reads, IEvidenceWriter writer, DateTimeOffset now)
+        => state["verified"]?["class"]?.GetValue<string>() == PassMarkerFormat.SiteClass
+            ? RunSiteAsync(state, executionName, settings, reads, writer, now)
+            : RunAsync(state, executionName, settings, keys, reads, writer, now);
+
+    /// <summary>
+    /// MARKPASSED'S SITE MODE (DecoupledCd.md V-K step 5): after a site execution's Record, the site it deployed and verified
+    /// - Record's own evidence, read at its version, <c>deployed</c>, naming the bundle this execution verified - written once
+    /// as a site marker at <c>passed/site/{sha256}.json</c>. The site has no Gate 2 (V-24): deploying and verifying it is its
+    /// pass, and the marker names no test evidence. A second pass of the same site counts as already passed.
+    /// </summary>
+    public static async Task<JsonObject> RunSiteAsync(JsonObject state, string executionName, MarkPassedSettings settings,
+        IRecordStore reads, IEvidenceWriter writer, DateTimeOffset now)
+    {
+        var verified = state["verified"] as JsonObject;
+        if (verified?["class"]?.GetValue<string>() != PassMarkerFormat.SiteClass)
+            throw new MarkPassedRefused($"this execution verified a '{verified?["class"]}' record, not a site; only a site is marked as one.");
+        var key = state["recorded"]?["key"]?.GetValue<string>()
+                  ?? throw new MarkPassedRefused("the state has no recorded evidence: Record must have written the site's deploy evidence first.");
+
+        var stored = await reads.ReadAsync(settings.EvidenceStore, key) ?? throw new MarkPassedRefused($"{key} could not be read.");
+        if (stored.VersionId is not { Length: > 0 } deployVersion || deployVersion == "null")
+            throw new MarkPassedRefused($"{key} could not be read at a version.");
+        if (JsonNode.Parse(stored.Json) is not JsonObject deploy || deploy["outcome"]?.GetValue<string>() != "deployed")
+            throw new MarkPassedRefused($"{key} does not record the site as deployed; a site that did not land is not passed.");
+
+        var identity = verified["identity"] as JsonObject ?? throw new MarkPassedRefused("the state's verified site names no identity.");
+        var landed = deploy["verified"]?["identity"] as JsonObject;
+        var version = identity["versionId"]?.GetValue<string>() ?? throw new MarkPassedRefused("the state's verified site names no bundle version.");
+        if (landed?["versionId"]?.GetValue<string>() != version || landed["sha256"]?.GetValue<string>() != identity["sha256"]?.GetValue<string>())
+            throw new MarkPassedRefused($"{key} names bundle version {landed?["versionId"]}, not {version}, the one this execution verified.");
+
+        // As a set's member: record, identity and builtFrom copied from the evidence, as Verify read them from the record.
+        var evidence = (JsonObject)deploy["verified"]!;
+        var record = deploy["record"] as JsonObject ?? throw new MarkPassedRefused($"{key} names no record.");
+        var member = new PassMarkerMember(PassMarkerFormat.SiteClass, evidence["target"]?["repo"]?.GetValue<string>() ?? throw new MarkPassedRefused($"{key} names no repository."),
+            new PassMarkerRecordReference(record["bucket"]!.GetValue<string>(), record["key"]!.GetValue<string>(),
+                evidence["recordVersionId"]?.GetValue<string>() ?? throw new MarkPassedRefused($"{key} names no record version.")),
+            new BuildRecordIdentity("bundle", Bucket: landed["bucket"]!.GetValue<string>(), Key: landed["key"]!.GetValue<string>(),
+                VersionId: version, Sha256: landed["sha256"]!.GetValue<string>()),
+            version, BuiltFromOf(evidence, key), new PassMarkerReference(key, deployVersion));
+
+        var marker = new PassMarker(PassMarkerFormat.CurrentSchema, PassMarkerFormat.MarkerIdFor(new[] { member }), settings.Environment,
+            new[] { member }, new PassMarkerEvidence(null), executionName, now.ToString("O"));
+        var markerKey = PassMarkerFormat.KeyFor(marker.MarkerId);
+        var written = await writer.PutOnceAsync(settings.EvidenceStore, markerKey, PassMarkerFormat.Write(marker));
+        return new JsonObject { ["markerId"] = marker.MarkerId, ["key"] = markerKey, ["written"] = written, ["members"] = 1 };
+    }
+
+    private static BuildRecordBuiltFrom BuiltFromOf(JsonObject verified, string key)
+    {
+        var built = verified["builtFrom"] as JsonObject ?? throw new MarkPassedRefused($"{key} names no builtFrom.");
+        return new BuildRecordBuiltFrom(
+            built["repo"]!.GetValue<string>(), built["commit"]!.GetValue<string>(), built["lane"]!.GetValue<string>(),
+            (built["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>()),
+            built["ref"]?.GetValue<string>());
+    }
+
     private static async Task<PassMarkerMember> MemberAsync(MarkMember m, MarkPassedSettings settings, IGate2EvidenceReader keys, IRecordStore reads,
         Func<JsonObject, bool> isIt, Func<JsonObject, BuildRecordIdentity> identity, Func<JsonObject, string> version)
     {
@@ -83,11 +145,7 @@ public static class MarkPassedStep
                 throw new MarkPassedRefused($"{key} could not be read at a version.");
 
             var record = deploy["record"] as JsonObject ?? throw new MarkPassedRefused($"{key} names no record.");
-            var built = verified["builtFrom"] as JsonObject ?? throw new MarkPassedRefused($"{key} names no builtFrom.");
-            var builtFrom = new BuildRecordBuiltFrom(
-                built["repo"]!.GetValue<string>(), built["commit"]!.GetValue<string>(), built["lane"]!.GetValue<string>(),
-                (built["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>()),
-                built["ref"]?.GetValue<string>());
+            var builtFrom = BuiltFromOf(verified, key);
             return new PassMarkerMember(m.Class, m.Repo,
                 new PassMarkerRecordReference(record["bucket"]!.GetValue<string>(), record["key"]!.GetValue<string>(), verified["recordVersionId"]!.GetValue<string>()),
                 identity(verified), version(verified), builtFrom, new PassMarkerReference(key, deployVersion));

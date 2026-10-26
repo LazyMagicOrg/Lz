@@ -1004,6 +1004,13 @@ public static class DeployerPlanner
             markPassedFn = FnArn(markPassed);
         }
 
+        // THE SITE, PROMOTED (V-K step 5): where the site repository builds a bundle for the successor too, site-{successor},
+        // a site execution writes its site marker after Record, through the same function. Otherwise it ends Recorded (V-24).
+        var marksSite = markPassedFn is not null && p.Successor is { } next
+            && SiteApps(config).Count > 0
+            && p.AcceptedRepositories.Any(r => r.Repo == SiteApps(config)[0].Repo
+                                               && (r.Artifacts ?? new List<string>()).Contains(SiteArtifacts.ArtifactFor(next.Environment)));
+
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
 
         // THE WRITER PIN (P5 stage D), on the evidence store of an environment in a chain of more than one: the store another
@@ -1025,7 +1032,7 @@ public static class DeployerPlanner
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
                                       gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName),
-                                      decideFn, setHoldFn, recordRevertFn, markPassedFn),
+                                      decideFn, setHoldFn, recordRevertFn, markPassedFn, marksSite),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -3076,7 +3083,8 @@ public static class DeployerPlanner
         (string DeployBundle, string VerifyBundle)? bundleFunctions = null,
         (string DeploySite, string VerifySite)? siteFunctions = null,
         (string Start, string Result, string Project)? gate2 = null,
-        string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null, string? markPassedFn = null)
+        string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null, string? markPassedFn = null,
+        bool marksSite = false)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -3305,10 +3313,25 @@ public static class DeployerPlanner
             states["GatesThisClass"] = new
             {
                 Type = "Choice",
-                Choices = new[] { new { Variable = "$.verified.class", StringEquals = BuildRecordFormat.SiteClass, Next = "Recorded" } },
+                Choices = new[] { new { Variable = "$.verified.class", StringEquals = BuildRecordFormat.SiteClass, Next = marksSite ? "MarkSitePassed" : "Recorded" } },
                 Default = "Gate2Start",
             };
             states["Recorded"] = new { Type = "Succeed" };
+            if (marksSite)
+            {
+                // THE SITE MARKER (V-K step 5): the site deployed and verified is its pass, since it has no Gate 2 (V-24). A
+                // fault ends MarkPassedFailed, as a set's does: the site is deployed and recorded, and only test will not see it.
+                states["MarkSitePassed"] = new
+                {
+                    Type = "Task",
+                    Resource = markPassedFn,
+                    Parameters = payload,
+                    ResultPath = "$.marked",
+                    Retry = new[] { Transient(), EvidenceWrite() },
+                    Next = "Recorded",
+                    Catch = new[] { new { ErrorEquals = new[] { "States.ALL" }, Next = "MarkPassedFailed", ResultPath = "$.markError" } },
+                };
+            }
             states["Gate2Start"] = new
             {
                 Type = "Task",

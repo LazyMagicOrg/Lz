@@ -34,7 +34,7 @@ public sealed class Gate2StartFunction
 
 /// <summary>
 /// MarkPassed (P5 stage D): after a passed Gate 2, the set it found running written once as this environment's pass marker,
-/// for the next environment in the chain to read.
+/// for the next environment in the chain to read; after a site's Record, the site as a site marker (V-K step 5).
 /// </summary>
 public sealed class MarkPassedFunction
 {
@@ -46,7 +46,7 @@ public sealed class MarkPassedFunction
             System.Text.Json.JsonSerializer.Deserialize<List<MarkMember>>(Required(DeployerEnvironment.MarkMembers),
                 new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!);
 
-        var result = await MarkPassedStep.RunAsync(state, executionName, settings,
+        var result = await MarkPassedStep.RunForStateAsync(state, executionName, settings,
             new S3Gate2Objects(Clients.S3.Value), new S3RecordStore(Clients.S3.Value), new S3EvidenceWriter(Clients.S3.Value), DateTimeOffset.UtcNow);
         context.Logger.LogInformation($"{executionName}: pass marker {result["key"]} for {result["members"]} member(s) (written: {result["written"]})");
         return Io.Write(result);
