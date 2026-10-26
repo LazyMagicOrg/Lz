@@ -1006,14 +1006,21 @@ public static class DeployerPlanner
 
         var invoked = functions.Where(f => f.InvokedByStateMachine).Select(f => FnArn(f.Name)).ToList();
 
+        // THE WRITER PIN (P5 stage D), on the evidence store of an environment in a chain of more than one: the store another
+        // environment reads, or the one it decides by.
+        var pinned = p.Successor is not null || p.Predecessor is not null;
+
         return new PipelineDeployer(
             StateMachineName: machine,
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null, p.Gate2IsOn ? gate2?.ProjectArn : null),
-            DenyPolicy: DenyPolicyFor(p.Gate2IsOn && gate2 is not null ? new[] { CodeBuildSyncRuleArn(region, acct) } : null),
+            DenyPolicy: DenyPolicyFor(p.Gate2IsOn && gate2 is not null ? new[] { CodeBuildSyncRuleArn(region, acct) } : null,
+                                      pinned ? evidence : null),
             EvidenceStore: evidence,
-            EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
+            EvidenceStorePolicy: pinned
+                ? new[] { WriteOnceStore.Deny(evidence) }.Concat(EvidencePin(acct, evidence, functions)).Concat(SuccessorReadGrant(sk, evidence, p.Successor)).ToArray()
+                : new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
@@ -1822,7 +1829,97 @@ public static class DeployerPlanner
     /// in the target account, and the build account's bucket policy names it — a rename on one side
     /// alone would leave Verify unable to read a single record, with an access denial that names neither.
     /// </summary>
-    public static string VerifyRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-verify-fn";
+    public static string VerifyRoleName(SystemConfig config) => VerifyRoleNameFor(config.SystemKey, config.Environment);
+
+    /// <summary>Another environment's Verify role, by the same rule, for a grant that names it (P5 stage D).</summary>
+    public static string VerifyRoleNameFor(string systemKey, string environment) => $"{systemKey}-{environment}-deployer-verify-fn";
+
+    /// <summary>Another environment's poller role, by the same rule as <see cref="PromotionPollerFunctionName"/>.</summary>
+    public static string PollerRoleNameFor(string systemKey, string environment) => $"{systemKey}-{environment}-deployer-poller-fn";
+
+    /// <summary>Each evidence prefix and the handlers whose functions may put under it (P5 stage D), in this order.</summary>
+    public static readonly (string Prefix, string[] Writers)[] EvidenceWriters =
+    {
+        ("deploys/", new[] { DeployerHandlers.Record, DeployerHandlers.RecordFailure }),
+        ("failures/", new[] { DeployerHandlers.Record, DeployerHandlers.RecordFailure }),
+        ("tests/", new[] { DeployerHandlers.Gate2Result }),
+        ("passed/", new[] { DeployerHandlers.MarkPassed }),
+        ("decisions/", new[] { DeployerHandlers.Decide, DeployerHandlers.PromotionPoller }),
+        ("reverts/", new[] { DeployerHandlers.RecordRevert }),
+        ("anomalies/", new[] { DeployerHandlers.Corroborate }),
+        // V-H, deferred (owner, 2026-10-26): no writer until the DataSteps result function exists.
+        ("datasteps/", Array.Empty<string>()),
+    };
+
+    /// <summary>
+    /// THE WRITER PIN (P5 stage D): for each prefix, a Deny of <c>s3:PutObject</c> to every principal but the roles of the
+    /// functions planned to write it - so a prefix no planned function writes is denied to everyone - and a Deny of every
+    /// delete. A bucket-policy Deny binds administrators too; changing it is the break-glass path, and no deployer role may.
+    /// </summary>
+    private static IEnumerable<System.Text.Json.Nodes.JsonObject> EvidencePin(string acct, string evidence, IReadOnlyList<DeployerFunction> functions)
+    {
+        foreach (var (prefix, handlers) in EvidenceWriters)
+        {
+            var writers = handlers.SelectMany(h => functions.Where(f => f.Handler == h)).Select(f => $"arn:aws:iam::{acct}:role/{f.RoleName}").Distinct().ToList();
+            var statement = new System.Text.Json.Nodes.JsonObject
+            {
+                ["Sid"] = $"LzOnlyItsWritersPut{char.ToUpperInvariant(prefix[0])}{prefix[1..^1]}",
+                ["Effect"] = "Deny",
+                ["Principal"] = "*",
+                ["Action"] = "s3:PutObject",
+                ["Resource"] = $"arn:aws:s3:::{evidence}/{prefix}*",
+            };
+            if (writers.Count > 0)
+                statement["Condition"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["ArnNotLike"] = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["aws:PrincipalArn"] = new System.Text.Json.Nodes.JsonArray(writers.Select(w => (System.Text.Json.Nodes.JsonNode?)w).ToArray()),
+                    },
+                };
+            yield return statement;
+        }
+        yield return new System.Text.Json.Nodes.JsonObject
+        {
+            ["Sid"] = "LzNoOneDeletesEvidence",
+            ["Effect"] = "Deny",
+            ["Principal"] = "*",
+            ["Action"] = new System.Text.Json.Nodes.JsonArray("s3:DeleteObject", "s3:DeleteObjectVersion"),
+            ["Resource"] = $"arn:aws:s3:::{evidence}/*",
+        };
+    }
+
+    /// <summary>
+    /// THE READ GRANT, THIS STORE'S HALF (P5 stage D): the successor's poller and Verify may list its markers and read them and
+    /// the evidence they name. The successor's roles hold the other half in their own policies. None without a successor.
+    /// </summary>
+    private static IEnumerable<System.Text.Json.Nodes.JsonObject> SuccessorReadGrant(string sk, string evidence, PipelineNeighbour? successor)
+    {
+        if (successor is null) yield break;
+        System.Text.Json.Nodes.JsonObject Readers() => new()
+        {
+            ["AWS"] = new System.Text.Json.Nodes.JsonArray(
+                $"arn:aws:iam::{successor.AccountId}:role/{VerifyRoleNameFor(sk, successor.Environment)}",
+                $"arn:aws:iam::{successor.AccountId}:role/{PollerRoleNameFor(sk, successor.Environment)}"),
+        };
+        yield return new System.Text.Json.Nodes.JsonObject
+        {
+            ["Sid"] = "LzTheSuccessorListsMarkers",
+            ["Effect"] = "Allow",
+            ["Principal"] = Readers(),
+            ["Action"] = "s3:ListBucket",
+            ["Resource"] = $"arn:aws:s3:::{evidence}",
+            ["Condition"] = new System.Text.Json.Nodes.JsonObject { ["StringLike"] = new System.Text.Json.Nodes.JsonObject { ["s3:prefix"] = "passed/*" } },
+        };
+        yield return new System.Text.Json.Nodes.JsonObject
+        {
+            ["Sid"] = "LzTheSuccessorReadsMarkersAndEvidence",
+            ["Effect"] = "Allow",
+            ["Principal"] = Readers(),
+            ["Action"] = new System.Text.Json.Nodes.JsonArray("s3:GetObject", "s3:GetObjectVersion"),
+            ["Resource"] = new System.Text.Json.Nodes.JsonArray($"arn:aws:s3:::{evidence}/passed/*", $"arn:aws:s3:::{evidence}/deploys/*", $"arn:aws:s3:::{evidence}/tests/*"),
+        };
+    }
 
     /// <summary>Gate2Start's role, which the build account's stores grant the tests records and bundles to (V-E).</summary>
     public static string Gate2StartRoleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-gate2-start-fn";
@@ -2878,8 +2975,20 @@ public static class DeployerPlanner
     /// <c>events:PutTargets</c> are denied on every resource but those, named exactly, and every other rule action stays
     /// denied on them too. Without such a task the policy is the one statement it always was.</para>
     /// </summary>
-    internal static string DenyPolicyFor(IReadOnlyList<string>? syncManagedRules = null)
+    internal static string DenyPolicyFor(IReadOnlyList<string>? syncManagedRules = null, string? pinnedEvidenceStore = null)
     {
+        // A PINNED EVIDENCE STORE (P5 stage D): no deployer role may lift the pin or expire the evidence.
+        object? evidenceStatement = pinnedEvidenceStore is null ? null : new
+        {
+            Sid = "NorChangeTheEvidenceStoresPolicyOrLifecycle",
+            Effect = "Deny",
+            Action = new[] { "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration" },
+            Resource = $"arn:aws:s3:::{pinnedEvidenceStore}",
+        };
+        if (syncManagedRules is not { Count: > 0 } && evidenceStatement is not null)
+            return Policy(
+                new { Sid = "TheDeployerMayNotRewriteThePipeline", Effect = "Deny", Action = PipelineBootstrapPlanner.SelfRewriteDenied, Resource = "*" },
+                evidenceStatement);
         if (syncManagedRules is not { Count: > 0 })
             return JsonSerializer.Serialize(new
             {
@@ -2897,7 +3006,8 @@ public static class DeployerPlanner
             }, Asl);
 
         var putRules = new[] { "events:PutRule", "events:PutTargets" };
-        return Policy(
+        var statements = new List<object>
+        {
             new
             {
                 Sid = "TheDeployerMayNotRewriteThePipeline",
@@ -2911,7 +3021,10 @@ public static class DeployerPlanner
                 Effect = "Deny",
                 Action = putRules,
                 NotResource = syncManagedRules.ToArray(),
-            });
+            },
+        };
+        if (evidenceStatement is not null) statements.Add(evidenceStatement);
+        return Policy(statements.ToArray());
     }
 
     /// <summary>The rule Step Functions manages for <c>codebuild:startBuild.sync</c> in this account and region.</summary>
