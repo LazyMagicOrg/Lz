@@ -51,7 +51,8 @@ public static class DeployerBootstrapper
 
         // THE TRIGGER'S INPUTS ARE READ ONLY FOR AN ENVIRONMENT THAT HAS ONE: the cluster that exists here, and the tenants
         // whose services a build rolls. Both are reads, so the dry run shows the real routes.
-        var triggerInputs = DeployerPlanner.TriggerWanted(config)
+        // A promoted environment's poller names the image's service too (P5 stage I), so the same reads.
+        var triggerInputs = DeployerPlanner.TriggerWanted(config) || config.Pipeline?.Predecessor is not null
             ? await ResolveTriggerInputsAsync(config, profile, region)
             : null;
         // THE DISTRIBUTIONS A CLIENT DEPLOY INVALIDATES, read only where a client repository names its web app (P4 stage C).
@@ -98,6 +99,17 @@ public static class DeployerBootstrapper
 
         if (plan.Gate2 is { } plannedGate2)
             PrintGate2(config, plannedGate2);
+
+        if (plan.Promotion is { } plannedPromotion)
+        {
+            var predecessor = config.Pipeline!.Predecessor!;
+            Console.WriteLine($"  PROMOTED INTO from {predecessor.Environment} (P5): deploys only sets whose pass markers are in {predecessor.EvidenceStore}");
+            Console.WriteLine($"    poller:   {plannedPromotion.PollerFunctionName}, {plannedPromotion.ScheduleExpression} by {plannedPromotion.ScheduleRuleName}, " +
+                              $"reserved concurrency {plannedPromotion.ReservedConcurrency}, events at most {plannedPromotion.MaximumEventAgeSeconds} s old, never retried");
+            Console.WriteLine($"    hold:     {plannedPromotion.HoldParameter}, created 'off' if missing and never reset; anything else, or missing, starts nothing");
+            Console.WriteLine($"    alarms:   {string.Join(", ", plannedPromotion.Alarms.Select(a => a.Name))}");
+            Console.WriteLine($"    decide:   {DeployerHandlers.Decide.Split("::")[1]} writes decisions/ in {plan.EvidenceStore}");
+        }
 
         if (!apply)
         {
@@ -222,6 +234,16 @@ public static class DeployerBootstrapper
             // the flag off, the rules and alarm an earlier run created are taken away.
             if (plan.Alerts is { } alerts)
                 await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts);
+
+            // THE POLLER, AFTER THE MACHINE IT STARTS AND THE TOPIC IT ALARMS ON (P5 stage I), and the hold it reads first (J).
+            if (plan.Promotion is { } promotion)
+            {
+                using var ssm = creds != null
+                    ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(creds, endpoint)
+                    : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+                await PromotionApply.EnsureHoldAsync(ssm, promotion.HoldParameter);
+                await PromotionApply.WireAsync(events, lambda, cloudWatch, promotion, plan.Alerts!.TopicArn);
+            }
             else
                 await AlertsApply.RemoveAsync(events, cloudWatch, DeployerPlanner.FailedDeployRuleName(config),
                     DeployerPlanner.CorroborateScheduleRuleName(config), DeployerPlanner.CorroborateErrorsAlarmName(config));
