@@ -39,7 +39,7 @@ public static class EcrRepositoryNaming
     /// </param>
     public static string For(SystemConfig config, string serviceName, string? tenantKey = null)
         => IsNeutral(config)
-            ? Neutral(config.SystemKey, config.SystemSuffix, serviceName)
+            ? Neutral(config.SystemKey, PipelineBootstrapPlanner.BuildSuffixFor(config), serviceName)
             : Environment(config.SystemKey, config.SystemSuffix, config.Environment,
                           tenantKey ?? throw new InvalidOperationException(
                               $"ECR repository name for '{serviceName}' needs a tenant key under the " +
@@ -89,7 +89,7 @@ public static class EcrRepositoryNaming
     public static bool PipelineBuildsImage(SystemConfig config, string serviceName)
         => config.Pipeline is { Enabled: true } pipeline
            && pipeline.Classes?.Contains("image", StringComparer.Ordinal) == true
-           && (pipeline.Repositories ?? new List<PipelineRepositoryConfig>()).Any(r =>
+           && pipeline.AcceptedRepositories.Any(r =>
                string.Equals(r.Class, "image", StringComparison.Ordinal)
                && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal));
 

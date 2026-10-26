@@ -224,7 +224,18 @@ public static class ConfigLoader
 
         if (config.Pipeline is null) return;   // an environment outside the pipeline reads nothing from it
         var buildSide = Deserializer.Deserialize<BuildSideConfig>(File.ReadAllText(buildSidePath)) ?? new BuildSideConfig();
-        var problems = buildSide.Problems();
+        var problems = buildSide.Problems().ToList();
+        // EVERY ENVIRONMENT'S Classes, from its own config beside this one (P5 stage A): an environment plans only the
+        // repositories it accepts, so one that none accepts is a repository nothing deploys.
+        var classes = new Dictionary<string, IReadOnlyList<string>?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in buildSide.Chain ?? new())
+        {
+            if (string.IsNullOrWhiteSpace(e.Environment)) continue;
+            var sibling = Path.Combine(Path.GetDirectoryName(buildSidePath)!, $"systemconfig.{systemKey}.{e.Environment}.yaml");
+            if (string.Equals(e.Environment, environment, StringComparison.OrdinalIgnoreCase)) classes[e.Environment] = config.Pipeline.Classes;
+            else if (File.Exists(sibling)) classes[e.Environment] = Deserializer.Deserialize<SystemConfig>(File.ReadAllText(sibling))?.Pipeline?.Classes;
+        }
+        problems.AddRange(buildSide.UnacceptedRepositories(classes));
         if (problems.Count > 0)
             throw new InvalidOperationException(
                 $"{BuildSideConfig.FileNameFor(systemKey)}: {string.Join("; ", problems)}.");

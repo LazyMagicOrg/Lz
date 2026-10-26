@@ -26,7 +26,12 @@ public class SiteConfigTests
     {
         BuildAccountId = "147440642635",
         Repositories = new() { repo },
-        Chain = new() { new() { Environment = "dev", AccountId = "503947800380" }, new() { Environment = "test", AccountId = "456687462751" } },
+        BuildSuffix = "4df6-b9c6",
+        Chain = new()
+        {
+            new() { Environment = "dev", AccountId = "503947800380", EvidenceStore = "scu-dev-deploy-evidence-4df6-b9c6" },
+            new() { Environment = "test", AccountId = "456687462751", EvidenceStore = "scu-test-deploy-evidence-d5e0-b27f" },
+        },
     };
 
     [Fact]

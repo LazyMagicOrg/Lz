@@ -25,6 +25,17 @@ public class BuildSideConfig
     /// <summary>Registry hardening, shared by every environment the images replicate to.</summary>
     public PipelineRegistryConfig? Registry { get; set; }
 
+    /// <summary>
+    /// The suffix every build-account name carries (DecoupledCd.md §12 P5 stage A): the record and artifact stores, the
+    /// neutral image repository and the intake's stores. One value for the system, so every environment in the chain names
+    /// the same build side; required once the chain has more than one environment. Absent, each environment's own
+    /// SystemSuffix is used, as before P5.
+    /// </summary>
+    public string? BuildSuffix { get; set; }
+
+    /// <summary>A suffix as AWS names take it: lowercase letters and digits, in groups joined by single hyphens.</summary>
+    public const string SuffixPattern = "^[a-z0-9]+(-[a-z0-9]+)*$";
+
     /// <summary>The repositories the build account takes artifacts from (the intake's allowlist under v5).</summary>
     public List<PipelineRepositoryConfig>? Repositories { get; set; }
 
@@ -35,7 +46,7 @@ public class BuildSideConfig
     public List<PipelineChainEntry>? Chain { get; set; }
 
     /// <summary>The fields an environment config may no longer name in its <c>Pipeline</c> block.</summary>
-    public static readonly string[] MovedFields = { "ArtifactAccountId", "DeployOnBuildRecord", "Repositories", "Registry" };
+    public static readonly string[] MovedFields = { "ArtifactAccountId", "DeployOnBuildRecord", "Repositories", "Registry", "BuildSuffix" };
 
     public static string FileNameFor(string systemKey) => $"pipelineconfig.{systemKey}.yaml";
 
@@ -48,9 +59,17 @@ public class BuildSideConfig
         else if (!Regex.IsMatch(BuildAccountId, @"^\d{12}$"))
             p.Add($"BuildAccountId is '{BuildAccountId}', not a 12-digit AWS account id");
 
+        if (BuildSuffix is { } suffix && !Regex.IsMatch(suffix, SuffixPattern))
+            p.Add($"BuildSuffix is '{suffix}', not lowercase letters and digits in hyphen-joined groups");
+        var promoted = Chain is { Count: > 1 };
+        if (promoted && string.IsNullOrWhiteSpace(BuildSuffix))
+            p.Add("the Chain has more than one environment, so BuildSuffix is required: every environment names the build side by it, not by its own SystemSuffix");
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in Chain ?? new())
         {
+            if (promoted && !string.IsNullOrWhiteSpace(entry.Environment) && string.IsNullOrWhiteSpace(entry.EvidenceStore))
+                p.Add($"Chain entry '{entry.Environment}' names no EvidenceStore; in a chain of more than one, the next environment reads its pass markers there");
             if (string.IsNullOrWhiteSpace(entry.Environment)) { p.Add("a Chain entry has no Environment"); continue; }
             if (!seen.Add(entry.Environment)) p.Add($"Chain names '{entry.Environment}' twice");
             if (entry.AccountId is null || !Regex.IsMatch(entry.AccountId, @"^\d{12}$"))
@@ -220,6 +239,20 @@ public class BuildSideConfig
     }
 
     /// <summary>
+    /// The repositories whose class no environment in the chain accepts (P5 stage A): each would be taken in by the intake
+    /// and deployed nowhere. Given each environment's <c>Classes</c> as its config names them; an environment whose config is
+    /// not beside this file is left out, and a build-side class, which no environment deploys, is never refused.
+    /// </summary>
+    public IReadOnlyList<string> UnacceptedRepositories(IReadOnlyDictionary<string, IReadOnlyList<string>?> classesByEnvironment)
+        => (Repositories ?? new())
+            .Where(r => r.Class is { } c && !PipelineConfig.BuildSideClasses.Contains(c)
+                && classesByEnvironment.Count > 0
+                && !classesByEnvironment.Values.Any(classes => classes is not { Count: > 0 } || classes.Contains(c)))
+            .Select(r => $"{r.Repo} builds class '{r.Class}', which no environment in the Chain accepts (" +
+                         string.Join("; ", classesByEnvironment.Select(e => $"{e.Key}: {string.Join(", ", e.Value ?? new List<string>())}")) + ")")
+            .ToList();
+
+    /// <summary>
     /// Fills the moved fields into one environment's in-memory <see cref="PipelineConfig"/>. A chain entry for this
     /// environment must name the account the environment deploys into; anything else is two files disagreeing about
     /// where an environment is.
@@ -229,12 +262,15 @@ public class BuildSideConfig
         pipeline.ArtifactAccountId = BuildAccountId;
         pipeline.Registry = Registry;
         pipeline.Repositories = Repositories;
+        pipeline.BuildSuffix = BuildSuffix;
 
         var entry = Chain?.FirstOrDefault(c => string.Equals(c.Environment, environment, StringComparison.OrdinalIgnoreCase));
         if (entry is not null && pipeline.TargetAccountId is { } target && !string.Equals(entry.AccountId, target, StringComparison.Ordinal))
             throw new InvalidOperationException(
                 $"the promotion chain places '{environment}' in account {entry.AccountId}, but its systemconfig deploys " +
                 $"into {target} (Pipeline.TargetAccountId). One of the two files is wrong.");
+
+        pipeline.ChainEvidenceStore = entry?.EvidenceStore;
 
         pipeline.DeployOnBuildRecord = Chain is { Count: > 0 }
             && string.Equals(Chain[0].Environment, environment, StringComparison.OrdinalIgnoreCase);
@@ -246,6 +282,12 @@ public class PipelineChainEntry
 {
     public string? Environment { get; set; }
     public string? AccountId { get; set; }
+
+    /// <summary>
+    /// The environment's evidence store, where its pass markers are written and the next environment reads them (P5 stage
+    /// D). Required in a chain of more than one; the environment's deployer refuses to create any other.
+    /// </summary>
+    public string? EvidenceStore { get; set; }
 }
 
 /// <summary>A site repository's artifacts (DecoupledCd.md V-24): one bundle per environment, named <c>site-{environment}</c>.</summary>

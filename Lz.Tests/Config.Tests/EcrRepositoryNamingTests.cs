@@ -60,10 +60,15 @@ public class EcrRepositoryNamingTests
     {
         // This is the property that makes promotion by replication meaningful — the thing that
         // arrives in prod is provably the thing that was built.
+        // Since P5 stage A each environment keeps its own SystemSuffix, and the build side's BuildSuffix names the
+        // repository: two environments with different suffixes still name one repository.
         var dev = Config("neutral");
         var prod = Config("neutral");
         prod.Environment = "prod";
+        prod.SystemSuffix = "d5e0-b27f";
+        dev.Pipeline!.BuildSuffix = prod.Pipeline!.BuildSuffix = dev.SystemSuffix;
 
+        Assert.NotEqual(dev.SystemSuffix, prod.SystemSuffix);
         Assert.Equal(EcrRepositoryNaming.For(dev, "aiphost"), EcrRepositoryNaming.For(prod, "aiphost"));
     }
 

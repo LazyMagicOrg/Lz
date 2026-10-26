@@ -30,7 +30,7 @@ public static class IntakePushProbe
     public const string WrongTag = "probe-wrong";
     public static readonly string WrongDigest = "sha256:" + new string('0', 64);
 
-    public static string RepositoryFor(SystemConfig c) => $"{c.SystemKey}-intake-probe-{c.SystemSuffix}";
+    public static string RepositoryFor(SystemConfig c) => $"{c.SystemKey}-intake-probe-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
     public static string ProfileFor(SystemConfig c) => $"{c.SystemKey}_intake_probe";
     public static string FunctionFor(SystemConfig c) => $"{c.SystemKey}-intake-push";
 

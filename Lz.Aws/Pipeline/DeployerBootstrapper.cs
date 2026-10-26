@@ -586,7 +586,7 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    {alerts.CorroborateFunctionName} runs {alerts.ScheduleExpression}: an image in this environment's pipeline repository " +
                               "that no build record names is recorded once under anomalies/ and alerted once");
             if (alerts.BundlePrefixes is { Count: > 0 } bundlePrefixes)
-                Console.WriteLine($"      and a bundle version under {string.Join(", ", bundlePrefixes)} in {PipelineBootstrapPlanner.ArtifactStoreFor(config.SystemKey, config.SystemSuffix)} " +
+                Console.WriteLine($"      and a bundle version under {string.Join(", ", bundlePrefixes)} in {PipelineBootstrapPlanner.ArtifactStoreFor(config.SystemKey, PipelineBootstrapPlanner.BuildSuffixFor(config))} " +
                                   "that its record does not name, the same way");
             Console.WriteLine($"    alarm {alerts.CorroborateErrorsAlarmName}: a sweep that fails -> the topic");
         }

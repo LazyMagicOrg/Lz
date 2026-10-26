@@ -159,6 +159,28 @@ public class PipelineConfig
     public string? Gate2BrowserTests { get; set; }
 
     /// <summary>
+    /// The suffix every build-account name carries - the record and artifact stores, the neutral image repository, the
+    /// intake's stores (DecoupledCd.md §12 P5 stage A). Filled from the build-side file's <c>BuildSuffix</c>; never named in
+    /// an environment config. Null means the environment's own <c>SystemSuffix</c>, as every name was before P5.
+    /// </summary>
+    public string? BuildSuffix { get; set; }
+
+    /// <summary>
+    /// This environment's evidence store as the promotion chain names it, filled from the build-side file. The next
+    /// environment reads this environment's pass markers there (P5 stage D), so the deployer refuses to create any other.
+    /// </summary>
+    public string? ChainEvidenceStore { get; set; }
+
+    /// <summary>
+    /// The repositories this environment plans for: those whose class <see cref="Classes"/> accepts, and the build-side
+    /// classes, which no environment deploys (P5 stage A). <see cref="Repositories"/> stays the build side's whole allowlist,
+    /// which the intake takes runs from; a repository no environment in the chain accepts is refused when the file is read.
+    /// </summary>
+    public IReadOnlyList<PipelineRepositoryConfig> AcceptedRepositories => (Repositories ?? new List<PipelineRepositoryConfig>())
+        .Where(r => Classes is not { Count: > 0 } || (r.Class is { } c && (Classes.Contains(c) || BuildSideClasses.Contains(c))))
+        .ToList();
+
+    /// <summary>
     /// Which artifact classes this environment accepts. Required when <see cref="Enabled"/>.
     ///
     /// <para>SIX NAMES COVER THE EIGHT CLASSES of DecoupledCd.md section 3, because classes 5, 6

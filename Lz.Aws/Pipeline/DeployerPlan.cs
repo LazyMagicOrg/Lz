@@ -590,7 +590,7 @@ public static class DeployerPlanner
             .Where(r => r.SigningProfile != null)
             .Select(r => PipelineBootstrapPlanner.SigningProfileArn(region, artifactAccount, r.SigningProfile!))
             .ToList();
-        var buildRecordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, config.SystemSuffix);
+        var buildRecordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
 
         if (imageRepositories.Count == 0)
             throw new InvalidOperationException(
@@ -606,6 +606,12 @@ public static class DeployerPlanner
         // The evidence bucket lives in the TARGET account, unlike the three build-account stores:
         // it records what happened HERE, and §4.7 wants it replicated rather than shared.
         var evidence = $"{sk}-{env}-deploy-evidence-{config.SystemSuffix}";
+        // THE CHAIN NAMES IT (P5 stage A): the next environment reads this one's pass markers where the chain says they are,
+        // so a deployer that would create a store by another name is refused before it creates anything.
+        if (p.ChainEvidenceStore is { } named && !string.Equals(named, evidence, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"the promotion chain names {named} as {env}'s evidence store, but this deployer creates {evidence}; " +
+                $"the next environment would read its pass markers from a store that is not there. Correct the Chain entry in {BuildSideConfig.FileNameFor(sk)}.");
 
         var verify = $"{sk}-{env}-deployer-verify";
         if ($"{verify}-fn" != VerifyRoleName(config))
@@ -621,7 +627,7 @@ public static class DeployerPlanner
         // CLIENT BUNDLES (P4 stage C), only where a client repository names the web app it deploys as. Without one the plan
         // is what it was before class 2 existed, byte for byte — the Verify function's environment and grants included.
         var clientTargets = ClientTargetsFor(config, clientInputs);
-        var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, config.SystemSuffix);
+        var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
         // THE SITE (V-24), only where a site repository names this environment's bundle; otherwise nothing of it is planned.
         var siteTargets = SiteTargetsFor(config, siteInputs);
 
@@ -634,7 +640,7 @@ public static class DeployerPlanner
         };
         var verifyGrants = VerifyGrants(region, acct, sk, env, buildRecordStore, imageRepositories);
         // §4.4 step 1b (V-D): written only once a repository is Verify: live, so the plan is otherwise as it was.
-        var live = (p.Repositories ?? new List<PipelineRepositoryConfig>()).Where(r => r.Verify == "live").Select(r => r.Repo!).ToList();
+        var live = p.AcceptedRepositories.Where(r => r.Verify == "live").Select(r => r.Repo!).ToList();
         if (live.Count > 0) verifyEnvironment[DeployerEnvironment.VerifyLiveRepositories] = DeployerEnvironment.Join(live);
         if (clientTargets.Count > 0)
         {
@@ -832,7 +838,7 @@ public static class DeployerPlanner
                 },
                 TimeoutSeconds: 120, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
-            var imageGate1 = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+            var imageGate1 = p.AcceptedRepositories
                 .Where(r => BuildRecordFormat.IsImageClass(r.Class ?? "") && r.Gate1 is { Run: not null, SdkVersion: not null, SdkSha512: not null })
                 .Select(r => r.Gate1!).FirstOrDefault()
                 ?? throw new InvalidOperationException(
@@ -900,7 +906,7 @@ public static class DeployerPlanner
         if (config.Pipeline is not { Enabled: true } p || p.Classes?.Contains(BuildRecordFormat.SiteClass) != true)
             return Array.Empty<SiteApp>();
 
-        var apps = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+        var apps = p.AcceptedRepositories
             .Where(r => string.Equals(r.Class, BuildRecordFormat.SiteClass, StringComparison.Ordinal)
                         && (r.Artifacts ?? new List<string>()).Contains(SiteArtifacts.ArtifactFor(config.Environment)))
             .Select(r => new SiteApp(r.Repo!, config.Environment,
@@ -951,7 +957,7 @@ public static class DeployerPlanner
         if (config.Pipeline is not { Enabled: true } p || p.Classes?.Contains("client") != true)
             return Array.Empty<ClientApp>();
 
-        var named = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+        var named = p.AcceptedRepositories
             .Where(r => string.Equals(r.Class, "client", StringComparison.Ordinal) && r.Artifacts is { Count: > 0 })
             .ToList();
         if (named.Count == 0)
@@ -1078,7 +1084,7 @@ public static class DeployerPlanner
         string evidence, IReadOnlyList<string> imageRepositories, string stateMachineArn, DeployerTriggerPlan? trigger,
         IReadOnlyList<ClientTarget> clientTargets, string artifactStore, IReadOnlyList<SiteTarget> siteTargets)
     {
-        var sources = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+        var sources = p.AcceptedRepositories
             .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
             .SelectMany(r => (r.Artifacts ?? new List<string>()).Select(artifact => new CorroborateSource(
                 EcrRepositoryNaming.For(config, artifact), BuildRecordFormat.PrefixFor(DeployerTrigger.RecordClass, r.Repo!))))
@@ -1198,7 +1204,7 @@ public static class DeployerPlanner
 
         var sk = config.SystemKey;
 
-        var routes = (p.Repositories ?? new List<PipelineRepositoryConfig>())
+        var routes = p.AcceptedRepositories
             .Where(r => string.Equals(r.Class, DeployerTrigger.RecordClass, StringComparison.Ordinal))
             .Select(r =>
             {
@@ -1394,7 +1400,7 @@ public static class DeployerPlanner
         if (SignatureHooksFor(config, serviceName) is not { Count: > 0 }) return null;
 
         // The hook is attached only to a service the pipeline builds, so a repository entry names it.
-        var builtBy = config.Pipeline!.Repositories!.First(r =>
+        var builtBy = config.Pipeline!.AcceptedRepositories.First(r =>
             string.Equals(r.Class, "image", StringComparison.Ordinal)
             && (r.Artifacts ?? new List<string>()).Contains(serviceName, StringComparer.Ordinal)).Repo;
 

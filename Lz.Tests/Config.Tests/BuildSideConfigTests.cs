@@ -37,6 +37,7 @@ public class BuildSideConfigTests : IDisposable
 
     private const string BuildSide = """
         BuildAccountId: "147440642635"
+        BuildSuffix: "test"
         Registry:
           RepositoryNaming: neutral
           TagImmutability: true
@@ -50,8 +51,10 @@ public class BuildSideConfigTests : IDisposable
         Chain:
           - Environment: dev
             AccountId: "503947800380"
+            EvidenceStore: t-dev-deploy-evidence-test
           - Environment: test
             AccountId: "456687462751"
+            EvidenceStore: t-test-deploy-evidence-test
         """;
 
     private string Write(string env, string body, string? buildSide = BuildSide)
@@ -95,6 +98,10 @@ public class BuildSideConfigTests : IDisposable
 
         var merged = ConfigLoader.LoadSystemConfig(Write("dev", EnvPipeline())).Pipeline!;
 
+        // P5 stage A's two fields are filled by the move and named in no single file; everything else is as it was.
+        Assert.Equal(("test", "t-dev-deploy-evidence-test"), (merged.BuildSuffix, merged.ChainEvidenceStore));
+        merged.BuildSuffix = null;
+        merged.ChainEvidenceStore = null;
         Assert.Equal(Json(old), Json(merged));
     }
 

@@ -91,7 +91,7 @@ public static class ConfigValidator
                 "rule), or remove EcrUntaggedImageRetentionDays.");
         }
 
-        if (config.Pipeline != null) ValidatePipeline(config.Pipeline, config.Rollback, errors);
+        if (config.Pipeline != null) ValidatePipeline(config.Pipeline, config.Rollback, config.SystemSuffix, errors);
 
         // Topology-specific prerequisites (e.g., VpcCidr for topologies with a
         // private network) live in the platform library's topology descriptor
@@ -220,7 +220,7 @@ public static class ConfigValidator
     /// using it", and validating its contents would make writing that down harder than leaving the
     /// section out — which is the opposite of what the block is for.</para>
     /// </summary>
-    private static void ValidatePipeline(PipelineConfig p, RollbackConfig? rollback, List<string> errors)
+    private static void ValidatePipeline(PipelineConfig p, RollbackConfig? rollback, string? systemSuffix, List<string> errors)
     {
         if (!p.Enabled) return;
 
@@ -285,17 +285,21 @@ public static class ConfigValidator
                     "SHAPE — 'image' and 'tooling' get a push-only ECR role and a signing profile, " +
                     "everything else gets an S3 role scoped to its own prefix.");
             }
-            // A CLASS THIS ENVIRONMENT REFUSES (DecoupledCd.md §12, P4 stage A). Classes is the allowlist Verify
-            // applies, so such an entry is a role and prefixes GitHub can use, for records that are all refused.
-            // A build-side class (tests) is deployed by no environment, so no Classes names it, and it has no role to refuse.
-            else if (p.Classes is { Count: > 0 } classes && !classes.Contains(r.Class) && !PipelineConfig.BuildSideClasses.Contains(r.Class))
-            {
-                errors.Add(
-                    $"Pipeline.Repositories entry '{r.Repo}' builds class '{r.Class}', which Pipeline.Classes does " +
-                    $"not accept ({string.Join(", ", classes)}): every record it writes would be refused at Verify, " +
-                    "after lz bootstrappipeline had given it a role GitHub can assume. Add " +
-                    $"{r.Class} to Classes, or remove the entry.");
-            }
+            // A CLASS THIS ENVIRONMENT DOES NOT ACCEPT is no longer refused here (DecoupledCd.md §12 P5 stage A, replacing
+            // P4 stage A's refusal): the allowlist is the build side's, shared by every environment, so each plans only
+            // PipelineConfig.AcceptedRepositories, and one that no environment in the chain accepts is refused where the
+            // build-side file is read (BuildSideConfig.UnacceptedRepositories).
+        }
+
+        // A BUILD SUFFIX THAT IS NOT THIS ENVIRONMENT'S OWN names a build side another environment shares (P5 stage A). Its
+        // image repository can be shared only under neutral naming: the environment mode puts {env} in every name.
+        if (p.BuildSuffix is { } buildSuffix && !string.Equals(buildSuffix, systemSuffix, StringComparison.Ordinal)
+            && p.Registry?.RepositoryNaming != "neutral")
+        {
+            errors.Add(
+                $"the build side's BuildSuffix '{buildSuffix}' is not this environment's SystemSuffix '{systemSuffix}', " +
+                "so its image repositories are shared with another environment, which Registry.RepositoryNaming: environment " +
+                "cannot do: it names {env} in every repository. Use RepositoryNaming: neutral.");
         }
 
         if (p.Registry?.RepositoryNaming is { } naming

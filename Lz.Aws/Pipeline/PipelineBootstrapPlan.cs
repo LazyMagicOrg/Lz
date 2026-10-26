@@ -208,7 +208,7 @@ public static class PipelineBootstrapPlanner
 
         var sk = RequireNonEmpty(config.SystemKey, nameof(config.SystemKey));
         var region = RequireNonEmpty(config.Region, nameof(config.Region));
-        var suffix = RequireNonEmpty(config.SystemSuffix, nameof(config.SystemSuffix));
+        var suffix = RequireNonEmpty(BuildSuffixFor(config), nameof(config.SystemSuffix));
 
         var repos = p.Repositories!;
 
@@ -394,6 +394,14 @@ public static class PipelineBootstrapPlanner
     /// </summary>
     /// <summary>The signing profile an image repository's pushes are signed under: its push role's, and the intake's (V-D).</summary>
     public static string SigningProfileNameFor(string systemKey, string repo) => $"{systemKey}_build_ci_{SlugFor(repo).Replace('-', '_')}";
+
+    /// <summary>
+    /// The suffix every build-account name carries (P5 stage A): the build side's <c>BuildSuffix</c>, which every
+    /// environment in the chain shares, or this environment's own SystemSuffix where the build side names none, as before.
+    /// The environment's own stores - its evidence store, Gate 2's results, its web-app buckets - stay on SystemSuffix.
+    /// </summary>
+    public static string BuildSuffixFor(SystemConfig config)
+        => config.Pipeline?.BuildSuffix is { Length: > 0 } s ? s : config.SystemSuffix;
 
     public static string BuildRecordStoreFor(string systemKey, string systemSuffix)
         => $"{systemKey}-build-records-{systemSuffix}";

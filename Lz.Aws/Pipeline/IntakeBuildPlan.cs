@@ -72,8 +72,8 @@ public static class IntakeBuildPlanner
     public const int Gate1PollSeconds = 30;
     public const int Gate1PollAttempts = 130;
 
-    public static string EvidenceStoreFor(SystemConfig c) => $"{c.SystemKey}-intake-evidence-{c.SystemSuffix}";
-    public static string ScratchBucketFor(SystemConfig c) => $"{c.SystemKey}-intake-scratch-{c.SystemSuffix}";
+    public static string EvidenceStoreFor(SystemConfig c) => $"{c.SystemKey}-intake-evidence-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
+    public static string ScratchBucketFor(SystemConfig c) => $"{c.SystemKey}-intake-scratch-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
     public static string AppSecretFor(SystemConfig c) => $"{c.SystemKey}/cicd/intake-app";
 
     /// <summary>The repositories the intake takes: those with an <c>Intake</c> mode, all of whose ids the validator required.</summary>
@@ -291,8 +291,8 @@ public static class IntakeBuildPlanner
 
             // THE PUBLISH (V-D), after Gate 1's pass: a no-op for a dry repository, so the machine is one shape for all.
             var publish = Fn("publish");
-            var recordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, config.SystemSuffix);
-            var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, config.SystemSuffix);
+            var recordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
+            var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
             var targets = PublishTargetsFor(config, accountId, repositories);
             var images = repositories.Where(r => BuildRecordFormat.IsImageClass(r.Class)).ToList();
             var publishGrants = new List<object>

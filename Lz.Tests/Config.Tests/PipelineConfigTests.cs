@@ -257,24 +257,22 @@ public class PipelineConfigTests
     }
 
     [Fact]
-    public void ARepositoryBuildingAClassThisEnvironmentRefuses_IsRefused()
+    public void ARepositoryBuildingAClassThisEnvironmentDoesNotAccept_IsLeftOutOfItsPlan_NotRefused()
     {
-        // Classes is the allowlist Verify applies. A repository building a class outside it gets a role and prefixes
-        // GitHub can use, and every record it ever writes is refused at Verify (P4 stage A).
+        // P4 stage A refused it here. Since P5 stage A the allowlist is the build side's, shared by every environment in
+        // the chain: each plans the repositories it accepts, and BuildSideConfig.UnacceptedRepositories refuses one that no
+        // environment accepts (BuildSuffixTests.ARepositoryWhoseClassNoEnvironmentInTheChainAccepts_IsRefused).
         var p = Enabled(); // accepts image and config
         p.Repositories = new List<PipelineRepositoryConfig>
         {
             new() { Repo = "Scutara/ScutaraService", Class = "image", Artifacts = new List<string> { "aiphost" } },
             new() { Repo = "Scutara/ScutaraSellerApp", Class = "client" },
+            new() { Repo = "Scutara/ScutaraE2ETests", Class = "tests" },
         };
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => ConfigValidator.Validate(WithPipeline(p), "test.yaml"));
+        ConfigValidator.Validate(WithPipeline(p), "test.yaml"); // no throw
 
-        Assert.Contains("'Scutara/ScutaraSellerApp'", ex.Message);
-        Assert.Contains("'client'", ex.Message);
-        Assert.Contains("Pipeline.Classes does not accept", ex.Message);
-        Assert.DoesNotContain("'Scutara/ScutaraService'", ex.Message);
+        Assert.Equal(new[] { "Scutara/ScutaraService", "Scutara/ScutaraE2ETests" }, p.AcceptedRepositories.Select(r => r.Repo));
     }
 
     [Fact]
