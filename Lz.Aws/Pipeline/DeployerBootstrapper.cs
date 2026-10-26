@@ -192,6 +192,16 @@ public static class DeployerBootstrapper
             "lz decoupled-CD deployer. Rolls the service image by digest.",
             ($"{plan.RoleName}-deploy", plan.RolePolicy), plan.DenyPolicy);
 
+        // THE HOLD, BEFORE ANY FUNCTION THAT READS IT (P5 stage J): missing counts as held, so a start function updated first
+        // would hold every record until it exists. Created 'off' where missing; never written where it exists.
+        if (plan.HoldParameter is { } holdParameter)
+        {
+            using var ssm = creds != null
+                ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(creds, endpoint)
+                : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+            await PromotionApply.EnsureHoldAsync(ssm, holdParameter);
+        }
+
         foreach (var fn in plan.Functions)
         {
             // THE LOG GROUP BEFORE THE FUNCTION, so its first line lands where retention already applies.
@@ -235,15 +245,9 @@ public static class DeployerBootstrapper
             if (plan.Alerts is { } alerts)
                 await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts);
 
-            // THE POLLER, AFTER THE MACHINE IT STARTS AND THE TOPIC IT ALARMS ON (P5 stage I), and the hold it reads first (J).
+            // THE POLLER, AFTER THE MACHINE IT STARTS AND THE TOPIC IT ALARMS ON (P5 stage I).
             if (plan.Promotion is { } promotion)
-            {
-                using var ssm = creds != null
-                    ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(creds, endpoint)
-                    : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
-                await PromotionApply.EnsureHoldAsync(ssm, promotion.HoldParameter);
                 await PromotionApply.WireAsync(events, lambda, cloudWatch, promotion, plan.Alerts!.TopicArn);
-            }
             else
                 await AlertsApply.RemoveAsync(events, cloudWatch, DeployerPlanner.FailedDeployRuleName(config),
                     DeployerPlanner.CorroborateScheduleRuleName(config), DeployerPlanner.CorroborateErrorsAlarmName(config));

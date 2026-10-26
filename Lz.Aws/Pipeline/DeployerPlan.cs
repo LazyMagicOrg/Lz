@@ -86,7 +86,8 @@ public sealed record PipelineDeployer(
     IReadOnlyList<ClientTarget>? ClientTargets = null,
     IReadOnlyList<SiteTarget>? SiteTargets = null,
     DeployerGate2Plan? Gate2 = null,
-    DeployerPromotionPlan? Promotion = null);
+    DeployerPromotionPlan? Promotion = null,
+    string? HoldParameter = null);
 
 /// <summary>
 /// A promoted environment's poller (DecoupledCd.md §12 P5 stage I), its only trigger: a function the schedule invokes every
@@ -187,7 +188,10 @@ public sealed record DeployerAlertsPlan(
     string ScheduleRuleArn,
     string ScheduleExpression,
     string CorroborateErrorsAlarmName,
-    IReadOnlyList<string>? BundlePrefixes = null);
+    IReadOnlyList<string>? BundlePrefixes = null,
+    string? HoldChangedRuleName = null,
+    string? HoldChangedRuleArn = null,
+    string? HoldChangedPattern = null);
 
 /// <summary>
 /// The signature hook as an ECS service attaches it: the function ECS invokes at <c>PRE_SCALE_UP</c>, and the
@@ -971,7 +975,8 @@ public static class DeployerPlanner
             ClientTargets: clientTargets,
             SiteTargets: siteTargets,
             Gate2: gate2,
-            Promotion: promotionPlan);
+            Promotion: promotionPlan,
+            HoldParameter: HoldWanted(config) ? HoldParameterName(config) : null);
     }
 
     /// <summary>
@@ -1192,10 +1197,14 @@ public static class DeployerPlanner
             localAlarms.Add(AlarmArn(acct, trigger.AlarmName));
         var buildAlarm = trigger != null ? AlarmArn(artifactAccount, ForwardDeadLetterAlarmName(config)) : null;
 
+        // THE HOLD'S CHANGES (P5 stage J), where anything reads it.
+        var holdRule = HoldWanted(config) ? HoldChangedRuleName(config) : null;
+        var holdRuleArn = holdRule is null ? null : $"arn:aws:events:{region}:{acct}:rule/{holdRule}";
+
         var plan = new DeployerAlertsPlan(
             TopicName: AlertsTopicName(config),
             TopicArn: topicArn,
-            TopicPolicy: CrossAccount.AlertsTopicPolicy(topicArn, failedRuleArn, acct, localAlarms, artifactAccount, buildAlarm),
+            TopicPolicy: CrossAccount.AlertsTopicPolicy(topicArn, failedRuleArn, acct, localAlarms, artifactAccount, buildAlarm, holdRuleArn),
             FailedDeployRuleName: failedRule,
             FailedDeployRuleArn: failedRuleArn,
             FailedDeployPattern: FailedDeployPattern(stateMachineArn),
@@ -1206,7 +1215,10 @@ public static class DeployerPlanner
             // The sweep's period is its grace: an image is looked at by at least one run once it is old enough.
             ScheduleExpression: $"rate({(int)DeployerAlerts.Grace.TotalMinutes} minutes)",
             CorroborateErrorsAlarmName: errorsAlarm,
-            BundlePrefixes: bundlePrefixes);
+            BundlePrefixes: bundlePrefixes,
+            HoldChangedRuleName: holdRule,
+            HoldChangedRuleArn: holdRuleArn,
+            HoldChangedPattern: holdRule is null ? null : HoldChangedPattern(config));
 
         var corroborateEnvironment = new Dictionary<string, string>
         {
@@ -1356,6 +1368,8 @@ public static class DeployerPlanner
             [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
             // Main only (P2 stage D2). A build from any other branch is skipped, and can be deployed by hand.
             [DeployerEnvironment.TriggerRefs] = DeployerEnvironment.Join(DeployerTrigger.DefaultRefs),
+            // THE HOLD (P5 stage J), read before every start; anything but "off", or missing, starts nothing.
+            [DeployerEnvironment.HoldParameter] = HoldParameterName(config),
         };
         if (clientRoutes.Count > 0)
         {
@@ -1374,8 +1388,9 @@ public static class DeployerPlanner
 
         var startFunction = new DeployerFunction(
             function, DeployerHandlers.Start, StartFunctionRoleName(config),
-            Combine(Logs(region, acct, function), StartGrants(stateMachineArn, queueArn, buildRecordStore,
-                clientRecords: clientTargets.Count > 0, sitePrefixes: siteTargets.Select(t => t.RecordPrefix).ToList())),
+            Combine(Logs(region, acct, function), [.. StartGrants(stateMachineArn, queueArn, buildRecordStore,
+                clientRecords: clientTargets.Count > 0, sitePrefixes: siteTargets.Select(t => t.RecordPrefix).ToList()),
+                HoldReadGrant(region, acct, HoldParameterName(config))]),
             startEnvironment,
             TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
 
@@ -1432,6 +1447,23 @@ public static class DeployerPlanner
     /// <summary>The hold (P5 stage J, §5.3 rule 5), read before every automated start; missing counts as held.</summary>
     public static string HoldParameterName(SystemConfig config) => $"/{config.SystemKey}/{config.Environment}/pipeline/hold";
 
+    /// <summary>Whether anything starts this environment's deployer by itself - the trigger or the poller - and so reads the hold.</summary>
+    public static bool HoldWanted(SystemConfig config) => TriggerWanted(config) || config.Pipeline?.Predecessor is not null;
+
+    /// <summary>Every change to the hold, alerted (P5 stage J): the rule's name.</summary>
+    public static string HoldChangedRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-pipeline-hold-changed";
+
+    /// <summary>Parameter Store's change event for the hold, by its name.</summary>
+    public static string HoldChangedPattern(SystemConfig config) => JsonSerializer.Serialize(new Dictionary<string, object>
+    {
+        ["source"] = new[] { "aws.ssm" },
+        ["detail-type"] = new[] { "Parameter Store Change" },
+        ["detail"] = new Dictionary<string, object> { ["name"] = new[] { HoldParameterName(config) } },
+    });
+
+    private static object HoldReadGrant(string region, string acct, string hold)
+        => new { Sid = "ReadTheHold", Effect = "Allow", Action = new[] { "ssm:GetParameter" }, Resource = $"arn:aws:ssm:{region}:{acct}:parameter{hold}" };
+
     /// <summary>The poller's two alarms: a tick that failed, and no tick for five minutes, missing data counting as silence.</summary>
     public static IReadOnlyList<IntakeAlarm> PollerAlarms(SystemConfig config)
     {
@@ -1464,7 +1496,7 @@ public static class DeployerPlanner
         },
         new { Sid = "ReadAndWriteItsDecisions", Effect = "Allow", Action = new[] { "s3:GetObject", "s3:PutObject" }, Resource = $"arn:aws:s3:::{evidence}/decisions/*" },
         new { Sid = "ListAndStartItsDeployer", Effect = "Allow", Action = new[] { "states:ListExecutions", "states:StartExecution" }, Resource = machineArn },
-        new { Sid = "ReadTheHold", Effect = "Allow", Action = new[] { "ssm:GetParameter" }, Resource = $"arn:aws:ssm:{region}:{acct}:parameter{hold}" },
+        HoldReadGrant(region, acct, hold),
         new { Sid = "PublishItsAlarms", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topic },
     };
 

@@ -256,7 +256,7 @@ public sealed class StartFunction
             await Io.ReadAsync(input),
             TriggerSettings.Read(Environment.GetEnvironmentVariable),
             new S3RecordStore(Clients.S3.Value),
-            new SfnExecutions(Clients.Sfn.Value));
+            new SfnExecutions(Clients.Sfn.Value, Clients.Ssm.Value));
 
         context.Logger.LogInformation(result["skipped"] is JsonObject skipped
             ? $"skipped {skipped["record"]}: {skipped["reason"]}"

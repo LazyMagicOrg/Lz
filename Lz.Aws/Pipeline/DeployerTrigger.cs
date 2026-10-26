@@ -45,7 +45,8 @@ public sealed record ClientTriggerRoute(string RecordPrefix, string App, string 
 /// parses. Set exactly when <paramref name="ClientRoutes"/> names a route.</param>
 public sealed record TriggerSettings(
     string ArtifactAccountId, string BuildRecordStore, string StateMachineArn, IReadOnlyList<TriggerRoute> Routes,
-    IReadOnlyList<string> AllowedRefs, IReadOnlyList<ClientTriggerRoute>? ClientRoutes = null, string? ArtifactStore = null)
+    IReadOnlyList<string> AllowedRefs, IReadOnlyList<ClientTriggerRoute>? ClientRoutes = null, string? ArtifactStore = null,
+    string? HoldParameter = null)
 {
     public static TriggerSettings Read(Func<string, string?> env)
     {
@@ -73,7 +74,9 @@ public sealed record TriggerSettings(
             DeployerTrigger.DecodeRoutes(DeployerEnvironment.Required(env, DeployerEnvironment.TriggerRoutes)),
             refs,
             clientRoutes,
-            artifactStore);
+            artifactStore,
+            // THE HOLD (P5 stage J): set by bootstrapdeployer once the hold exists; a function planned before it reads none.
+            env(DeployerEnvironment.HoldParameter) is { Length: > 0 } hold ? hold : null);
     }
 }
 
@@ -571,7 +574,17 @@ public interface IExecutions
 
     /// <summary>The input of the execution with this name, or null when there is none.</summary>
     Task<string?> InputOfAsync(string executionArn);
+
+    /// <summary>The hold parameter's value, or null when there is no such parameter (P5 stage J).</summary>
+    Task<string?> HoldAsync(string parameter);
 }
+
+/// <summary>
+/// The hold is on, or missing, so nothing is started (DecoupledCd.md §12 P5 stage J, §5.3 rule 5). Thrown, so the event is
+/// retried and then lands in the trigger's dead-letter queue, whose alarm tells a person: a record that arrived under a hold
+/// is a deploy to start by hand once the hold is released, as every event in that queue is.
+/// </summary>
+public sealed class DeployHeld(string message) : Exception(message);
 
 /// <summary>
 /// The start function: the executions an event implies, started — or, for a name already taken, confirmed to be the
@@ -624,6 +637,16 @@ public static class StartStep
                 ["duplicates"] = duplicates,
                 ["skipped"] = new JsonObject { ["record"] = location.Key, ["ref"] = record.BuiltFrom.Ref, ["reason"] = reason },
             };
+
+        // THE HOLD, READ BEFORE EVERY AUTOMATED START (P5 stage J): anything but "off", or missing, starts nothing.
+        if (settings.HoldParameter is { } holdParameter)
+        {
+            var hold = await executions.HoldAsync(holdParameter);
+            if (!string.Equals(hold?.Trim(), "off", StringComparison.Ordinal))
+                throw new DeployHeld(
+                    $"{holdParameter} is {(hold is null ? "missing" : $"'{hold}'")}, so {location.Key} starts no deploy; it is left in the " +
+                    "dead-letter queue to be started by hand once the hold is released.");
+        }
 
         foreach (var execution in planned)
         {

@@ -110,7 +110,7 @@ public class DeployerClientTriggerPlanTests
         Assert.Equal(expected, settings.ClientRoutes);
         Assert.Equal(ArtifactStore, settings.ArtifactStore);
         Assert.Equal("image/scutara/scutaraservice/", settings.Routes.Single().RecordPrefix);
-        Assert.Equal(7, env.Count);
+        Assert.Equal(8, env.Count);   // the hold too, since P5 stage J
     }
 
     [Fact]
@@ -132,7 +132,7 @@ public class DeployerClientTriggerPlanTests
         var start = Function(plan, DeployerHandlers.Start);
 
         Assert.Empty(plan.Trigger!.ClientRoutes ?? Array.Empty<ClientTriggerRoute>());
-        Assert.Equal(5, start.Environment.Count);
+        Assert.Equal(6, start.Environment.Count);   // the hold too, since P5 stage J
         Assert.False(start.Environment.ContainsKey(DeployerEnvironment.TriggerClientRoutes));
         Assert.False(start.Environment.ContainsKey(DeployerEnvironment.ArtifactStore));
         Assert.DoesNotContain("client/", start.Policy);

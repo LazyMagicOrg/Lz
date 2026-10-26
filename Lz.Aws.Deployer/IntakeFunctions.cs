@@ -190,7 +190,7 @@ internal sealed class SfnIntakeExecutions(Amazon.StepFunctions.IAmazonStepFuncti
         return found;
     }
 
-    public Task<bool> StartAsync(string name, string input) => new SfnExecutions(sfn).StartAsync(stateMachineArn, name, input);
+    public Task<bool> StartAsync(string name, string input) => new SfnExecutions(sfn, Clients.Ssm.Value).StartAsync(stateMachineArn, name, input);
 }
 
 internal sealed class SnsIntakeAlerts(Amazon.SimpleNotificationService.IAmazonSimpleNotificationService sns, string topicArn) : IIntakeAlerts

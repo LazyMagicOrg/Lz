@@ -1158,6 +1158,8 @@ public class DeployerPlannerTests
                 ("states:StartExecution", "arn:aws:states:us-west-2:503947800380:stateMachine:scu-dev-deployer"),
                 ("states:DescribeExecution", "arn:aws:states:us-west-2:503947800380:execution:scu-dev-deployer:*"),
                 ("sqs:SendMessage", "arn:aws:sqs:us-west-2:503947800380:scu-dev-deployer-start-dlq"),
+                // P5 stage J: the hold, read before every start.
+                ("ssm:GetParameter", "arn:aws:ssm:us-west-2:503947800380:parameter/scu/dev/pipeline/hold"),
             },
             grants);
 
@@ -1192,7 +1194,8 @@ public class DeployerPlannerTests
         Assert.Equal(plan.Trigger!.Routes.Single().RecordPrefix, settings.Routes.Single().RecordPrefix);
         Assert.Equal(plan.Trigger.Routes.Single().Targets, settings.Routes.Single().Targets);
         Assert.Equal(new[] { "refs/heads/main" }, settings.AllowedRefs);
-        Assert.Equal(5, env.Count);
+        Assert.Equal("/scu/dev/pipeline/hold", settings.HoldParameter);
+        Assert.Equal(6, env.Count);
     }
 
     [Fact]

@@ -362,6 +362,10 @@ public class DeployerTriggerTests
         public List<(string Machine, string Name, string Input)> Starts { get; } = new();
         public List<string> Reads { get; } = new();
         public bool ExistsButUnreadable { get; init; }
+        public string? Hold { get; init; } = "off";
+        public List<string> HoldReads { get; } = new();
+
+        public Task<string?> HoldAsync(string parameter) { HoldReads.Add(parameter); return Task.FromResult(Hold); }
 
         public Task<bool> StartAsync(string stateMachineArn, string name, string input)
         {
@@ -377,6 +381,50 @@ public class DeployerTriggerTests
             var name = executionArn[(executionArn.LastIndexOf(':') + 1)..];
             return Task.FromResult(ExistsButUnreadable ? null : Existing.GetValueOrDefault(name));
         }
+    }
+
+    // ---- the hold (DecoupledCd P5 stage J, §5.3 rule 5) ----
+
+    private const string Hold = "/scu/dev/pipeline/hold";
+
+    [Theory]
+    [InlineData("on")]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task UnderAHeldOrMissingHold_NothingStarts_AndTheEventGoesToTheDeadLetterQueue(string? hold)
+    {
+        var executions = new Executions { Hold = hold };
+        var ex = await Assert.ThrowsAsync<DeployHeld>(() => StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = Hold }, MainRecord(), executions));
+        Assert.Empty(executions.Starts);
+        Assert.Equal(new[] { Hold }, executions.HoldReads);
+        Assert.Contains(Hold, ex.Message);
+    }
+
+    [Fact]
+    public async Task UnderAnOffHold_TheRecordStartsAsBefore()
+    {
+        var executions = new Executions { Hold = " off " };
+        await StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = Hold }, MainRecord(), executions);
+        Assert.Single(executions.Starts);
+    }
+
+    [Fact]
+    public async Task ARecordTheTriggerSkips_NeverReadsTheHold()
+    {
+        var executions = new Executions { Hold = "on" };
+        var branch = new Records(RecordBody("refs/heads/feature"));
+        var result = await StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = Hold }, branch, executions);
+        Assert.NotNull(result["skipped"]);
+        Assert.Empty(executions.HoldReads);
+    }
+
+    [Fact]
+    public async Task AStartFunctionPlannedBeforeTheHold_ReadsNone()
+    {
+        var executions = new Executions { Hold = "on" };
+        await StartStep.RunAsync(Event().ToJsonString(), Settings(), MainRecord(), executions);
+        Assert.Empty(executions.HoldReads);
+        Assert.Single(executions.Starts);
     }
 
     [Fact]

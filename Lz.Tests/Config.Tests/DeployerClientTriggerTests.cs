@@ -144,6 +144,7 @@ public class DeployerClientTriggerTests
     {
         public Dictionary<string, string> Existing { get; } = new(StringComparer.Ordinal);
         public List<(string Name, string Input)> Starts { get; } = new();
+        public Task<string?> HoldAsync(string parameter) => Task.FromResult<string?>("off");
 
         public Task<bool> StartAsync(string stateMachineArn, string name, string input)
         {

@@ -88,6 +88,15 @@ internal static class AlertsApply
 
         await EnsureErrorsAlarmAsync(cloudWatch, plan);
 
+        // EVERY CHANGE TO THE HOLD (P5 stage J), to the topic.
+        if (plan.HoldChangedRuleName is { } holdRule)
+        {
+            await TriggerApply.EnsureRuleAsync(events, eventBusName: null, holdRule, plan.HoldChangedRuleArn!, plan.HoldChangedPattern!,
+                "lz pipeline: sends every change to this environment's promotion hold to its alerts topic.");
+            await TriggerApply.EnsureOnlyTargetAsync(events, eventBusName: null, holdRule, new Target { Id = TargetId, Arn = plan.TopicArn });
+            Console.WriteLine($"  alerts: every change to the hold -> {plan.TopicName} (rule {holdRule}).");
+        }
+
         await TriggerApply.EnsureInvokePermissionAsync(
             lambda, plan.CorroborateFunctionName, ScheduleInvokeSid, plan.ScheduleRuleName, plan.ScheduleRuleArn);
         await EnsureScheduleRuleAsync(events, plan);

@@ -394,8 +394,15 @@ internal sealed class SnsAlerts(Amazon.SimpleNotificationService.IAmazonSimpleNo
 }
 
 /// <summary>The start function's two calls. "The name is taken" and "no such execution" are SDK exceptions; the step needs answers.</summary>
-internal sealed class SfnExecutions(Amazon.StepFunctions.IAmazonStepFunctions sfn) : IExecutions
+internal sealed class SfnExecutions(Amazon.StepFunctions.IAmazonStepFunctions sfn,
+    Amazon.SimpleSystemsManagement.IAmazonSimpleSystemsManagement ssm) : IExecutions
 {
+    public async Task<string?> HoldAsync(string parameter)
+    {
+        try { return (await ssm.GetParameterAsync(new Amazon.SimpleSystemsManagement.Model.GetParameterRequest { Name = parameter })).Parameter?.Value; }
+        catch (Amazon.SimpleSystemsManagement.Model.ParameterNotFoundException) { return null; }
+    }
+
     public async Task<bool> StartAsync(string stateMachineArn, string name, string input)
     {
         try

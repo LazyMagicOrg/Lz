@@ -454,7 +454,7 @@ public static class CrossAccount
     /// <param name="buildAlarmArn">The build account's forwarding-queue alarm, or null when there is no trigger to forward.</param>
     public static string AlertsTopicPolicy(
         string topicArn, string failedDeployRuleArn, string targetAccountId, IReadOnlyList<string> localAlarmArns,
-        string artifactAccountId, string? buildAlarmArn)
+        string artifactAccountId, string? buildAlarmArn, string? holdChangedRuleArn = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         RequireAccount(artifactAccountId, nameof(artifactAccountId));
@@ -473,9 +473,15 @@ public static class CrossAccount
 
         var statements = new JsonArray
         {
+            // The failed-deploy rule, and - where something reads the hold (P5 stage J) - the rule for its changes.
             Publish(AlertsFailedDeploySid, "events.amazonaws.com", new JsonObject
             {
-                ["ArnEquals"] = new JsonObject { ["aws:SourceArn"] = failedDeployRuleArn },
+                ["ArnEquals"] = new JsonObject
+                {
+                    ["aws:SourceArn"] = holdChangedRuleArn is null
+                        ? failedDeployRuleArn
+                        : new JsonArray(failedDeployRuleArn, holdChangedRuleArn),
+                },
             }),
             Publish(AlertsLocalAlarmsSid, "cloudwatch.amazonaws.com", new JsonObject
             {
