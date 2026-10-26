@@ -522,12 +522,13 @@ public static class DeployBundleStep
             if (plan.Deletes.Count > 0)
                 await bucket.DeleteAsync(target.Bucket, plan.Deletes);
 
-            // 7. THE APP'S PATH ON EVERY DISTRIBUTION, in dev too (P-9). The execution name is the caller reference, so a
-            // retry gets back the invalidation the first attempt made.
+            // 7. THE APP'S PATH ON EVERY DISTRIBUTION, in dev too (P-9). The execution and the app are the caller reference,
+            // so a retry gets back the invalidation the first attempt made, and a promoted execution, which deploys every app
+            // of its set to distributions they share, makes one per app: CloudFront refuses a reference reused for another path.
             var created = new JsonArray();
             foreach (var distribution in target.Distributions)
             {
-                var id = await invalidations.CreateAsync(distribution, target.InvalidationPath, executionName);
+                var id = await invalidations.CreateAsync(distribution, target.InvalidationPath, $"{executionName}-{target.App}");
                 created.Add(new JsonObject { ["distribution"] = distribution, ["path"] = target.InvalidationPath, ["id"] = id });
             }
 

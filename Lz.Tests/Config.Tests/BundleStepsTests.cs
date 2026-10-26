@@ -202,8 +202,11 @@ public sealed class BundleStepsTests : IDisposable
 
         public Task<string> CreateAsync(string distributionId, string path, string callerReference)
         {
-            // CloudFront's idempotency: the same caller reference returns the invalidation it already made.
+            // CloudFront's idempotency: the same caller reference returns the invalidation it already made - for the same
+            // batch. With another path it is refused (measured 2026-10-26, test's first promoted execution).
             var existing = Created.FindIndex(c => c.Distribution == distributionId && c.CallerReference == callerReference);
+            if (existing >= 0 && Created[existing].Path != path)
+                throw new InvalidOperationException("Your request contains a caller reference that was used for a previous invalidation batch for the same distribution.");
             if (existing < 0)
             {
                 Created.Add((distributionId, path, callerReference));
@@ -470,7 +473,7 @@ public sealed class BundleStepsTests : IDisposable
         Assert.All(manifests.Concat(assets), i => Assert.True(i >= 0));
         Assert.True(assets.Max() < manifests.Min(), string.Join("\n", log));
 
-        Assert.Equal(new[] { ("E31GJ01SW2CEEA", "/seller*", Execution) }, invalidations.Created);
+        Assert.Equal(new[] { ("E31GJ01SW2CEEA", "/seller*", $"{Execution}-sellerapp") }, invalidations.Created);
 
         var marker = BundleMarker.Parse(bucket.Marker!.Value.Json);
         Assert.Null(marker.Claim);
@@ -666,6 +669,21 @@ public sealed class BundleStepsTests : IDisposable
         Assert.Single(invalidations.Created);
         Assert.Equal("I1", again["invalidations"]![0]!["id"]!.GetValue<string>());
         Assert.Equal(6, again["unchanged"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task OneExecutionDeployingTwoApps_ToOneDistribution_InvalidatesEach()
+    {
+        // A promoted execution deploys every app of its set, and the apps share a distribution (measured 2026-10-26: the
+        // second app's invalidation was refused for reusing the first's caller reference).
+        var invalidations = new Invalidations();
+        var seller = Zip(Build1);
+        await Deploy(Verified(seller), new Artifacts(seller, BundleVersion), new Bucket(), invalidations);
+        var admin = Zip(Build1.ToDictionary(f => "admin/" + f.Key["seller/".Length..], f => f.Value));
+        await Deploy(Verified(admin, target: Admin), new Artifacts(admin, BundleVersion), new Bucket(), invalidations);
+
+        Assert.Equal(new[] { "/seller*", "/admin*" }, invalidations.Created.Select(c => c.Path));
+        Assert.Equal(2, invalidations.Created.Select(c => c.CallerReference).Distinct().Count());
     }
 
     [Fact]
