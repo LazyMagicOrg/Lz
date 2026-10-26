@@ -272,6 +272,13 @@ public class BuildSideConfig
 
         pipeline.ChainEvidenceStore = entry?.EvidenceStore;
 
+        // THE NEIGHBOURS (P5): the environment before this one, whose markers it admits, and the one after, which admits its.
+        var at = entry is null ? -1 : Chain!.IndexOf(entry);
+        PipelineNeighbour? Neighbour(int i) => at < 0 || i < 0 || i >= Chain!.Count ? null
+            : new PipelineNeighbour(Chain[i].Environment!, Chain[i].AccountId!, Chain[i].EvidenceStore);
+        pipeline.Predecessor = Neighbour(at - 1);
+        pipeline.Successor = Neighbour(at + 1);
+
         pipeline.DeployOnBuildRecord = Chain is { Count: > 0 }
             && string.Equals(Chain[0].Environment, environment, StringComparison.OrdinalIgnoreCase);
     }

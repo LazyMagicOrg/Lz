@@ -172,6 +172,19 @@ public class PipelineConfig
     public string? ChainEvidenceStore { get; set; }
 
     /// <summary>
+    /// The environment before this one in the build-side chain, filled from it: where this environment's promotion poller
+    /// lists pass markers and its Verify reads them (P5 stages F and I). Null for the chain's first environment, which is fed
+    /// by build records, and for one outside the chain.
+    /// </summary>
+    public PipelineNeighbour? Predecessor { get; set; }
+
+    /// <summary>
+    /// The environment after this one in the chain: whose poller and Verify this environment's evidence store grants its
+    /// pass markers to (P5 stage D). Null for the chain's last environment.
+    /// </summary>
+    public PipelineNeighbour? Successor { get; set; }
+
+    /// <summary>
     /// The repositories this environment plans for: those whose class <see cref="Classes"/> accepts, and the build-side
     /// classes, which no environment deploys (P5 stage A). <see cref="Repositories"/> stays the build side's whole allowlist,
     /// which the intake takes runs from; a repository no environment in the chain accepts is refused when the file is read.
@@ -480,3 +493,9 @@ public class PipelineScanConfig
     public static readonly string[] KnownSeverities =
         { "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL", "UNDEFINED" };
 }
+
+/// <summary>
+/// A neighbour in the build-side chain, as an environment's Pipeline block carries it: its name, its account, and the evidence
+/// store where its pass markers are. A record of plain fields, since this file is also compiled into the deployer's functions.
+/// </summary>
+public sealed record PipelineNeighbour(string Environment, string AccountId, string? EvidenceStore);

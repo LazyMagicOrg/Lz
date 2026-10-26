@@ -126,6 +126,33 @@ public class BuildSuffixTests : IDisposable
         Assert.Contains("scu-test-deploy-evidence-d5e0-b27f", message);
     }
 
+    // ---- each environment's neighbours in the chain (P5 stages D, F, I) ----
+
+    [Fact]
+    public void ThePromotedEnvironment_KnowsItsPredecessor_WhereItReadsMarkers()
+    {
+        var test = Load("test").Pipeline!;
+        Assert.Equal(new PipelineNeighbour("dev", "503947800380", "scu-dev-deploy-evidence-4df6-b9c6"), test.Predecessor);
+        Assert.Null(test.Successor);
+    }
+
+    [Fact]
+    public void TheFirstEnvironment_KnowsItsSuccessor_WhomItsReadGrantNames()
+    {
+        var dev = Load("dev").Pipeline!;
+        Assert.Null(dev.Predecessor);
+        Assert.Equal(new PipelineNeighbour("test", "456687462751", "scu-test-deploy-evidence-d5e0-b27f"), dev.Successor);
+    }
+
+    [Fact]
+    public void AnEnvironmentOutsideTheChain_HasNoNeighbours()
+    {
+        File.WriteAllText(Path.Combine(_dir, "systemconfig.scu.prod.yaml"), Head("1111-2222") + EnvPipeline("982408502448"));
+        var prod = Load("prod").Pipeline!;
+        Assert.Null(prod.Predecessor);
+        Assert.Null(prod.Successor);
+    }
+
     // ---- A4: an environment plans what it accepts ----
 
     [Fact]

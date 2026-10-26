@@ -98,10 +98,13 @@ public class BuildSideConfigTests : IDisposable
 
         var merged = ConfigLoader.LoadSystemConfig(Write("dev", EnvPipeline())).Pipeline!;
 
-        // P5 stage A's two fields are filled by the move and named in no single file; everything else is as it was.
+        // P5's derived fields are filled by the move and named in no single file; everything else is as it was.
         Assert.Equal(("test", "t-dev-deploy-evidence-test"), (merged.BuildSuffix, merged.ChainEvidenceStore));
+        Assert.Equal(new PipelineNeighbour("test", "456687462751", "t-test-deploy-evidence-test"), merged.Successor);
+        Assert.Null(merged.Predecessor);
         merged.BuildSuffix = null;
         merged.ChainEvidenceStore = null;
+        merged.Successor = null;
         Assert.Equal(Json(old), Json(merged));
     }
 
