@@ -157,11 +157,15 @@ public static class SiteCheck
 
     /// <summary>
     /// A text file with its host and its robots <c>noindex</c> set aside: the host only where a URL names it (<c>//host</c>),
-    /// so an e-mail address on the same domain is compared as written.
+    /// so an e-mail address on the same domain is compared as written. A subdomain of the host is set aside the same way
+    /// (<c>//match.host</c>, V-K step 5: the MCP and sign-up links name each environment's own), its labels kept, so another
+    /// subdomain is still a difference. The host must end there: <c>//host.evil.example</c> and <c>//evilhost</c> are not it.
     /// </summary>
     private static string Normalize(string text, string? host)
     {
-        if (host is not null) text = text.Replace("//" + host, "//{host}", StringComparison.OrdinalIgnoreCase);
+        if (host is not null)
+            text = Regex.Replace(text, @"//((?:[a-z0-9-]+\.)*)" + Regex.Escape(host) + @"(?![a-z0-9-]|\.[a-z0-9])", "//$1{host}",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         return MetaTag.Replace(text, m => SiteHtml.Tags(m.Value).FirstOrDefault() is { } tag && IsNoIndex(tag) ? "" : m.Value);
     }
 

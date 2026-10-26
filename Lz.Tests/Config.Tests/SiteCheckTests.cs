@@ -159,6 +159,44 @@ public class SiteCheckTests
         => Refused(Check(Dev(), Test(t => t["about/index.html"] = t["about/index.html"].Replace("Home", "Start"))),
             "test: about/index.html differs from dev's beyond the host and noindex");
 
+    // A SUBDOMAIN OF THE HOST (V-K step 5, 2026-10-26): the MCP install page and the offer pages name each environment's
+    // match.{domain}, so dev's and test's bundles differ there and nowhere else.
+    private static Action<Dictionary<string, string>> Naming(string host, string what) => t =>
+        t["about/index.html"] = t["about/index.html"].Replace("Home", what.Replace("{host}", host));
+
+    [Fact]
+    public void ASubdomainOfEachBundlesHost_IsSetAsideAcrossBundles()
+    {
+        const string links = "<a href=https://match.{host}/seller/>Get started</a><code>https://match.{host}/mcp</code>" +
+                             "<a href=https://a.b.{host}/>Deeper</a>";
+        var result = Check(Dev(Naming("aiproxydev.click", links)), Test(Naming("scutara-test.click", links)));
+        Assert.True(result.Passed, string.Join("\n", result.Reasons));
+    }
+
+    [Fact]
+    public void AnotherSubdomain_IsStillADifference()
+        => Refused(Check(Dev(Naming("aiproxydev.click", "<a href=https://match.{host}/seller/>Go</a>")),
+                         Test(Naming("scutara-test.click", "<a href=https://app.{host}/seller/>Go</a>"))),
+            "test: about/index.html differs from dev's beyond the host and noindex");
+
+    [Fact]
+    public void AHostThatOnlyEndsLikeTheHost_IsNotSetAside()
+        => Refused(Check(Dev(Naming("aiproxydev.click", "<a href=https://evil{host}/>Go</a>")),
+                         Test(Naming("scutara-test.click", "<a href=https://evil{host}/>Go</a>"))),
+            "test: about/index.html differs from dev's beyond the host and noindex");
+
+    [Fact]
+    public void AHostThatOnlyStartsLikeTheHost_IsNotSetAside()
+        => Refused(Check(Dev(Naming("aiproxydev.click", "<a href=https://{host}.evil.example/>Go</a>")),
+                         Test(Naming("scutara-test.click", "<a href=https://{host}.evil.example/>Go</a>"))),
+            "test: about/index.html differs from dev's beyond the host and noindex");
+
+    [Fact]
+    public void ASubdomainOutsideAUrl_IsComparedAsWritten()
+        => Refused(Check(Dev(Naming("aiproxydev.click", "<p>hi@match.{host}</p>")),
+                         Test(Naming("scutara-test.click", "<p>hi@match.{host}</p>"))),
+            "test: about/index.html differs from dev's beyond the host and noindex");
+
     [Fact]
     public void BundlesWithDifferentFiles_AreRefused()
         => Refused(Check(Dev(), Test(t => t["extra.html"] = Page("scutara-test.click", "/extra.html", true))),
