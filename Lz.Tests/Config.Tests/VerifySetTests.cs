@@ -22,7 +22,7 @@ public class VerifySetTests
         new[] { "image", "client" }, new[] { "CRITICAL" }, Records, new[] { "scu-4df6-b9c6-aiphost" }, Artifacts,
         new[] { new ClientTarget("Scutara/ScutaraSellerApp", "sellerapp", "scu---webapp-sellerapp-d5e0-b27f", "seller/", new[] { "E1" }) });
 
-    private static BuildRecord ImageRecord(string? serviceVersion = "1.0.421", string digest = ImageDigest) => new(
+    internal static BuildRecord ImageRecord(string? serviceVersion = "1.0.421", string digest = ImageDigest) => new(
         1, "image",
         new BuildRecordBuiltFrom("Scutara/ScutaraService", new string('1', 40), "published", new Dictionary<string, string> { ["LazyMagic.Shared"] = "3.0.43-alpha" }, "refs/heads/main"),
         new BuildRecordIdentity("image", Digest: digest),

@@ -122,6 +122,16 @@ public class DeployerStepsTests
     }
 
     [Fact]
+    public async Task AnIntakeImageRecord_CarriesItsServiceVersion_IntoWhatVerifyRecords()
+    {
+        // P5 stage D: a pass marker names an image member by its Service version, copied from this deploy's evidence.
+        var record = VerifySetTests.ImageRecord(digest: Digest);
+        var result = await Verify(State(key: BuildRecordFormat.KeyFor(record)), record: BuildRecordFormat.Serialize(record),
+            settings: Settings() with { LiveRepositories = new[] { "Scutara/ScutaraService" } });
+        Assert.Equal("1.0.421", result["serviceVersion"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task APushPathRecord_OfAVerifyLiveRepository_IsRefusedAtVerify()
     {
         // Step 1b (V-D): the workflow's own record, no intake block, once its repository is Verify: live.

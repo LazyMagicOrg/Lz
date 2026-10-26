@@ -238,6 +238,8 @@ public static class VerifyStep
         {
             ["class"] = record.Class,
             ["digest"] = digest,
+            // The Service version the intake recorded (P5 stage D): a pass marker names the image member by it.
+            ["serviceVersion"] = record.Intake?.ServiceVersion,
             ["recordVersionId"] = stored.VersionId,
             ["builtFrom"] = BuiltFrom(record),
             ["builtAt"] = record.BuiltAt,
