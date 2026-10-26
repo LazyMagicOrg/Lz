@@ -209,6 +209,48 @@ public class DeployerGate2PlanTests
         Assert.False(s.TryGetProperty("GatesThisClass", out _));
     }
 
+    // ---- the deny and what .sync needs ----
+
+    private const string ManagedRule = "arn:aws:events:us-west-2:503947800380:rule/StepFunctionsGetEventForCodeBuildStartBuildRule";
+
+    /// <summary>The bug of 2026-10-25: Step Functions refused Gate 2's definition, since the deny beat the grant .sync needs.</summary>
+    [Theory]
+    [InlineData("off")]
+    [InlineData("provisioned")]
+    [InlineData("on")]
+    public void NothingTheRoleIsGranted_IsDeniedByItsOwnDenyPolicy(string gate2)
+    {
+        var plan = PlanWithSite(gate2);
+        Assert.Empty(DeployerPlanner.DenyGaps(plan.RolePolicy, plan.DenyPolicy));
+    }
+
+    [Fact]
+    public void On_TheDenyStillRefusesEveryRuleChange_ButPutRuleAndPutTargetsOnTheManagedRule()
+    {
+        var deny = PlanWithSite("on").DenyPolicy;
+        foreach (var action in PipelineBootstrapPlanner.SelfRewriteDenied.Where(a => !a.Contains('*')))
+            Assert.True(DeployerPlanner.Denies(deny, action, "arn:aws:events:us-west-2:503947800380:rule/scu-dev-deployer-start"), action);
+        Assert.True(DeployerPlanner.Denies(deny, "states:UpdateStateMachine", "arn:aws:states:us-west-2:503947800380:stateMachine:scu-dev-deployer"));
+
+        Assert.False(DeployerPlanner.Denies(deny, "events:PutRule", ManagedRule));
+        Assert.False(DeployerPlanner.Denies(deny, "events:PutTargets", ManagedRule));
+        foreach (var action in new[] { "events:DeleteRule", "events:RemoveTargets", "events:DisableRule", "events:PutPermission" })
+            Assert.True(DeployerPlanner.Denies(deny, action, ManagedRule), action);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("provisioned")]
+    public void NotOn_TheDenyIsTodays_OneStatementOnEveryResource(string gate2)
+    {
+        var expected = JsonSerializer.Serialize(new
+        {
+            Version = "2012-10-17",
+            Statement = new[] { new { Sid = "TheDeployerMayNotRewriteThePipeline", Effect = "Deny", Action = PipelineBootstrapPlanner.SelfRewriteDenied, Resource = "*" } },
+        }, DeployerPlanner.Asl);
+        Assert.Equal(JsonDocument.Parse(expected).RootElement.GetRawText(), JsonDocument.Parse(PlanWithSite(gate2).DenyPolicy).RootElement.GetRawText());
+    }
+
     [Fact]
     public void On_WithASite_ThePlannedMachineHasNoContractGaps()
     {

@@ -504,6 +504,55 @@ public static class DeployerPlanner
                 "^" + System.Text.RegularExpressions.Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$");
     }
 
+    /// <summary>
+    /// Whether a deny policy refuses this action on this resource: a Deny statement whose Action (or NotAction) takes it in and
+    /// whose Resource names it, or whose NotResource does not. Patterns as IAM's, <c>*</c> and <c>?</c>. Conditions are not
+    /// read; the deny policies planned here carry none.
+    /// </summary>
+    public static bool Denies(string denyPolicy, string action, string resource)
+    {
+        using var doc = JsonDocument.Parse(denyPolicy);
+        foreach (var st in doc.RootElement.GetProperty("Statement").EnumerateArray())
+        {
+            if (st.GetProperty("Effect").GetString() != "Deny") continue;
+            var actionMatches = st.TryGetProperty("Action", out var a) ? Strings(a).Any(p => Glob(p, action))
+                : st.TryGetProperty("NotAction", out var na) && !Strings(na).Any(p => Glob(p, action));
+            var resourceMatches = st.TryGetProperty("Resource", out var r) ? Strings(r).Any(p => Glob(p, resource))
+                : st.TryGetProperty("NotResource", out var nr) && !Strings(nr).Any(p => Glob(p, resource));
+            if (actionMatches && resourceMatches) return true;
+        }
+        return false;
+
+        static bool Glob(string pattern, string value) => System.Text.RegularExpressions.Regex.IsMatch(value,
+            "^" + System.Text.RegularExpressions.Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        static IEnumerable<string> Strings(JsonElement e) => e.ValueKind == JsonValueKind.Array
+            ? e.EnumerateArray().Select(x => x.GetString() ?? "") : new[] { e.GetString() ?? "" };
+    }
+
+    /// <summary>
+    /// Every grant of the role that its own deny policy refuses, as "action on resource". An explicit Deny beats any Allow, so
+    /// such a grant is dead, and where a service checks the role before it accepts a definition — Step Functions does for a
+    /// <c>.sync</c> task's managed rule — the definition is refused at apply (2026-10-25, Gate 2's startBuild.sync).
+    /// </summary>
+    public static IReadOnlyList<string> DenyGaps(string rolePolicy, string denyPolicy)
+    {
+        using var doc = JsonDocument.Parse(rolePolicy);
+        var gaps = new List<string>();
+        foreach (var st in doc.RootElement.GetProperty("Statement").EnumerateArray())
+        {
+            if (st.GetProperty("Effect").GetString() != "Allow" || !st.TryGetProperty("Action", out var actions) || !st.TryGetProperty("Resource", out var resources)) continue;
+            foreach (var action in Strings(actions))
+                foreach (var resource in Strings(resources))
+                    if (Denies(denyPolicy, action, resource))
+                        gaps.Add($"{st.GetProperty("Sid").GetString()}: {action} on {resource} is granted and denied");
+        }
+        return gaps;
+
+        static IEnumerable<string> Strings(JsonElement e) => e.ValueKind == JsonValueKind.Array
+            ? e.EnumerateArray().Select(x => x.GetString() ?? "") : new[] { e.GetString() ?? "" };
+    }
+
     /// <summary>Build the deployer plan for one environment.</summary>
     /// <param name="triggerInputs">The cluster and tenants the trigger's routes name. Required when
     /// <c>Pipeline.DeployOnBuildRecord</c> is on, and ignored otherwise.</param>
@@ -802,7 +851,7 @@ public static class DeployerPlanner
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null, p.Gate2IsOn ? gate2?.ProjectArn : null),
-            DenyPolicy: DenyPolicyFor(),
+            DenyPolicy: DenyPolicyFor(p.Gate2IsOn && gate2 is not null ? new[] { CodeBuildSyncRuleArn(region, acct) } : null),
             EvidenceStore: evidence,
             EvidenceStorePolicy: new[] { WriteOnceStore.Deny(evidence) },
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
@@ -1613,7 +1662,7 @@ public static class DeployerPlanner
                 Sid = "LearnThatGate2sBuildEnded",
                 Effect = "Allow",
                 Action = new[] { "events:PutTargets", "events:PutRule", "events:DescribeRule" },
-                Resource = $"arn:aws:events:{region}:{accountId}:rule/StepFunctionsGetEventForCodeBuildStartBuildRule",
+                Resource = CodeBuildSyncRuleArn(region, accountId),
             });
         }
 
@@ -2373,22 +2422,51 @@ public static class DeployerPlanner
     /// <para>An explicit Deny beats any Allow anywhere, including a future one nobody remembers
     /// adding, which is the whole point of stating it rather than relying on the absence of a
     /// grant.</para>
+    ///
+    /// <para>EXCEPT THE RULES STEP FUNCTIONS MANAGES FOR A <c>.sync</c> TASK, which it checks the role may put before it
+    /// accepts the definition (Gate 2's <c>codebuild:startBuild.sync</c>, V-E): <c>events:PutRule</c> and
+    /// <c>events:PutTargets</c> are denied on every resource but those, named exactly, and every other rule action stays
+    /// denied on them too. Without such a task the policy is the one statement it always was.</para>
     /// </summary>
-    internal static string DenyPolicyFor()
-        => JsonSerializer.Serialize(new
-        {
-            Version = "2012-10-17",
-            Statement = new[]
+    internal static string DenyPolicyFor(IReadOnlyList<string>? syncManagedRules = null)
+    {
+        if (syncManagedRules is not { Count: > 0 })
+            return JsonSerializer.Serialize(new
             {
-                new
+                Version = "2012-10-17",
+                Statement = new[]
                 {
-                    Sid = "TheDeployerMayNotRewriteThePipeline",
-                    Effect = "Deny",
-                    Action = PipelineBootstrapPlanner.SelfRewriteDenied,
-                    Resource = "*",
+                    new
+                    {
+                        Sid = "TheDeployerMayNotRewriteThePipeline",
+                        Effect = "Deny",
+                        Action = PipelineBootstrapPlanner.SelfRewriteDenied,
+                        Resource = "*",
+                    },
                 },
+            }, Asl);
+
+        var putRules = new[] { "events:PutRule", "events:PutTargets" };
+        return Policy(
+            new
+            {
+                Sid = "TheDeployerMayNotRewriteThePipeline",
+                Effect = "Deny",
+                Action = PipelineBootstrapPlanner.SelfRewriteDenied.Except(putRules).ToArray(),
+                Resource = "*",
             },
-        }, Asl);
+            new
+            {
+                Sid = "NorPutAnyRuleButTheSyncTasksManagedOnes",
+                Effect = "Deny",
+                Action = putRules,
+                NotResource = syncManagedRules.ToArray(),
+            });
+    }
+
+    /// <summary>The rule Step Functions manages for <c>codebuild:startBuild.sync</c> in this account and region.</summary>
+    internal static string CodeBuildSyncRuleArn(string region, string accountId)
+        => $"arn:aws:events:{region}:{accountId}:rule/StepFunctionsGetEventForCodeBuildStartBuildRule";
 
     /// <summary>
     /// The state machine: Verify → [Approve] → Prepare → Deploy → VerifyRollout → Record.
