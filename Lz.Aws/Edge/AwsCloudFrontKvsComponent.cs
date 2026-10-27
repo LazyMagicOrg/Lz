@@ -998,7 +998,12 @@ public class AwsCloudFrontKvsComponent : ComponentResource, ITenantCdnComponent
             // "/.well-known/oauth-protected-resource*" (prefix) covers BOTH the bare PRM and the RFC 9728
             // path-suffixed variant (/.well-known/oauth-protected-resource/mcp) the SDK advertises for a
             // resource with a path. /mcp stays exact (stateless Streamable HTTP is a single endpoint).
-            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource*" })
+            // "/oauth/*" and "/.well-known/oauth-authorization-server*" are the OAuth front door in front of the
+            // consumer pool (Scutara's specs/Platform/McpAuthFrontDoor.md): its authorize, callback, token and revoke
+            // endpoints, and its RFC 8414 metadata by path insertion. AipHost answers them only when its
+            // Mcp:FrontDoor:* config is set, so routing them on an MCP tenant without it changes nothing it serves.
+            // "/oauth/*" does not match "/oauth2/...", the public clients' apex callback.
+            foreach (var mcpPath in new[] { "/mcp", "/.well-known/oauth-protected-resource*", "/oauth/*", "/.well-known/oauth-authorization-server*" })
             {
                 distributionArgs.OrderedCacheBehaviors.Add(new DistributionOrderedCacheBehaviorArgs
                 {

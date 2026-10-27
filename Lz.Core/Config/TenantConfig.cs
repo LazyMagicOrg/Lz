@@ -169,7 +169,9 @@ public class TenantConfig
     /// <summary>
     /// M0-8: when <c>true</c>, add the CloudFront ordered behaviors that route the bare <c>/mcp</c>
     /// (Streamable HTTP) and the RFC 9728 PRM (<c>/.well-known/oauth-protected-resource</c>) to the API
-    /// origin (AipHost), unstripped (same passthrough model as <c>/bff</c>). Default <c>false</c>/null ⇒
+    /// origin (AipHost), unstripped (same passthrough model as <c>/bff</c>) - and with them the OAuth front door's
+    /// <c>/oauth/*</c> and its RFC 8414 metadata (<c>/.well-known/oauth-authorization-server*</c>), which AipHost serves
+    /// only when its <c>Mcp:FrontDoor:*</c> config is set (Scutara's specs/Platform/McpAuthFrontDoor.md). Default <c>false</c>/null ⇒
     /// the behaviors list is byte-for-byte identical to a non-MCP tenant. Pair with the pool's
     /// <c>McpResource</c> opt-in and AipHost's <c>Mcp:*</c> config. See specs/Platform/McpAgents.md M0-8.
     /// </summary>
