@@ -536,6 +536,41 @@ public static class CrossAccount
         return new JsonObject { ["Version"] = "2012-10-17", ["Statement"] = statements }.ToJsonString(PolicyJson);
     }
 
+    /// <summary>
+    /// The outcomes topic's policy: this environment's notify function, and - where the topic is the intake's list - the
+    /// intake's record role in the build account, each admitted by ARN. BY THE ACCOUNT AND <c>aws:PrincipalArn</c>, not by the
+    /// role as principal: SNS refuses a policy naming a role that does not exist yet, and the topic is created before them.
+    /// </summary>
+    public static string OutcomesTopicPolicy(
+        string topicArn, string targetAccountId, string notifyRoleArn, string? artifactAccountId, string? intakeRecordRoleArn)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        if ((artifactAccountId is null) != (intakeRecordRoleArn is null))
+            throw new InvalidOperationException("the intake is admitted by its account and its role together, or not at all.");
+
+        JsonObject Publish(string sid, string account, string principalArn) => new()
+        {
+            ["Sid"] = sid,
+            ["Effect"] = "Allow",
+            ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{account}:root" },
+            ["Action"] = "sns:Publish",
+            ["Resource"] = topicArn,
+            ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = principalArn } },
+        };
+
+        var statements = new JsonArray { Publish(OutcomesNotifySid, targetAccountId, notifyRoleArn) };
+        if (artifactAccountId is not null)
+        {
+            RequireAccount(artifactAccountId, nameof(artifactAccountId));
+            statements.Add(Publish(OutcomesIntakeSid, artifactAccountId, intakeRecordRoleArn!));
+        }
+
+        return new JsonObject { ["Version"] = "2012-10-17", ["Statement"] = statements }.ToJsonString(PolicyJson);
+    }
+
+    public const string OutcomesNotifySid = "TheNotifyFunctionTellsTheList";
+    public const string OutcomesIntakeSid = "TheIntakeTellsTheListWhatItRefused";
+
     public const string AlertsFailedDeploySid = "FailedDeploysOfThisDeployer";
     public const string AlertsLocalAlarmsSid = "AlarmsOfThisPipeline";
     public const string AlertsBuildAlarmSid = "TheBuildAccountsForwardingAlarm";

@@ -333,6 +333,10 @@ public static class DeployerEnvironment
     public const string TriggerClientRoutes = "LZ_TRIGGER_CLIENT_ROUTES";
     public const string CorroborateBundleSources = "LZ_CORROBORATE_BUNDLE_SOURCES";
 
+    // The outcomes (each environment's deploy-outcomes topic): where the notify function publishes, and the environment it names.
+    public const string OutcomesTopic = "LZ_OUTCOMES_TOPIC";
+    public const string OutcomesEnvironment = "LZ_OUTCOMES_ENVIRONMENT";
+
     /// <summary>The region Lambda runs a function in, which it sets itself.</summary>
     public const string Region = "AWS_REGION";
 

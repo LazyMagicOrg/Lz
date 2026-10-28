@@ -46,6 +46,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\MarkPassed.cs" Link="Linked\Lz.Aws\Pipeline\MarkPassed.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\DeployOutcomes.cs" Link="Linked\Lz.Aws\Pipeline\DeployOutcomes.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\SignatureHook.cs" Link="Linked\Lz.Aws\Pipeline\SignatureHook.cs" />
     <Compile Include="..\Lz.Aws\Ops\TaskDefinitionRevision.cs" Link="Linked\Lz.Aws\Ops\TaskDefinitionRevision.cs" />
     <!-- The per-service lease (DecoupledCd.md V-J): Prepare claims it, Record and RecordFailure release it. -->

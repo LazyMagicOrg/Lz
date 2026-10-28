@@ -78,9 +78,10 @@ public class AlertsCallSiteTests
     public void TheTopicsPolicy_AndEveryAlarmsActions_AreReadBack()
     {
         var alerts = Source("Lz.Aws", "Pipeline", "AlertsApply.cs");
-        var topic = Body(alerts, "public static async Task EnsureTopicAsync(");
+        // The alerts and outcomes topics share one writer, which reads the policy back.
+        var topic = Body(alerts, "private static async Task EnsureTopicAsync(");
         var set = At(topic, "await sns.SetTopicAttributesAsync(", "EnsureTopicAsync");
-        var readBack = At(topic, "if (!CrossAccount.SamePolicy(plan.TopicPolicy, after))", "EnsureTopicAsync");
+        var readBack = At(topic, "if (!CrossAccount.SamePolicy(topicPolicy, after))", "EnsureTopicAsync");
         Assert.True(set < readBack);
 
         At(alerts, "await TriggerApply.RequireAlarmActionsAsync(cloudWatch, plan.CorroborateErrorsAlarmName, actions);", "AlertsApply.cs");

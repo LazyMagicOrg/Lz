@@ -295,10 +295,18 @@ public static class IntakeFetchStep
     }
 }
 
+/// <summary>Where the intake tells an environment's outcomes list about a build it did not take in.</summary>
+/// <param name="Environment">The chain's first environment, the one a taken-in build would have deployed to.</param>
+/// <param name="EvidenceStore">The intake's own evidence store, which the message points at.</param>
+public sealed record IntakeOutcomeSettings(string Environment, string TopicArn, string EvidenceStore, string Region);
+
+public sealed record IntakeOutcomes(IntakeOutcomeSettings Settings, IAlertPublisher Publisher);
+
 /// <summary>
 /// THE INTAKE'S RECORD (DecoupledCd.md §15.4, §5.3 rule 1): taken in or refused under the attempt's first-try name, a fault
 /// under the try's own name; each written once, so a retry of the write after one that landed is not a second record. A
-/// dry intake's "taken in" says what was staged and that nothing was pushed. A refusal and a fault alert.
+/// dry intake's "taken in" says what was staged and that nothing was pushed. A refusal and a fault alert, and - where the
+/// chain's first environment has an outcomes list - tell that list too.
 /// </summary>
 public static class IntakeRecordStep
 {
@@ -318,7 +326,8 @@ public static class IntakeRecordStep
         return Written(IntakeEvidence.TakenIn(input.AttemptName), await evidence.PutOnceAsync(IntakeEvidence.TakenIn(input.AttemptName), body.ToJsonString()));
     }
 
-    public static async Task<JsonObject> RefusedAsync(JsonObject state, IIntakeEvidenceStore evidence, IIntakeAlerts alerts, DateTimeOffset now)
+    public static async Task<JsonObject> RefusedAsync(
+        JsonObject state, IIntakeEvidenceStore evidence, IIntakeAlerts alerts, DateTimeOffset now, IntakeOutcomes? outcomes = null)
     {
         var input = IntakeInput.From(state);
         // Whichever step refused: the run check, the fetch, or Gate 1 (V-C).
@@ -329,12 +338,17 @@ public static class IntakeRecordStep
         {
             ["outcome"] = "refused", ["at"] = now.ToString("O"), ["run"] = Run(input), ["reasons"] = reasons,
         }.ToJsonString());
+        var result = Written(key, written);
         if (written)
+        {
             await alerts.PublishAsync("intake refused a run", $"{input.Repo} run {input.RunId} attempt {input.RunAttempt} was refused: {reasons?.ToJsonString()}");
-        return Written(key, written);
+            result["outcome"] = await TellAsync(outcomes, key, input.Repo, input.RunId, input.RunAttempt, HeadSha(state), "refused", DeployOutcomes.Strings(reasons));
+        }
+        return result;
     }
 
-    public static async Task<JsonObject> FaultAsync(JsonObject state, string executionName, IIntakeEvidenceStore evidence, IIntakeAlerts alerts, DateTimeOffset now)
+    public static async Task<JsonObject> FaultAsync(
+        JsonObject state, string executionName, IIntakeEvidenceStore evidence, IIntakeAlerts alerts, DateTimeOffset now, IntakeOutcomes? outcomes = null)
     {
         var key = IntakeEvidence.Fault(executionName);
         var error = state["error"]?.DeepClone();
@@ -342,10 +356,42 @@ public static class IntakeRecordStep
         {
             ["outcome"] = "fault", ["at"] = now.ToString("O"), ["execution"] = executionName, ["error"] = error,
         }.ToJsonString());
+        var result = Written(key, written);
         if (written && IntakeNames.Parse(executionName) is { Retry: >= IntakeNames.MaxRetries })
+        {
             await alerts.PublishAsync("intake faulted on its last retry", $"{executionName}: {error?.ToJsonString()}");
-        return Written(key, written);
+            // The input names the run; a state too broken to read it still tells the list that something did not deploy.
+            IntakeInput? input = null;
+            try { input = IntakeInput.From(state); } catch (IntakeFault) { }
+            result["outcome"] = await TellAsync(outcomes, key, input?.Repo ?? "an unreadable run", input?.RunId ?? 0, input?.RunAttempt ?? 0,
+                HeadSha(state), "fault", new[] { error is JsonObject e ? DeployOutcomes.Cause(e["Cause"] ?? e["cause"] ?? e) : DeployOutcomes.Cause(error) });
+        }
+        return result;
     }
+
+    /// <summary>
+    /// The outcomes message (the environment's deploy-outcomes topic), after the evidence and the alert. NEVER THROWS: the
+    /// outcome is recorded and alerted by then, and a list that missed one message must not turn a refusal into a fault.
+    /// </summary>
+    private static async Task<string> TellAsync(
+        IntakeOutcomes? outcomes, string key, string repo, long runId, int runAttempt, string? commit, string outcome, IReadOnlyList<string> reasons)
+    {
+        if (outcomes is null) return "none: no environment's outcomes topic is configured";
+        try
+        {
+            var o = outcomes.Settings;
+            var (subject, message) = DeployOutcomes.ForIntake(o.Environment, o.Region, o.EvidenceStore, key, repo, runId, runAttempt, commit, outcome, reasons);
+            await outcomes.Publisher.PublishAsync(o.TopicArn, subject, message);
+            return $"sent to {o.TopicArn}";
+        }
+        catch (Exception ex)
+        {
+            return $"not sent: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    private static string? HeadSha(JsonObject state)
+        => state["check"]?["headSha"] is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) ? s : null;
 
     private static JsonObject Run(IntakeInput input) => new()
     {

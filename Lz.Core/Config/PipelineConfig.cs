@@ -172,6 +172,19 @@ public class PipelineConfig
     public string? ChainEvidenceStore { get; set; }
 
     /// <summary>
+    /// This environment's outcomes list, filled from its chain entry's <c>Outcomes</c> (never named in an environment config):
+    /// a topic sent one message for every deploy that ends here, and - in the chain's first environment - every build the
+    /// intake did not take in. See <c>PipelineChainEntry.Outcomes</c>.
+    /// </summary>
+    public bool Outcomes { get; set; }
+
+    /// <summary>
+    /// The environment whose outcomes list the intake tells about a build it did not take in: the chain's first, when its
+    /// entry has <c>Outcomes</c>. Filled from the build-side file, the same whichever environment's config is loaded.
+    /// </summary>
+    public PipelineNeighbour? IntakeOutcomesTo { get; set; }
+
+    /// <summary>
     /// The environment before this one in the build-side chain, filled from it: where this environment's promotion poller
     /// lists pass markers and its Verify reads them (P5 stages F and I). Null for the chain's first environment, which is fed
     /// by build records, and for one outside the chain.

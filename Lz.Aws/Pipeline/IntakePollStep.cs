@@ -57,6 +57,9 @@ public static class IntakeEnvironment
     public const string PublishTargets = "LZ_INTAKE_PUBLISH_TARGETS";
     public const string BuildRecordStore = "LZ_INTAKE_BUILD_RECORD_STORE";
     public const string ArtifactStore = "LZ_INTAKE_ARTIFACT_STORE";
+    // The outcomes list (the chain's first environment's deploy-outcomes topic), told of each build not taken in.
+    public const string OutcomesTopic = "LZ_INTAKE_OUTCOMES_TOPIC";
+    public const string OutcomesEnvironment = "LZ_INTAKE_OUTCOMES_ENVIRONMENT";
 }
 
 /// <summary>

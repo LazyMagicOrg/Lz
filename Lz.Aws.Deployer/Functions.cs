@@ -339,6 +339,26 @@ public sealed class CorroborateFunction
     }
 }
 
+/// <summary>
+/// The notify function: an execution of this environment's deployer that ended, whatever its status, sent to the outcomes
+/// topic. Invoked by the rule that matches the execution's end; the event is the input.
+/// </summary>
+public sealed class DeployNotifyFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var result = await DeployNotifyStep.RunAsync(
+            JsonNode.Parse(await Io.ReadAsync(input)) as JsonObject
+                ?? throw new InvalidOperationException("the notify function was invoked with something other than an event object."),
+            OutcomeSettings.Read(Environment.GetEnvironmentVariable),
+            new S3RecordStore(Clients.S3.Value),
+            new SnsAlerts(Clients.Sns.Value));
+
+        context.Logger.LogInformation($"{result["execution"]} {result["status"]}: sent \"{result["subject"]}\"");
+        return Io.Write(result);
+    }
+}
+
 [System.Runtime.Versioning.SupportedOSPlatform("linux")]
 public sealed class SignatureHookFunction
 {

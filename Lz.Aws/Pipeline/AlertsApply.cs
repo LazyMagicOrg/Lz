@@ -27,32 +27,59 @@ internal static class AlertsApply
     public const string ScheduleInvokeSid = "InvokedByTheCorroborateSchedule";
 
     /// <summary>The topic and its whole policy — before anything that publishes to it exists.</summary>
-    public static async Task EnsureTopicAsync(IAmazonSimpleNotificationService sns, DeployerAlertsPlan plan)
+    public static Task EnsureTopicAsync(IAmazonSimpleNotificationService sns, DeployerAlertsPlan plan)
+        => EnsureTopicAsync(sns, "alerts", plan.TopicName, plan.TopicArn, plan.TopicPolicy,
+            "the failed-deploy rule and this pipeline's alarms may publish");
+
+    /// <summary>The outcomes topic and its whole policy, before the notify function and the intake publish to it.</summary>
+    public static Task EnsureTopicAsync(IAmazonSimpleNotificationService sns, DeployerOutcomesPlan plan)
+        => EnsureTopicAsync(sns, "outcomes", plan.TopicName, plan.TopicArn, plan.TopicPolicy,
+            plan.AdmitsTheIntake ? "the notify function and the intake's record function may publish" : "the notify function may publish");
+
+    private static async Task EnsureTopicAsync(
+        IAmazonSimpleNotificationService sns, string what, string topicName, string topicArn, string topicPolicy, string publishers)
     {
         // CreateTopic is idempotent for a name the account already owns: it returns that topic's ARN.
-        var created = await sns.CreateTopicAsync(new CreateTopicRequest { Name = plan.TopicName });
-        TriggerApply.RequireEqual("alerts topic ARN", plan.TopicArn, created.TopicArn);
+        var created = await sns.CreateTopicAsync(new CreateTopicRequest { Name = topicName });
+        TriggerApply.RequireEqual($"{what} topic ARN", topicArn, created.TopicArn);
 
-        var current = await PolicyAsync(sns, plan.TopicArn);
-        if (CrossAccount.SamePolicy(plan.TopicPolicy, current))
+        var current = await PolicyAsync(sns, topicArn);
+        if (CrossAccount.SamePolicy(topicPolicy, current))
         {
-            Console.WriteLine($"  alerts topic '{plan.TopicName}': policy already admits exactly this pipeline's publishers.");
+            Console.WriteLine($"  {what} topic '{topicName}': policy already admits exactly this pipeline's publishers.");
             return;
         }
 
         await sns.SetTopicAttributesAsync(new SetTopicAttributesRequest
         {
-            TopicArn = plan.TopicArn,
+            TopicArn = topicArn,
             AttributeName = "Policy",
-            AttributeValue = plan.TopicPolicy,
+            AttributeValue = topicPolicy,
         });
 
-        var after = await PolicyAsync(sns, plan.TopicArn);
-        if (!CrossAccount.SamePolicy(plan.TopicPolicy, after))
+        var after = await PolicyAsync(sns, topicArn);
+        if (!CrossAccount.SamePolicy(topicPolicy, after))
             throw new InvalidOperationException(
-                $"the policy on '{plan.TopicName}' does not read back as the one written.\n  written: {plan.TopicPolicy}\n  read:    {after}");
+                $"the policy on '{topicName}' does not read back as the one written.\n  written: {topicPolicy}\n  read:    {after}");
 
-        Console.WriteLine($"  alerts topic '{plan.TopicName}': policy written and read back — the failed-deploy rule and this pipeline's alarms may publish.");
+        Console.WriteLine($"  {what} topic '{topicName}': policy written and read back — {publishers}.");
+    }
+
+    /// <summary>The notify function's permission statement for the rule that invokes it.</summary>
+    public const string OutcomeInvokeSid = "InvokedByTheOutcomeRule";
+
+    /// <summary>
+    /// The rule that sends every end of the deployer's executions to the notify function — after the permission that lets it
+    /// invoke the function, so the first end is not refused.
+    /// </summary>
+    public static async Task WireOutcomesAsync(IAmazonEventBridge events, IAmazonLambda lambda, DeployerOutcomesPlan plan)
+    {
+        await TriggerApply.EnsureInvokePermissionAsync(lambda, plan.FunctionName, OutcomeInvokeSid, plan.RuleName, plan.RuleArn);
+        await TriggerApply.EnsureRuleAsync(events, eventBusName: null, plan.RuleName, plan.RuleArn, plan.Pattern,
+            "lz pipeline: sends every end of this environment's deploys to the function that tells its outcomes list.");
+        await TriggerApply.EnsureOnlyTargetAsync(events, eventBusName: null, plan.RuleName,
+            new Target { Id = TargetId, Arn = plan.FunctionArn });
+        Console.WriteLine($"  outcomes: every deploy's end -> {plan.FunctionName} -> {plan.TopicName} (rule {plan.RuleName}).");
     }
 
     /// <summary>The topic's confirmed and pending subscriptions, or null when there is no topic yet.</summary>

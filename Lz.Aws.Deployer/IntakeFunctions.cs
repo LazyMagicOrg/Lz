@@ -69,11 +69,12 @@ public sealed class IntakeRecordFunction
         var result = state["record"]?.GetValue<string>() switch
         {
             "taken-in" => await IntakeRecordStep.TakenInAsync(state, IntakeInput.From(state).In(repositories)?.Mode ?? "dry", evidence, now),
-            "refused" => await IntakeRecordStep.RefusedAsync(state, evidence, IntakeClients.Alerts(), now),
-            "fault" => await IntakeRecordStep.FaultAsync(state, executionName, evidence, IntakeClients.Alerts(), now),
+            "refused" => await IntakeRecordStep.RefusedAsync(state, evidence, IntakeClients.Alerts(), now, IntakeClients.Outcomes()),
+            "fault" => await IntakeRecordStep.FaultAsync(state, executionName, evidence, IntakeClients.Alerts(), now, IntakeClients.Outcomes()),
             var other => throw new IntakeFault($"the machine asked to record '{other}', which is none of taken-in, refused or fault"),
         };
-        context.Logger.LogInformation($"{executionName}: recorded {result["key"]} (written: {result["written"]})");
+        context.Logger.LogInformation($"{executionName}: recorded {result["key"]} (written: {result["written"]})" +
+                                      (result["outcome"] is { } told ? $"; outcomes list: {told}" : ""));
         return Io.Write(result);
     }
 }
@@ -90,6 +91,15 @@ internal static class IntakeClients
         => _app ??= new IntakeApp(new IntakeGitHub(new HttpClient()), Secrets.Value, Required(IntakeEnvironment.AppSecret), repositories);
 
     public static IIntakeAlerts Alerts() => new SnsIntakeAlerts(Clients.Sns.Value, Required(IntakeEnvironment.AlertsTopic));
+
+    /// <summary>The chain's first environment's outcomes list, or null where its chain entry has none.</summary>
+    public static IntakeOutcomes? Outcomes()
+        => Environment.GetEnvironmentVariable(IntakeEnvironment.OutcomesTopic) is { Length: > 0 } topic
+            ? new IntakeOutcomes(
+                new IntakeOutcomeSettings(Required(IntakeEnvironment.OutcomesEnvironment), topic, Required(IntakeEnvironment.EvidenceStore),
+                    Required(DeployerEnvironment.Region)),
+                new SnsAlerts(Clients.Sns.Value))
+            : null;
 }
 
 /// <summary>

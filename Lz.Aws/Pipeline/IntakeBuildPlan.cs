@@ -76,6 +76,9 @@ public static class IntakeBuildPlanner
     public static string ScratchBucketFor(SystemConfig c) => $"{c.SystemKey}-intake-scratch-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
     public static string AppSecretFor(SystemConfig c) => $"{c.SystemKey}/cicd/intake-app";
 
+    /// <summary>The record function's role: the one principal an environment's outcomes topic admits from the build account.</summary>
+    public static string RecordRoleName(string systemKey) => $"{systemKey}-intake-record-fn";
+
     /// <summary>The repositories the intake takes: those with an <c>Intake</c> mode, all of whose ids the validator required.</summary>
     public static IReadOnlyList<IntakeRepository> RepositoriesFor(SystemConfig config)
         => (config.Pipeline?.Repositories ?? new List<PipelineRepositoryConfig>())
@@ -129,6 +132,13 @@ public static class IntakeBuildPlanner
 
         var (poller, check, fetch, record) = (Fn("poller"), Fn("check-run"), Fn("fetch"), Fn("record"));
         var reposVariable = IntakeRepositories.Encode(repositories);
+        if ($"{record}-fn" != RecordRoleName(sk))
+            throw new InvalidOperationException("the intake's record role diverged from RecordRoleName, which each outcomes topic admits.");
+
+        // THE OUTCOMES LIST (the chain's first environment's), where it has one: the record function tells it of each build
+        // refused or undecided, in that environment's account, which admits this one role.
+        var outcomesTo = config.Pipeline?.IntakeOutcomesTo;
+        var outcomesTopic = outcomesTo is null ? null : DeployOutcomes.TopicArn(region, outcomesTo.AccountId, sk, outcomesTo.Environment);
 
         object ReadTheAppKey() => new { Sid = "ReadTheIntakeAppKey", Effect = "Allow", Action = new[] { "secretsmanager:GetSecretValue" }, Resource = secretArn };
         object Publish() => new { Sid = "PublishIntakeAlerts", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topicArn };
@@ -192,13 +202,25 @@ public static class IntakeBuildPlanner
                 {
                     WriteEvidence("WriteTheOutcomeOnce", "taken-in/", "refused/", "faults/"),
                     Publish(),
-                }),
-                new Dictionary<string, string>
+                }.Concat(outcomesTopic is null ? Array.Empty<object>() : new object[]
                 {
-                    [IntakeEnvironment.Repositories] = reposVariable,
-                    [IntakeEnvironment.EvidenceStore] = evidence,
-                    [IntakeEnvironment.AlertsTopic] = topicArn,
-                },
+                    new { Sid = "TellTheOutcomesList", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = outcomesTopic },
+                }).ToArray()),
+                outcomesTopic is null
+                    ? new Dictionary<string, string>
+                    {
+                        [IntakeEnvironment.Repositories] = reposVariable,
+                        [IntakeEnvironment.EvidenceStore] = evidence,
+                        [IntakeEnvironment.AlertsTopic] = topicArn,
+                    }
+                    : new Dictionary<string, string>
+                    {
+                        [IntakeEnvironment.Repositories] = reposVariable,
+                        [IntakeEnvironment.EvidenceStore] = evidence,
+                        [IntakeEnvironment.AlertsTopic] = topicArn,
+                        [IntakeEnvironment.OutcomesTopic] = outcomesTopic,
+                        [IntakeEnvironment.OutcomesEnvironment] = outcomesTo!.Environment,
+                    },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
         };
 

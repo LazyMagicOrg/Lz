@@ -46,7 +46,7 @@ public class BuildSideConfig
     public List<PipelineChainEntry>? Chain { get; set; }
 
     /// <summary>The fields an environment config may no longer name in its <c>Pipeline</c> block.</summary>
-    public static readonly string[] MovedFields = { "ArtifactAccountId", "DeployOnBuildRecord", "Repositories", "Registry", "BuildSuffix" };
+    public static readonly string[] MovedFields = { "ArtifactAccountId", "DeployOnBuildRecord", "Repositories", "Registry", "BuildSuffix", "Outcomes" };
 
     public static string FileNameFor(string systemKey) => $"pipelineconfig.{systemKey}.yaml";
 
@@ -296,6 +296,12 @@ public class BuildSideConfig
                 $"into {target} (Pipeline.TargetAccountId). One of the two files is wrong.");
 
         pipeline.ChainEvidenceStore = entry?.EvidenceStore;
+        pipeline.Outcomes = entry?.Outcomes ?? false;
+        // THE INTAKE'S OUTCOMES LIST is the chain's first environment's, whichever environment's config planned the intake:
+        // a build it refuses would have deployed there.
+        pipeline.IntakeOutcomesTo = Chain is { Count: > 0 } && Chain[0].Outcomes
+            ? new PipelineNeighbour(Chain[0].Environment!, Chain[0].AccountId!, Chain[0].EvidenceStore)
+            : null;
 
         // THE NEIGHBOURS (P5): the environment before this one, whose markers it admits, and the one after, which admits its.
         var at = entry is null ? -1 : Chain!.IndexOf(entry);
@@ -320,6 +326,18 @@ public class PipelineChainEntry
     /// D). Required in a chain of more than one; the environment's deployer refuses to create any other.
     /// </summary>
     public string? EvidenceStore { get; set; }
+
+    /// <summary>
+    /// Tell this environment's outcomes list how every deploy ended (default <c>false</c>): a topic,
+    /// <c>{systemkey}-{environment}-deploy-outcomes</c>, sent one message for every execution of its deployer that ends,
+    /// deployed or not, by a function the execution's end invokes. In the chain's first environment the intake also sends it
+    /// every build it refuses, or cannot decide, since such a build reaches no deployer.
+    ///
+    /// <para>NOBODY IS SUBSCRIBED BY lz, as for the alerts topic: a subscription is a person or a list, and confirming it is
+    /// theirs. <c>lz bootstrapdeployer</c> reports how many the topic has and how to add one. Here, beside the chain, so the
+    /// deployer that creates the topic and the intake that sends to it read one switch.</para>
+    /// </summary>
+    public bool Outcomes { get; set; }
 }
 
 /// <summary>A site repository's artifacts (DecoupledCd.md V-24): one bundle per environment, named <c>site-{environment}</c>.</summary>

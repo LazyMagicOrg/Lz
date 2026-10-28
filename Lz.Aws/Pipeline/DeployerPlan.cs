@@ -63,6 +63,8 @@ public sealed record DeployerFunction(
 /// then the apply removes the start rule if an earlier run created it.</param>
 /// <param name="Alerts">The alerts (stage D3), when <c>Pipeline.Alerts</c> is on; null otherwise, and then the apply removes
 /// the failed-deploy rule, the sweep's schedule and its errors alarm if an earlier run created them.</param>
+/// <param name="Outcomes">The outcomes list, when this environment's chain entry has <c>Outcomes</c>; null otherwise, and then
+/// the apply removes the rule that invokes the notify function if an earlier run created it.</param>
 public sealed record PipelineDeployer(
     string StateMachineName,
     string RoleName,
@@ -87,7 +89,19 @@ public sealed record PipelineDeployer(
     IReadOnlyList<SiteTarget>? SiteTargets = null,
     DeployerGate2Plan? Gate2 = null,
     DeployerPromotionPlan? Promotion = null,
-    string? HoldParameter = null);
+    string? HoldParameter = null,
+    DeployerOutcomesPlan? Outcomes = null);
+
+/// <summary>
+/// The outcomes list (the environment's chain entry's <c>Outcomes</c>): a topic, a rule matching every end of this deployer's
+/// executions, and the notify function it invokes, which reads the execution's evidence and sends one message. The function
+/// itself is in <see cref="PipelineDeployer.Functions"/>.
+/// </summary>
+/// <param name="TopicPolicy">Admits the notify function's role, and - in the chain's first environment - the intake's record
+/// role in the build account, each by ARN.</param>
+public sealed record DeployerOutcomesPlan(
+    string TopicName, string TopicArn, string TopicPolicy, string RuleName, string RuleArn, string Pattern,
+    string FunctionName, string FunctionArn, bool AdmitsTheIntake);
 
 /// <summary>
 /// A promoted environment's poller (DecoupledCd.md §12 P5 stage I), its only trigger: a function the schedule invokes every
@@ -236,6 +250,8 @@ public static class DeployerHandlers
     public static readonly string SignatureHook = For("SignatureHookFunction");
     public static readonly string Start = For("StartFunction");
     public static readonly string Corroborate = For("CorroborateFunction");
+    // The outcomes (each environment's deploy-outcomes topic), planned only where its chain entry has Outcomes.
+    public static readonly string DeployNotify = For("DeployNotifyFunction");
     public static readonly string DeployBundle = For("DeployBundleFunction");
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
     public static readonly string DeploySite = For("DeploySiteFunction");
@@ -258,7 +274,7 @@ public static class DeployerHandlers
     /// <summary>Every handler, for the packaging test.</summary>
     public static IReadOnlyList<string> All => new[]
     {
-        Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployBundle, VerifyBundle, DeploySite, VerifySite,
+        Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployNotify, DeployBundle, VerifyBundle, DeploySite, VerifySite,
         Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart, MarkPassed,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
@@ -918,6 +934,15 @@ public static class DeployerPlanner
             functions.Add(corroborate);
         }
 
+        // THE OUTCOMES LIST, and the notify function with the others.
+        DeployerOutcomesPlan? outcomes = null;
+        if (p.Outcomes)
+        {
+            var (outcomesPlan, notify) = OutcomesFor(config, p, region, acct, artifactAccount, evidence, machineArn);
+            outcomes = outcomesPlan;
+            functions.Add(notify);
+        }
+
         // GATE 2 (V-E): provisioned or on plans its resources and functions; only on puts its states in the machine.
         DeployerGate2Plan? gate2 = null;
         if (p.Gate2IsProvisioned)
@@ -1065,8 +1090,79 @@ public static class DeployerPlanner
             SiteTargets: siteTargets,
             Gate2: gate2,
             Promotion: promotionPlan,
-            HoldParameter: HoldWanted(config) ? HoldParameterName(config) : null);
+            HoldParameter: HoldWanted(config) ? HoldParameterName(config) : null,
+            Outcomes: outcomes);
     }
+
+    /// <summary>
+    /// The outcomes list's topic, rule and notify function. THE INTAKE IS ADMITTED ONLY IN THE ENVIRONMENT BUILD RECORDS DEPLOY
+    /// TO: that is the environment whose list the intake tells (<c>PipelineConfig.IntakeOutcomesTo</c>, the chain's first), and
+    /// no other environment's topic takes a message from the build account.
+    /// </summary>
+    private static (DeployerOutcomesPlan Plan, DeployerFunction Function) OutcomesFor(
+        SystemConfig config, PipelineConfig p, string region, string acct, string artifactAccount, string evidence, string stateMachineArn)
+    {
+        var sk = config.SystemKey;
+        var env = config.Environment;
+        var topicArn = DeployOutcomes.TopicArn(region, acct, sk, env);
+        var rule = OutcomeRuleName(config);
+        var function = NotifyFunctionName(config);
+        var role = $"{function}-fn";
+        var admitsIntake = p.DeployOnBuildRecord;
+
+        var plan = new DeployerOutcomesPlan(
+            TopicName: DeployOutcomes.TopicName(sk, env),
+            TopicArn: topicArn,
+            TopicPolicy: CrossAccount.OutcomesTopicPolicy(topicArn, acct, $"arn:aws:iam::{acct}:role/{role}",
+                admitsIntake ? artifactAccount : null,
+                admitsIntake ? $"arn:aws:iam::{artifactAccount}:role/{IntakeBuildPlanner.RecordRoleName(sk)}" : null),
+            RuleName: rule,
+            RuleArn: $"arn:aws:events:{region}:{acct}:rule/{rule}",
+            Pattern: OutcomePattern(stateMachineArn),
+            FunctionName: function,
+            FunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
+            AdmitsTheIntake: admitsIntake);
+
+        var notify = new DeployerFunction(
+            function, DeployerHandlers.DeployNotify, role,
+            Combine(Logs(region, acct, function), new object[]
+            {
+                new { Sid = "TellTheOutcomesList", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topicArn },
+                new
+                {
+                    Sid = "ReadWhatTheExecutionRecorded", Effect = "Allow", Action = new[] { "s3:GetObject" },
+                    Resource = new[] { "deploys/", "failures/", Gate2ResultStep.TestsPrefix }.Select(prefix => $"arn:aws:s3:::{evidence}/{prefix}*").ToArray(),
+                },
+            }),
+            new Dictionary<string, string>
+            {
+                [DeployerEnvironment.OutcomesTopic] = topicArn,
+                [DeployerEnvironment.OutcomesEnvironment] = env,
+                [DeployerEnvironment.EvidenceStore] = evidence,
+            },
+            TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
+
+        return (plan, notify);
+    }
+
+    /// <summary>
+    /// Every end of this deployer's executions: SUCCEEDED as well as the three the failed-deploy rule matches. Step Functions
+    /// sends these to the default bus for a Standard workflow, best effort.
+    /// </summary>
+    public static string OutcomePattern(string stateMachineArn)
+        => JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["source"] = new[] { "aws.states" },
+            ["detail-type"] = new[] { "Step Functions Execution Status Change" },
+            ["detail"] = new Dictionary<string, object>
+            {
+                ["status"] = new[] { "SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED" },
+                ["stateMachineArn"] = new[] { stateMachineArn },
+            },
+        });
+
+    public static string OutcomeRuleName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-outcome";
+    public static string NotifyFunctionName(SystemConfig config) => $"{config.SystemKey}-{config.Environment}-deployer-notify";
 
     /// <summary>
     /// The site this environment deploys (DecoupledCd.md V-24), from configuration alone: the <c>site</c> repository whose

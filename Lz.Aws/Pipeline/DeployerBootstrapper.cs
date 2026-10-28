@@ -82,7 +82,9 @@ public static class DeployerBootstrapper
 
         // WHO WOULD BE TOLD, read in the dry run too: a topic nobody confirmed is alerts that reach no one.
         if (plan.Alerts is { } plannedAlerts)
-            await ReportSubscriptionsAsync(profile, region, plannedAlerts, config);
+            await ReportSubscriptionsAsync(profile, region, "alerts", plannedAlerts.TopicName, plannedAlerts.TopicArn, config);
+        if (plan.Outcomes is { } plannedOutcomes)
+            await ReportSubscriptionsAsync(profile, region, "outcomes", plannedOutcomes.TopicName, plannedOutcomes.TopicArn, config);
 
         // A VERIFIER-LESS HOOK IS REFUSED WHERE IT WOULD BE USED (DecoupledCd.md §14.2). Checked before the
         // dry-run return so a dry run says what the apply will do.
@@ -161,6 +163,8 @@ public static class DeployerBootstrapper
             : new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(endpoint);
         if (plan.Alerts is { } alertsTopic)
             await AlertsApply.EnsureTopicAsync(sns, alertsTopic);
+        if (plan.Outcomes is { } outcomesTopic)
+            await AlertsApply.EnsureTopicAsync(sns, outcomesTopic);
 
         // THE REPOSITORIES BEFORE THE PERMISSION, so there is no moment at which the build account may
         // replicate into a repository this account has not hardened. Without ecr:CreateRepository in the
@@ -245,6 +249,14 @@ public static class DeployerBootstrapper
             if (plan.Alerts is { } alerts)
                 await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts);
 
+            // THE OUTCOMES, AFTER THE MACHINE WHOSE ENDS THEY REPORT AND THE FUNCTION THEY INVOKE. Or, with the switch off, the
+            // rule an earlier run created is taken away; the topic stays, with whoever subscribed.
+            if (plan.Outcomes is { } outcomes)
+                await AlertsApply.WireOutcomesAsync(events, lambda, outcomes);
+            else
+                await TriggerApply.RemoveRuleAsync(events, eventBusName: null, DeployerPlanner.OutcomeRuleName(config),
+                    "the chain entry's Outcomes is off");
+
             // THE POLLER, AFTER THE MACHINE IT STARTS AND THE TOPIC IT ALARMS ON (P5 stage I).
             if (plan.Promotion is { } promotion)
                 await PromotionApply.WireAsync(events, lambda, cloudWatch, promotion, plan.Alerts!.TopicArn);
@@ -263,7 +275,9 @@ public static class DeployerBootstrapper
             ? "NOTHING STARTS THE DEPLOYER: Pipeline.DeployOnBuildRecord is off, so executions are started by hand."
             : $"THIS ACCOUNT'S HALF OF THE TRIGGER IS WIRED: a record event arriving on {plan.Trigger.BusName} starts the deployer.");
         if (plan.Alerts is { } wired)
-            await ReportSubscriptionsAsync(profile, region, wired, config);
+            await ReportSubscriptionsAsync(profile, region, "alerts", wired.TopicName, wired.TopicArn, config);
+        if (plan.Outcomes is { } wiredOutcomes)
+            await ReportSubscriptionsAsync(profile, region, "outcomes", wiredOutcomes.TopicName, wiredOutcomes.TopicArn, config);
         Console.WriteLine("Not built:");
         Console.WriteLine("  - a reconciler: an event that ends in a dead-letter queue is retried by nothing; start that deploy by hand");
         if (plan.Alerts is null)
@@ -315,10 +329,10 @@ public static class DeployerBootstrapper
     }
 
     /// <summary>
-    /// How many people the alerts reach, and how to add one. lz never subscribes an address: a subscription is a person's to
-    /// make and to confirm.
+    /// How many people a topic reaches - the alerts or the outcomes - and how to add one. lz never subscribes an address: a
+    /// subscription is a person's (or a list's) to make and to confirm.
     /// </summary>
-    private static async Task ReportSubscriptionsAsync(string? profile, string region, DeployerAlertsPlan alerts, SystemConfig config)
+    private static async Task ReportSubscriptionsAsync(string? profile, string region, string what, string topicName, string topicArn, SystemConfig config)
     {
         var creds = AwsCredentialsFactory.ResolveOrThrow(profile);
         var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
@@ -326,21 +340,21 @@ public static class DeployerBootstrapper
             ? new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(creds, endpoint)
             : new Amazon.SimpleNotificationService.AmazonSimpleNotificationServiceClient(endpoint);
 
-        var subscriptions = await AlertsApply.SubscriptionsAsync(sns, alerts.TopicArn);
+        var subscriptions = await AlertsApply.SubscriptionsAsync(sns, topicArn);
         if (subscriptions is { Confirmed: > 0 } found)
         {
-            Console.WriteLine($"  alerts reach {found.Confirmed} confirmed subscription(s) of {alerts.TopicName}" +
+            Console.WriteLine($"  {what} reach {found.Confirmed} confirmed subscription(s) of {topicName}" +
                               (found.Pending > 0 ? $" ({found.Pending} pending confirmation)." : "."));
             return;
         }
 
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine(subscriptions is null
-            ? $"  alerts topic {alerts.TopicName} does not exist yet; the apply creates it, and nobody is subscribed."
-            : $"  NOBODY RECEIVES THESE ALERTS: {alerts.TopicName} has no confirmed subscription" +
+            ? $"  {what} topic {topicName} does not exist yet; the apply creates it, and nobody is subscribed."
+            : $"  NOBODY RECEIVES THESE {what.ToUpperInvariant()}: {topicName} has no confirmed subscription" +
               (subscriptions.Value.Pending > 0 ? $" ({subscriptions.Value.Pending} pending confirmation)." : "."));
         Console.WriteLine("  To receive them, subscribe an address and click the confirmation link AWS sends it:");
-        Console.WriteLine($"    aws sns subscribe --topic-arn {alerts.TopicArn} --protocol email --notification-endpoint YOUR_EMAIL_ADDRESS" +
+        Console.WriteLine($"    aws sns subscribe --topic-arn {topicArn} --protocol email --notification-endpoint YOUR_EMAIL_ADDRESS" +
                           $"{(string.IsNullOrEmpty(profile) ? "" : $" --profile {profile}")} --region {config.Region}");
         Console.ResetColor();
     }
@@ -620,6 +634,22 @@ public static class DeployerBootstrapper
         {
             Console.WriteLine($"  alerts: off (Pipeline.Alerts) — rules {DeployerPlanner.FailedDeployRuleName(config)} and " +
                               $"{DeployerPlanner.CorroborateScheduleRuleName(config)} are removed if an earlier run created them");
+        }
+        Console.WriteLine();
+
+        if (plan.Outcomes is { } outcomes)
+        {
+            Console.WriteLine("  outcomes (the chain entry's Outcomes):");
+            Console.WriteLine($"    topic {outcomes.TopicName}: published to only by {outcomes.FunctionName}" +
+                              (outcomes.AdmitsTheIntake ? " and the build account's intake record function, by ARN" : ", by ARN"));
+            Console.WriteLine($"    rule {outcomes.RuleName}: executions of {plan.StateMachineName} that end SUCCEEDED, FAILED, TIMED_OUT or ABORTED " +
+                              $"-> {outcomes.FunctionName}, which reads the execution's evidence and sends one message");
+            if (outcomes.AdmitsTheIntake)
+                Console.WriteLine("    the intake sends the same topic each build it refuses or cannot decide (`lz bootstrappipeline --apply` wires its half)");
+        }
+        else
+        {
+            Console.WriteLine($"  outcomes: off (the chain entry's Outcomes) — rule {DeployerPlanner.OutcomeRuleName(config)} is removed if an earlier run created it");
         }
         Console.WriteLine();
 
