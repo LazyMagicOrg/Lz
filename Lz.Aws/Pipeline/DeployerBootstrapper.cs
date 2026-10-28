@@ -248,6 +248,9 @@ public static class DeployerBootstrapper
             // the flag off, the rules and alarm an earlier run created are taken away.
             if (plan.Alerts is { } alerts)
                 await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts);
+            else
+                await AlertsApply.RemoveAsync(events, cloudWatch, DeployerPlanner.FailedDeployRuleName(config),
+                    DeployerPlanner.CorroborateScheduleRuleName(config), DeployerPlanner.CorroborateErrorsAlarmName(config));
 
             // THE OUTCOMES, AFTER THE MACHINE WHOSE ENDS THEY REPORT AND THE FUNCTION THEY INVOKE. Or, with the switch off, the
             // rule an earlier run created is taken away; the topic stays, with whoever subscribed.
@@ -260,9 +263,6 @@ public static class DeployerBootstrapper
             // THE POLLER, AFTER THE MACHINE IT STARTS AND THE TOPIC IT ALARMS ON (P5 stage I).
             if (plan.Promotion is { } promotion)
                 await PromotionApply.WireAsync(events, lambda, cloudWatch, promotion, plan.Alerts!.TopicArn);
-            else
-                await AlertsApply.RemoveAsync(events, cloudWatch, DeployerPlanner.FailedDeployRuleName(config),
-                    DeployerPlanner.CorroborateScheduleRuleName(config), DeployerPlanner.CorroborateErrorsAlarmName(config));
         }
 
         Console.WriteLine();

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Lz.Tests.Build.Tests;
 
 namespace Lz.Tests.Config.Tests;
@@ -72,6 +73,19 @@ public class AlertsCallSiteTests
         Assert.True(permission < schedule && schedule < target, "the schedule could fire into a function EventBridge may not invoke");
         At(body, "await TriggerApply.EnsureOnlyTargetAsync(events, eventBusName: null, plan.FailedDeployRuleName,", file);
         At(body, "await EnsureErrorsAlarmAsync(cloudWatch, plan);", file);
+    }
+
+    /// <summary>
+    /// THE REMOVAL IS THE ALERTS' OWN ELSE. From 2026-10-25 to 10-28 the promotion poller's block sat between the alerts' wire
+    /// and their removal, so the removal ran in every environment WITHOUT a poller - dev - and each apply wired dev's failed-deploy
+    /// rule, sweep schedule and errors alarm, then deleted all three. Read off the source, as the other call sites here are.
+    /// </summary>
+    [Fact]
+    public void AlertsAreRemoved_OnlyWhenAlertsAreOff()
+    {
+        var src = Regex.Replace(Source("Lz.Aws", "Pipeline", "DeployerBootstrapper.cs"), @"\s+", " ");
+        Assert.Contains("if (plan.Alerts is { } alerts) await AlertsApply.WireAsync(events, lambda, cloudWatch, alerts); else await AlertsApply.RemoveAsync(", src);
+        Assert.Single(Regex.Matches(src, @"AlertsApply\.RemoveAsync\("));
     }
 
     [Fact]
