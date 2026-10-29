@@ -429,6 +429,41 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             var userPoolClient = new UserPoolClient($"{poolPrefix}-client", userPoolClientArgs,
                 new CustomResourceOptions { Parent = this });
 
+            // THE MCP RESOURCE SERVER, made before the BFF client (below) so that client can be granted its scope
+            // (McpResource.GrantToBffClient). Its clients are made in the M0-8 block further down. Moving it here
+            // changes no resource's name, so nothing is replaced.
+            ResourceServer? mcpResourceServer = null;
+            string? qualifiedMcpScope = null;
+            if (poolConfig.McpResource is { } mcpConfig)
+            {
+                if (string.IsNullOrWhiteSpace(mcpConfig.Identifier))
+                    throw new InvalidOperationException(
+                        $"Pool '{authType}' McpResource has no Identifier — set the MCP endpoint URL " +
+                        "(it is BOTH the resource-server id and the token aud).");
+
+                var mcpScope = string.IsNullOrWhiteSpace(mcpConfig.Scope) ? "invoke" : mcpConfig.Scope;
+
+                mcpResourceServer = new ResourceServer($"{poolPrefix}-mcp-resource-server", new ResourceServerArgs
+                {
+                    Identifier = mcpConfig.Identifier,
+                    Name = $"{poolPrefix}-mcp-resource-server",
+                    UserPoolId = userPool.Id,
+                    Scopes =
+                    {
+                        new ResourceServerScopeArgs
+                        {
+                            ScopeName = mcpScope,
+                            ScopeDescription = string.IsNullOrWhiteSpace(mcpConfig.ScopeDescription) ? mcpScope : mcpConfig.ScopeDescription,
+                        },
+                    },
+                }, new CustomResourceOptions { Parent = this });
+
+                // Token-visible qualified scope "{identifier}/{scope}" — what the client requests, Cognito puts
+                // in the scope claim, and AipHost's McpTokenGuard checks. Depends on the resource server.
+                qualifiedMcpScope = $"{mcpConfig.Identifier}/{mcpScope}";
+            }
+            var bffMcpScope = BffScopes.McpScopeForBff(authType, poolConfig, qualifiedMcpScope);
+
             // =================================================================
             // BFF CONFIDENTIAL CLIENT (additive, flag-gated) — §8.5
             // =================================================================
@@ -445,6 +480,7 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             Output<string>? bffClientId = null;
             Output<string>? bffClientSecret = null;
             int? bffSessionTtlHours = null;
+            string? bffScopes = null;
             if (poolConfig.ProvisionBffClient)
             {
                 // Token validity derived from the per-pool BFF session TTL.
@@ -483,7 +519,9 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                     SupportedIdentityProviders = { "COGNITO" },
                     PreventUserExistenceErrors = "ENABLED",
                     AllowedOauthFlows = { "code" },
-                    AllowedOauthScopes = { "openid", "profile", "email" },
+                    // openid/profile/email, and the pool's MCP scope where McpResource.GrantToBffClient asks for it,
+                    // so a cookie session's calls to /mcp carry a token /mcp takes (BffScopes).
+                    AllowedOauthScopes = { BffScopes.ScopesOf(bffMcpScope).Split(' ') },
                     AllowedOauthFlowsUserPoolClient = true,
                     CallbackUrls = { bffCallbackUrls.ToArray() },
                     LogoutUrls = { bffLogoutUrls.ToArray() },
@@ -498,10 +536,18 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                         AccessToken = "minutes",
                         IdToken = "minutes",
                     },
-                }, new CustomResourceOptions { Parent = this });
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    // A client can be granted a resource server's scope only once the scope exists.
+                    DependsOn = bffMcpScope != null && mcpResourceServer != null
+                        ? new InputList<Resource> { mcpResourceServer }
+                        : new InputList<Resource>(),
+                });
 
                 bffClientId = bffClient.Id;
                 bffClientSecret = bffClient.ClientSecret;
+                bffScopes = BffScopes.ScopesOf(bffMcpScope);
             }
 
             // =================================================================
@@ -721,33 +767,8 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             // Per-surface connector clients (BuyerOnboarding.md #9) — each needs its own branding slot
             // below, so (name, id) pairs are collected here. Empty unless SurfaceClients are configured.
             var mcpSurfaceClientIds = new List<(string Name, Output<string> Id)>();
-            if (poolConfig.McpResource is { } mcp)
+            if (poolConfig.McpResource is { } mcp && mcpResourceServer != null && qualifiedMcpScope != null)
             {
-                if (string.IsNullOrWhiteSpace(mcp.Identifier))
-                    throw new InvalidOperationException(
-                        $"Pool '{authType}' McpResource has no Identifier — set the MCP endpoint URL " +
-                        "(it is BOTH the resource-server id and the token aud).");
-
-                var mcpScope = string.IsNullOrWhiteSpace(mcp.Scope) ? "invoke" : mcp.Scope;
-
-                var mcpResourceServer = new ResourceServer($"{poolPrefix}-mcp-resource-server", new ResourceServerArgs
-                {
-                    Identifier = mcp.Identifier,
-                    Name = $"{poolPrefix}-mcp-resource-server",
-                    UserPoolId = userPool.Id,
-                    Scopes =
-                    {
-                        new ResourceServerScopeArgs
-                        {
-                            ScopeName = mcpScope,
-                            ScopeDescription = string.IsNullOrWhiteSpace(mcp.ScopeDescription) ? mcpScope : mcp.ScopeDescription,
-                        },
-                    },
-                }, new CustomResourceOptions { Parent = this });
-
-                // Token-visible qualified scope "{identifier}/{scope}" — what the client requests, Cognito puts
-                // in the scope claim, and AipHost's McpTokenGuard checks. Depends on the resource server.
-                var qualifiedMcpScope = $"{mcp.Identifier}/{mcpScope}";
                 var mcpClientSuffix = string.IsNullOrWhiteSpace(mcp.ClientName) ? "mcp" : mcp.ClientName;
                 var mcpDays = mcp.RefreshTokenDays > 0 ? mcp.RefreshTokenDays : 90;
 
@@ -1152,6 +1173,7 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 BffClientId = bffClientId,
                 BffClientSecret = bffClientSecret,
                 BffSessionTtlHours = bffSessionTtlHours,
+                BffScopes = bffScopes,
                 // Smartstore confidential-client outputs. Null unless
                 // ProvisionSmartstoreClient was set for this pool.
                 SmartstoreClientId = smartstoreClientId,
@@ -1371,6 +1393,12 @@ public class CognitoPoolOutputs
     public int? BffSessionTtlHours { get; init; }
 
     /// <summary>
+    /// The scopes the BFF client may ask for, space-separated (<see cref="BffScopes"/>). Non-null only when the
+    /// pool's <c>ProvisionBffClient</c> flag was set.
+    /// </summary>
+    public string? BffScopes { get; init; }
+
+    /// <summary>
     /// Confidential BFF client secret. Non-null only when the pool's
     /// <c>ProvisionBffClient</c> flag was set. Persisted into the tenant
     /// Secrets Manager secret by the tenant-data flow, never exported in clear
@@ -1415,6 +1443,7 @@ public class AwsCognitoOutputs : IAuthPoolOutputs
                 BffClientId = kv.Value.BffClientId,
                 BffClientSecret = kv.Value.BffClientSecret,
                 BffSessionTtlHours = kv.Value.BffSessionTtlHours,
+                BffScopes = kv.Value.BffScopes,
                 SmartstoreClientId = kv.Value.SmartstoreClientId,
                 SmartstoreClientSecret = kv.Value.SmartstoreClientSecret,
             });

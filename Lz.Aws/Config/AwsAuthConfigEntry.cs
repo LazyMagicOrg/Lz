@@ -314,6 +314,15 @@ public class McpResourceConfig
     /// <summary>Description surfaced on the resource-server scope. Defaults to the scope name.</summary>
     public string? ScopeDescription { get; set; }
 
+    /// <summary>
+    /// Grant this pool's BFF client (<see cref="AwsAuthConfigEntry.ProvisionBffClient"/>) the qualified scope, and
+    /// have the host's BFF ask for it at sign-in, so a web client signed in through the BFF can call <c>/mcp</c>
+    /// with its cookie (<c>BffScopes</c>). Requires <c>ProvisionBffClient</c>. Default <c>false</c>: the BFF client
+    /// keeps <c>openid profile email</c> only. Takes effect for a session signed in after it is deployed - a
+    /// refresh keeps the scopes the session was signed in with.
+    /// </summary>
+    public bool GrantToBffClient { get; set; } = false;
+
     /// <summary>Name suffix of the public PKCE MCP client (<c>{poolPrefix}-{ClientName}-client</c>). Default <c>mcp</c>.</summary>
     public string ClientName { get; set; } = "mcp";
 

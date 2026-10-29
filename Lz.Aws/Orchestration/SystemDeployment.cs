@@ -1167,6 +1167,10 @@ public class SystemDeployment
                     if (pool.BffSessionTtlHours is > 0)
                         exports[$"auth_{poolName}_bffSessionTtlHours"] =
                             Output.Create(pool.BffSessionTtlHours.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    // The scopes that client asks for at sign-in, for the host's LZ_*BFF_SCOPES (BffWiring): the same
+                    // list Cognito allows it, so the host never asks for a scope the client may not have.
+                    if (!string.IsNullOrEmpty(pool.BffScopes))
+                        exports[$"auth_{poolName}_bffScopes"] = Output.Create(pool.BffScopes);
                     // Smartstore confidential-client outputs — only present when the
                     // pool set ProvisionSmartstoreClient. Null otherwise, so
                     // unconfigured pools export exactly the same keys as before.

@@ -77,6 +77,13 @@ internal sealed class BffStackOutputs
     public Output<string> SessionTtlHours(string pool, string whenAbsent) =>
         _foundation.GetOutput($"auth_{pool}_bffSessionTtlHours").Apply(v => BffWiring.SessionTtlHoursOf(v, whenAbsent));
 
+    /// <summary>
+    /// The scopes <paramref name="pool"/>'s BFF client asks for, as the foundation exported them, or
+    /// <c>openid profile email</c> for a foundation deployed before it exported them (<see cref="BffScopes.Of"/>).
+    /// </summary>
+    public Output<string> Scopes(string pool) =>
+        _foundation.GetOutput($"auth_{pool}_bffScopes").Apply(BffScopes.Of);
+
     /// <summary>BFF authority (OIDC issuer) for <paramref name="pool"/>, or "" if absent.</summary>
     public Output<string> Authority(string pool) =>
         _foundation.GetOutput($"auth_{pool}_authority").Apply(v => v as string ?? string.Empty);
