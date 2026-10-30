@@ -41,6 +41,15 @@ public class PromotionPollTests
     private static readonly SeenMarker OldSite = Site("20261025T100000Z-7-1");
     private static readonly SeenMarker NewSite = Site("20261026T010000Z-8-1");
 
+    /// <summary>A set with a client <paramref name="first"/> doesn't have: a web app newly added to the chain.</summary>
+    private static SeenMarker WithNewApp(SeenMarker first, string stem, int minutesAgo = 1)
+    {
+        var members = first.Marker.Members.Append(Member("client", "scutara/scutarabuyerappreact", stem)).ToArray();
+        var id = PassMarkerFormat.MarkerIdFor(members);
+        var marker = new PassMarker(1, id, "dev", members, new PassMarkerEvidence(new PassMarkerReference("tests/x.json", "tv")), "req-x", "2026-10-26T00:00:00Z");
+        return new SeenMarker(PassMarkerFormat.KeyFor(id), "mv-" + id[5..11], marker, Now.AddMinutes(-minutesAgo));
+    }
+
     private static readonly SeenMarker Old = Set("20261025T100000Z-1-1", "20261024T100000Z-9-1");
     private static readonly SeenMarker NewService = Set("20261025T200000Z-2-1", "20261024T100000Z-9-1");
     private static readonly SeenMarker NewSeller = Set("20261025T100000Z-1-1", "20261025T210000Z-8-1");
@@ -71,6 +80,34 @@ public class PromotionPollTests
         Assert.False(PromotionPoll.Dominates(Old.Marker, NewService.Marker));
         Assert.False(PromotionPoll.Dominates(NewService.Marker, NewSeller.Marker));
         Assert.False(PromotionPoll.Dominates(NewSeller.Marker, NewService.Marker));
+    }
+
+    [Fact]
+    public void ASetLackingAMember_DoesNotDominateOneThatHasIt()
+    {
+        // Dev's pass of 2026-10-30 03:09: test's deployed set plus a new web app, every shared member the same. The set
+        // without the app was taken as dominating it, and the new app's set was decided superseded in test, never deployed.
+        var added = WithNewApp(NewService, "20261030T030104Z-40984017654-2");
+        Assert.False(PromotionPoll.Dominates(NewService.Marker, added.Marker));
+        Assert.True(PromotionPoll.Dominates(added.Marker, NewService.Marker));
+    }
+
+    [Fact]
+    public void ASetAddingAWebApp_ToTheSetDeployedHere_IsStarted_NotSuperseded()
+    {
+        var added = WithNewApp(NewService, "20261030T030104Z-40984017654-2");
+        var d = PromotionPoll.Decide(new[] { NewService, added }, State(decided: new Dictionary<SeenMarker, string> { [NewService] = "deployed" }), Now);
+        Assert.DoesNotContain(added, d.Supersede);
+        Assert.Equal(added, d.Start);
+    }
+
+    [Fact]
+    public void OfTwoUndecidedSets_TheOneAddingAWebApp_IsTheNewer()
+    {
+        var added = WithNewApp(NewService, "20261030T030104Z-40984017654-2");
+        var d = PromotionPoll.Decide(new[] { NewService, added }, State(), Now);
+        Assert.Equal(added, d.Start);
+        Assert.Empty(d.Alerts);
     }
 
     // ---- what it starts ----

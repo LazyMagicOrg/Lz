@@ -37,7 +37,7 @@ public readonly record struct RecordAge(string Stamp, int Attempt) : IComparable
 /// <item>SUPERSEDED: a marker never started, older than a set deployed here, is decided superseded (rule 3). A refused or
 /// failed set supersedes nothing.</item>
 /// <item>ONE SET IN FLIGHT: while any execution runs or awaits approval, nothing starts, and waiting does not alarm.</item>
-/// <item>THE NEWEST BY DOMINANCE: of the candidates, the one none of whose members is older than any other's same member.
+/// <item>THE NEWEST BY DOMINANCE: of the candidates, the one that has every member each other has, none of them older.
 /// Neither of two dominating starts nothing and alarms for a person, since a break-glass deploy can leave two such sets.</item>
 /// <item>LATE (rule 4): the newest startable marker not started ten minutes after it became startable - after it was
 /// written or after the last execution here closed, whichever is later - alarms, as it is started.</item>
@@ -57,9 +57,14 @@ public static class PromotionPoll
         return new RecordAge(m.Groups["stamp"].Value, m.Groups["attempt"].Success ? int.Parse(m.Groups["attempt"].Value) : 1);
     }
 
-    /// <summary>Whether no member of <paramref name="a"/> is older than <paramref name="b"/>'s member of the same class and repository.</summary>
+    /// <summary>
+    /// Whether <paramref name="a"/> has every member <paramref name="b"/> has, by class and repository, and none of them older.
+    /// A set lacking a member does not dominate one that has it: a web app newly added to the chain is newer than nothing,
+    /// and was otherwise decided superseded by the set deployed before it (dev's pass of 2026-10-30 03:09).
+    /// </summary>
     public static bool Dominates(PassMarker a, PassMarker b)
     {
+        if (b.Members.Any(o => !a.Members.Any(m => m.Class == o.Class && m.Repo == o.Repo))) return false;
         foreach (var m in a.Members)
         {
             var other = b.Members.FirstOrDefault(o => o.Class == m.Class && o.Repo == m.Repo);
