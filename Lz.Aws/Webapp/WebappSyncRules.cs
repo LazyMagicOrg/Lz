@@ -78,8 +78,8 @@ public static class WebappSyncRules
 
     /// <summary>
     /// The path a Blazor publish output serves under, from its files relative to the publish root: the folder holding
-    /// <c>_framework</c>, with a trailing slash (<c>seller/</c>); "" for an app at the root, or for files with no
-    /// framework at all.
+    /// <c>_framework</c>, with a trailing slash (<c>seller/</c>); "" for an app at the root. With no framework at all, the
+    /// folder holding its page (<see cref="IndexFolderOf"/>).
     ///
     /// <para>REFUSES TWO. <c>WebappDeployer.BundleBasePath</c> takes whichever <c>_framework</c> directory the file
     /// system lists first, which is harmless on a workstation whose publish has one; a bundle with two is not one app, and
@@ -99,12 +99,33 @@ public static class WebappSyncRules
 
         return bases.Count switch
         {
-            0 => "",
+            0 => IndexFolderOf(relativeFiles),
             1 => bases.Min!,
             _ => throw new InvalidOperationException(
                 $"the bundle holds {bases.Count} _framework folders ({string.Join(", ", bases.Select(b => b.Length == 0 ? "(root)" : b))}), " +
                 "so it is not one Blazor app and its base path cannot be told."),
         };
+    }
+
+    /// <summary>
+    /// A BUNDLE WITH NO FRAMEWORK (BuyerAppReactPunchlist BR-P3, 2026-10-29: a Vite build) serves under the folder holding
+    /// its page: the shallowest <c>index.html</c>, so <c>app2/index.html</c> with <c>app2/assets/...</c> is <c>app2/</c>,
+    /// and a page at the root, or no page at all, is "" as before. Two pages at that depth are not one app, and are refused.
+    /// </summary>
+    private static string IndexFolderOf(IEnumerable<string> relativeFiles)
+    {
+        var pages = relativeFiles.Select(f => f.Replace('\\', '/'))
+            .Where(f => f == "index.html" || f.EndsWith("/index.html", StringComparison.Ordinal))
+            .Select(f => f[..^"index.html".Length])
+            .ToList();
+        if (pages.Count == 0) return "";
+        var depth = pages.Min(p => p.Count(c => c == '/'));
+        var shallowest = pages.Where(p => p.Count(c => c == '/') == depth).Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToList();
+        return shallowest.Count == 1
+            ? shallowest[0]
+            : throw new InvalidOperationException(
+                $"the bundle holds no _framework folder and {shallowest.Count} pages at one depth ({string.Join(", ", shallowest.Select(b => b.Length == 0 ? "(root)" : b))}), " +
+                "so it is not one app and its base path cannot be told.");
     }
 
     /// <summary>

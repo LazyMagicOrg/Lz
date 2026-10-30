@@ -88,6 +88,8 @@ public static class IntakeBuildPlanner
                 (IReadOnlyList<string>?)r.Artifacts ?? Array.Empty<string>(),
                 r.TestBundle is { } collected && r.Gate1 is { Kind: "collection" } c
                     ? new IntakeGate1(collected, "", "", "", "", Array.Empty<IntakeImage>(), null, c.BuildRoot, Kind: "collection")
+                : r.TestBundle is { } npmBundle && r.Gate1 is { Kind: "vitest" } v
+                    ? new IntakeGate1(npmBundle, "", "", "", "", Array.Empty<IntakeImage>(), null, v.BuildRoot, Kind: "vitest")
                 : r.TestBundle is { } bundle && r.Gate1 is { } g
                     ? new IntakeGate1(bundle, g.Run!, g.Filter!, g.SdkVersion!, g.SdkSha512!,
                         (g.Images ?? new()).Select(i => new IntakeImage(i.From!, i.As!)).ToList(),
@@ -455,6 +457,9 @@ public static class IntakeBuildPlanner
     /// A COLLECTION CHECK (GATE1_KIND collection, the browser tests' Gate 1, §15.4) skips the SDK, the images and the test run:
     /// its specs' own dependencies installed before BUILD, then <c>playwright test --list --forbid-only</c>, all and @gate, and
     /// one GATE1-LIST-COLLECTED line with both counts, which <see cref="Gate1CollectionJudge"/> reads. It writes no report.
+    /// A VITEST RUN (GATE1_KIND vitest, a Node repository's own tests) skips the SDK and the images too: npm ci before BUILD,
+    /// then <c>vitest run</c> with a JSON report, and one GATE1-VITEST line with its counts - printed whether the tests passed
+    /// or not - which <see cref="Gate1VitestJudge"/> reads; the build ends as vitest did. It writes no report either.
     /// </summary>
     public static string BuildspecFor(string reportGroupArn) => $$"""
         version: 0.2
@@ -464,21 +469,22 @@ public static class IntakeBuildPlanner
           install:
             commands:
               - printf 'GATE1 %s run %s attempt %s, commit %s (%s)\nGATE1 intake execution %s\nGATE1 tests %s %s (the bundle under test)\n' "$INTAKE_REPO" "$INTAKE_RUN_ID" "$INTAKE_RUN_ATTEMPT" "$INTAKE_COMMIT" "$INTAKE_WORKFLOW_REF" "$INTAKE_EXECUTION" "$INTAKE_TESTS" "$BUNDLE_SHA256" && printf '%s\n' "$INTAKE_ARTIFACTS" | while read -r name sha; do [ -z "$name" ] || echo "GATE1 staged $name $sha"; done
-              - test "$GATE1_KIND" = collection || curl -fsSL --retry 3 -o /tmp/sdk.tgz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${SDK_VERSION}/dotnet-sdk-${SDK_VERSION}-linux-x64.tar.gz"
-              - test "$GATE1_KIND" = collection || echo "${SDK_SHA512}  /tmp/sdk.tgz" | sha512sum -c -
-              - test "$GATE1_KIND" = collection || { mkdir -p /opt/gate1-dotnet && tar -xzf /tmp/sdk.tgz -C /opt/gate1-dotnet; }
-              - test "$GATE1_KIND" = collection || printf '%s\n' "$GATE1_IMAGES" | while read -r from as; do [ -z "$from" ] || { docker pull "$from" && docker tag "$from" "$as"; } || exit 1; done
+              - test "$GATE1_KIND" != tests || curl -fsSL --retry 3 -o /tmp/sdk.tgz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${SDK_VERSION}/dotnet-sdk-${SDK_VERSION}-linux-x64.tar.gz"
+              - test "$GATE1_KIND" != tests || echo "${SDK_SHA512}  /tmp/sdk.tgz" | sha512sum -c -
+              - test "$GATE1_KIND" != tests || { mkdir -p /opt/gate1-dotnet && tar -xzf /tmp/sdk.tgz -C /opt/gate1-dotnet; }
+              - test "$GATE1_KIND" != tests || printf '%s\n' "$GATE1_IMAGES" | while read -r from as; do [ -z "$from" ] || { docker pull "$from" && docker tag "$from" "$as"; } || exit 1; done
           pre_build:
             commands:
               - curl -fsSL --retry 3 -o /tmp/bundle.zip "$BUNDLE_URL"
               - echo "${BUNDLE_SHA256}  /tmp/bundle.zip" | sha256sum -c -
               - mkdir -p "$GATE1_ROOT" && unzip -q /tmp/bundle.zip -d "$GATE1_ROOT"
-              - if [ "$GATE1_KIND" = collection ]; then cd "$GATE1_ROOT" && npm ci --no-audit --no-fund; fi
+              - if [ "$GATE1_KIND" = collection ] || [ "$GATE1_KIND" = vitest ]; then cd "$GATE1_ROOT" && npm ci --no-audit --no-fund; fi
           build:
             commands:
-              - test "$GATE1_KIND" = collection || { set -o pipefail; cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && printf '%s\n' "$GATE1_LISTS" | while read -r name filter; do [ -z "$name" ] && continue; echo "GATE1-LIST-BEGIN $name"; DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --list-tests --filter "$filter" | sed -n "s/^    /GATE1-LIST $name /p" || exit 1; echo "GATE1-LIST-END $name"; done; }
-              - test "$GATE1_KIND" = collection || { cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results; }
+              - test "$GATE1_KIND" != tests || { set -o pipefail; cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && printf '%s\n' "$GATE1_LISTS" | while read -r name filter; do [ -z "$name" ] && continue; echo "GATE1-LIST-BEGIN $name"; DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --list-tests --filter "$filter" | sed -n "s/^    /GATE1-LIST $name /p" || exit 1; echo "GATE1-LIST-END $name"; done; }
+              - test "$GATE1_KIND" != tests || { cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results; }
               - if [ "$GATE1_KIND" = collection ]; then set -o pipefail; cd "$GATE1_ROOT" && total=$(npx playwright test --list --forbid-only | awk '/^Total/{print $2}') && gate=$(npx playwright test --list --forbid-only --grep @gate | awk '/^Total/{print $2}') && echo "GATE1-LIST-COLLECTED total ${total:-0} gate ${gate:-0}" || { echo "GATE1-LIST-COLLECTED failed"; exit 1; }; fi
+              - if [ "$GATE1_KIND" = vitest ]; then cd "$GATE1_ROOT" && { npx vitest run --reporter=default --reporter=json --outputFile=/tmp/gate1-vitest.json; status=$?; node -e 'const r=JSON.parse(require("fs").readFileSync("/tmp/gate1-vitest.json","utf8"));console.log(["GATE1-VITEST","total",r.numTotalTests,"passed",r.numPassedTests,"failed",r.numFailedTests,"suites-failed",r.numFailedTestSuites].join(" "))' || echo "GATE1-VITEST unreadable"; exit $status; }; fi
         reports:
           {{reportGroupArn}}:
             files:

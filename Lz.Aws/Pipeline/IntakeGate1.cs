@@ -242,6 +242,36 @@ public static class Gate1CollectionJudge
 }
 
 /// <summary>
+/// A NODE REPOSITORY'S GATE 1, JUDGED (BuyerAppReactPunchlist BR-P3): its vitest run, which writes no test report, so it is
+/// judged from its log's <c>GATE1-VITEST</c> line, printed whether the tests passed or not. A failed test, or a test file
+/// that failed to load, is a decided FAILURE whatever the build says. A build that succeeded and counted at least one test,
+/// every one passing, is a PASS. Anything else decided nothing, and is a fault, retried: a failure before the run (the
+/// bundle, npm), a run that printed no count or an unreadable one, or one that ran no test.
+/// </summary>
+public static class Gate1VitestJudge
+{
+    public const string Marker = "GATE1-VITEST";
+
+    public static (Gate1Outcome Outcome, string Reason, IReadOnlyDictionary<string, int>? Counts) Judge(Gate1Build build, IReadOnlyList<string> lines)
+    {
+        if (build.Status == "IN_PROGRESS") return (Gate1Outcome.Running, "the vitest run is running", null);
+        var count = lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, $@"^{Marker} total (\d+) passed (\d+) failed (\d+) suites-failed (\d+)$"))
+            .FirstOrDefault(m => m.Success);
+        if (count is null)
+            return (Gate1Outcome.Fault, $"the vitest run ended {build.Status} and printed no count{(build.FailedPhase is { } p ? $": {p}" : "")}", null);
+        var (total, passed, failed, suites) = (int.Parse(count.Groups[1].Value), int.Parse(count.Groups[2].Value),
+            int.Parse(count.Groups[3].Value), int.Parse(count.Groups[4].Value));
+        var counts = new Dictionary<string, int> { ["SUCCEEDED"] = passed, ["FAILED"] = failed };
+        if (failed > 0) return (Gate1Outcome.Failed, $"{failed} of {total} tests failed", counts);
+        if (suites > 0) return (Gate1Outcome.Failed, $"{suites} test file(s) failed to run", counts);
+        if (build.Status != "SUCCEEDED")
+            return (Gate1Outcome.Fault, $"the vitest run ended {build.Status} with no failed test{(build.FailedPhase is { } p2 ? $": {p2}" : "")}", counts);
+        if (total == 0) return (Gate1Outcome.Fault, "the vitest run succeeded and ran no test", counts);
+        return (Gate1Outcome.Passed, $"{passed} of {total} tests passed", counts);
+    }
+}
+
+/// <summary>
 /// GATE 1, DECIDED (V-C): one look at the build; while it runs, <see cref="Gate1StillRunning"/>; when it ends, the verdict
 /// written once to the intake's evidence under <c>gate1/{executionName}</c>, BINDING THE BYTES IT RAN FOR: the image's
 /// manifest digest and every staged artifact's SHA-256, from the fetch. A failure names up to twenty failed tests. Gate 2's
@@ -256,13 +286,20 @@ public static class IntakeGate1VerdictStep
         var build = await builds.DescribeAsync(buildId);
 
         // A COLLECTION CHECK writes no test report: it is judged from its log, and its @gate count is what it records.
-        var collection = state["gate1Start"]?["kind"]?.GetValue<string>() == "collection";
+        var kind = state["gate1Start"]?["kind"]?.GetValue<string>();
+        var collection = kind == "collection";
+        // A VITEST RUN writes no test report either: judged from its log, its counts are what it records.
+        var vitest = kind == "vitest";
         Gate1Report? report = null;
         int? gateCount = null;
+        IReadOnlyDictionary<string, int>? logCounts = null;
         Gate1Outcome outcome;
         string reason;
         if (collection)
             (outcome, reason, gateCount) = Gate1CollectionJudge.Judge(build,
+                build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
+        else if (vitest)
+            (outcome, reason, logCounts) = Gate1VitestJudge.Judge(build,
                 build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
         else
         {
@@ -276,11 +313,13 @@ public static class IntakeGate1VerdictStep
             case Gate1Outcome.Fault: throw new IntakeFault($"Gate 1 {buildId}: {reason}");
         }
 
-        var lists = collection ? null : Gate2Lists.Parse(await builds.ListLinesAsync(build));
-        if (!collection && outcome == Gate1Outcome.Passed && lists is null)
+        // Gate 2's lists come from a .NET run only: a collection or a vitest run gives Gate 2 nothing to hold results to.
+        var dotnet = !collection && !vitest;
+        var lists = dotnet ? Gate2Lists.Parse(await builds.ListLinesAsync(build)) : null;
+        if (dotnet && outcome == Gate1Outcome.Passed && lists is null)
             throw new IntakeFault($"Gate 1 {buildId}: {reason}, but its log holds no complete Gate 2 lists");
 
-        var failing = !collection && outcome == Gate1Outcome.Failed ? await builds.FailedCasesAsync(build.ReportArns, 20) : Array.Empty<string>();
+        var failing = dotnet && outcome == Gate1Outcome.Failed ? await builds.FailedCasesAsync(build.ReportArns, 20) : Array.Empty<string>();
         var fetch = state["fetch"] as JsonObject;
         var verdict = new JsonObject
         {
@@ -291,7 +330,8 @@ public static class IntakeGate1VerdictStep
             ["summary"] = reason,
             ["buildId"] = buildId,
             ["seconds"] = build.Started is { } s && build.Ended is { } e ? (int)(e - s).TotalSeconds : null,
-            ["counts"] = report is null ? null : new JsonObject(report.StatusCounts.Select(c => KeyValuePair.Create(c.Key, (JsonNode?)c.Value))),
+            ["counts"] = report is not null ? new JsonObject(report.StatusCounts.Select(c => KeyValuePair.Create(c.Key, (JsonNode?)c.Value)))
+                : logCounts is not null ? new JsonObject(logCounts.Select(c => KeyValuePair.Create(c.Key, (JsonNode?)c.Value))) : null,
             ["gateCount"] = gateCount,
             ["manifestDigest"] = fetch?["manifestDigest"]?.DeepClone(),
             ["artifactSha256"] = new JsonObject((fetch?["staged"] as JsonArray ?? new JsonArray())

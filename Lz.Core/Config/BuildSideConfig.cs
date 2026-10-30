@@ -127,9 +127,22 @@ public class BuildSideConfig
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
     private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
     {
-        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection"))
+        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection" or "vitest"))
         {
-            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site or collection";
+            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site, collection or vitest";
+            yield break;
+        }
+        // A NODE REPOSITORY'S TESTS (BuyerAppReactPunchlist BR-P3, 2026-10-29): lz runs them - npm ci, then vitest run - in the
+        // test bundle's root, and judges them from the count it prints. A test bundle to run, and none of a .NET run's settings.
+        if (repo.Gate1 is { Kind: "vitest" } v)
+        {
+            if (repo.Class is "tests" or "site") yield return $"{name}: Gate1.Kind vitest runs a repository's own tests; a {repo.Class} repository has its own check";
+            if (string.IsNullOrWhiteSpace(repo.TestBundle)) yield return $"{name}: a vitest run runs a TestBundle, and none is named";
+            if (v.BuildRoot is { } vroot && (!Regex.IsMatch(vroot, "^/[A-Za-z0-9._/-]+$") || vroot.Contains("..")))
+                yield return $"{name}: Gate1.BuildRoot '{vroot}' is not an absolute path";
+            foreach (var (field, set) in new[] { ("Run", v.Run is not null), ("Filter", v.Filter is not null), ("SdkVersion", v.SdkVersion is not null),
+                         ("SdkSha512", v.SdkSha512 is not null), ("Images", v.Images is { Count: > 0 }), ("Environment", v.Environment is { Count: > 0 }) })
+                if (set) yield return $"{name}: Gate1.Kind vitest runs the bundle's own tests with npm, so it takes no {field}";
             yield break;
         }
         // THE BROWSER TESTS' GATE 1 (DecoupledCd.md §15.4): their collection, which lz runs - every spec loads and none is

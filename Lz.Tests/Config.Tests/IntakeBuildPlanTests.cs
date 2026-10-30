@@ -279,9 +279,9 @@ public class IntakeBuildPlanTests
         var phases = (Dictionary<object, object>)yaml["phases"];
         List<string> Commands(string phase) => ((List<object>)((Dictionary<object, object>)phases[phase])["commands"]).Select(c => (string)c).ToList();
 
-        // The SDK and the images are a test run's: a collection check skips them.
+        // The SDK and the images are a .NET test run's only: a collection check, and a vitest run, skip them.
         Assert.All(Commands("install").Where(c => c.Contains("sdk.tgz") || c.Contains("docker pull")),
-            c => Assert.StartsWith("test \"$GATE1_KIND\" = collection ||", c));
+            c => Assert.StartsWith("test \"$GATE1_KIND\" != tests ||", c));
         var collect = Commands("build").Single(c => c.Contains("--forbid-only"));
         Assert.StartsWith("if [ \"$GATE1_KIND\" = collection ]", collect);
         Assert.Contains("npx playwright test --list --forbid-only", collect);
@@ -317,6 +317,49 @@ public class IntakeBuildPlanTests
         if (exit == 0)
             Assert.Equal((Gate1Outcome.Passed, (int?)12), (Gate1CollectionJudge.Judge(new("SUCCEEDED", null, Array.Empty<string>(), null, null), lines).Outcome,
                 Gate1CollectionJudge.Judge(new("SUCCEEDED", null, Array.Empty<string>(), null, null), lines).GateCount));
+    }
+
+    [Fact]
+    public void AVitestRun_InstallsWithNpmCi_AndRunsVitestWithAJsonReport()
+    {
+        var yaml = new YamlDotNet.Serialization.DeserializerBuilder().Build().Deserialize<Dictionary<string, object>>(WithGate1().Gate1!.Buildspec);
+        var phases = (Dictionary<object, object>)yaml["phases"];
+        List<string> Commands(string phase) => ((List<object>)((Dictionary<object, object>)phases[phase])["commands"]).Select(c => (string)c).ToList();
+
+        Assert.Contains(Commands("pre_build"), c => c.Contains("[ \"$GATE1_KIND\" = vitest ]") && c.Contains("npm ci"));
+        var run = Commands("build").Single(c => c.Contains("vitest run"));
+        Assert.StartsWith("if [ \"$GATE1_KIND\" = vitest ]", run);
+        Assert.Contains("--reporter=json --outputFile=/tmp/gate1-vitest.json", run);
+        // The .NET run's two steps are skipped for it, as for a collection check.
+        Assert.All(Commands("build").Where(c => c.Contains("dotnet test")), c => Assert.StartsWith("test \"$GATE1_KIND\" != tests ||", c));
+    }
+
+    [Theory]
+    [InlineData(0, 16, 16, 0, 0, "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
+    [InlineData(1, 16, 14, 2, 1, "GATE1-VITEST total 16 passed 14 failed 2 suites-failed 1", Gate1Outcome.Failed)]
+    public void TheVitestCommand_PrintsTheLineTheJudgeReads_AndEndsAsVitestDid_UnderBash(int exit, int total, int passed, int failed, int suites, string expected, Gate1Outcome outcome)
+    {
+        var yaml = new YamlDotNet.Serialization.DeserializerBuilder().Build().Deserialize<Dictionary<string, object>>(WithGate1().Gate1!.Buildspec);
+        var build = (Dictionary<object, object>)((Dictionary<object, object>)yaml["phases"])["build"];
+        var run = ((List<object>)build["commands"]).Select(c => (string)c).Single(c => c.Contains("vitest run"));
+        // A stand-in npx writing vitest's JSON report (its numTotalTests, numPassedTests, numFailedTests, numFailedTestSuites)
+        // where the command told it to, and exiting as vitest does; the command's own node reads it.
+        var script = $$"""
+            export GATE1_KIND=vitest GATE1_ROOT=/tmp
+            npx() { printf '{"numTotalTests":{{total}},"numPassedTests":{{passed}},"numFailedTests":{{failed}},"numFailedTestSuites":{{suites}}}' > /tmp/gate1-vitest.json; return {{exit}}; }
+            {{run}}
+            """;
+        var psi = new System.Diagnostics.ProcessStartInfo("bash", "-s") { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };
+        using var bash = System.Diagnostics.Process.Start(psi)!;
+        bash.StandardInput.Write(script.Replace("\r", "") + "\n");
+        bash.StandardInput.Close();
+        var lines = bash.StandardOutput.ReadToEnd().Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        bash.WaitForExit();
+
+        Assert.Equal(exit, bash.ExitCode);
+        Assert.Equal(expected, lines.Last());
+        Assert.Equal(outcome, Gate1VitestJudge.Judge(new(exit == 0 ? "SUCCEEDED" : "FAILED", exit == 0 ? null : "BUILD: COMMAND_EXECUTION_ERROR",
+            Array.Empty<string>(), null, null), lines).Outcome);
     }
 
     [Fact]

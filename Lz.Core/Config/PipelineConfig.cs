@@ -370,7 +370,9 @@ public class PipelineGate1Config
     /// <summary>
     /// <c>tests</c> (the default) runs the repository's test bundle in CodeBuild; <c>site</c> is lz's own check of a site's
     /// bundles (DecoupledCd.md V-24), which runs no repository code and so takes none of the settings below but
-    /// <see cref="Indexed"/>.
+    /// <see cref="Indexed"/>; <c>collection</c> is the browser tests' collection check; <c>vitest</c> runs a Node
+    /// repository's own tests - <c>npm ci</c>, then <c>vitest run</c> in the bundle's root - and takes only
+    /// <see cref="BuildRoot"/>.
     /// </summary>
     public string? Kind { get; set; }
 

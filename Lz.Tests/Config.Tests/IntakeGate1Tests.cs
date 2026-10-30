@@ -288,6 +288,53 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal(0, f.ReportReads);
     }
 
+    // ---- a Node repository's vitest run (BuyerAppReactPunchlist BR-P3) ----
+
+    [Theory]
+    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]
+    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]   // a failed test decides, whatever the build says
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 4 passed 4 failed 0 suites-failed 1", Gate1Outcome.Failed)]   // a file that did not load
+    [InlineData("FAILED", "PRE_BUILD: npm ci failed", null, Gate1Outcome.Fault)]                                      // not the tests' own failure
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST unreadable", Gate1Outcome.Fault)]         // no count it could read
+    [InlineData("SUCCEEDED", null, null, Gate1Outcome.Fault)]                                                          // no count: it decided nothing
+    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 0 passed 0 failed 0 suites-failed 0", Gate1Outcome.Fault)]    // ran no test
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Fault)]   // all passed, yet the build failed
+    public void AVitestRun_IsJudgedFromItsLog(string status, string? phase, string? line, Gate1Outcome outcome)
+    {
+        var (o, _, _) = Gate1VitestJudge.Judge(new(status, phase, Array.Empty<string>(), null, null), line is null ? Array.Empty<string>() : new[] { line });
+        Assert.Equal(outcome, o);
+    }
+
+    [Fact]
+    public async Task AVitestRunsPass_IsWritten_WithItsCounts_AndNeedsNoGate2Lists_AndReadsNoReport()
+    {
+        var f = new Fakes { Build = new("SUCCEEDED", null, Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0" } };
+        var state = State();
+        state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "vitest" };
+
+        var verdict = await IntakeGate1VerdictStep.RunAsync(state, Exec, f, f, Now);
+
+        Assert.Equal("passed", verdict["verdict"]!.GetValue<string>());
+        Assert.Equal(16, verdict["counts"]!["SUCCEEDED"]!.GetValue<int>());
+        Assert.Null(verdict["gate2Lists"]);
+        Assert.Equal(0, f.ReportReads);
+    }
+
+    [Fact]
+    public async Task AVitestRunsFailure_IsDecided_AndAsksTheReportNothing()
+    {
+        var f = new Fakes { Build = new("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-VITEST total 16 passed 14 failed 2 suites-failed 1" } };
+        var state = State();
+        state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "vitest" };
+
+        var verdict = await IntakeGate1VerdictStep.RunAsync(state, Exec, f, f, Now);
+
+        Assert.Equal("failed", verdict["verdict"]!.GetValue<string>());
+        Assert.Contains("2 of 16 tests failed", verdict["summary"]!.GetValue<string>());
+        Assert.Equal(0, f.ReportReads);
+    }
+
     // ---- the verdict ----
 
     private static JsonObject Started() { var s = State(); s["gate1Start"] = new JsonObject { ["buildId"] = "build:1" }; return s; }

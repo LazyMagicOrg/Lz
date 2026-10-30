@@ -91,6 +91,38 @@ public class WebappSyncRulesTests
     }
 
     [Fact]
+    public void ABundleWithNoFramework_IsServedUnderTheFolderHoldingItsPage()
+    {
+        // A Vite build re-rooted under its path (BuyerAppReactPunchlist BR-P3): the page and its hashed assets.
+        Assert.Equal("app2/", WebappSyncRules.BasePathOf(new[] { "app2/index.html", "app2/assets/index-DMTnKVjY.js", "app2/brand-icon.png" }));
+        // The shallowest page decides: a page deeper in the app is one of its own files.
+        Assert.Equal("app2/", WebappSyncRules.BasePathOf(new[] { "app2/index.html", "app2/help/index.html" }));
+        Assert.Equal("app2/", WebappSyncRules.BasePathOf(new[] { "app2\\index.html", "app2\\assets\\a.js" }));   // as a Windows listing names them
+        // A framework still decides for a Blazor bundle, whatever pages it holds.
+        Assert.Equal("seller/", WebappSyncRules.BasePathOf(new[] { "seller/_framework/dotnet.js", "seller/index.html", "index.html" }));
+        Assert.Equal("", WebappSyncRules.BasePathOf(new[] { "assets/a.js" }));   // no page and no framework: the root, as before
+    }
+
+    [Fact]
+    public void ABundleWithNoFramework_AndTwoPagesAtOneDepth_HasNoBasePath()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            WebappSyncRules.BasePathOf(new[] { "app2/index.html", "admin/index.html" }));
+
+        Assert.Contains("2 pages at one depth", ex.Message);
+    }
+
+    [Fact]
+    public void AViteBundleBuiltForItsPath_IsMirrored_AndOneBuiltForAnother_IsRefused()
+    {
+        var bundle = new[] { "app2/index.html", "app2/assets/index-DMTnKVjY.js" }
+            .Select(p => new BundleFile(p, new string('a', 64), 10)).ToList();
+        Assert.NotNull(WebappMirrorPlanner.Plan(bundle, Array.Empty<StoredObject>(), "app2/"));
+        Assert.Contains("built for base path 'app2/'",
+            Assert.Throws<InvalidOperationException>(() => WebappMirrorPlanner.Plan(bundle, Array.Empty<StoredObject>(), "app/")).Message);
+    }
+
+    [Fact]
     public void ABundleWithTwoFrameworkFolders_HasNoBasePath()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
