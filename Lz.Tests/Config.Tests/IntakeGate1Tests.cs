@@ -291,15 +291,15 @@ public sealed class IntakeGate1Tests : IDisposable
     // ---- a Node repository's vitest run (BuyerAppReactPunchlist BR-P3) ----
 
     [Theory]
-    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
-    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]
-    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]   // a failed test decides, whatever the build says
-    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 4 passed 4 failed 0 suites-failed 1", Gate1Outcome.Failed)]   // a file that did not load
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-LIST-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-VITEST total 16 passed 15 failed 1 suites-failed 1", Gate1Outcome.Failed)]   // a failed test decides, whatever the build says
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-LIST-VITEST total 4 passed 4 failed 0 suites-failed 1", Gate1Outcome.Failed)]   // a file that did not load
     [InlineData("FAILED", "PRE_BUILD: npm ci failed", null, Gate1Outcome.Fault)]                                      // not the tests' own failure
-    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST unreadable", Gate1Outcome.Fault)]         // no count it could read
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-LIST-VITEST unreadable", Gate1Outcome.Fault)]         // no count it could read
     [InlineData("SUCCEEDED", null, null, Gate1Outcome.Fault)]                                                          // no count: it decided nothing
-    [InlineData("SUCCEEDED", null, "GATE1-VITEST total 0 passed 0 failed 0 suites-failed 0", Gate1Outcome.Fault)]    // ran no test
-    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Fault)]   // all passed, yet the build failed
+    [InlineData("SUCCEEDED", null, "GATE1-LIST-VITEST total 0 passed 0 failed 0 suites-failed 0", Gate1Outcome.Fault)]    // ran no test
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", "GATE1-LIST-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Fault)]   // all passed, yet the build failed
     public void AVitestRun_IsJudgedFromItsLog(string status, string? phase, string? line, Gate1Outcome outcome)
     {
         var (o, _, _) = Gate1VitestJudge.Judge(new(status, phase, Array.Empty<string>(), null, null), line is null ? Array.Empty<string>() : new[] { line });
@@ -309,7 +309,7 @@ public sealed class IntakeGate1Tests : IDisposable
     [Fact]
     public async Task AVitestRunsPass_IsWritten_WithItsCounts_AndNeedsNoGate2Lists_AndReadsNoReport()
     {
-        var f = new Fakes { Build = new("SUCCEEDED", null, Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0" } };
+        var f = new Fakes { Build = new("SUCCEEDED", null, Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-LIST-VITEST total 16 passed 16 failed 0 suites-failed 0" } };
         var state = State();
         state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "vitest" };
 
@@ -324,7 +324,7 @@ public sealed class IntakeGate1Tests : IDisposable
     [Fact]
     public async Task AVitestRunsFailure_IsDecided_AndAsksTheReportNothing()
     {
-        var f = new Fakes { Build = new("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-VITEST total 16 passed 14 failed 2 suites-failed 1" } };
+        var f = new Fakes { Build = new("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-LIST-VITEST total 16 passed 14 failed 2 suites-failed 1" } };
         var state = State();
         state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "vitest" };
 

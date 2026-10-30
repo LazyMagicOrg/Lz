@@ -458,7 +458,7 @@ public static class IntakeBuildPlanner
     /// its specs' own dependencies installed before BUILD, then <c>playwright test --list --forbid-only</c>, all and @gate, and
     /// one GATE1-LIST-COLLECTED line with both counts, which <see cref="Gate1CollectionJudge"/> reads. It writes no report.
     /// A VITEST RUN (GATE1_KIND vitest, a Node repository's own tests) skips the SDK and the images too: npm ci before BUILD,
-    /// then <c>vitest run</c> with a JSON report, and one GATE1-VITEST line with its counts - printed whether the tests passed
+    /// then <c>vitest run</c> with a JSON report, and one GATE1-LIST-VITEST line with its counts - printed whether the tests passed
     /// or not - which <see cref="Gate1VitestJudge"/> reads; the build ends as vitest did. It writes no report either.
     /// </summary>
     public static string BuildspecFor(string reportGroupArn) => $$"""
@@ -484,7 +484,7 @@ public static class IntakeBuildPlanner
               - test "$GATE1_KIND" != tests || { set -o pipefail; cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && printf '%s\n' "$GATE1_LISTS" | while read -r name filter; do [ -z "$name" ] && continue; echo "GATE1-LIST-BEGIN $name"; DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --list-tests --filter "$filter" | sed -n "s/^    /GATE1-LIST $name /p" || exit 1; echo "GATE1-LIST-END $name"; done; }
               - test "$GATE1_KIND" != tests || { cd "$GATE1_ROOT/$(dirname "$GATE1_RUN")" && DOTNET_ROOT=/opt/gate1-dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 /opt/gate1-dotnet/dotnet test "$(basename "$GATE1_RUN")" --filter "$GATE1_FILTER" --logger "trx;LogFileName=gate1.trx" --results-directory /tmp/gate1-results; }
               - if [ "$GATE1_KIND" = collection ]; then set -o pipefail; cd "$GATE1_ROOT" && total=$(npx playwright test --list --forbid-only | awk '/^Total/{print $2}') && gate=$(npx playwright test --list --forbid-only --grep @gate | awk '/^Total/{print $2}') && echo "GATE1-LIST-COLLECTED total ${total:-0} gate ${gate:-0}" || { echo "GATE1-LIST-COLLECTED failed"; exit 1; }; fi
-              - if [ "$GATE1_KIND" = vitest ]; then cd "$GATE1_ROOT" && { npx vitest run --reporter=default --reporter=json --outputFile=/tmp/gate1-vitest.json; status=$?; node -e 'const r=JSON.parse(require("fs").readFileSync("/tmp/gate1-vitest.json","utf8"));console.log(["GATE1-VITEST","total",r.numTotalTests,"passed",r.numPassedTests,"failed",r.numFailedTests,"suites-failed",r.numFailedTestSuites].join(" "))' || echo "GATE1-VITEST unreadable"; exit $status; }; fi
+              - if [ "$GATE1_KIND" = vitest ]; then cd "$GATE1_ROOT" && { npx vitest run --reporter=default --reporter=json --outputFile=/tmp/gate1-vitest.json; status=$?; node -e 'const r=JSON.parse(require("fs").readFileSync("/tmp/gate1-vitest.json","utf8"));console.log(["GATE1-LIST-VITEST","total",r.numTotalTests,"passed",r.numPassedTests,"failed",r.numFailedTests,"suites-failed",r.numFailedTestSuites].join(" "))' || echo "GATE1-LIST-VITEST unreadable"; exit $status; }; fi
         reports:
           {{reportGroupArn}}:
             files:

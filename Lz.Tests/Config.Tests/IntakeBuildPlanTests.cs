@@ -335,8 +335,8 @@ public class IntakeBuildPlanTests
     }
 
     [Theory]
-    [InlineData(0, 16, 16, 0, 0, "GATE1-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
-    [InlineData(1, 16, 14, 2, 1, "GATE1-VITEST total 16 passed 14 failed 2 suites-failed 1", Gate1Outcome.Failed)]
+    [InlineData(0, 16, 16, 0, 0, "GATE1-LIST-VITEST total 16 passed 16 failed 0 suites-failed 0", Gate1Outcome.Passed)]
+    [InlineData(1, 16, 14, 2, 1, "GATE1-LIST-VITEST total 16 passed 14 failed 2 suites-failed 1", Gate1Outcome.Failed)]
     public void TheVitestCommand_PrintsTheLineTheJudgeReads_AndEndsAsVitestDid_UnderBash(int exit, int total, int passed, int failed, int suites, string expected, Gate1Outcome outcome)
     {
         var yaml = new YamlDotNet.Serialization.DeserializerBuilder().Build().Deserialize<Dictionary<string, object>>(WithGate1().Gate1!.Buildspec);
@@ -358,8 +358,10 @@ public class IntakeBuildPlanTests
 
         Assert.Equal(exit, bash.ExitCode);
         Assert.Equal(expected, lines.Last());
+        // The judge is given what the verdict's log reader keeps, as in the intake: a marker it drops is a count never read
+        // (the first vitest run, 2026-10-30, printed GATE1-VITEST, which the reader dropped, and faulted).
         Assert.Equal(outcome, Gate1VitestJudge.Judge(new(exit == 0 ? "SUCCEEDED" : "FAILED", exit == 0 ? null : "BUILD: COMMAND_EXECUTION_ERROR",
-            Array.Empty<string>(), null, null), lines).Outcome);
+            Array.Empty<string>(), null, null), lines.Where(Gate2Lists.Kept).ToList()).Outcome);
     }
 
     [Fact]

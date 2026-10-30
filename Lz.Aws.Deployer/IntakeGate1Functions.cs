@@ -153,7 +153,7 @@ internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild, IAmazonCloudWat
             {
                 LogGroupName = build.LogGroup, LogStreamName = build.LogStream, StartFromHead = true, NextToken = token,
             });
-            lines.AddRange((page.Events ?? new List<OutputLogEvent>()).Select(e => e.Message).Where(m => m.StartsWith(Gate2Lists.Prefix, StringComparison.Ordinal)));
+            lines.AddRange((page.Events ?? new List<OutputLogEvent>()).Select(e => e.Message).Where(Gate2Lists.Kept));
             if (page.NextForwardToken is null || page.NextForwardToken == token) return lines;
             token = page.NextForwardToken;
         }

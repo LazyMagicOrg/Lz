@@ -41,6 +41,12 @@ public static class Gate2Lists
 {
     public const string Prefix = "GATE1-LIST";
 
+    /// <summary>
+    /// The log lines the verdict is given: only those with the prefix, so every marker a judge reads - the lists, the
+    /// collection's count, the vitest run's counts - starts with it. A marker without it never reaches its judge.
+    /// </summary>
+    public static bool Kept(string message) => message.StartsWith(Prefix, StringComparison.Ordinal);
+
     public static readonly IReadOnlyList<(string Name, string Filter)> Filters = new[]
     {
         ("precondition", "Category=E2E&Gate2=Precondition"),
@@ -221,7 +227,7 @@ public static class Gate1Judge
 /// </summary>
 public static class Gate1CollectionJudge
 {
-    public const string Marker = "GATE1-LIST-COLLECTED";
+    public const string Marker = Gate2Lists.Prefix + "-COLLECTED";
 
     public static (Gate1Outcome Outcome, string Reason, int? GateCount) Judge(Gate1Build build, IReadOnlyList<string> lines)
     {
@@ -243,14 +249,14 @@ public static class Gate1CollectionJudge
 
 /// <summary>
 /// A NODE REPOSITORY'S GATE 1, JUDGED (BuyerAppReactPunchlist BR-P3): its vitest run, which writes no test report, so it is
-/// judged from its log's <c>GATE1-VITEST</c> line, printed whether the tests passed or not. A failed test, or a test file
+/// judged from its log's <c>GATE1-LIST-VITEST</c> line, printed whether the tests passed or not. A failed test, or a test file
 /// that failed to load, is a decided FAILURE whatever the build says. A build that succeeded and counted at least one test,
 /// every one passing, is a PASS. Anything else decided nothing, and is a fault, retried: a failure before the run (the
 /// bundle, npm), a run that printed no count or an unreadable one, or one that ran no test.
 /// </summary>
 public static class Gate1VitestJudge
 {
-    public const string Marker = "GATE1-VITEST";
+    public const string Marker = Gate2Lists.Prefix + "-VITEST";
 
     public static (Gate1Outcome Outcome, string Reason, IReadOnlyDictionary<string, int>? Counts) Judge(Gate1Build build, IReadOnlyList<string> lines)
     {
