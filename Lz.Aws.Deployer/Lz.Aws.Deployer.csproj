@@ -56,6 +56,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\IntakeNames.cs" Link="Linked\Lz.Aws\Pipeline\IntakeNames.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakeArtifacts.cs" Link="Linked\Lz.Aws\Pipeline\IntakeArtifacts.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakeGitHub.cs" Link="Linked\Lz.Aws\Pipeline\IntakeGitHub.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\IntakeTokens.cs" Link="Linked\Lz.Aws\Pipeline\IntakeTokens.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakePollStep.cs" Link="Linked\Lz.Aws\Pipeline\IntakePollStep.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakeSteps.cs" Link="Linked\Lz.Aws\Pipeline\IntakeSteps.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\IntakeGate1.cs" Link="Linked\Lz.Aws\Pipeline\IntakeGate1.cs" />

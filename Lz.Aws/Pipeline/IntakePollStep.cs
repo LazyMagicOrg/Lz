@@ -229,9 +229,28 @@ public static class IntakePollStep
 
         var started = new JsonArray();
         var alarmed = new JsonArray();
+        var failed = new JsonArray();
         foreach (var repository in repositories)
         {
-            var runs = await github.CompletedRunsAsync(repository.Repo, repository.WorkflowFile, now - ListWindow);
+            // ONE REPOSITORY GITHUB WILL NOT ANSWER FOR IS SKIPPED, NOT THE TICK (2026-11-05): with the App not installed on the
+            // root, its token was refused and every poll failed, stopping all eight repositories for eight minutes. It is
+            // alarmed once per distinct answer, and the others are polled as always.
+            IReadOnlyList<GitHubRun> runs;
+            try
+            {
+                runs = await github.CompletedRunsAsync(repository.Repo, repository.WorkflowFile, now - ListWindow);
+            }
+            catch (Exception ex) when (ex is GitHubApiException or IntakeFault or HttpRequestException)
+            {
+                var alarm = $"{repository.Repo} ({repository.WorkflowFile}) could not be polled, and was skipped: {ex.Message}";
+                failed.Add(alarm);
+                if (await evidence.PutOnceAsync(IntakeEvidence.Alarm(alarm), new JsonObject { ["alarm"] = alarm, ["at"] = now.ToString("O") }.ToJsonString()))
+                {
+                    await alerts.PublishAsync("intake alarm", alarm);
+                    alarmed.Add(alarm);
+                }
+                continue;
+            }
             var plan = IntakePoller.Choose(repository.Source, runs, now, states);
 
             foreach (var start in plan.Starts)
@@ -259,6 +278,6 @@ public static class IntakePollStep
             }
         }
 
-        return new JsonObject { ["started"] = started, ["alarmed"] = alarmed };
+        return new JsonObject { ["started"] = started, ["alarmed"] = alarmed, ["failed"] = failed };
     }
 }

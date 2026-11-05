@@ -59,9 +59,19 @@ public class IntakePollStepTests
         public readonly List<(string Name, string Input)> Started = new();
         public readonly List<string> Published = new();
         public bool StartsCollide;   // StartExecution answers ExecutionAlreadyExists, as for a name another start just took
+        public string? Refuses;      // a repository whose runs GitHub will not list (the App is not installed on it)
+        public readonly List<string> Polled = new();
 
         public Task<IReadOnlyList<GitHubRun>> CompletedRunsAsync(string repo, string workflowFile, DateTimeOffset since)
-        { Asked = (repo, workflowFile, since); return Task.FromResult<IReadOnlyList<GitHubRun>>(Runs); }
+        {
+            if (repo == Refuses)
+                throw new GitHubApiException(System.Net.HttpStatusCode.UnprocessableEntity, "an installation token for installation 173750004");
+            Polled.Add(repo);
+            Asked = (repo, workflowFile, since);
+            return Task.FromResult<IReadOnlyList<GitHubRun>>(Runs.Where(r => r.RepositoryId == RepoIdOf(repo)).ToList());
+        }
+
+        public static long RepoIdOf(string repo) => repo == Service.Repo ? RepoId : 9999;
 
         public Task<IReadOnlyList<string>> KeysAsync(string prefix)
             => Task.FromResult<IReadOnlyList<string>>(Evidence.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList());
@@ -83,6 +93,35 @@ public class IntakePollStepTests
     }
 
     private static Task<JsonObject> Tick(Fakes f) => IntakePollStep.RunAsync(new[] { Service }, f, f, f, f, Now);
+
+    // ---- one repository GitHub refuses (2026-11-05: the App was not installed on the root, and every poll failed) ----
+
+    private static readonly IntakeRepository Refused = new("Example/Root", 9999, OwnerId, ".github/workflows/build-tooling.yml", "dry", "tooling", new[] { "tooling" });
+
+    [Fact]
+    public async Task ARepositoryGitHubRefuses_IsSkipped_AndTheOthersArePolled()
+    {
+        var f = new Fakes { Runs = { Run(9001) }, Refuses = Refused.Repo };
+
+        var result = await IntakePollStep.RunAsync(new[] { Refused, Service }, f, f, f, f, Now);
+
+        Assert.Equal(new[] { Service.Repo }, f.Polled);
+        Assert.Equal(Name(9001), Assert.Single(f.Started).Name);
+        Assert.Contains(Refused.Repo, result["failed"]![0]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ARefusedRepository_Alarms_Once()
+    {
+        var f = new Fakes { Refuses = Refused.Repo };
+
+        await IntakePollStep.RunAsync(new[] { Refused, Service }, f, f, f, f, Now);
+        await IntakePollStep.RunAsync(new[] { Refused, Service }, f, f, f, f, Now.AddMinutes(1));
+
+        var alarm = Assert.Single(f.Published);
+        Assert.Contains(Refused.Repo, alarm);
+        Assert.Contains("422", alarm);
+    }
 
     // ---- the evidence ----
 

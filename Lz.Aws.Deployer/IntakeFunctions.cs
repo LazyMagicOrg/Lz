@@ -104,42 +104,54 @@ internal static class IntakeClients
 
 /// <summary>
 /// The intake App (V-17) as the steps see it: its key read from Secrets Manager (JSON <c>{"clientId", "privateKey"}</c>), a
-/// JWT, the installation found from the first repository, and an installation token narrowed to the configured
-/// repositories and to Actions and Contents read, kept until ten minutes before GitHub's hour runs out.
+/// JWT, and an installation token for each repository, narrowed to it and to Actions and Contents read (<see cref="IntakeTokens"/>,
+/// since 2026-11-05: one token for all of them was refused whole when the App was not installed on one).
 /// </summary>
-internal sealed class IntakeApp(IntakeGitHub github, Amazon.SecretsManager.IAmazonSecretsManager secrets, string secretId,
-    IReadOnlyList<IntakeRepository> repositories) : IIntakeRuns, IIntakeGitHub
+internal sealed class IntakeApp : IIntakeRuns, IIntakeGitHub
 {
-    private string? _token;
-    private DateTimeOffset _tokenUntil;
+    private readonly IntakeGitHub github;
+    private readonly Amazon.SecretsManager.IAmazonSecretsManager secrets;
+    private readonly string secretId;
+    private readonly IntakeTokens tokens;
+    private (string ClientId, string PrivateKey)? _key;
 
-    private async Task<string> TokenAsync()
+    public IntakeApp(IntakeGitHub github, Amazon.SecretsManager.IAmazonSecretsManager secrets, string secretId, IReadOnlyList<IntakeRepository> repositories)
     {
-        if (_token is not null && DateTimeOffset.UtcNow < _tokenUntil) return _token;
-        var secret = JsonNode.Parse((await secrets.GetSecretValueAsync(new Amazon.SecretsManager.Model.GetSecretValueRequest { SecretId = secretId })).SecretString)
-            ?? throw new IntakeFault($"the intake App's secret {secretId} is empty");
-        var jwt = GitHubAppJwt.Create(secret["clientId"]!.GetValue<string>(), secret["privateKey"]!.GetValue<string>(), DateTimeOffset.UtcNow);
-        var installation = await github.InstallationIdAsync(jwt, repositories[0].Repo, CancellationToken.None);
-        _token = await github.InstallationTokenAsync(jwt, installation, repositories.Select(r => r.RepositoryId).Distinct().ToList(), CancellationToken.None);
-        _tokenUntil = DateTimeOffset.UtcNow.AddMinutes(50);
-        return _token;
+        (this.github, this.secrets, this.secretId) = (github, secrets, secretId);
+        tokens = new IntakeTokens(
+            async repo => await github.InstallationIdAsync(await JwtAsync(), repo, CancellationToken.None),
+            async (installation, ids) => await github.InstallationTokenAsync(await JwtAsync(), installation, ids, CancellationToken.None),
+            repositories, () => DateTimeOffset.UtcNow);
     }
 
+    private async Task<string> JwtAsync()
+    {
+        if (_key is null)
+        {
+            var secret = JsonNode.Parse((await secrets.GetSecretValueAsync(new Amazon.SecretsManager.Model.GetSecretValueRequest { SecretId = secretId })).SecretString)
+                ?? throw new IntakeFault($"the intake App's secret {secretId} is empty");
+            _key = (secret["clientId"]!.GetValue<string>(), secret["privateKey"]!.GetValue<string>());
+        }
+        return GitHubAppJwt.Create(_key.Value.ClientId, _key.Value.PrivateKey, DateTimeOffset.UtcNow);
+    }
+
+    private Task<string> TokenAsync(string repo) => tokens.ForAsync(repo);
+
     public async Task<IReadOnlyList<GitHubRun>> CompletedRunsAsync(string repo, string workflowFile, DateTimeOffset since)
-        => await github.CompletedRunsAsync(await TokenAsync(), repo, workflowFile, since, CancellationToken.None);
+        => await github.CompletedRunsAsync(await TokenAsync(repo), repo, workflowFile, since, CancellationToken.None);
 
     public async Task<GitHubRun?> RunAttemptAsync(string repo, long runId, int attempt)
-        => await github.RunAttemptAsync(await TokenAsync(), repo, runId, attempt, CancellationToken.None);
+        => await github.RunAttemptAsync(await TokenAsync(repo), repo, runId, attempt, CancellationToken.None);
 
     public async Task<IReadOnlyList<GitHubJob>> JobsAsync(string repo, long runId, int attempt)
-        => await github.JobsAsync(await TokenAsync(), repo, runId, attempt, CancellationToken.None);
+        => await github.JobsAsync(await TokenAsync(repo), repo, runId, attempt, CancellationToken.None);
 
     public async Task<IReadOnlyList<GitHubArtifact>> ArtifactsAsync(string repo, long runId)
-        => await github.ArtifactsAsync(await TokenAsync(), repo, runId, CancellationToken.None);
+        => await github.ArtifactsAsync(await TokenAsync(repo), repo, runId, CancellationToken.None);
 
     public async Task DownloadAsync(string repo, long artifactId, string path)
     {
-        await using var source = await github.DownloadArtifactAsync(await TokenAsync(), repo, artifactId, CancellationToken.None);
+        await using var source = await github.DownloadArtifactAsync(await TokenAsync(repo), repo, artifactId, CancellationToken.None);
         await using var file = File.Create(path);
         await source.CopyToAsync(file);
     }
