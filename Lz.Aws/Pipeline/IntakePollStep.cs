@@ -19,7 +19,10 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
     /// The classes whose prefixes the publish writes under in each store: its own, and <c>tests</c> where it has a test bundle.
     /// A site has none, so it is given no <c>tests/</c> prefix.
     /// </summary>
-    public IReadOnlyList<string> PublishedClasses => Site is not null && Gate1 is null ? new[] { Class } : new[] { Class, "tests" };
+    public IReadOnlyList<string> PublishedClasses => (Site is not null && Gate1 is null) || Gate1 is { Kind: "smoke" } ? new[] { Class } : new[] { Class, "tests" };
+
+    /// <summary>A Gate 1 with a test bundle of its own, published under <c>tests/</c>; a smoke check's bundle is the image itself.</summary>
+    public bool HasTestBundle => Gate1 is { Kind: not "smoke" };
 
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
@@ -240,6 +243,8 @@ public static class IntakePollStep
                     ["runId"] = start.RunId,
                     ["runAttempt"] = start.RunAttempt,
                     ["retry"] = start.Retry,
+                    // WHICH ENTRY: a repository may have one per class, each with its own workflow (P3 B).
+                    ["workflowPath"] = repository.WorkflowPath,
                 };
                 if (await executions.StartAsync(start.ExecutionName, input.ToJsonString()))
                     started.Add(start.ExecutionName);

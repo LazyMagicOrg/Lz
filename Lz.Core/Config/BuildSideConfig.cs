@@ -78,6 +78,18 @@ public class BuildSideConfig
                 p.Add($"Chain entry '{entry.Environment}' is the build account; an environment runs in its own account");
         }
 
+        // ONE ENTRY PER CLASS, EACH WITH ITS OWN WORKFLOW (DecoupledCd.md P3 B): the intake tells a repository's entries apart by
+        // the workflow its poller listed the run under, so two entries of one repository with the same workflow, or of the
+        // same class, could not be told apart.
+        foreach (var group in (Repositories ?? new()).Where(r => !string.IsNullOrWhiteSpace(r.Repo))
+                     .GroupBy(r => r.Repo!, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+        {
+            if (group.Select(r => r.WorkflowPath ?? "").Distinct(StringComparer.Ordinal).Count() < group.Count())
+                p.Add($"{group.Key}: {group.Count()} entries need a workflow each; the intake tells them apart by it");
+            if (group.Select(r => r.Class ?? "").Distinct(StringComparer.Ordinal).Count() < group.Count())
+                p.Add($"{group.Key}: two entries of one class; a repository has one entry per class");
+        }
+
         foreach (var repo in Repositories ?? new())
         {
             var name = repo.Repo ?? "(unnamed)";
@@ -127,9 +139,24 @@ public class BuildSideConfig
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
     private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
     {
-        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection" or "vitest"))
+        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection" or "vitest" or "smoke"))
         {
-            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site, collection or vitest";
+            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site, collection, vitest or smoke";
+            yield break;
+        }
+        // THE TOOLING IMAGE'S GATE 1 (DecoupledCd.md P3 B, owner 2026-11-05): an image with no test suite of its own, so lz loads
+        // the image the run built and checks it does what it is for - lz at the version it carries, the plugin loaded, the
+        // Pulumi provider and the AWS CLI present. Its bundle is the image itself, so it names no TestBundle and none of a
+        // test run's settings.
+        if (repo.Gate1 is { Kind: "smoke" } s)
+        {
+            if (repo.Class != "tooling") yield return $"{name}: Gate1.Kind smoke checks the tooling image; a {repo.Class} repository has its own check";
+            if (repo.Artifacts is not { Count: 1 }) yield return $"{name}: Gate1.Kind smoke loads the one image the run built, so it needs exactly one artifact";
+            if (repo.TestBundle is not null) yield return $"{name}: Gate1.Kind smoke checks the image itself, so it takes no TestBundle";
+            foreach (var (field, set) in new[] { ("Run", s.Run is not null), ("Filter", s.Filter is not null), ("SdkVersion", s.SdkVersion is not null),
+                         ("SdkSha512", s.SdkSha512 is not null), ("Images", s.Images is { Count: > 0 }), ("Environment", s.Environment is { Count: > 0 }),
+                         ("BuildRoot", s.BuildRoot is not null) })
+                if (set) yield return $"{name}: Gate1.Kind smoke is lz's own check of the image, so it takes no {field}";
             yield break;
         }
         // A NODE REPOSITORY'S TESTS (BuyerAppReactPunchlist BR-P3, 2026-10-29): lz runs them - npm ci, then vitest run - in the

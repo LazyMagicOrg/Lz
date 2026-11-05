@@ -335,6 +335,44 @@ public sealed class IntakeGate1Tests : IDisposable
         Assert.Equal(0, f.ReportReads);
     }
 
+    // ---- the tooling image's smoke check (DecoupledCd.md P3 B, owner 2026-11-05) ----
+
+    [Theory]
+    [InlineData("SUCCEEDED", null, new[] { "GATE1-LIST-SMOKE checks 6 failed 0" }, Gate1Outcome.Passed)]
+    [InlineData("SUCCEEDED", null, new[] { "GATE1-LIST-SMOKE-FAILED plugin-loaded", "GATE1-LIST-SMOKE checks 6 failed 1" }, Gate1Outcome.Failed)]
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", new[] { "GATE1-LIST-SMOKE checks 6 failed 2" }, Gate1Outcome.Failed)]
+    [InlineData("FAILED", "BUILD: COMMAND_EXECUTION_ERROR", new string[0], Gate1Outcome.Fault)]          // the archive would not load
+    [InlineData("SUCCEEDED", null, new string[0], Gate1Outcome.Fault)]                                    // no count: it decided nothing
+    [InlineData("SUCCEEDED", null, new[] { "GATE1-LIST-SMOKE checks 0 failed 0" }, Gate1Outcome.Fault)]   // ran no check
+    public void ASmokeCheck_IsJudgedFromItsLog(string status, string? phase, string[] lines, Gate1Outcome outcome)
+    {
+        var (o, _, _) = Gate1SmokeJudge.Judge(new(status, phase, Array.Empty<string>(), null, null), lines);
+        Assert.Equal(outcome, o);
+    }
+
+    [Fact]
+    public void ASmokeFailure_NamesTheChecksThatFailed()
+    {
+        var (_, reason, _) = Gate1SmokeJudge.Judge(new("SUCCEEDED", null, Array.Empty<string>(), null, null),
+            new[] { "GATE1-LIST-SMOKE-FAILED plugin-loaded", "GATE1-LIST-SMOKE-FAILED aws-cli", "GATE1-LIST-SMOKE checks 6 failed 2" });
+        Assert.Equal("2 of 6 smoke checks failed: plugin-loaded, aws-cli", reason);
+    }
+
+    [Fact]
+    public async Task ASmokeChecksPass_IsWritten_WithItsCounts_AndNeedsNoGate2Lists_AndReadsNoReport()
+    {
+        var f = new Fakes { Build = new("SUCCEEDED", null, Array.Empty<string>(), Now.AddMinutes(-1), Now), LogLines = new[] { "GATE1-LIST-SMOKE checks 6 failed 0" } };
+        var state = State();
+        state["gate1Start"] = new JsonObject { ["buildId"] = "build:1", ["kind"] = "smoke" };
+
+        var verdict = await IntakeGate1VerdictStep.RunAsync(state, Exec, f, f, Now);
+
+        Assert.Equal("passed", verdict["verdict"]!.GetValue<string>());
+        Assert.Equal(6, verdict["counts"]!["SUCCEEDED"]!.GetValue<int>());
+        Assert.Null(verdict["gate2Lists"]);
+        Assert.Equal(0, f.ReportReads);
+    }
+
     // ---- the verdict ----
 
     private static JsonObject Started() { var s = State(); s["gate1Start"] = new JsonObject { ["buildId"] = "build:1" }; return s; }

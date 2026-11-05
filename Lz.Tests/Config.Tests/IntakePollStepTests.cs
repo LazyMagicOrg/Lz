@@ -146,7 +146,10 @@ public class IntakePollStepTests
         var (name, input) = Assert.Single(f.Started);
         Assert.Equal(Name(9001), name);
         var json = JsonNode.Parse(input)!.AsObject();
-        Assert.Equal(new[] { "repo", "repositoryId", "runId", "runAttempt", "retry" }, json.Select(p => p.Key));
+        // Ids, and the workflow the entry lists runs from (P3 B: one repository may have an entry per class) - which CheckRun
+        // compares with the run GitHub reports, so it is no more trusted than the ids are.
+        Assert.Equal(new[] { "repo", "repositoryId", "runId", "runAttempt", "retry", "workflowPath" }, json.Select(p => p.Key));
+        Assert.Equal(".github/workflows/build-aiphost.yml", json["workflowPath"]!.GetValue<string>());
         Assert.Equal(9001, json["runId"]!.GetValue<long>());
         Assert.Equal(Name(9001), result["started"]![0]!.GetValue<string>());
         Assert.Equal(("Example/ExampleService", "build-aiphost.yml", Now - TimeSpan.FromDays(7)), f.Asked);   // a week: past the artifacts' day

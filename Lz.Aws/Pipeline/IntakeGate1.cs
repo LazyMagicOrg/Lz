@@ -278,6 +278,35 @@ public static class Gate1VitestJudge
 }
 
 /// <summary>
+/// THE TOOLING IMAGE'S GATE 1, JUDGED (DecoupledCd.md P3 B, owner 2026-11-05): its smoke check, which writes no test report, so it
+/// is judged from its log's <c>GATE1-LIST-SMOKE</c> line and the <c>GATE1-LIST-SMOKE-FAILED</c> lines before it. A failed check
+/// is a decided FAILURE: the image does not do what it is for. Every check passing is a PASS. No count, or a count of no checks
+/// - the archive would not load, or the build failed before checking - decided nothing, and is a fault, retried.
+/// </summary>
+public static class Gate1SmokeJudge
+{
+    public const string Marker = Gate2Lists.Prefix + "-SMOKE";
+
+    public static (Gate1Outcome Outcome, string Reason, IReadOnlyDictionary<string, int>? Counts) Judge(Gate1Build build, IReadOnlyList<string> lines)
+    {
+        if (build.Status == "IN_PROGRESS") return (Gate1Outcome.Running, "the smoke check is running", null);
+        var count = lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, $@"^{Marker} checks (\d+) failed (\d+)$"))
+            .FirstOrDefault(m => m.Success);
+        if (count is null)
+            return (Gate1Outcome.Fault, $"the smoke check ended {build.Status} and printed no count{(build.FailedPhase is { } p ? $": {p}" : "")}", null);
+        var (checks, failed) = (int.Parse(count.Groups[1].Value), int.Parse(count.Groups[2].Value));
+        var counts = new Dictionary<string, int> { ["SUCCEEDED"] = checks - failed, ["FAILED"] = failed };
+        if (checks == 0) return (Gate1Outcome.Fault, "the smoke check ran no check", counts);
+        if (failed > 0)
+        {
+            var names = lines.Where(l => l.StartsWith(Marker + "-FAILED ", StringComparison.Ordinal)).Select(l => l[(Marker.Length + 8)..]);
+            return (Gate1Outcome.Failed, $"{failed} of {checks} smoke checks failed: {string.Join(", ", names)}", counts);
+        }
+        return (Gate1Outcome.Passed, $"{checks} of {checks} smoke checks passed", counts);
+    }
+}
+
+/// <summary>
 /// GATE 1, DECIDED (V-C): one look at the build; while it runs, <see cref="Gate1StillRunning"/>; when it ends, the verdict
 /// written once to the intake's evidence under <c>gate1/{executionName}</c>, BINDING THE BYTES IT RAN FOR: the image's
 /// manifest digest and every staged artifact's SHA-256, from the fetch. A failure names up to twenty failed tests. Gate 2's
@@ -296,6 +325,8 @@ public static class IntakeGate1VerdictStep
         var collection = kind == "collection";
         // A VITEST RUN writes no test report either: judged from its log, its counts are what it records.
         var vitest = kind == "vitest";
+        // A SMOKE CHECK (P3 B) is judged from its log too.
+        var smoke = kind == "smoke";
         Gate1Report? report = null;
         int? gateCount = null;
         IReadOnlyDictionary<string, int>? logCounts = null;
@@ -306,6 +337,9 @@ public static class IntakeGate1VerdictStep
                 build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
         else if (vitest)
             (outcome, reason, logCounts) = Gate1VitestJudge.Judge(build,
+                build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
+        else if (smoke)
+            (outcome, reason, logCounts) = Gate1SmokeJudge.Judge(build,
                 build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
         else
         {
@@ -320,7 +354,7 @@ public static class IntakeGate1VerdictStep
         }
 
         // Gate 2's lists come from a .NET run only: a collection or a vitest run gives Gate 2 nothing to hold results to.
-        var dotnet = !collection && !vitest;
+        var dotnet = !collection && !vitest && !smoke;
         var lists = dotnet ? Gate2Lists.Parse(await builds.ListLinesAsync(build)) : null;
         if (dotnet && outcome == Gate1Outcome.Passed && lists is null)
             throw new IntakeFault($"Gate 1 {buildId}: {reason}, but its log holds no complete Gate 2 lists");

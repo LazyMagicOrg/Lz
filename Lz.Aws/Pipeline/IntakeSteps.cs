@@ -30,7 +30,7 @@ public interface IIntakeScratch
 public sealed class IntakeFault(string message) : Exception(message);
 
 /// <summary>Reads the execution's input: what the poller (or a nudge) started it with. Ids only; none is trusted.</summary>
-public sealed record IntakeInput(string Repo, long RepositoryId, long RunId, int RunAttempt, int Retry)
+public sealed record IntakeInput(string Repo, long RepositoryId, long RunId, int RunAttempt, int Retry, string? WorkflowPath = null)
 {
     public string AttemptName => IntakeNames.For(RepositoryId, RunId, RunAttempt);
 
@@ -40,7 +40,8 @@ public sealed record IntakeInput(string Repo, long RepositoryId, long RunId, int
         {
             return new IntakeInput(
                 state["repo"]!.GetValue<string>(), state["repositoryId"]!.GetValue<long>(),
-                state["runId"]!.GetValue<long>(), state["runAttempt"]!.GetValue<int>(), state["retry"]!.GetValue<int>());
+                state["runId"]!.GetValue<long>(), state["runAttempt"]!.GetValue<int>(), state["retry"]!.GetValue<int>(),
+                state["workflowPath"]?.GetValue<string>());
         }
         catch (Exception ex) when (ex is NullReferenceException or InvalidOperationException or FormatException)
         {
@@ -48,9 +49,22 @@ public sealed record IntakeInput(string Repo, long RepositoryId, long RunId, int
         }
     }
 
-    /// <summary>The configured repository this input names, matched by name AND id; null when none is.</summary>
+    /// <summary>
+    /// The configured entry this input names, matched by name AND id, and by the workflow the poller listed the run under;
+    /// null when none is.
+    ///
+    /// <para><b>ONE REPOSITORY MAY HAVE AN ENTRY PER CLASS</b> (DecoupledCd.md P3 B, owner 2026-11-05): the root builds the
+    /// tooling image and the config bundle with a workflow each. Matched by repository alone, the second entry was never
+    /// reached. An input with no workflow - one the poller wrote before it said - resolves only where the repository has one
+    /// entry, and is never guessed between two. CheckRun then compares the run's own workflow with the entry's, so an input
+    /// that named the wrong one is refused.</para>
+    /// </summary>
     public IntakeRepository? In(IReadOnlyList<IntakeRepository> repositories)
-        => repositories.FirstOrDefault(r => r.Repo == Repo && r.RepositoryId == RepositoryId);
+    {
+        var named = repositories.Where(r => r.Repo == Repo && r.RepositoryId == RepositoryId).ToList();
+        if (WorkflowPath is { } workflow) return named.FirstOrDefault(r => string.Equals(r.WorkflowPath, workflow, StringComparison.Ordinal));
+        return named.Count == 1 ? named[0] : null;
+    }
 }
 
 /// <summary>
@@ -112,7 +126,8 @@ public static class IntakeFetchStep
 
         // Check names each expected artifact for this attempt itself (ArtifactCheck.NameFor), and keys what it found by
         // the configured name. The test bundle, where Gate 1 is configured, is fetched the same way (V-C).
-        var expected = repository.Gate1 is { } gate1 ? repository.Artifacts.Append(gate1.Artifact).ToList() : repository.Artifacts.ToList();
+        // A smoke check's bundle is the image itself (P3 B), fetched once.
+        var expected = repository.HasTestBundle ? repository.Artifacts.Append(repository.Gate1!.Artifact).ToList() : repository.Artifacts.ToList();
         if (repository.BuiltFrom is { } builtFromArtifact) expected = expected.Append(builtFromArtifact).ToList();   // V-D
         if (repository.Sbom is { } sbomArtifact) expected = expected.Append(sbomArtifact).ToList();                    // V-19
         var listed = await github.ArtifactsAsync(input.Repo, input.RunId);
@@ -138,7 +153,7 @@ public static class IntakeFetchStep
                 if (!ArtifactCheck.DigestMatches(artifact.Digest, sha256))
                     return IntakeCheckRunStep.Refused($"{artifact.Name}: the bytes downloaded hash to sha256:{sha256}, not GitHub's {artifact.Digest}");
 
-                var isTests = repository.Gate1?.Artifact == configured;
+                var isTests = repository.HasTestBundle && repository.Gate1!.Artifact == configured;
                 var isBuiltFrom = repository.BuiltFrom == configured;
                 var isSbom = repository.Sbom == configured;
                 if (isSbom)
@@ -158,7 +173,7 @@ public static class IntakeFetchStep
                         return IntakeCheckRunStep.Refused($"{artifact.Name}: {ex.Message}");
                     }
                 }
-                else if (repository.Class == "image" && !isTests)
+                else if (BuildRecordFormat.IsImageClass(repository.Class) && !isTests)
                 {
                     try
                     {

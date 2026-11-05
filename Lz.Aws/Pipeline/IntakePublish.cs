@@ -186,7 +186,7 @@ public static class IntakePublishStep
             throw new IntakeFault($"{input.Repo} names {repository.Artifacts.Count} artifacts; a record names one");
         var artifactName = isTests ? "" : repository.Artifacts[0];
         var staged = isTests ? default : Passed(artifactName);
-        var testsStaged = repository.Gate1 is { } g ? Passed(g.Artifact) : default;
+        var testsStaged = repository.HasTestBundle ? Passed(repository.Gate1!.Artifact) : default;
         Directory.CreateDirectory(workDirectory);
         var written = new JsonArray();
 
@@ -196,7 +196,7 @@ public static class IntakePublishStep
         // THE TESTS ZIP AND ITS RECORD come first, so no record that starts a deploy exists before the bundle Gate 2 reads.
         async Task WriteTestsAsync()
         {
-            if (repository.Gate1 is not { } gate) return;
+            if (!repository.HasTestBundle || repository.Gate1 is not { } gate) return;   // a smoke check's bundle is the image (P3 B)
             var provisional = Record("tests", new BuildRecordIdentity("bundle"), gate.Artifact, testsStaged.Sha256);
             provisional = provisional with { Intake = provisional.Intake! with { Gate1 = provisional.Intake.Gate1 with { Lists = testsLists } } };
             var zipKey = BuildRecordFormat.BundleKeyFor(provisional);
