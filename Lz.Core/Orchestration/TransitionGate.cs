@@ -59,6 +59,10 @@ public static class TransitionGate
                 Console.WriteLine("  Re-run the same deploy command after completing this step.");
                 Console.ResetColor();
                 Console.WriteLine();
+                // A STOP IS A DEPLOY THAT DID NOT HAPPEN (DecoupledCd.md P3 stage A). Every caller returns on false, and
+                // each used to leave the exit code at 0, so a person read the yellow message and a script, or the
+                // deployer's tooling task, read success.
+                Environment.ExitCode = 1;
                 return false;
             }
         }

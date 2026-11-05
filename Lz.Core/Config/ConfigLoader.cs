@@ -108,6 +108,22 @@ public static class ConfigLoader
         _extensions.Clear();
         _deserializer = null;
         _activePlatform = "aws";
+        CredentialOverride.ResetForTests();
+    }
+
+    /// <summary>
+    /// Under <c>LZ_CREDENTIALS=ambient</c> (<see cref="CredentialOverride"/>), the profile a config names is not used: it is
+    /// emptied here, once, after validation, so every site downstream takes the ambient chain it already takes for an
+    /// empty profile, and no site has to learn about the override.
+    /// </summary>
+    private static string? WithoutProfileIfAmbient(string? profile)
+        => profile != null && CredentialOverride.Ambient ? string.Empty : profile;
+
+    private static void ValidateWithExtensions(SystemConfig config, string filePath)
+    {
+        foreach (var ext in _extensions)
+            if (string.Equals(ext.Platform, _activePlatform, StringComparison.OrdinalIgnoreCase))
+                ext.ValidateLoaded(config, filePath);
     }
 
     /// <summary>
@@ -166,6 +182,7 @@ public static class ConfigLoader
         var config = Deserializer.Deserialize<SharedConfig>(yaml) ?? new SharedConfig();
         config.State = GenerateAwsStateConfig("shared", config.SharedSuffix, config.Region);
         ConfigValidator.Validate(config, filePath);
+        config.Profile = WithoutProfileIfAmbient(config.Profile)!;
         return config;
     }
 
@@ -196,6 +213,8 @@ public static class ConfigLoader
         config.State = GenerateAwsStateConfig($"{systemKey}-{environment}", config.SystemSuffix, config.Region);
         ApplyBuildSideConfig(config, yaml, filePath, systemKey, environment);
         ConfigValidator.Validate(config, filePath);
+        config.Profile = WithoutProfileIfAmbient(config.Profile)!;
+        ValidateWithExtensions(config, filePath);
         return config;
     }
 
@@ -293,6 +312,7 @@ public static class ConfigLoader
         }
 
         ConfigValidator.Validate(config, filePath);
+        config.Profile = WithoutProfileIfAmbient(config.Profile);
 
         // Load smartstore.usersettings.json from the same directory if present.
         // This file contains the SmartStore usersettings.json content (ReverseProxy, Serilog, etc.)

@@ -57,6 +57,30 @@ class Program
         // platform (Azure, GCP, ...) means registering its extensions here.
         ConfigLoader.RegisterExtensions(new AwsConfigExtensions());
 
+        // LZ_CREDENTIALS=ambient (DecoupledCd.md P-10, P3 stage A): the configs' Profile is set aside and the ambient chain
+        // acts - a task role in the tooling image. Which account that is gets resolved the first time a config is checked
+        // against its AccountId, and said once, so a run never hides whose credentials it used.
+        CredentialOverride.ResolveAmbientAccount = () =>
+        {
+            var region = Environment.GetEnvironmentVariable("AWS_REGION")
+                         ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION") ?? "us-east-1";
+            string account;
+            try
+            {
+                account = AwsAccountResolver.ResolveAccountIdAsync(string.Empty, region).GetAwaiter().GetResult();
+            }
+            catch (Amazon.Runtime.AmazonClientException ex)
+            {
+                throw new InvalidOperationException(
+                    $"{CredentialOverride.Variable}={CredentialOverride.AmbientValue} is set, so the configs' Profile is not " +
+                    "used, but there are no ambient credentials to use instead (no task or instance role, no AWS_* " +
+                    "environment variables). Nothing was done. " + ex.Message, ex);
+            }
+            Console.WriteLine($"Credentials: ambient ({CredentialOverride.Variable}={CredentialOverride.AmbientValue}), " +
+                              $"account {account}; the configs' Profile is not used.");
+            return account;
+        };
+
         // Load plugin (optional — core commands work without one).
         //
         // ABSENCE AND FAILURE ARE DIFFERENT THINGS HERE, which is what this used to conflate.
@@ -1315,6 +1339,7 @@ class Program
                         Console.WriteLine("  Re-run the same deploy command after completing this step.");
                         Console.ResetColor();
                         Console.WriteLine();
+                        Environment.ExitCode = 1;   // a tenant not deployed is a failure to the caller (P3 stage A)
                         continue;
                     }
 

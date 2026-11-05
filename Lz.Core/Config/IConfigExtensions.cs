@@ -36,4 +36,12 @@ public interface IConfigExtensions
     /// for each derived config type they introduce.
     /// </summary>
     void Configure(DeserializerBuilder builder);
+
+    /// <summary>
+    /// Invoked by <see cref="ConfigLoader"/> after a system config is loaded and validated, for the checks that need the
+    /// platform's derived fields - the AWS one compares <c>AccountId</c> with the ambient account under
+    /// <see cref="CredentialOverride"/>. Throws to refuse the config. A default implementation, so an extension that has
+    /// nothing to check, and a plugin built against an older Lz.Core, need no change.
+    /// </summary>
+    void ValidateLoaded(SystemConfig config, string sourceFile) { }
 }
