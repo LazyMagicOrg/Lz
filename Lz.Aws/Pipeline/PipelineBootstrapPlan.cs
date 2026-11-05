@@ -57,6 +57,9 @@ public sealed record PipelineRole(
 /// build record.</param>
 /// <param name="ForwardRuleToRemove">With a target account and the trigger off: the forwarding rule an earlier run may
 /// have created, which the apply removes.</param>
+/// <param name="ReplicatedRepositories">The repositories that replicate to this environment, whether or not it names an
+/// account yet: the images, and the tooling image where the environment accepts it (P3 B). The environment's deployer plan
+/// hardens exactly these and lets the build account replicate into them, so the two sides cannot name different lists.</param>
 public sealed record PipelineBootstrapPlan(
     string SystemKey,
     string Region,
@@ -73,7 +76,8 @@ public sealed record PipelineBootstrapPlan(
     RecordForwardingPlan? RecordForwarding = null,
     string? ForwardRuleToRemove = null,
     string? ArtifactStore = null,
-    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? ArtifactReadGrant = null);
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? ArtifactReadGrant = null,
+    IReadOnlyList<string>? ReplicatedRepositories = null);
 
 /// <summary>
 /// The trigger's build-account half (DecoupledCd.md §4.3, P2 stage D): the record store sends its S3 events to the
@@ -233,8 +237,11 @@ public static class PipelineBootstrapPlanner
         // because two repositories can produce the same class (SellerApp and AdminApp are both
         // `client`) and must not share a prefix.
         // GitHub's writers only: a build-side class (tests, V-E) has no role, and only the intake writes its prefix.
+        // A RETIRED ROLE WRITES NOTHING (V-D, P3 B), so its prefix is not one GitHub may write; the plan said so until 2026-11-05.
+        var retired = roles.Where(r => r.Retired).Select(r => (r.Repo, r.Class)).ToHashSet();
         var prefixes = repos
             .Where(r => !PipelineConfig.BuildSideClasses.Contains(r.Class ?? ""))
+            .Where(r => !retired.Contains((r.Repo ?? "", r.Class ?? "")))
             .Select(r => BuildRecordFormat.PrefixFor(
                 RequireNonEmpty(r.Class, "Pipeline.Repositories[].Class"),
                 RequireNonEmpty(r.Repo, "Pipeline.Repositories[].Repo")))
@@ -270,9 +277,12 @@ public static class PipelineBootstrapPlanner
         // the account — the build account cannot ask STS about dev, and a guessed id would replicate
         // artifacts somewhere nobody chose.
         var target = p.TargetAccountId;
-        // THE IMAGE CLASS ONLY, not every image-shaped role: whether a tooling image replicates to an environment is
-        // P3 stage B's to decide when it builds one, not a side effect of its role's shape (P4 stage A).
-        var imageRepositories = roles.Where(r => r.Class == "image").SelectMany(r => r.EcrRepositories).Distinct().ToList();
+        // THE IMAGE CLASS, AND THE TOOLING IMAGE WHERE THIS ENVIRONMENT ACCEPTS IT (P3 B, 2026-11-05): the deployer runs the
+        // tooling image as a task in the environment's own account, so it replicates exactly where Classes says tooling is
+        // deployed - decided by the environment, not by the role's shape (P4 stage A).
+        var acceptsTooling = p.Classes?.Contains("tooling") == true;
+        var imageRepositories = roles.Where(r => r.Class == "image" || (r.Class == "tooling" && acceptsTooling))
+            .SelectMany(r => r.EcrRepositories).Distinct().ToList();
 
         // THE TRIGGER'S BUILD HALF (P2 stage D), only for an environment that deploys on every build record. Without it,
         // the rule's name is still planned so an apply takes away a rule an earlier run created: a flag that can only
@@ -386,7 +396,8 @@ public static class PipelineBootstrapPlanner
             RecordForwarding: forwarding,
             ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null,
             ArtifactStore: artifacts,
-            ArtifactReadGrant: artifactGrant);
+            ArtifactReadGrant: artifactGrant,
+            ReplicatedRepositories: imageRepositories);
     }
 
     /// <summary>
@@ -479,8 +490,16 @@ public static class PipelineBootstrapPlanner
             PermissionPolicy: PermissionPolicyFor(
                 region, accountId, artifacts, buildRecords, prefix, ecrRepos, profile),
             EcrRepositories: ecrRepos,
-            Retired: r.Verify == "live");
+            Retired: r.Verify == "live" || IntakeOnly(cls));
     }
+
+    /// <summary>
+    /// A CLASS BORN INTO THE PULL MODEL (DecoupledCd.md P3 B, owner 2026-11-05): its builds have only ever reached the build
+    /// account through the intake, so no stage of it needs a GitHub-assumable role - not even while its intake is dry, which is
+    /// when a repository that moved from the push model still held one (V-D). Its signing profile and registry repository are
+    /// planned all the same: the intake pushes and signs under them.
+    /// </summary>
+    public static bool IntakeOnly(string cls) => cls == "tooling";
 
     /// <summary>
     /// What one role may do once assumed.

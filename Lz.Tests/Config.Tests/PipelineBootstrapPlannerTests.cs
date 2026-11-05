@@ -460,6 +460,65 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void AToolingRepository_IsTheIntakes_SoGitHubGetsNoRoleForIt()
+    {
+        // BORN INTO THE PULL MODEL (DecoupledCd.md P3 B, owner 2026-11-05): the root's tooling build has never pushed, so it
+        // gets no GitHub-assumable role at any stage - not only once it is Verify: live, as a repository that moved from the
+        // push model does. Its signing profile and registry repository stay: the intake pushes and signs under them.
+        var p = Enabled();
+        p.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" }, Intake = "dry" });
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+        var tooling = plan.Roles.Single(r => r.Class == "tooling");
+
+        Assert.True(tooling.Retired);
+        Assert.Equal("scu_build_ci_scutara", tooling.SigningProfile);
+        Assert.Contains("scu-abcd-1234-tooling", plan.EcrRepositories);
+        Assert.DoesNotContain(plan.Stores, s => s.WriterPrefixes.Contains("tooling/scutara/scutara/"));
+    }
+
+    [Fact]
+    public void TheToolingRepository_ReplicatesToAnEnvironmentThatAcceptsTooling()
+    {
+        var p = Enabled();
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        p.Classes!.Add("tooling");
+        p.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        Assert.Equal(new[] { "scu-abcd-1234-aiphost", "scu-abcd-1234-tooling" },
+            plan.Replication!.RepositoryFilters.Select(f => f.Filter).OrderBy(f => f));
+    }
+
+    [Fact]
+    public void TheToolingRepository_DoesNotReplicateWhereToolingIsNotAccepted()
+    {
+        var p = Enabled();                       // Classes: image, client, config
+        p.ArtifactAccountId = "147440642635";
+        p.TargetAccountId = "503947800380";
+        p.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        Assert.Equal(new[] { "scu-abcd-1234-aiphost" }, plan.Replication!.RepositoryFilters.Select(f => f.Filter));
+    }
+
+    [Fact]
+    public void WhatGitHubMayWrite_LeavesOutEveryRetiredRole()
+    {
+        var p = Enabled();
+        p.Repositories![0].Verify = "live";       // the Service, switched to the intake (V-D)
+        p.Repositories[0].Intake = "live";
+
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        Assert.DoesNotContain(plan.Stores, s => s.WriterPrefixes.Contains("image/scutara/scutaraservice/"));
+        Assert.Contains(plan.Stores, s => s.WriterPrefixes.Contains("client/scutara/scutarasellerapp/"));
+    }
+
+    [Fact]
     public void AToolingRepositoryWithNoArtifacts_IsRefused()
     {
         var p = Enabled();

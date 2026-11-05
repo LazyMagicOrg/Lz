@@ -775,6 +775,26 @@ public class DeployerPlannerTests
     // ---------------------------------------------------------------------------------------
 
     [Fact]
+    public void WhereToolingIsAccepted_TheToolingRepositoryIsHardenedAndReplicatedInto_ButIsNoDeployTarget()
+    {
+        // P3 B (2026-11-05): the build side replicates the tooling image here exactly where Classes accepts tooling, so this
+        // side must harden that repository and let the build account replicate into it - the same list - or ECR would create
+        // it on first replication with mutable tags. Verify's deploy targets stay the images alone.
+        var config = Config(false);
+        config.Pipeline!.Classes!.Add("tooling");
+        config.Pipeline.Repositories!.Add(new() { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+
+        var plan = DeployerPlanner.Plan(config, TargetAccount);
+        var build = PipelineBootstrapPlanner.Plan(config, BuildAccount);
+
+        Assert.Contains("scu-4df6-b9c6-tooling", plan.ImageRepositories);
+        Assert.Equal(build.Replication!.RepositoryFilters.Select(f => f.Filter).OrderBy(f => f), plan.ImageRepositories.OrderBy(f => f));
+        Assert.Contains("repository/scu-4df6-b9c6-tooling", plan.ReplicationPermission!.ToJsonString());
+        var verify = plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        Assert.DoesNotContain("tooling", verify.Environment[DeployerEnvironment.ImageRepositories]);
+    }
+
+    [Fact]
     public void TheRepositoriesImagesReplicateInto_AreTheBuildRegistrysNames()
     {
         // ECR keeps the repository name across accounts, so these must match the build side exactly.

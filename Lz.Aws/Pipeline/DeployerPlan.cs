@@ -1070,12 +1070,15 @@ public static class DeployerPlanner
                 Action = new[] { "lambda:InvokeFunction" },
                 Resource = FnArn(hook),
             }),
-            ImageRepositories: imageRepositories,
+            // WHAT REPLICATES HERE, the build plan's own list (P3 B): the images, and the tooling image where this environment
+            // accepts it. Verify's targets (imageRepositories) stay the images alone - the tooling image runs as a task, and is
+            // never what a deploy puts into a service.
+            ImageRepositories: build.ReplicatedRepositories ?? imageRepositories,
             // Only with a real account: a policy statement naming a placeholder account is not a plan
             // anyone could apply, and the applier always resolves the account first.
             ReplicationPermission: accountId is null
                 ? null
-                : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, imageRepositories),
+                : CrossAccount.ReplicationPermission(artifactAccount, region, accountId, build.ReplicatedRepositories ?? imageRepositories),
             // SOURCE CONDITIONS WHERE AWS DOCUMENTS THEM (DecoupledCd.md §14.3): Step Functions shows a trust policy with
             // aws:SourceArn and aws:SourceAccount for a state machine's role. Lambda's execution-role and ECS's hook-role
             // documentation show none, and a condition either service does not send would stop every function or every

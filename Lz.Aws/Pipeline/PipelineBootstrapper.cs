@@ -211,7 +211,9 @@ public static class PipelineBootstrapper
         Console.WriteLine("  roles GitHub may assume:");
         foreach (var r in plan.Roles)
         {
-            Console.WriteLine($"    {r.Name}{(r.Retired ? "  RETIRED: Verify: live, the intake pushes; the role is removed on apply" : "")}");
+            Console.WriteLine($"    {r.Name}{(!r.Retired ? "" : PipelineBootstrapPlanner.IntakeOnly(r.Class)
+                ? "  NONE: built for the intake only, which pushes; no GitHub role, and one found is removed on apply"
+                : "  RETIRED: Verify: live, the intake pushes; the role is removed on apply")}");
             Console.WriteLine($"      for {r.Repo} building '{r.Class}'");
             Console.WriteLine($"      signing profile: {r.SigningProfile ?? "none (bundles carry no registry signature)"}");
             if (r.EcrRepositories.Count > 0)
