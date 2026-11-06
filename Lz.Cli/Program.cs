@@ -9,6 +9,7 @@ using Lz.Core.Interfaces;
 using Lz.Core.Orchestration;
 using Lz.Aws.Orchestration;
 using Lz.Core.Interaction;
+using Lz.Aws.Pipeline;
 using Lz.Core.Plugin;
 using Lz.Core.Repos;
 using Lz.Core.Validation;
@@ -175,6 +176,7 @@ class Program
         RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeploySubtenantsCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterPreviewCommands(rootCommand, plugin, systemKeyOption, envOption);
+        RegisterInfraPlanCommand(rootCommand, plugin, envOption);
         RegisterDestroySubtenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -516,6 +518,120 @@ class Program
     // no post-deploy actions; --fail-on-replace gates topology switches)
     // ---------------------------------------------------------------
 
+    /// <summary>Preview every system's foundation stack for an environment; each stack's plan, in order.</summary>
+    private static async Task<List<PlanSummary>> PreviewSystemsAsync(
+        ILzPlugin plugin, string? systemKey, string? env, string? platform, string? topology, bool refresh)
+    {
+        var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+        var plans = new List<PlanSummary>();
+        foreach (var config in ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey))
+        {
+            if (platform != null) config.Platform = platform;
+            if (topology != null) config.Topology = topology;
+            TryResolveSharedContext(config);
+            var (system, factory) = PrepareSystem(plugin, config);
+            Console.WriteLine($"System: {config.SystemKey}  Env: {config.Environment}  Topology: {config.Topology}");
+            Console.WriteLine();
+            var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+            await deployment.PreviewFoundationAsync(refresh);
+            plans.Add(deployment.LastPlan ?? throw new InvalidOperationException("the foundation preview left no plan"));
+        }
+        return plans;
+    }
+
+    /// <summary>Preview every tenant stack (or one) for an environment; each stack's plan, in order.</summary>
+    private static async Task<List<PlanSummary>> PreviewTenantsAsync(
+        ILzPlugin plugin, string? systemKey, string? env, string? tenantKey, string? topology, bool refresh)
+    {
+        var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+        var plans = new List<PlanSummary>();
+        foreach (var config in ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey))
+        {
+            if (topology != null) config.Topology = topology;
+            TryResolveSharedContext(config);
+            var (system, factory) = PrepareSystem(plugin, config);
+            var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+            foreach (var (tk, tenantConfig) in ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment, tenantKey))
+            {
+                ValidateTenantConfig(config, tk, tenantConfig);
+                tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+                await deployment.PreviewTenantAsync(tk, tenantConfig, refresh);
+                plans.Add(deployment.LastPlan ?? throw new InvalidOperationException($"the tenant preview of {tk} left no plan"));
+            }
+        }
+        return plans;
+    }
+
+    // ---------------------------------------------------------------
+    // infraplan (DecoupledCd.md P3 D, the read-only slice)
+    //
+    // What the deployer's Plan state runs in the tooling image, as an ECS task on a read-only role: the config bundle the
+    // verified record names, fetched by version and refused unless its SHA-256 matches, expanded into the empty working
+    // directory; the foundation and every tenant previewed from it, never refreshed (a refresh writes state); every stack's
+    // plan written once to the evidence store under plans/. Exits 0 for a plan that is not destructive, 2 for one that is
+    // (RefuseDestructivePlan reads the exit code), 1 for anything that stopped it.
+    // ---------------------------------------------------------------
+    private static void RegisterInfraPlanCommand(RootCommand root, ILzPlugin? plugin, Option<string?> envOption)
+    {
+        var cmd = new Command("infraplan",
+            "Plan the infrastructure from a recorded config bundle and write the plan to the evidence store (the deployer runs it).");
+        var bundleBucket = new Option<string>("--bundle-bucket", "The artifact store holding the config bundle.") { IsRequired = true };
+        var bundleKey = new Option<string>("--bundle-key", "The config bundle's key.") { IsRequired = true };
+        var bundleVersion = new Option<string?>("--bundle-version", "The config bundle's S3 version.");
+        var bundleSha = new Option<string>("--bundle-sha256", "The SHA-256 the config record carries.") { IsRequired = true };
+        var planBucket = new Option<string>("--plan-bucket", "The evidence store.") { IsRequired = true };
+        var planKey = new Option<string>("--plan-key", $"Where the plan goes, under {InfraPlan.PlansPrefix}.") { IsRequired = true };
+        cmd.AddOption(envOption);
+        foreach (var o in new Option[] { bundleBucket, bundleKey, bundleVersion, bundleSha, planBucket, planKey }) cmd.AddOption(o);
+
+        cmd.SetHandler(async ctx =>
+        {
+            var r = ctx.ParseResult;
+            var env = r.GetValueForOption(envOption);
+            var key = r.GetValueForOption(planKey)!;
+            var bucket = r.GetValueForOption(bundleBucket)!;
+            var bundle = r.GetValueForOption(bundleKey)!;
+            var version = r.GetValueForOption(bundleVersion);
+            var sha = r.GetValueForOption(bundleSha)!;
+            var evidence = r.GetValueForOption(planBucket)!;
+            try
+            {
+                RequirePlugin(plugin, "infraplan");
+                if (InfraPlan.WhyNotAPlanKey(key) is { } why) throw new InvalidOperationException(why);
+                if (string.IsNullOrWhiteSpace(env)) throw new InvalidOperationException("--env is required: the task names the environment it plans");
+
+                var work = Directory.GetCurrentDirectory();
+                var zip = Path.Combine(Path.GetTempPath(), $"config-{Guid.NewGuid():N}.zip");
+                var region = Environment.GetEnvironmentVariable("AWS_REGION") ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+                using var s3 = region is null
+                    ? new Amazon.S3.AmazonS3Client()
+                    : new Amazon.S3.AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
+
+                Console.WriteLine($"Fetching s3://{bucket}/{bundle} ({version ?? "current version"})...");
+                await InfraPlan.FetchAsync(s3, bucket, bundle, version, zip, Cts.Token);
+                var files = InfraPlan.ExtractVerified(zip, sha, work);
+                File.Delete(zip);
+                Console.WriteLine($"  {files} file(s) into {work}, SHA-256 {sha} checked.");
+                Console.WriteLine();
+
+                var plans = await PreviewSystemsAsync(plugin!, null, env, null, null, refresh: false);
+                plans.AddRange(await PreviewTenantsAsync(plugin!, null, env, null, null, refresh: false));
+                var plan = new PlanFile("infraplan", plans);
+
+                await InfraPlan.PutPlanAsync(s3, evidence, key, plan.ToJson(), Cts.Token);
+                Console.WriteLine($"Plan written to s3://{evidence}/{key}: {plans.Count} stack(s), " +
+                    $"{(plan.HasChanges ? "changes" : "no changes")}, {(plan.Destructive ? "DESTRUCTIVE" : "not destructive")}.");
+                if (plan.Destructive) ctx.ExitCode = InfraPlan.DestructiveExitCode;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"infraplan: {ex.Message}");
+                ctx.ExitCode = 1;
+            }
+        });
+        root.AddCommand(cmd);
+    }
+
     private static void RegisterPreviewCommands(
         RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
@@ -545,22 +661,8 @@ class Program
         systemCmd.SetHandler(async (systemKey, env, platform, topology, refresh, failOnReplace, planJson) =>
         {
             RequirePlugin(plugin, "previewsystem");
-            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
-            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
-            var anyDestructive = false;
-            var plans = new List<PlanSummary>();
-            foreach (var config in configs)
-            {
-                if (platform != null) config.Platform = platform;
-                if (topology != null) config.Topology = topology;
-                TryResolveSharedContext(config);
-                var (system, factory) = PrepareSystem(plugin!, config);
-                Console.WriteLine($"System: {config.SystemKey}  Env: {config.Environment}  Topology: {config.Topology}");
-                Console.WriteLine();
-                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
-                anyDestructive |= await deployment.PreviewFoundationAsync(refresh);
-                if (deployment.LastPlan is { } plan) plans.Add(plan);
-            }
+            var plans = await PreviewSystemsAsync(plugin!, systemKey, env, platform, topology, refresh);
+            var anyDestructive = plans.Any(p => p.Destructive);
             if (planJson is not null) new PlanFile("previewsystem", plans).WriteTo(planJson);
             if (failOnReplace && anyDestructive)
             {
@@ -584,25 +686,8 @@ class Program
         tenantCmd.SetHandler(async (systemKey, env, tenantKey, topology, refresh, failOnReplace, planJson) =>
         {
             RequirePlugin(plugin, "previewtenant");
-            var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
-            var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
-            var anyDestructive = false;
-            var plans = new List<PlanSummary>();
-            foreach (var config in configs)
-            {
-                if (topology != null) config.Topology = topology;
-                TryResolveSharedContext(config);
-                var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
-                var tenants = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment, tenantKey);
-                foreach (var (tk, tenantConfig) in tenants)
-                {
-                    ValidateTenantConfig(config, tk, tenantConfig);
-                    tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
-                    anyDestructive |= await deployment.PreviewTenantAsync(tk, tenantConfig, refresh);
-                    if (deployment.LastPlan is { } plan) plans.Add(plan);
-                }
-            }
+            var plans = await PreviewTenantsAsync(plugin!, systemKey, env, tenantKey, topology, refresh);
+            var anyDestructive = plans.Any(p => p.Destructive);
             if (planJson is not null) new PlanFile("previewtenant", plans).WriteTo(planJson);
             if (failOnReplace && anyDestructive)
             {
