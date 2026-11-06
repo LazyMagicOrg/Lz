@@ -154,6 +154,7 @@ public class SystemDeployment
         // --- Pulumi up: deploy everything including Tailscale in one pass ---
         Console.WriteLine();
         Console.WriteLine("Deploying system infrastructure...");
+        await ResolveRuntimeConfigExistingAsync();
         var result = await PulumiUpAsync(stackName, includeTailscale: true);
 
         // --- Post-deploy: Configure Tailscale devices ---
@@ -196,6 +197,9 @@ public class SystemDeployment
                 kv => kv.Value.Value);
             await systemPostDeploy.ExecuteAsync(systemOutputs);
         }
+
+        // --- Post-deploy: a changed runtime parameter the services read only at start restarts them (P3 F) ---
+        await RestartForRuntimeConfigAsync();
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
@@ -245,9 +249,10 @@ public class SystemDeployment
 
             try
             {
+                _lastUpSteps.Clear();
                 var result = await stack.UpAsync(new UpOptions
                 {
-                    OnEvent = HandleEngineEvent,
+                    OnEvent = e => { Capture(e, _lastUpSteps); HandleEngineEvent(e); },
                     OnStandardError = msg =>
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
@@ -1090,6 +1095,10 @@ public class SystemDeployment
         if (_config.VectorStore != null)
             vectorStore = new Lz.Aws.VectorStore.AwsVectorStoreComponent(_config);
 
+        // Runtime config (P3 F): the operator-set SSM values, imported where the account already holds them.
+        if (_config.RuntimeConfig != null)
+            Lz.Aws.Ops.AwsRuntimeConfigComponent.Deploy(_config, Lz.Aws.Ops.RuntimeConfigPlanner.Plan(_config, _runtimeConfigExisting));
+
         // Gate Checker: Lambda for verifying EFS/DB data at gate-check time
         IGateCheckerOutputs? gateCheckerOutputs = null;
         var gateCheckerComponent = AwsFactory?.CreateGateChecker();
@@ -1311,7 +1320,13 @@ public class SystemDeployment
         var stackName = $"{_config.SystemKey}-{_config.Environment}";
         Console.WriteLine($"=== Foundation preview: {stackName} (no changes will be applied) ===");
         Console.WriteLine();
-        return PulumiPreviewAsync(stackName, BuildFoundationProgram(includeTailscale: true), refresh);
+        return PreviewFoundationCoreAsync(stackName, refresh);
+    }
+
+    private async Task<bool> PreviewFoundationCoreAsync(string stackName, bool refresh)
+    {
+        await ResolveRuntimeConfigExistingAsync();
+        return await PulumiPreviewAsync(stackName, BuildFoundationProgram(includeTailscale: true), refresh);
     }
 
     /// <summary>
@@ -1485,6 +1500,50 @@ public class SystemDeployment
     /// </summary>
     /// <summary>The last preview's plan, as data (null before one runs): what <c>--plan-json</c> writes.</summary>
     public PlanSummary? LastPlan { get; private set; }
+
+    /// <summary>The last foundation up's steps, as its engine events reported them: which runtime parameters it changed (P3 F).</summary>
+    private readonly List<PlannedStep> _lastUpSteps = new();
+
+    /// <summary>The runtime parameters the account holds, read before each foundation program runs: those are imported (P3 F).</summary>
+    private IReadOnlySet<string> _runtimeConfigExisting = new HashSet<string>();
+
+    private async Task ResolveRuntimeConfigExistingAsync()
+    {
+        if (_config.RuntimeConfig is null) return;
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(_config.Profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+        using var ssm = credentials != null
+            ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(credentials, endpoint)
+            : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+        _runtimeConfigExisting = await Lz.Aws.Ops.RuntimeConfigApply.ExistingAsync(ssm, Lz.Aws.Ops.RuntimeConfigPlanner.PathFor(_config), _ct);
+        var plan = Lz.Aws.Ops.RuntimeConfigPlanner.Plan(_config, _runtimeConfigExisting);
+        Console.WriteLine($"Runtime config: {plan.Count} parameter(s) under {Lz.Aws.Ops.RuntimeConfigPlanner.PathFor(_config)}, " +
+                          $"{plan.Count(p => p.Import)} already in the account (imported where not yet in state).");
+    }
+
+    /// <summary>After a foundation up: restart the system cluster's services if it changed a runtime parameter read only at start.</summary>
+    private async Task RestartForRuntimeConfigAsync()
+    {
+        if (_config.RuntimeConfig is null) return;
+        var changed = Lz.Aws.Ops.RuntimeConfigPlanner.ChangedKeys(_lastUpSteps);
+        var atStart = Lz.Aws.Ops.RuntimeConfigPlanner.ReadAtStart(changed, _config.RuntimeConfig.ReadAtStart);
+        if (changed.Count > 0)
+            Console.WriteLine($"Runtime config changed: {string.Join(", ", changed)}; read live by the service unless named below.");
+        if (atStart.Count == 0) return;
+
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(_config.Profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(_config.Region);
+        using var ecs = credentials != null ? new Amazon.ECS.AmazonECSClient(credentials, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+        var cluster = $"{_config.SystemKey}-{_config.Environment}-cluster";
+        try
+        {
+            await Lz.Aws.Ops.RuntimeConfigApply.RestartAsync(ecs, cluster, atStart, TimeSpan.FromMinutes(20), _ct);
+        }
+        catch (Amazon.ECS.Model.ClusterNotFoundException)
+        {
+            Console.WriteLine($"  {cluster} does not exist on this topology; nothing to restart. A function reads the new value at its next cold start.");
+        }
+    }
 
     private async Task<bool> PulumiPreviewAsync(
         string stackName, Func<IDictionary<string, object?>> program, bool refresh)

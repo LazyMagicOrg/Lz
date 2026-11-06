@@ -92,6 +92,7 @@ public static class ConfigValidator
         }
 
         if (config.Pipeline != null) ValidatePipeline(config.Pipeline, config.Rollback, config.SystemSuffix, errors);
+        errors.AddRange(RuntimeConfigConfig.Problems(config.RuntimeConfig));
 
         // Topology-specific prerequisites (e.g., VpcCidr for topologies with a
         // private network) live in the platform library's topology descriptor

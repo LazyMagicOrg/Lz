@@ -108,6 +108,10 @@ public class SystemConfig
     // --- Runtime Application Settings ---
     public SecretsManagerConfig? SecretsManager { get; set; }
 
+    // RuntimeConfig — the operator-set SSM values under /{SystemKey}/{Environment}/, as foundation-stack parameters
+    // (DecoupledCd.md P3 F). Absent = nothing of it planned; every parameter stays as it was set.
+    public RuntimeConfigConfig? RuntimeConfig { get; set; }
+
     // RequiredSecrets — secrets that must exist (with listed JSON keys) before
     // deploysystem proceeds; missing values are prompted for or supplied via
     // --secret (see RequiredSecretConfig). Absent = nothing checked.
