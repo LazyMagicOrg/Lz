@@ -96,6 +96,97 @@ public class TenantPlanCheckTests
         Assert.Equal(2, TenantPlanCheck.Destructive(steps).Count);
     }
 
+    // ---- the plan summary (P3 D) ----
+
+    [Fact]
+    public void ThePlanSummary_TakesImageOnlyReplacesOut_AndNamesWhatStaysCounted()
+    {
+        var same = Inputs("x", "h1", null);
+        var steps = new[]
+        {
+            Replace(same, same),                                                  // image-only
+            Replace(same, Inputs("x", "h2", null)),                               // definitions change: counted
+            Replace(same, same, type: "aws:lb/targetGroup:TargetGroup"),          // another replace: counted
+        };
+        var plan = PlanSummary.From("scu-mp-dev",
+            new Dictionary<OperationType, int> { [OperationType.Same] = 40, [OperationType.Update] = 2, [OperationType.Replace] = 3 },
+            steps, ["refused: x"]);
+
+        Assert.Equal("scu-mp-dev", plan.Stack);
+        Assert.Equal(new Dictionary<string, int> { ["update"] = 2, ["replace"] = 3 }, plan.Changes);
+        Assert.Equal(1, plan.ImageOnlyReplaces);
+        Assert.Equal(2, plan.Replaces);
+        Assert.True(plan.Destructive);
+        Assert.Equal(["aws:ecs/taskDefinition:TaskDefinition", "aws:lb/targetGroup:TargetGroup"], plan.DestructiveSteps.Select(s => s.Type));
+        Assert.Equal("its container definitions change apart from the image", Assert.Single(plan.CountedTaskDefinitionReplaces).Why);
+        Assert.Equal(["refused: x"], plan.DigestRefusals);
+    }
+
+    [Fact]
+    public void ARollThatOnlyMovesTheImage_IsNotDestructive()
+    {
+        var same = Inputs("x", "h1", null);
+        var plan = PlanSummary.From("s", new Dictionary<OperationType, int> { [OperationType.Replace] = 1 }, [Replace(same, same)]);
+        Assert.True(plan.HasChanges);
+        Assert.False(plan.Destructive);
+        Assert.Empty(plan.DestructiveSteps);
+        Assert.Equal(0, plan.Replaces);
+    }
+
+    [Fact]
+    public void WithoutSteps_EveryReplaceAndDeleteCounts_AndNoChangeIsNone()
+    {
+        var plan = PlanSummary.From("s", new Dictionary<OperationType, int> { [OperationType.Delete] = 1, [OperationType.Same] = 5 });
+        Assert.True(plan.Destructive);
+        Assert.Equal(1, plan.Deletes);
+
+        var none = PlanSummary.From("s", new Dictionary<OperationType, int> { [OperationType.Same] = 5 });
+        Assert.False(none.HasChanges);
+        Assert.False(none.Destructive);
+        Assert.False(PlanSummary.From("s", null).Destructive);
+    }
+
+    [Fact]
+    public void ThePrintedVerdict_IsTheSummarys()
+    {
+        var same = Inputs("x", "h1", null);
+        Assert.False(SystemDeployment.PrintPreviewSummary(new Dictionary<OperationType, int> { [OperationType.Replace] = 1 }, [Replace(same, same)]));
+        Assert.True(SystemDeployment.PrintPreviewSummary(new Dictionary<OperationType, int> { [OperationType.Replace] = 1 }));
+    }
+
+    [Fact]
+    public void TheSummaryIsWrittenInCamelCase_WithItsSchema()
+    {
+        var json = System.Text.Json.JsonDocument.Parse(
+            PlanSummary.From("s", new Dictionary<OperationType, int> { [OperationType.Delete] = 1 }).ToJson()).RootElement;
+        Assert.Equal(1, json.GetProperty("schema").GetInt32());
+        Assert.True(json.GetProperty("destructive").GetBoolean());
+        Assert.Equal(1, json.GetProperty("changes").GetProperty("delete").GetInt32());
+        Assert.Equal(0, json.GetProperty("destructiveSteps").GetArrayLength());
+        Assert.Equal("s", json.GetProperty("stack").GetString());
+    }
+
+    [Fact]
+    public void ThePlanFile_IsDestructiveWhenAnyStackIs_AndWritesWhereItIsTold()
+    {
+        var quiet = PlanSummary.From("scu-dev", new Dictionary<OperationType, int> { [OperationType.Same] = 3 });
+        var loud = PlanSummary.From("scu-mp-dev", new Dictionary<OperationType, int> { [OperationType.Delete] = 1 });
+        Assert.False(new PlanFile("previewsystem", [quiet]).Destructive);
+        Assert.False(new PlanFile("previewsystem", [quiet]).HasChanges);
+        Assert.True(new PlanFile("previewtenant", [quiet, loud]).Destructive);
+
+        var path = Path.Combine(Path.GetTempPath(), $"lz-plan-{Guid.NewGuid():N}", "plans", "tenant.json");
+        try
+        {
+            new PlanFile("previewtenant", [quiet, loud]).WriteTo(path);
+            var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)).RootElement;
+            Assert.Equal("previewtenant", json.GetProperty("command").GetString());
+            Assert.True(json.GetProperty("destructive").GetBoolean());
+            Assert.Equal(["scu-dev", "scu-mp-dev"], json.GetProperty("plans").EnumerateArray().Select(p => p.GetProperty("stack").GetString()));
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(Path.GetDirectoryName(path))!, true); }
+    }
+
     // ---- the digest the plan pins ----
 
     private static readonly Dictionary<string, RunningServiceImage> RunningServices = new()

@@ -8,6 +8,7 @@ using Lz.Core.Definitions;
 using Lz.Core.Interfaces;
 using Lz.Core.Orchestration;
 using Lz.Aws.Orchestration;
+using Lz.Core.Interaction;
 using Lz.Core.Plugin;
 using Lz.Core.Repos;
 using Lz.Core.Validation;
@@ -528,6 +529,8 @@ class Program
             "Exit non-zero (2) if the plan contains any replace/delete — the topology-switch guardrail");
         var tenantKeyOption = new Option<string?>("--tenantkey",
             "Tenant key (previews all tenants if not specified)");
+        var planJsonOption = new Option<string?>("--plan-json",
+            "Also write what was planned, every stack, as JSON to this path (the deployer's Plan state reads it)");
 
         // ---- previewsystem ----
         var systemCmd = new Command("previewsystem",
@@ -538,12 +541,14 @@ class Program
         systemCmd.AddOption(topologyOption);
         systemCmd.AddOption(refreshOption);
         systemCmd.AddOption(failOnReplaceOption);
-        systemCmd.SetHandler(async (systemKey, env, platform, topology, refresh, failOnReplace) =>
+        systemCmd.AddOption(planJsonOption);
+        systemCmd.SetHandler(async (systemKey, env, platform, topology, refresh, failOnReplace, planJson) =>
         {
             RequirePlugin(plugin, "previewsystem");
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
             var anyDestructive = false;
+            var plans = new List<PlanSummary>();
             foreach (var config in configs)
             {
                 if (platform != null) config.Platform = platform;
@@ -554,13 +559,15 @@ class Program
                 Console.WriteLine();
                 var deployment = new SystemDeployment(factory, system, config, Cts.Token);
                 anyDestructive |= await deployment.PreviewFoundationAsync(refresh);
+                if (deployment.LastPlan is { } plan) plans.Add(plan);
             }
+            if (planJson is not null) new PlanFile("previewsystem", plans).WriteTo(planJson);
             if (failOnReplace && anyDestructive)
             {
                 Console.Error.WriteLine("previewsystem: replace/delete operations detected and --fail-on-replace was set.");
                 Environment.ExitCode = 2;
             }
-        }, systemKeyOption, envOption, platformOption, topologyOption, refreshOption, failOnReplaceOption);
+        }, systemKeyOption, envOption, platformOption, topologyOption, refreshOption, failOnReplaceOption, planJsonOption);
         root.AddCommand(systemCmd);
 
         // ---- previewtenant ----
@@ -573,12 +580,14 @@ class Program
         tenantCmd.AddOption(topologyOption);
         tenantCmd.AddOption(refreshOption);
         tenantCmd.AddOption(failOnReplaceOption);
-        tenantCmd.SetHandler(async (systemKey, env, tenantKey, topology, refresh, failOnReplace) =>
+        tenantCmd.AddOption(planJsonOption);
+        tenantCmd.SetHandler(async (systemKey, env, tenantKey, topology, refresh, failOnReplace, planJson) =>
         {
             RequirePlugin(plugin, "previewtenant");
             var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
             var anyDestructive = false;
+            var plans = new List<PlanSummary>();
             foreach (var config in configs)
             {
                 if (topology != null) config.Topology = topology;
@@ -591,14 +600,16 @@ class Program
                     ValidateTenantConfig(config, tk, tenantConfig);
                     tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
                     anyDestructive |= await deployment.PreviewTenantAsync(tk, tenantConfig, refresh);
+                    if (deployment.LastPlan is { } plan) plans.Add(plan);
                 }
             }
+            if (planJson is not null) new PlanFile("previewtenant", plans).WriteTo(planJson);
             if (failOnReplace && anyDestructive)
             {
                 Console.Error.WriteLine("previewtenant: replace/delete operations detected and --fail-on-replace was set.");
                 Environment.ExitCode = 2;
             }
-        }, systemKeyOption, envOption, tenantKeyOption, topologyOption, refreshOption, failOnReplaceOption);
+        }, systemKeyOption, envOption, tenantKeyOption, topologyOption, refreshOption, failOnReplaceOption, planJsonOption);
         root.AddCommand(tenantCmd);
 
         // ---- previewshared ----
@@ -1967,10 +1978,8 @@ class Program
                         $"will be deleted{(force ? " (emptied first — DATA LOSS)" : "")}.");
                     Console.WriteLine($"  - DynamoDB tables {config.SystemKey}_{tenantKey}_{subtenantKey} and {config.SystemKey}_{tenantKey}_{subtenantKey}_gsi will be deleted (DATA LOSS)" +
                         $"{(forceDeleteProtected ? "; deletion protection, if enabled, will be DISABLED first (--force-delete-protected)" : " — if either has deletion protection enabled, the destroy will FAIL unless you also pass --force-delete-protected")}.");
-                    Console.Write("Type 'yes' to confirm: ");
                     Console.ResetColor();
-                    var response = Console.ReadLine();
-                    if (!string.Equals(response, "yes", StringComparison.Ordinal))
+                    if (!Confirmation.Ask("Type 'yes' to confirm: ", exact: true))
                     {
                         Console.WriteLine("Aborted.");
                         return;
@@ -2063,8 +2072,7 @@ class Program
 
                 if (!yes)
                 {
-                    Console.Write("Type 'yes' to release the lock: ");
-                    if (!string.Equals(Console.ReadLine(), "yes", StringComparison.Ordinal))
+                    if (!Confirmation.Ask("Type 'yes' to release the lock: ", exact: true))
                     {
                         Console.WriteLine("Aborted.");
                         continue;
@@ -2107,9 +2115,7 @@ class Program
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine("WARNING: This will destroy the shared-services stack.");
             Console.ResetColor();
-            Console.Write("Type 'yes' to confirm: ");
-            var confirmation = Console.ReadLine();
-            if (confirmation?.Trim().ToLowerInvariant() != "yes")
+            if (!Confirmation.Ask("Type 'yes' to confirm: ", passInstead: null))
             {
                 Console.WriteLine("Aborted.");
                 return;
@@ -2186,9 +2192,7 @@ class Program
                 }
                 else
                 {
-                    Console.Write("Type 'yes' to confirm: ");
-                    var confirmation = Console.ReadLine();
-                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    if (!Confirmation.Ask("Type 'yes' to confirm: "))
                     {
                         Console.WriteLine("Aborted.");
                         continue;
@@ -2275,9 +2279,7 @@ class Program
                     }
                     else
                     {
-                        Console.Write("Type 'yes' to confirm: ");
-                        var confirmation = Console.ReadLine();
-                        if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                        if (!Confirmation.Ask("Type 'yes' to confirm: "))
                         {
                             Console.WriteLine("Aborted.");
                             continue;
@@ -2653,9 +2655,7 @@ class Program
                     Console.WriteLine(
                         $"WARNING: This will park tenant '{tk}' ({tenantConfig.RootDomain}).");
                     Console.ResetColor();
-                    Console.Write("Type 'yes' to confirm: ");
-                    var confirmation = Console.ReadLine();
-                    if (confirmation?.Trim().ToLowerInvariant() != "yes")
+                    if (!Confirmation.Ask("Type 'yes' to confirm: ", passInstead: null))
                     {
                         Console.WriteLine("Skipped.");
                         continue;

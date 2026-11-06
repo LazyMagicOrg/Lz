@@ -1483,6 +1483,9 @@ public class SystemDeployment
     /// refreshed state) so the diff reflects live AWS state. Returns true if the
     /// plan contains any replace/delete operation — used by <c>--fail-on-replace</c>.
     /// </summary>
+    /// <summary>The last preview's plan, as data (null before one runs): what <c>--plan-json</c> writes.</summary>
+    public PlanSummary? LastPlan { get; private set; }
+
     private async Task<bool> PulumiPreviewAsync(
         string stackName, Func<IDictionary<string, object?>> program, bool refresh)
     {
@@ -1512,10 +1515,11 @@ public class SystemDeployment
         }, _ct);
 
         Console.WriteLine();
-        var destructive = PrintPreviewSummary(result.ChangeSummary, steps);
-
         // What deploytenant would refuse, so a preview says so before a deploy finds out (V-J).
         var refusals = TenantPlanCheck.DigestRefusals(steps, _runningImages, TenantPlanCheck.DeclaredImages);
+        LastPlan = PlanSummary.From(stackName, result.ChangeSummary, steps, refusals);
+        var destructive = PrintPlanSummary(LastPlan);
+
         if (refusals.Count > 0)
         {
             Console.ForegroundColor = ConsoleColor.Red;
@@ -1534,47 +1538,38 @@ public class SystemDeployment
 
     /// <summary>
     /// Print the preview change summary and return whether it is destructive
-    /// (contains any replace or delete operation).
+    /// (contains any replace or delete operation). The verdict is <see cref="PlanSummary.From"/>'s.
     /// </summary>
     internal static bool PrintPreviewSummary(IReadOnlyDictionary<OperationType, int> changeSummary, IReadOnlyList<PlannedStep>? steps = null)
+        => PrintPlanSummary(PlanSummary.From("", changeSummary, steps));
+
+    /// <summary>Print a plan summary as the preview always has, and return its destructive verdict.</summary>
+    internal static bool PrintPlanSummary(PlanSummary plan)
     {
-        var meaningful = changeSummary?.Where(kv => kv.Key != OperationType.Same).ToList()
-                         ?? new List<KeyValuePair<OperationType, int>>();
-        if (meaningful.Count == 0)
+        if (!plan.HasChanges)
         {
             Console.WriteLine("Preview: no changes.");
             return false;
         }
 
         Console.WriteLine("Preview — planned changes:");
-        foreach (var kv in meaningful)
-            Console.WriteLine($"  {kv.Key.ToString().ToLowerInvariant()}: {kv.Value}");
-
-        changeSummary!.TryGetValue(OperationType.Replace, out var replaces);
-        changeSummary.TryGetValue(OperationType.Delete, out var deletes);
+        foreach (var kv in plan.Changes)
+            Console.WriteLine($"  {kv.Key}: {kv.Value}");
 
         // AN IMAGE-ONLY TASK-DEFINITION REPLACE IS NOT DESTRUCTIVE (V-J): a task definition is immutable, so every image
         // change replaces it, and counting those would fail every routine roll. Counted from the steps when there are any.
-        if (steps is not null)
-        {
-            foreach (var td in steps.Where(s => s.Type == TenantPlanCheck.TaskDefinitionType && s.Op == OperationType.Replace))
-                if (TenantPlanCheck.WhyNotImageOnly(td) is { } why)
-                    Console.WriteLine($"  task-definition replace counted: {why}");
-            var imageOnly = steps.Count(TenantPlanCheck.IsImageOnlyTaskDefinitionReplace);
-            if (imageOnly > 0)
-            {
-                Console.WriteLine($"  ({imageOnly} image-only task-definition replace(s), not counted as destructive)");
-                replaces = Math.Max(0, replaces - imageOnly);
-            }
-        }
-        var destructive = replaces + deletes > 0;
-        if (destructive)
+        foreach (var td in plan.CountedTaskDefinitionReplaces)
+            Console.WriteLine($"  task-definition replace counted: {td.Why}");
+        if (plan.ImageOnlyReplaces > 0)
+            Console.WriteLine($"  ({plan.ImageOnlyReplaces} image-only task-definition replace(s), not counted as destructive)");
+
+        if (plan.Destructive)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"  ⚠ destructive: {replaces} replace, {deletes} delete — stateful resources may be recreated.");
+            Console.WriteLine($"  ⚠ destructive: {plan.Replaces} replace, {plan.Deletes} delete — stateful resources may be recreated.");
             Console.ResetColor();
         }
-        return destructive;
+        return plan.Destructive;
     }
 
     internal static void PrintStdErr(string msg)
