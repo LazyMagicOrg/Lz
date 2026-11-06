@@ -55,6 +55,9 @@ public static class ImageDeployPlanner
                 $"arn:aws:s3:::{stateBucket}/.pulumi/history/{project}/{stack}/*",
                 $"arn:aws:s3:::{stateBucket}/.pulumi/backups/{project}/{stack}/*",
                 $"arn:aws:s3:::{stateBucket}/.pulumi/locks/{project}/{stack}/*",
+                // THE LOCK HAS AN `organization` SEGMENT the stack file does not (measured 2026-11-06: the first live image deploy
+                // was refused PutObject on .pulumi/locks/organization/lz-scu/scu-mp-dev/<id>.json).
+                $"arn:aws:s3:::{stateBucket}/.pulumi/locks/organization/{project}/{stack}/*",
             };
         }).ToArray();
 

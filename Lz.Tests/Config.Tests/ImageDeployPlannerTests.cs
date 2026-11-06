@@ -93,6 +93,7 @@ public class ImageDeployPlannerTests
         var state = Sid(d.TaskRolePolicy, "WriteOnlyTheTenantStacksState").GetProperty("Resource").EnumerateArray().Select(r => r.GetString()).ToList();
         Assert.Contains("arn:aws:s3:::scu-dev-pulumi-state-4df6-b9c6/.pulumi/stacks/lz-scu/scu-mp-dev.json", state);
         Assert.Contains("arn:aws:s3:::scu-dev-pulumi-state-4df6-b9c6/.pulumi/locks/lz-scu/scu-mp-dev/*", state);
+        Assert.Contains("arn:aws:s3:::scu-dev-pulumi-state-4df6-b9c6/.pulumi/locks/organization/lz-scu/scu-mp-dev/*", state);
         Assert.DoesNotContain(state, r => r!.Contains("/scu-dev.json"));          // never the foundation's state
         Assert.Equal(new[] { "ecs:UpdateService" }, Sid(d.TaskRolePolicy, "UpdateTheServices").GetProperty("Action").EnumerateArray().Select(a => a.GetString()));
         Assert.Equal($"arn:aws:dynamodb:us-west-2:{TargetAccount}:table/scu", Sid(d.TaskRolePolicy, "NoTableItemsButTheLeases").GetProperty("NotResource").GetString());
