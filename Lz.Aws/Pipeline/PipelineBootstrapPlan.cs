@@ -384,6 +384,22 @@ public static class PipelineBootstrapPlanner
                 .Concat(CrossAccount.Gate2BundleReadGrant(artifacts, config.Environment, target!, DeployerPlanner.Gate2StartRoleName(config)))
                 .ToList();
 
+        // THE INFRASTRUCTURE BRANCH, PLAN ONLY (P3 D): where the environment plans config bundles, its Verify reads the config and
+        // tooling records and HEADs a bundle, and its Plan task's role reads the bundle. Nothing of it otherwise.
+        if (target != null && p.InfrastructurePlans)
+        {
+            var (configRepo, toolingRepo) = InfraPlanPlanner.Repositories(p);
+            var configPrefix = BuildRecordFormat.PrefixFor("config", configRepo);
+            recordGrant = (recordGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Concat(CrossAccount.InfraRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
+                    configPrefix, BuildRecordFormat.PrefixFor("tooling", toolingRepo)))
+                .ToList();
+            artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
+                .Concat(CrossAccount.ConfigBundleReadGrant(artifacts, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
+                    InfraPlanPlanner.TaskRoleNameFor(sk, config.Environment), configPrefix))
+                .ToList();
+        }
+
         return new PipelineBootstrapPlan(
             sk, region, p.ArtifactAccountId, stores, roles, ecrRepositories, OidcProvider,
             SelfRewriteDenied,

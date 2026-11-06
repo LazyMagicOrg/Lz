@@ -85,8 +85,8 @@ public class BootstrapHardeningCallSiteTests
     [Theory]
     [InlineData("PipelineBootstrapper.cs", 2)]
     // Five since P4 stage C: the client targets' distributions are read with the same credentials. Six since V-E's E2: Gate 2's
-    // private subnets are read with them too.
-    [InlineData("DeployerBootstrapper.cs", 6)]
+    // private subnets are read with them too. Seven since P3 D: the Plan task's network is found by its tag with them.
+    [InlineData("DeployerBootstrapper.cs", 7)]
     public void ANamedProfileThatDoesNotResolve_IsRefused_NotReplacedByAmbientCredentials(string file, int resolutions)
     {
         // Falling back labelled the ambient account with the profile's name in the dry run, and applied there.

@@ -72,7 +72,17 @@ public static class DeployerBootstrapper
             using var ec2Reads = gate2Creds != null ? new Amazon.EC2.AmazonEC2Client(gate2Creds, gate2Endpoint) : new Amazon.EC2.AmazonEC2Client(gate2Endpoint);
             gate2Inputs = await Gate2Bootstrapper.ResolveInputsAsync(config, ec2Reads);
         }
-        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs, gate2Inputs);
+        // THE PLAN TASK'S NETWORK, read only under Pipeline.Infrastructure: plan (P3 D): found by its tag where an earlier apply made
+        // it, so the dry run shows the ids the functions will carry; otherwise planned with placeholders the apply replaces.
+        DeployerInfraInputs? infraInputs = null;
+        if (config.Pipeline?.InfrastructurePlans == true)
+        {
+            var infraCreds = AwsCredentialsFactory.ResolveOrThrow(profile);
+            var infraEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+            using var ec2Reads = infraCreds != null ? new Amazon.EC2.AmazonEC2Client(infraCreds, infraEndpoint) : new Amazon.EC2.AmazonEC2Client(infraEndpoint);
+            infraInputs = await InfraPlanApply.FindAsync(ec2Reads, InfraPlanPlanner.NetworkFor(config));
+        }
+        var plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs, gate2Inputs, infraInputs);
 
         // THE PACKAGES ARE READ BEFORE ANYTHING IS CREATED, so a build without them fails the dry run
         // rather than half-way through an apply.
@@ -101,6 +111,18 @@ public static class DeployerBootstrapper
 
         if (plan.Gate2 is { } plannedGate2)
             PrintGate2(config, plannedGate2);
+
+        if (plan.Infrastructure is { } plannedInfra)
+        {
+            var n = plannedInfra.Network;
+            Console.WriteLine();
+            Console.WriteLine($"  The infrastructure branch (Pipeline.Infrastructure: plan, P3 D): a config record -> VerifyTooling -> Plan -> ReadPlan -> Planned; nothing applied");
+            Console.WriteLine($"    network {n.Name}: {n.VpcCidr}, public subnet {n.SubnetCidr} in {n.AvailabilityZone}, internet gateway, no NAT, a group with no inbound rule" +
+                              (infraInputs is { } found ? $" - exists: {found.SubnetId}, {found.SecurityGroupId}" : " - created by the apply"));
+            Console.WriteLine($"    cluster {plannedInfra.ClusterName}; task family {plannedInfra.Family}, the tooling image from {plannedInfra.ToolingRepository} by digest; log {plannedInfra.LogGroup} ({plannedInfra.LogRetentionDays} days)");
+            Console.WriteLine($"    roles {plannedInfra.ExecutionRoleName} (pull, log) and {plannedInfra.TaskRoleName} ({string.Join(", ", plannedInfra.TaskRoleManagedPolicies)}, " +
+                              $"kms:Decrypt on {plannedInfra.StateKeyAlias}, config bundles, s3:PutObject under {InfraPlan.PlansPrefix} in {plan.EvidenceStore}; no DynamoDB or Secrets Manager data)");
+        }
 
         if (plan.Promotion is { } plannedPromotion)
         {
@@ -190,6 +212,17 @@ public static class DeployerBootstrapper
             using var codeBuild = creds != null ? new Amazon.CodeBuild.AmazonCodeBuildClient(creds, endpoint) : new Amazon.CodeBuild.AmazonCodeBuildClient(endpoint);
             await Gate2Bootstrapper.ApplyAsync(plan, region, s3, iam, ec2, codeBuild, logs, plan.LogRetentionDays ?? 14,
                 Gate2Bootstrapper.LocalCacheDir(Directory.GetCurrentDirectory()));
+        }
+
+        // THE PLAN TASK'S NETWORK, CLUSTER, LOG AND ROLES BEFORE THE FUNCTIONS (P3 D): VerifyTooling is configured with the subnet
+        // and group, so where this apply made them the plan is made again with their ids.
+        if (plan.Infrastructure is { } infra)
+        {
+            using var ec2 = creds != null ? new Amazon.EC2.AmazonEC2Client(creds, endpoint) : new Amazon.EC2.AmazonEC2Client(endpoint);
+            using var ecs = creds != null ? new Amazon.ECS.AmazonECSClient(creds, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+            var made = await InfraPlanApply.EnsureAsync(ec2, ecs, iam, logs, infra, plan.DenyPolicy);
+            if (made != infraInputs)
+                plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs, gate2Inputs, made);
         }
 
         var roleArn = await EnsureRoleAsync(iam, plan.RoleName, plan.StateMachineTrustPolicy,

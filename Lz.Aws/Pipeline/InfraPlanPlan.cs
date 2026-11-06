@@ -162,7 +162,7 @@ public static class InfraPlanPlanner
             });
 
         return new InfraPlanResources(
-            Network: new InfraPlanNetwork($"{sk}-{env}-deployer-tooling", "10.254.0.0/24", "10.254.0.0/25", $"{region}a"),
+            Network: NetworkFor(config),
             ClusterName: cluster,
             ClusterArn: $"arn:aws:ecs:{region}:{acct}:cluster/{cluster}",
             Family: FamilyFor(sk, env),
@@ -180,6 +180,10 @@ public static class InfraPlanPlanner
             StateBucket: stateBucket,
             StateKeyAlias: keyAlias);
     }
+
+    /// <summary>The Plan task's network: a /24 of its own, one /25 public subnet in the region's first zone.</summary>
+    public static InfraPlanNetwork NetworkFor(SystemConfig config)
+        => new($"{config.SystemKey}-{config.Environment}-deployer-tooling", "10.254.0.0/24", "10.254.0.0/25", $"{config.Region}a");
 
     /// <summary>The Pulumi state bucket and the alias of its secrets key, from the derived state config.</summary>
     public static (string Bucket, string KeyAlias) StateOf(SystemConfig config)

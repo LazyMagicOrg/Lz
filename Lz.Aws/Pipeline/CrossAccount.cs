@@ -426,6 +426,69 @@ public static class CrossAccount
     }
 
     /// <summary>
+    /// The build-record store's grant to ONE environment for the infrastructure branch, plan only (DecoupledCd.md P3 D): its Verify
+    /// function reads the config repository's records and the tooling repository's, and lists both prefixes - to find the newest
+    /// tooling record carrying a bundle's lz, and to tell a missing record from a denied one. Nothing else, and nothing here writes.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> InfraRecordReadGrant(
+        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string configPrefix, string toolingPrefix)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        var verify = $"arn:aws:iam::{targetAccountId}:role/{verifyRoleName}";
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerReadsConfigAndToolingRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObject",
+                ["Resource"] = new JsonArray($"arn:aws:s3:::{buildRecordStore}/{configPrefix}*", $"arn:aws:s3:::{buildRecordStore}/{toolingPrefix}*"),
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = verify } },
+            },
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerListsConfigAndToolingRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:ListBucket",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = verify },
+                    ["StringLike"] = new JsonObject { ["s3:prefix"] = new JsonArray($"{configPrefix}*", $"{toolingPrefix}*") },
+                },
+            },
+        };
+    }
+
+    /// <summary>
+    /// The artifact store's grant to ONE environment for its config bundles (DecoupledCd.md P3 D): Verify HEADs one by version, and
+    /// the Plan task's role reads it by version. Nothing may read any other prefix, and nothing here writes.
+    /// </summary>
+    public static IReadOnlyList<JsonObject> ConfigBundleReadGrant(
+        string artifactStore, string environment, string targetAccountId, string verifyRoleName, string planTaskRoleName, string configPrefix)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
+        return new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"DeployerReadsConfigBundles{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = new JsonArray("s3:GetObject", "s3:GetObjectVersion"),
+                ["Resource"] = $"arn:aws:s3:::{artifactStore}/{configPrefix}*",
+                ["Condition"] = new JsonObject
+                {
+                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName)) },
+                },
+            },
+        };
+    }
+
+    /// <summary>
     /// The artifact store's grant to ONE environment (P4 stage C): its Verify function HEADs a client bundle by version and
     /// lists under <c>client/</c> to tell a missing version from a denied one; its DeployBundle function reads one by
     /// version. Nothing may read any other prefix, and nothing here writes.

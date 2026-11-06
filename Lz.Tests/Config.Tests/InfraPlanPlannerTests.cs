@@ -245,6 +245,37 @@ public class InfraPlanPlannerTests
         Assert.DoesNotContain("ECSTaskRule", off.DenyPolicy);
     }
 
+    // ---- the build account's half ----
+
+    private static string Role(string name) => $"arn:aws:iam::{TargetAccount}:role/{name}";
+
+    [Fact]
+    public void TheBuildAccount_LetsVerifyReadConfigAndToolingRecords_AndVerifyAndThePlanTaskReadConfigBundles_Only()
+    {
+        var config = Dev();
+        var build = PipelineBootstrapPlanner.Plan(config, "147440642635");
+
+        var records = build.BuildRecordReadGrant!.Single(s => s["Sid"]!.GetValue<string>() == "DeployerReadsConfigAndToolingRecordsDev");
+        Assert.Equal(new[] { "arn:aws:s3:::scu-build-records-4df6-b9c6/config/scutara/scutara/*", "arn:aws:s3:::scu-build-records-4df6-b9c6/tooling/scutara/scutara/*" },
+            records["Resource"]!.AsArray().Select(r => r!.GetValue<string>()));
+        Assert.Equal(Role(DeployerPlanner.VerifyRoleName(config)), records["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.GetValue<string>());
+        Assert.Equal("s3:GetObject", records["Action"]!.GetValue<string>());
+
+        var bundles = build.ArtifactReadGrant!.Single(s => s["Sid"]!.GetValue<string>() == "DeployerReadsConfigBundlesDev");
+        Assert.Equal("arn:aws:s3:::scu-artifacts-4df6-b9c6/config/scutara/scutara/*", bundles["Resource"]!.GetValue<string>());
+        Assert.Equal(new[] { Role(DeployerPlanner.VerifyRoleName(config)), Role("scu-dev-deployer-plan-task") },
+            bundles["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.AsArray().Select(r => r!.GetValue<string>()));
+        Assert.Equal(Plan(config).Infrastructure!.TaskRoleName, InfraPlanPlanner.TaskRoleNameFor("scu", "dev"));
+    }
+
+    [Fact]
+    public void WithoutTheBranch_TheBuildAccountGrantsNothingOfIt()
+    {
+        var build = PipelineBootstrapPlanner.Plan(Dev(null), "147440642635");
+        Assert.DoesNotContain(build.BuildRecordReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>(), s => s.ToJsonString().Contains("config/"));
+        Assert.DoesNotContain(build.ArtifactReadGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>(), s => s.ToJsonString().Contains("config/"));
+    }
+
     // ---- refusals ----
 
     [Fact]
