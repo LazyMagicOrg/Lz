@@ -253,6 +253,25 @@ public class VerifySetTests
     }
 
     [Fact]
+    public async Task ASetWithAConfigMember_IsRefusedByName_UntilInfrastructureIsPromoted()
+    {
+        // P3 G lets a marker name the config bundle; promoting it is P3 I. It must not reach the client branch, where it would be
+        // refused for having no web app - or, with one named like it, deployed as a bundle.
+        var f = Set();
+        var config = f.Marker.Members.First(m => m.Class == "client") with
+        {
+            Class = "config", Repo = "Scutara/Scutara",
+            Identity = new BuildRecordIdentity("bundle", Bucket: "scu-artifacts-4df6-b9c6", Key: "config/scutara/scutara/x.zip", VersionId: "cfg-v1", Sha256: new string('d', 64)),
+        };
+        var members = f.Marker.Members.Append(config).ToList();
+        const string tooling = "sha256:8a15e378fb4f7650cbd0f80b2e7b23902fe7da3ac61f618dd1c19cbd77ce9923";
+        var marker = f.Marker with { Members = members, MarkerId = PassMarkerFormat.MarkerIdFor(members, tooling), ToolingDigest = tooling, ConfigBundleVersion = "cfg-v1" };
+        var key = PassMarkerFormat.KeyFor(marker.MarkerId);
+        f.Store.Put(Dev, key, "mv-1", PassMarkerFormat.Write(marker));
+        Assert.Contains("promoting infrastructure is P3 I", await Refused(f, "members", Input(key, "mv-1")));
+    }
+
+    [Fact]
     public async Task ASetWithoutAnImageMember_IsRefused()
     {
         // The set is everything the predecessor runs beside the Service (T-13); clients alone would land onto whatever

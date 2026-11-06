@@ -169,12 +169,84 @@ public class PassMarkerTests
     [Theory]
     [InlineData("toolingDigest")]
     [InlineData("configBundleVersion")]
-    public void ToolingDigestOrConfigBundleVersion_IsRefused_WhileNoMemberIsOfClasses5To7(string field)
+    public void ToolingDigestOrConfigBundleVersion_IsRefused_InASetWithNoMemberOfClasses5To7(string field)
     {
-        // Not merely an unknown field: the refusal says when it becomes one, so the day classes 5 to 7 deploy it is found.
+        // Not merely an unknown field: the refusal says what would carry it, a config member.
         var message = Refusal(With(m => m[field] = "x"));
         Assert.Contains(field, message);
         Assert.Contains("classes 5 to 7", message);
+    }
+
+    // ---- classes 5 to 7: the config member (P3 G) ----
+
+    private const string Tooling = "sha256:8a15e378fb4f7650cbd0f80b2e7b23902fe7da3ac61f618dd1c19cbd77ce9923";
+
+    private static PassMarkerMember Config(string version = "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6") => new(
+        Class: "config", Repo: "Scutara/Scutara",
+        Record: new PassMarkerRecordReference(Records, "config/scutara/scutara/20261106T145329Z-42237962485-1.json", "rec-v4"),
+        Identity: new BuildRecordIdentity("bundle", Bucket: "scu-artifacts-4df6-b9c6", Key: "config/scutara/scutara/20261106T145329Z-42237962485-1.zip", VersionId: version, Sha256: new string('d', 64)),
+        Version: version,
+        BuiltFrom: new BuildRecordBuiltFrom("Scutara/Scutara", new string('4', 40), "published", new Dictionary<string, string> { ["Lz.Cli"] = "0.13.166" }, "refs/heads/main"),
+        Deploy: new PassMarkerReference("deploys/config/scutara/scutara/deploy-20261106T1505Z-42237962485.json", "dep-v4"));
+
+    private static PassMarker WithConfig(string? tooling = Tooling, string? version = "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6", PassMarkerMember? config = null)
+    {
+        var m = new[] { Image(), Client(), config ?? Config() };
+        return new PassMarker(1, PassMarkerFormat.MarkerIdFor(m, tooling), "dev", m,
+            new PassMarkerEvidence(new PassMarkerReference("tests/req-1.json", "tst-v1")), "req-1", "2026-11-06T16:00:00Z", tooling, version);
+    }
+
+    /// <summary>A marker written as JSON without the writer's check, so the reader's own refusal is what is tested.</summary>
+    private static string Raw(PassMarker marker)
+    {
+        var node = JsonNode.Parse(PassMarkerFormat.Write(Marker()))!.AsObject();
+        node["members"] = JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(marker.Members,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase, DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }));
+        node["markerId"] = marker.MarkerId;
+        if (marker.ToolingDigest is { } t) node["toolingDigest"] = t;
+        if (marker.ConfigBundleVersion is { } v) node["configBundleVersion"] = v;
+        return node.ToJsonString();
+    }
+
+    [Fact]
+    public void ASetWithAConfigMember_CarriesTheToolingDigestAndItsBundleVersion_AndRoundTrips()
+    {
+        var marker = WithConfig();
+        var parsed = PassMarkerFormat.Parse(PassMarkerFormat.Write(marker), "dev");
+        Assert.Equal(Tooling, parsed.ToolingDigest);
+        Assert.Equal("rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6", parsed.ConfigBundleVersion);
+        Assert.Equal(PassMarkerFormat.Write(marker), PassMarkerFormat.Write(parsed));
+        Assert.Contains(parsed.Members, m => m.Class == PassMarkerFormat.ConfigClass);
+    }
+
+    [Theory]
+    [InlineData(null, "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6", "toolingDigest")]
+    [InlineData(Tooling, null, "configBundleVersion")]
+    [InlineData("latest", "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6", "not a sha256 digest")]
+    [InlineData(Tooling, "another-version", "config member's bundle is version")]
+    public void ASetWithAConfigMember_WithoutBothFieldsConsistentWithIt_IsRefused_ByReaderAndWriter(string? tooling, string? version, string expected)
+    {
+        var marker = WithConfig(tooling, version);
+        Assert.Contains(expected, Refusal(Raw(marker)));
+        Assert.Contains(expected, Assert.Throws<InvalidOperationException>(() => PassMarkerFormat.Write(marker)).Message);
+    }
+
+    [Fact]
+    public void TwoConfigMembers_AreRefused()
+    {
+        var m = new[] { Image(), Config(), Config("v-other") with { Record = new PassMarkerRecordReference(Records, "config/scutara/scutara/x-2.json", "r") } };
+        Assert.Throws<InvalidOperationException>(() => PassMarkerFormat.RequireClasses5To7(m, Tooling, "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6"));
+    }
+
+    [Fact]
+    public void TheToolingDigest_IsPartOfTheMarkerId_SoAnotherLzMakesAnotherSet()
+    {
+        var other = "sha256:" + new string('e', 64);
+        Assert.NotEqual(PassMarkerFormat.MarkerIdFor(WithConfig().Members, Tooling), PassMarkerFormat.MarkerIdFor(WithConfig().Members, other));
+        // And a marker whose digest was swapped after its id was computed is refused.
+        Assert.Contains("markerId", Refusal(With(m => m["toolingDigest"] = other, WithConfig())));
+        // Without a config member nothing is added: every marker written before P3 G keeps its id.
+        Assert.Equal(PassMarkerFormat.MarkerIdFor(Marker().Members), Marker().MarkerId);
     }
 
     [Fact]

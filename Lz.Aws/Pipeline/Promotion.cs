@@ -99,6 +99,11 @@ public static class VerifySetStep
         var images = marker.Members.Where(m => m.Class == "image").ToList();
         if (images.Count != 1)
             throw new DeployRefused("members", $"the set names {images.Count} image members; a set is the Service image and the clients beside it, so exactly one.");
+        // A CONFIG MEMBER (P3 G) IS READ, NOT YET PROMOTED: infrastructure promoted into this environment is P3 I. Refused by name
+        // here, rather than mistaken for a client bundle with no web app.
+        if (marker.Members.FirstOrDefault(m => m.Class == PassMarkerFormat.ConfigClass) is { } config)
+            throw new DeployRefused("members",
+                $"the set names a config member ({config.Repo}, bundle version {config.Identity.VersionId}); promoting infrastructure is P3 I, not built yet.");
 
         var records = new BuildRecord[marker.Members.Count];
         for (var i = 0; i < marker.Members.Count; i++)

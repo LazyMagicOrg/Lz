@@ -21,7 +21,8 @@ public sealed record PassMarkerEvidence(PassMarkerReference? Tests);
 /// One member of the tested set (T-13): the Service image or a client bundle, with the record it was deployed from and the
 /// environment's deploy evidence for it.
 /// </summary>
-/// <param name="Class"><c>image</c> or <c>client</c> in a set; <c>site</c>, alone, in a site marker (V-K step 5).</param>
+/// <param name="Class"><c>image</c>, <c>client</c> or - at most one, P3 G - <c>config</c> in a set; <c>site</c>, alone, in a site marker
+/// (V-K step 5).</param>
 /// <param name="Version">What the member names itself by: an image's Service version (its record's
 /// <c>intake.serviceVersion</c>), a bundle's object version.</param>
 /// <param name="BuiltFrom">Copied from the record, so the next environment compares the record it reads against it.</param>
@@ -42,8 +43,10 @@ public sealed record PassMarkerMember(
 /// days and a person can choose by hand.</param>
 /// <param name="Environment">The writer's.</param>
 /// <param name="Execution">The execution that wrote it, a field rather than the key.</param>
-/// <param name="ToolingDigest">For classes 5 to 7, once they deploy (P3); refused until then.</param>
-/// <param name="ConfigBundleVersion">For classes 5 to 7, once they deploy (P3); refused until then.</param>
+/// <param name="ToolingDigest">The tooling image that applied the set's config member (classes 5 to 7, P3 G): required with a config
+/// member, refused without one, and part of the marker id - the same bundle applied by another lz is another set.</param>
+/// <param name="ConfigBundleVersion">The config member's bundle version (P3 G): required with a config member and equal to its
+/// identity's version, refused without one.</param>
 public sealed record PassMarker(
     int Schema, string MarkerId, string Environment, IReadOnlyList<PassMarkerMember> Members, PassMarkerEvidence Evidence,
     string Execution, string WrittenAt, string? ToolingDigest = null, string? ConfigBundleVersion = null);
@@ -64,8 +67,14 @@ public static class PassMarkerFormat
     /// <summary>Both kinds of marker, as the promotion poller lists them and their decisions.</summary>
     public static readonly string[] Segments = { SetsSegment, SiteSegment };
 
-    /// <summary>The classes a set names (T-13): the Service image and the clients. The site has a marker of its own.</summary>
-    public static readonly string[] MemberClasses = { "image", "client" };
+    /// <summary>
+    /// The classes a set names (T-13): the Service image, the clients and - since P3 G - the config bundle, classes 5 to 7. The
+    /// site has a marker of its own.
+    /// </summary>
+    public static readonly string[] MemberClasses = { "image", "client", ConfigClass };
+
+    /// <summary>The class of a set's config member: the root's config bundle, which classes 5 to 7 deploy from (P3 G).</summary>
+    public const string ConfigClass = "config";
 
     /// <summary>The class a site marker's one member is of.</summary>
     public const string SiteClass = "site";
@@ -82,7 +91,8 @@ public static class PassMarkerFormat
     /// second pass of the same set, by another execution or at another time, is the same marker and meets the write-once
     /// statement.
     /// </summary>
-    public static string MarkerIdFor(IEnumerable<PassMarkerMember> members)
+    /// <param name="toolingDigest">With a config member, the tooling image that applied it (P3 G), hashed with the members.</param>
+    public static string MarkerIdFor(IEnumerable<PassMarkerMember> members, string? toolingDigest = null)
     {
         var list = members.ToList();
         var sites = list.Count(m => m.Class == SiteClass);
@@ -93,6 +103,7 @@ public static class PassMarkerFormat
         if (identities.Count == 0) throw new InvalidOperationException("a pass marker names at least one member.");
         var twice = identities.GroupBy(i => i, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1);
         if (twice is not null) throw new InvalidOperationException($"a pass marker names {twice.Key} twice.");
+        if (toolingDigest is not null) identities.Add($"tooling|{toolingDigest}");
         var canonical = string.Join("\n", identities.OrderBy(i => i, StringComparer.Ordinal));
         return (sites == 1 ? SiteSegment : SetsSegment) + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
@@ -107,9 +118,43 @@ public static class PassMarkerFormat
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
-    public static string Write(PassMarker marker) => JsonSerializer.Serialize(marker, Json);
+    /// <summary>Written only as a reader would accept it: <see cref="RequireClasses5To7"/> holds on both sides.</summary>
+    public static string Write(PassMarker marker)
+    {
+        RequireClasses5To7(marker.Members, marker.ToolingDigest, marker.ConfigBundleVersion);
+        return JsonSerializer.Serialize(marker, Json);
+    }
+
+    /// <summary>
+    /// THE CONFIG MEMBER AND ITS TWO FIELDS GO TOGETHER (P3 G, DecoupledCd.md §12 P5 stage C): a set with a member of classes 5 to 7
+    /// - at most one, the config bundle - carries the tooling digest that applied it and the bundle's version, which must be the
+    /// member's own; a set without one carries neither, since a field that names nothing is a claim nobody can check.
+    /// </summary>
+    public static void RequireClasses5To7(IReadOnlyList<PassMarkerMember> members, string? toolingDigest, string? configBundleVersion)
+    {
+        var configs = members.Where(m => m.Class == ConfigClass).ToList();
+        if (configs.Count > 1)
+            throw new InvalidOperationException($"a pass marker names {configs.Count} config members; a set runs one config bundle.");
+        if (configs.Count == 0)
+        {
+            foreach (var (name, value) in new[] { ("toolingDigest", toolingDigest), ("configBundleVersion", configBundleVersion) })
+                if (value is not null)
+                    throw new InvalidOperationException(
+                        $"pass marker names {name}, which only a set with a member of classes 5 to 7 (a config member) carries, and this one has none.");
+            return;
+        }
+        var config = configs[0];
+        if (string.IsNullOrWhiteSpace(toolingDigest)) throw Missing("toolingDigest (its set has a config member)");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(toolingDigest, "^sha256:[0-9a-f]{64}$"))
+            throw new InvalidOperationException($"pass marker's toolingDigest '{toolingDigest}' is not a sha256 digest.");
+        if (string.IsNullOrWhiteSpace(configBundleVersion)) throw Missing("configBundleVersion (its set has a config member)");
+        if (!string.Equals(configBundleVersion, config.Identity.VersionId, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"pass marker's configBundleVersion is {configBundleVersion}, but its config member's bundle is version {config.Identity.VersionId}.");
+    }
 
     private static readonly string[] Fields = { "schema", "markerId", "environment", "members", "evidence", "execution", "writtenAt" };
+    private static readonly string[] OptionalFields = { "toolingDigest", "configBundleVersion" };
     private static readonly string[] MemberFields = { "class", "repo", "record", "identity", "version", "builtFrom", "deploy" };
 
     /// <summary>
@@ -130,12 +175,8 @@ public static class PassMarkerFormat
                 "rather than reading another format with today's assumptions.");
 
         foreach (var key in root.Select(p => p.Key))
-        {
-            if (key is "toolingDigest" or "configBundleVersion")
-                throw new InvalidOperationException(
-                    $"pass marker names {key}, which only a set with a member of classes 5 to 7 carries, and none deploys yet (P3).");
-            if (!Fields.Contains(key)) throw new InvalidOperationException($"pass marker names '{key}', a field schema 1 does not have.");
-        }
+            if (!Fields.Contains(key) && !OptionalFields.Contains(key))
+                throw new InvalidOperationException($"pass marker names '{key}', a field schema 1 does not have.");
         foreach (var field in Fields) if (root[field] is null) throw Missing(field);
 
         var written = String(root, "environment");
@@ -153,12 +194,18 @@ public static class PassMarkerFormat
             throw new InvalidOperationException("a site marker names evidence; the site has no Gate 2, so it has none to name.");
         var evidence = new PassMarkerEvidence(isSite ? null : Reference(Object(evidenceObject, "tests", "evidence.tests"), "evidence.tests"));
 
+        // P3 G: present only with a config member, and then both, consistent with it - checked before the id that hashes one of them.
+        var toolingDigest = root["toolingDigest"] is null ? null : String(root, "toolingDigest");
+        var configBundleVersion = root["configBundleVersion"] is null ? null : String(root, "configBundleVersion");
+        RequireClasses5To7(members, toolingDigest, configBundleVersion);
+
         var markerId = String(root, "markerId");
-        var expected = MarkerIdFor(members);
+        var expected = MarkerIdFor(members, toolingDigest);
         if (!string.Equals(markerId, expected, StringComparison.Ordinal))
             throw new InvalidOperationException($"pass marker's markerId is {markerId}, but its members hash to {expected}.");
 
-        return new PassMarker(CurrentSchema, markerId, written, members, evidence, String(root, "execution"), String(root, "writtenAt"));
+        return new PassMarker(CurrentSchema, markerId, written, members, evidence, String(root, "execution"), String(root, "writtenAt"),
+            toolingDigest, configBundleVersion);
     }
 
     private static PassMarkerMember Member(JsonObject m, int i)
