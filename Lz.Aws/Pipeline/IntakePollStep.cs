@@ -19,10 +19,10 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
     /// The classes whose prefixes the publish writes under in each store: its own, and <c>tests</c> where it has a test bundle.
     /// A site has none, so it is given no <c>tests/</c> prefix.
     /// </summary>
-    public IReadOnlyList<string> PublishedClasses => (Site is not null && Gate1 is null) || Gate1 is { Kind: "smoke" } ? new[] { Class } : new[] { Class, "tests" };
+    public IReadOnlyList<string> PublishedClasses => (Site is not null && Gate1 is null) || Gate1 is { ChecksTheArtifact: true } ? new[] { Class } : new[] { Class, "tests" };
 
-    /// <summary>A Gate 1 with a test bundle of its own, published under <c>tests/</c>; a smoke check's bundle is the image itself.</summary>
-    public bool HasTestBundle => Gate1 is { Kind: not "smoke" };
+    /// <summary>A Gate 1 with a test bundle of its own, published under <c>tests/</c>; a smoke or config check's bundle is the artifact itself.</summary>
+    public bool HasTestBundle => Gate1 is { ChecksTheArtifact: false };
 
     public IntakeSource Source => new(Repo, RepositoryId, OwnerId, WorkflowPath);
     public string WorkflowFile => WorkflowPath[(WorkflowPath.LastIndexOf('/') + 1)..];
@@ -35,7 +35,14 @@ public sealed record IntakeRepository(string Repo, long RepositoryId, long Owner
 /// <param name="Kind"><c>tests</c>, a test run of the bundle; or <c>collection</c>, the browser tests' collection check (§15.4),
 /// which takes none of a test run's settings.</param>
 public sealed record IntakeGate1(string Artifact, string Run, string Filter, string SdkVersion, string SdkSha512, IReadOnlyList<IntakeImage> Images,
-    IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null, string Kind = "tests");
+    IReadOnlyDictionary<string, string>? Environment = null, string? BuildRoot = null, string Kind = "tests")
+{
+    /// <summary>
+    /// A CHECK OF THE ARTIFACT ITSELF, not of a test bundle beside it: the tooling image's smoke check (P3 B) and the config
+    /// bundle's check (P3 C). Its bundle is the artifact, fetched once, handed to Gate 1, and published under its own class.
+    /// </summary>
+    public bool ChecksTheArtifact => Kind is "smoke" or "config";
+}
 
 /// <summary>
 /// A site's Gate 1 (DecoupledCd.md V-24): which environment each artifact's bundle was built for, read from its name by the
@@ -60,6 +67,9 @@ public static class IntakeEnvironment
     public const string PublishTargets = "LZ_INTAKE_PUBLISH_TARGETS";
     public const string BuildRecordStore = "LZ_INTAKE_BUILD_RECORD_STORE";
     public const string ArtifactStore = "LZ_INTAKE_ARTIFACT_STORE";
+    // A config bundle's Gate 1 (P3 C): where the tooling records are, and the tooling image's repository, to run it in.
+    public const string ToolingRecordPrefix = "LZ_INTAKE_TOOLING_RECORDS";
+    public const string ToolingRepository = "LZ_INTAKE_TOOLING_REPOSITORY";
     // The outcomes list (the chain's first environment's deploy-outcomes topic), told of each build not taken in.
     public const string OutcomesTopic = "LZ_INTAKE_OUTCOMES_TOPIC";
     public const string OutcomesEnvironment = "LZ_INTAKE_OUTCOMES_ENVIRONMENT";

@@ -139,9 +139,23 @@ public class BuildSideConfig
     /// <summary>Gate 1's settings (V-C): all of them or none, and each in a form the build can check.</summary>
     private static IEnumerable<string> Gate1Problems(string name, PipelineRepositoryConfig repo)
     {
-        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection" or "vitest" or "smoke"))
+        if (repo.Gate1?.Kind is { } kind && kind is not ("tests" or "site" or "collection" or "vitest" or "smoke" or "config"))
         {
-            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site, collection, vitest or smoke";
+            yield return $"{name}: Gate1.Kind '{kind}' is not tests, site, collection, vitest, smoke or config";
+            yield break;
+        }
+        // THE CONFIG BUNDLE'S GATE 1 (DecoupledCd.md P3 C, owner 2026-11-06): the edge tests, and every environment's config
+        // loaded by the lz the bundle pins, in the tooling image. Its bundle is the config bundle itself, so it names no
+        // TestBundle and none of a test run's settings.
+        if (repo.Gate1 is { Kind: "config" } cfg)
+        {
+            if (repo.Class != "config") yield return $"{name}: Gate1.Kind config checks the config bundle; a {repo.Class} repository has its own check";
+            if (repo.Artifacts is not { Count: 1 }) yield return $"{name}: Gate1.Kind config checks the one bundle the run built, so it needs exactly one artifact";
+            if (repo.TestBundle is not null) yield return $"{name}: Gate1.Kind config checks the bundle itself, so it takes no TestBundle";
+            foreach (var (field, set) in new[] { ("Run", cfg.Run is not null), ("Filter", cfg.Filter is not null), ("SdkVersion", cfg.SdkVersion is not null),
+                         ("SdkSha512", cfg.SdkSha512 is not null), ("Images", cfg.Images is { Count: > 0 }), ("Environment", cfg.Environment is { Count: > 0 }),
+                         ("BuildRoot", cfg.BuildRoot is not null) })
+                if (set) yield return $"{name}: Gate1.Kind config is lz's own check of the bundle, so it takes no {field}";
             yield break;
         }
         // THE TOOLING IMAGE'S GATE 1 (DecoupledCd.md P3 B, owner 2026-11-05): an image with no test suite of its own, so lz loads

@@ -499,7 +499,7 @@ public static class PipelineBootstrapPlanner
     /// when a repository that moved from the push model still held one (V-D). Its signing profile and registry repository are
     /// planned all the same: the intake pushes and signs under them.
     /// </summary>
-    public static bool IntakeOnly(string cls) => cls == "tooling";
+    public static bool IntakeOnly(string cls) => cls is "tooling" or "config";   // config: owner, 2026-11-06 (P3 C)
 
     /// <summary>
     /// What one role may do once assumed.

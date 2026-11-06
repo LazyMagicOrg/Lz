@@ -163,6 +163,21 @@ public sealed class IntakeStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task AConfigBundle_IsStagedOnce_ReadAsABundle_AndHandedToGate1()
+    {
+        // P3 C: the config bundle is its own Gate 1 bundle, as the tooling image is (the routing the first live tooling run lacked).
+        var config = new[] { Service with { Class = "config", Artifacts = new[] { "app" }, Gate1 = new IntakeGate1("app", "", "", "", "", Array.Empty<IntakeImage>(), Kind: "config") } };
+        var f = WithClientArtifact((IntakeFetchStep.BundleEntry, ZipOf(("systemconfig.scu.dev.yaml", new byte[] { 1 }))));
+
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), config, f, f, f, _work);
+
+        Assert.Equal("staged", result["verdict"]!.GetValue<string>());
+        Assert.Single(result["staged"]!.AsArray());
+        Assert.NotNull(result["bundle"]);
+        Assert.Equal($"{Exec()}/app-1.zip", result["tests"]!["key"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task AClientsArtifact_IsStaged_WithItsOneBundleZipsOwnSha()
     {
         var bundle = ZipOf(("app/index.html", System.Text.Encoding.UTF8.GetBytes("<html/>")));

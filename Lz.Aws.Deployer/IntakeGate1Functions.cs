@@ -24,7 +24,12 @@ public sealed class IntakeGate1StartFunction
             state, executionName, repositories,
             new S3ScratchPresigner(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.ScratchBucket)),
             new CodeBuildGate1(Gate1Clients.CodeBuild.Value),
-            IntakeClients.Required(IntakeEnvironment.Gate1Project));
+            IntakeClients.Required(IntakeEnvironment.Gate1Project),
+            // A config bundle's check (P3 C): the tooling records and the image's repository, where the planner configured them.
+            Environment.GetEnvironmentVariable(IntakeEnvironment.ToolingRecordPrefix) is { Length: > 0 } prefix
+                ? new S3ToolingRecords(Clients.S3.Value, IntakeClients.Required(IntakeEnvironment.BuildRecordStore), prefix)
+                : null,
+            Environment.GetEnvironmentVariable(IntakeEnvironment.ToolingRepository));
         context.Logger.LogInformation($"{executionName}: Gate 1 started, {result["buildId"]}");
         return Io.Write(result);
     }
@@ -157,5 +162,31 @@ internal sealed class CodeBuildGate1(IAmazonCodeBuild codeBuild, IAmazonCloudWat
             if (page.NextForwardToken is null || page.NextForwardToken == token) return lines;
             token = page.NextForwardToken;
         }
+    }
+}
+
+/// <summary>The tooling image's build records, newest first by key (each key starts with its build's stamp), read from the record store (P3 C).</summary>
+internal sealed class S3ToolingRecords(Amazon.S3.IAmazonS3 s3, string bucket, string prefix) : IToolingRecords
+{
+    public async Task<IReadOnlyList<(string Key, System.Text.Json.Nodes.JsonObject Record)>> NewestAsync(int max)
+    {
+        var keys = new List<string>();
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new Amazon.S3.Model.ListObjectsV2Request { BucketName = bucket, Prefix = prefix, ContinuationToken = token });
+            keys.AddRange((page.S3Objects ?? new List<Amazon.S3.Model.S3Object>()).Select(o => o.Key).Where(k => k.EndsWith(".json", StringComparison.Ordinal)));
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token is not null);
+
+        var records = new List<(string, System.Text.Json.Nodes.JsonObject)>();
+        foreach (var key in keys.OrderByDescending(k => k, StringComparer.Ordinal).Take(max))
+        {
+            using var response = await s3.GetObjectAsync(bucket, key);
+            using var reader = new StreamReader(response.ResponseStream);
+            if (System.Text.Json.Nodes.JsonNode.Parse(await reader.ReadToEndAsync()) is System.Text.Json.Nodes.JsonObject record)
+                records.Add((key, record));
+        }
+        return records;
     }
 }

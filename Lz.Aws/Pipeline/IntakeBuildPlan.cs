@@ -79,6 +79,9 @@ public static class IntakeBuildPlanner
     // runs too long ends TIMED_OUT, a fault, before the wait gives up.
     public const int Gate1PollSeconds = 30;
     public const int Gate1PollAttempts = 130;
+    // A config bundle waits for the tooling image that carries its lz (P3 C): a minute apart, for half an hour.
+    public const int Gate1WaitSeconds = 60;
+    public const int Gate1WaitAttempts = 30;
 
     public static string EvidenceStoreFor(SystemConfig c) => $"{c.SystemKey}-intake-evidence-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
     public static string ScratchBucketFor(SystemConfig c) => $"{c.SystemKey}-intake-scratch-{PipelineBootstrapPlanner.BuildSuffixFor(c)}";
@@ -95,8 +98,9 @@ public static class IntakeBuildPlanner
                 r.Repo!, r.RepositoryId!.Value, r.OwnerId!.Value, r.WorkflowPath!, r.Intake!, r.Class!,
                 (IReadOnlyList<string>?)r.Artifacts ?? Array.Empty<string>(),
                 // THE TOOLING IMAGE'S SMOKE CHECK (P3 B): its bundle is the image the run built.
-                r.Gate1 is { Kind: "smoke" } && r.Artifacts is { Count: 1 } smokeImage
-                    ? new IntakeGate1(smokeImage[0], "", "", "", "", Array.Empty<IntakeImage>(), null, null, Kind: "smoke")
+                // AND THE CONFIG BUNDLE'S CHECK (P3 C): its bundle is the config bundle.
+                r.Gate1 is { Kind: "smoke" or "config" } own && r.Artifacts is { Count: 1 } checkedArtifact
+                    ? new IntakeGate1(checkedArtifact[0], "", "", "", "", Array.Empty<IntakeImage>(), null, null, Kind: own.Kind!)
                 : r.TestBundle is { } collected && r.Gate1 is { Kind: "collection" } c
                     ? new IntakeGate1(collected, "", "", "", "", Array.Empty<IntakeImage>(), null, c.BuildRoot, Kind: "collection")
                 : r.TestBundle is { } npmBundle && r.Gate1 is { Kind: "vitest" } v
@@ -251,6 +255,18 @@ public static class IntakeBuildPlanner
             var logGroup = $"/aws/codebuild/{project}";
             var (start, verdict) = (Fn("gate1-start"), Fn("gate1-verdict"));
 
+            // A CONFIG BUNDLE'S CHECK RUNS IN THE TOOLING IMAGE (P3 C): Gate1Start reads the tooling records to choose the image
+            // that carries the bundle's lz, and the build pulls it from this registry.
+            var configCheck = repositories.Any(r => r.Gate1 is { Kind: "config" });
+            var toolingEntry = repositories.FirstOrDefault(r => r.Class == "tooling" && r.Artifacts.Count == 1);
+            if (configCheck && toolingEntry is null)
+                throw new InvalidOperationException(
+                    "lz bootstrappipeline refuses: a repository's Gate 1 is a config check, which runs in the tooling image, and the " +
+                    "intake takes no tooling repository to choose that image from.");
+            var toolingRepositoryName = toolingEntry is null ? null : EcrRepositoryNaming.For(config, toolingEntry.Artifacts[0]);
+            var toolingRecordPrefix = toolingEntry is null ? null : BuildRecordFormat.PrefixFor("tooling", toolingEntry.Repo);
+            var gate1RecordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
+
             gate1 = new IntakeGate1Build(
                 project, projectArn, $"{project}-build",
                 DeployerPlanner.Policy(
@@ -265,7 +281,19 @@ public static class IntakeBuildPlanner
                         Sid = "WriteItsOwnReports", Effect = "Allow",
                         Action = new[] { "codebuild:CreateReport", "codebuild:UpdateReport", "codebuild:BatchPutTestCases" },
                         Resource = reportGroupArn,
-                    }),
+                    },
+                    // The config check pulls the tooling image to run lz in (P3 C); nothing else in the registry.
+                    configCheck
+                        ? new { Sid = "SignInToTheRegistry", Effect = "Allow", Action = new[] { "ecr:GetAuthorizationToken" }, Resource = (object)"*" }
+                        : null,
+                    configCheck
+                        ? new
+                        {
+                            Sid = "PullTheToolingImage", Effect = "Allow",
+                            Action = new[] { "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability" },
+                            Resource = (object)$"arn:aws:ecr:{region}:{accountId}:repository/{toolingRepositoryName}",
+                        }
+                        : null),
                 DeployerPlanner.ServiceTrustPolicy("codebuild.amazonaws.com"),
                 reportGroup, reportGroupArn, logGroup, BuildspecFor(reportGroupArn),
                 Gate1Image, Gate1ComputeType, Gate1TimeoutMinutes);
@@ -276,13 +304,34 @@ public static class IntakeBuildPlanner
                     // To sign the one URL Gate 1 reads its bundle by; Gate 1's own role holds no S3 right.
                     new { Sid = "PresignTheTestBundle", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{scratch}/*" },
                     new { Sid = "StartGate1", Effect = "Allow", Action = new[] { "codebuild:StartBuild" }, Resource = projectArn },
-                }),
-                new Dictionary<string, string>
-                {
-                    [IntakeEnvironment.Repositories] = reposVariable,
-                    [IntakeEnvironment.ScratchBucket] = scratch,
-                    [IntakeEnvironment.Gate1Project] = project,
-                },
+                }.Concat(configCheck
+                    ? new object[]
+                    {
+                        // To choose the tooling image that carries a config bundle's lz (P3 C): the tooling records, nothing else.
+                        new
+                        {
+                            Sid = "ListTheToolingRecords", Effect = "Allow", Action = new[] { "s3:ListBucket" }, Resource = $"arn:aws:s3:::{gate1RecordStore}",
+                            Condition = new { StringLike = new Dictionary<string, string> { ["s3:prefix"] = $"{toolingRecordPrefix}*" } },
+                        },
+                        new { Sid = "ReadTheToolingRecords", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{gate1RecordStore}/{toolingRecordPrefix}*" },
+                    }
+                    : Array.Empty<object>()).ToArray()),
+                configCheck
+                    ? new Dictionary<string, string>
+                    {
+                        [IntakeEnvironment.Repositories] = reposVariable,
+                        [IntakeEnvironment.ScratchBucket] = scratch,
+                        [IntakeEnvironment.Gate1Project] = project,
+                        [IntakeEnvironment.BuildRecordStore] = gate1RecordStore,
+                        [IntakeEnvironment.ToolingRecordPrefix] = toolingRecordPrefix!,
+                        [IntakeEnvironment.ToolingRepository] = $"{accountId}.dkr.ecr.{region}.amazonaws.com/{toolingRepositoryName}",
+                    }
+                    : new Dictionary<string, string>
+                    {
+                        [IntakeEnvironment.Repositories] = reposVariable,
+                        [IntakeEnvironment.ScratchBucket] = scratch,
+                        [IntakeEnvironment.Gate1Project] = project,
+                    },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
             functions.Add(new(verdict, DeployerHandlers.IntakeGate1Verdict, $"{verdict}-fn",
@@ -477,6 +526,11 @@ public static class IntakeBuildPlanner
     /// blobs left as they are - - lz at the version the image says it carries, the plugin loaded and its commands
     /// present, the Pulumi aws provider, the AWS CLI, LZ_CREDENTIALS=ambient - and one GATE1-LIST-SMOKE line with the counts,
     /// each failed check named before it, which <see cref="Gate1SmokeJudge"/> reads. It writes no report.
+    /// A CONFIG CHECK (GATE1_KIND config, the config bundle's Gate 1, P3 C) unzips the bundle, signs in to this registry and
+    /// pulls the tooling image Gate1Start chose (GATE1_TOOLING_IMAGE, the one carrying the bundle's lz) - a failure there decided
+    /// nothing, and is a fault - then runs the edge tests (node --test) and, for every environment the bundle holds a system
+    /// config for, lz validateconfig in that image with the bundle as _Dev and LZ_CREDENTIALS unset, printing one
+    /// GATE1-LIST-CONFIG line, each failed check named before it, which <see cref="Gate1SmokeJudge"/> reads.
     /// </summary>
     public static string BuildspecFor(string reportGroupArn) => $$"""
         version: 0.2
@@ -503,6 +557,7 @@ public static class IntakeBuildPlanner
               - if [ "$GATE1_KIND" = collection ]; then set -o pipefail; cd "$GATE1_ROOT" && total=$(npx playwright test --list --forbid-only | awk '/^Total/{print $2}') && gate=$(npx playwright test --list --forbid-only --grep @gate | awk '/^Total/{print $2}') && echo "GATE1-LIST-COLLECTED total ${total:-0} gate ${gate:-0}" || { echo "GATE1-LIST-COLLECTED failed"; exit 1; }; fi
               - if [ "$GATE1_KIND" = vitest ]; then cd "$GATE1_ROOT" && { npx vitest run --reporter=default --reporter=json --outputFile=/tmp/gate1-vitest.json; status=$?; node -e 'const r=JSON.parse(require("fs").readFileSync("/tmp/gate1-vitest.json","utf8"));console.log(["GATE1-LIST-VITEST","total",r.numTotalTests,"passed",r.numPassedTests,"failed",r.numFailedTests,"suites-failed",r.numFailedTestSuites].join(" "))' || echo "GATE1-LIST-VITEST unreadable"; exit $status; }; fi
               - if [ "$GATE1_KIND" = smoke ]; then cd "$GATE1_ROOT" && archive=$(ls *.tar | head -1) && mkdir -p /tmp/smoke && tar -xf "$GATE1_ROOT/$archive" -C /tmp/smoke && cd /tmp/smoke && python3 -c "import json;i=json.load(open('index.json'));b=lambda d:'blobs/'+d.replace(':','/');r=lambda m:r(json.load(open(b([x for x in m['manifests'] if x.get('platform',dict()).get('os')!='unknown'][0]['digest'])))) if 'manifests' in m else m;m=r(i);json.dump([dict(Config=b(m['config']['digest']),RepoTags=['gate1/smoke:image'],Layers=[b(l['digest']) for l in m['layers']])],open('manifest.json','w'))" && tar -cf /tmp/smoke.tar manifest.json blobs && id=$(docker load -i /tmp/smoke.tar | awk '/^Loaded image/{print $NF}' | tail -1) && [ -n "$id" ] && pin=$(docker run --rm --entrypoint cat "$id" /opt/lz-version 2>/dev/null || true) && checks=0 && failed=0 && c() { checks=$((checks+1)); [ "$2" = 0 ] || { failed=$((failed+1)); echo "GATE1-LIST-SMOKE-FAILED $1"; }; } && { [ -n "$pin" ] && docker run --rm "$id" --version | grep -Eq "lz[.]cli:[[:space:]]*${pin}[+]"; c lz-at-its-pin $?; docker run --rm "$id" --version | grep -Eq "loaded:[[:space:]]*/opt/scutara/plugin/Deploy[.]dll"; c plugin-loaded $?; docker run --rm "$id" --help | grep -q "System Specific"; c plugin-commands $?; docker run --rm --entrypoint pulumi "$id" plugin ls | grep -Eq "^aws +resource"; c pulumi-aws-provider $?; docker run --rm --entrypoint aws "$id" --version >/dev/null; c aws-cli $?; docker run --rm --entrypoint printenv "$id" LZ_CREDENTIALS | grep -qx ambient; c ambient-credentials $?; echo "GATE1-LIST-SMOKE checks $checks failed $failed"; }; fi
+              - if [ "$GATE1_KIND" = config ]; then cd "$GATE1_ROOT" && rm -rf /tmp/config && mkdir -p /tmp/config && unzip -q -o bundle.zip -d /tmp/config && aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${GATE1_TOOLING_IMAGE%%/*}" >/dev/null && docker pull -q "$GATE1_TOOLING_IMAGE" >/dev/null && checks=0 && failed=0 && c() { checks=$((checks+1)); [ "$2" = 0 ] || { failed=$((failed+1)); echo "GATE1-LIST-CONFIG-FAILED $1"; }; } && { (cd /tmp/config/CloudFront && node --test test/*.test.mjs); c edge-tests $?; for env in $(ls /tmp/config | sed -n "s/^systemconfig[.][^.]*[.]\([^.]*\)[.]yaml$/\1/p" | sort -u); do docker run --rm -e LZ_CREDENTIALS= -v /tmp/config:/work/_Dev:ro "$GATE1_TOOLING_IMAGE" validateconfig --env "$env"; c "config-$env" $?; done; echo "GATE1-LIST-CONFIG checks $checks failed $failed"; }; fi
         reports:
           {{reportGroupArn}}:
             files:
@@ -589,7 +644,7 @@ public static class IntakeBuildPlanner
             states["HasGate1"] = new { Type = "Choice", Choices = choices.ToArray(), Default = "MarkTakenIn" };
             if (testsGate)
             {
-                states["Gate1Start"] = new { Type = "Task", Resource = gate1StartFn!, Parameters = payload, ResultPath = "$.gate1Start", Retry = new[] { Transient() }, Next = "Gate1Verdict", Catch = toFault };
+                states["Gate1Start"] = new { Type = "Task", Resource = gate1StartFn!, Parameters = payload, ResultPath = "$.gate1Start", Retry = new object[] { Transient(), new { ErrorEquals = new[] { nameof(Gate1Waiting) }, IntervalSeconds = Gate1WaitSeconds, MaxAttempts = Gate1WaitAttempts, BackoffRate = 1.0 } }, Next = "Gate1Verdict", Catch = toFault };
                 states["Gate1Verdict"] = new
                 {
                     Type = "Task", Resource = gate1VerdictFn!, Parameters = payload, ResultPath = "$.gate1",

@@ -3103,8 +3103,9 @@ public static class DeployerPlanner
     private static string[] RepositoryArns(string region, string accountId, IReadOnlyList<string> repositories)
         => repositories.Select(r => $"arn:aws:ecr:{region}:{accountId}:repository/{r}").ToArray();
 
-    internal static string Policy(params object[] statements)
-        => JsonSerializer.Serialize(new { Version = "2012-10-17", Statement = statements }, Asl);
+    // A null statement is one a plan left out (a conditional grant, P3 C); IAM refuses a null in Statement, so none is written.
+    internal static string Policy(params object?[] statements)
+        => JsonSerializer.Serialize(new { Version = "2012-10-17", Statement = statements.Where(s => s is not null).ToArray() }, Asl);
 
     internal static string Combine(object[] first, object[] second)
         => Policy(first.Concat(second).ToArray());

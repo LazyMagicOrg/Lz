@@ -104,6 +104,32 @@ public interface IScratchPresigner
 public sealed class Gate1StillRunning(string message) : Exception(message);
 
 /// <summary>
+/// A config bundle's Gate 1 cannot start yet: no tooling image carries the lz its bundle pins (P3 C). A push that raises the pin
+/// builds both, and the bundle usually reaches Gate 1 first; the machine retries this every minute for half an hour, by which
+/// time the image the same push built has been taken in.
+/// </summary>
+public sealed class Gate1Waiting(string message) : Exception(message);
+
+/// <summary>The tooling image's build records, newest first, as the config bundle's Gate 1 reads them (P3 C).</summary>
+public interface IToolingRecords
+{
+    Task<IReadOnlyList<(string Key, JsonObject Record)>> NewestAsync(int max);
+}
+
+/// <summary>
+/// WHICH TOOLING IMAGE CHECKS A CONFIG BUNDLE (DecoupledCd.md P3 C, owner 2026-11-06): the newest one whose record carries the
+/// lz the bundle pins, so the bundle's config is loaded by exactly the lz that will deploy it. PURE.
+/// </summary>
+public static class ToolingImageChoice
+{
+    public static string? DigestFor(IEnumerable<(string Key, JsonObject Record)> records, string lzVersion)
+        => records.OrderByDescending(r => r.Key, StringComparer.Ordinal)
+            .Where(r => r.Record["builtFrom"]?["packages"]?["Lz.Cli"]?.GetValue<string>() == lzVersion)
+            .Select(r => r.Record["identity"]?["digest"]?.GetValue<string>())
+            .FirstOrDefault(d => d is not null);
+}
+
+/// <summary>
 /// WHAT A GATE 1 BUILD TESTS, FOR ITS LOG: the run and its commit, the intake execution that started it, and every artifact
 /// the fetch staged with its SHA-256 — the ones Publish later holds each file to — which the buildspec prints before anything
 /// else. DISPLAY ONLY: the build checks the test bundle by BUNDLE_SHA256 alone and trusts none of these. A field the state
@@ -175,7 +201,8 @@ public static class IntakeGate1StartStep
     };
 
     public static async Task<JsonObject> RunAsync(
-        JsonObject state, string executionName, IReadOnlyList<IntakeRepository> repositories, IScratchPresigner presigner, IGate1Builds builds, string project)
+        JsonObject state, string executionName, IReadOnlyList<IntakeRepository> repositories, IScratchPresigner presigner, IGate1Builds builds, string project,
+        IToolingRecords? tooling = null, string? toolingRepository = null)
     {
         var input = IntakeInput.From(state);
         var gate1 = input.In(repositories)?.Gate1 ?? throw new IntakeFault($"{input.Repo} has no Gate 1; the machine should not have started one");
@@ -183,8 +210,25 @@ public static class IntakeGate1StartStep
         var key = tests["key"]!.GetValue<string>();
         var sha256 = tests["sha256"]!.GetValue<string>();
 
-        var buildId = await builds.StartAsync(project, VariablesFor(gate1, presigner.GetUrl(key, UrlLifetime), sha256, Gate1Header.From(state, executionName)));
-        return new JsonObject { ["buildId"] = buildId, ["bundle"] = key, ["bundleSha256"] = sha256, ["kind"] = gate1.Kind };
+        var variables = new Dictionary<string, string>(VariablesFor(gate1, presigner.GetUrl(key, UrlLifetime), sha256, Gate1Header.From(state, executionName)));
+        string? image = null;
+        if (gate1.Kind == "config")
+        {
+            // THE LZ THE BUNDLE PINS (P3 C), from the builtFrom the run uploaded, and the tooling image that carries it.
+            var lz = state["fetch"]?["builtFrom"]?["packages"]?["Lz.Cli"]?.GetValue<string>()
+                ?? throw new IntakeFault("the config bundle's builtFrom names no Lz.Cli, so no tooling image can check it");
+            if (tooling is null || string.IsNullOrEmpty(toolingRepository))
+                throw new IntakeFault("this intake has no tooling image to check a config bundle with: no tooling repository is configured");
+            var digest = ToolingImageChoice.DigestFor(await tooling.NewestAsync(30), lz)
+                ?? throw new Gate1Waiting($"no tooling image carries Lz.Cli {lz} yet; the config bundle waits for one");
+            image = $"{toolingRepository}@{digest}";
+            variables["GATE1_TOOLING_IMAGE"] = image;
+        }
+
+        var buildId = await builds.StartAsync(project, variables);
+        var started = new JsonObject { ["buildId"] = buildId, ["bundle"] = key, ["bundleSha256"] = sha256, ["kind"] = gate1.Kind };
+        if (image is not null) started["toolingImage"] = image;
+        return started;
     }
 }
 
@@ -287,22 +331,29 @@ public static class Gate1SmokeJudge
 {
     public const string Marker = Gate2Lists.Prefix + "-SMOKE";
 
+    /// <summary>The config bundle's check (P3 C), judged the same way from its own line.</summary>
+    public const string ConfigMarker = Gate2Lists.Prefix + "-CONFIG";
+
     public static (Gate1Outcome Outcome, string Reason, IReadOnlyDictionary<string, int>? Counts) Judge(Gate1Build build, IReadOnlyList<string> lines)
+        => Judge(build, lines, Marker, "smoke");
+
+    public static (Gate1Outcome Outcome, string Reason, IReadOnlyDictionary<string, int>? Counts) Judge(
+        Gate1Build build, IReadOnlyList<string> lines, string marker, string noun)
     {
-        if (build.Status == "IN_PROGRESS") return (Gate1Outcome.Running, "the smoke check is running", null);
-        var count = lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, $@"^{Marker} checks (\d+) failed (\d+)$"))
+        if (build.Status == "IN_PROGRESS") return (Gate1Outcome.Running, $"the {noun} check is running", null);
+        var count = lines.Select(l => System.Text.RegularExpressions.Regex.Match(l, $@"^{marker} checks (\d+) failed (\d+)$"))
             .FirstOrDefault(m => m.Success);
         if (count is null)
-            return (Gate1Outcome.Fault, $"the smoke check ended {build.Status} and printed no count{(build.FailedPhase is { } p ? $": {p}" : "")}", null);
+            return (Gate1Outcome.Fault, $"the {noun} check ended {build.Status} and printed no count{(build.FailedPhase is { } p ? $": {p}" : "")}", null);
         var (checks, failed) = (int.Parse(count.Groups[1].Value), int.Parse(count.Groups[2].Value));
         var counts = new Dictionary<string, int> { ["SUCCEEDED"] = checks - failed, ["FAILED"] = failed };
-        if (checks == 0) return (Gate1Outcome.Fault, "the smoke check ran no check", counts);
+        if (checks == 0) return (Gate1Outcome.Fault, $"the {noun} check ran no check", counts);
         if (failed > 0)
         {
-            var names = lines.Where(l => l.StartsWith(Marker + "-FAILED ", StringComparison.Ordinal)).Select(l => l[(Marker.Length + 8)..]);
-            return (Gate1Outcome.Failed, $"{failed} of {checks} smoke checks failed: {string.Join(", ", names)}", counts);
+            var names = lines.Where(l => l.StartsWith(marker + "-FAILED ", StringComparison.Ordinal)).Select(l => l[(marker.Length + 8)..]);
+            return (Gate1Outcome.Failed, $"{failed} of {checks} {noun} checks failed: {string.Join(", ", names)}", counts);
         }
-        return (Gate1Outcome.Passed, $"{checks} of {checks} smoke checks passed", counts);
+        return (Gate1Outcome.Passed, $"{checks} of {checks} {noun} checks passed", counts);
     }
 }
 
@@ -325,8 +376,9 @@ public static class IntakeGate1VerdictStep
         var collection = kind == "collection";
         // A VITEST RUN writes no test report either: judged from its log, its counts are what it records.
         var vitest = kind == "vitest";
-        // A SMOKE CHECK (P3 B) is judged from its log too.
+        // A SMOKE CHECK (P3 B), and a config bundle's check (P3 C), are judged from their logs too.
         var smoke = kind == "smoke";
+        var configCheck = kind == "config";
         Gate1Report? report = null;
         int? gateCount = null;
         IReadOnlyDictionary<string, int>? logCounts = null;
@@ -341,6 +393,9 @@ public static class IntakeGate1VerdictStep
         else if (smoke)
             (outcome, reason, logCounts) = Gate1SmokeJudge.Judge(build,
                 build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build));
+        else if (configCheck)
+            (outcome, reason, logCounts) = Gate1SmokeJudge.Judge(build,
+                build.Status == "IN_PROGRESS" ? Array.Empty<string>() : await builds.ListLinesAsync(build), Gate1SmokeJudge.ConfigMarker, "config");
         else
         {
             report = build.Status == "IN_PROGRESS" ? null : await builds.ReportAsync(build.ReportArns);
@@ -354,7 +409,7 @@ public static class IntakeGate1VerdictStep
         }
 
         // Gate 2's lists come from a .NET run only: a collection or a vitest run gives Gate 2 nothing to hold results to.
-        var dotnet = !collection && !vitest && !smoke;
+        var dotnet = !collection && !vitest && !smoke && !configCheck;
         var lists = dotnet ? Gate2Lists.Parse(await builds.ListLinesAsync(build)) : null;
         if (dotnet && outcome == Gate1Outcome.Passed && lists is null)
             throw new IntakeFault($"Gate 1 {buildId}: {reason}, but its log holds no complete Gate 2 lists");

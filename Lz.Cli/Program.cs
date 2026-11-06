@@ -185,6 +185,7 @@ class Program
         RegisterUnparkCommand(rootCommand, systemKeyOption, envOption);
         RegisterGetEnvCommand(rootCommand);
         RegisterGetTenantsCommand(rootCommand);
+        RegisterValidateConfigCommand(rootCommand);
         RegisterGetTestTenantCommand(rootCommand);
         RegisterReposCommand(rootCommand);
         RegisterCloneReposCommand(rootCommand);
@@ -3489,6 +3490,45 @@ class Program
             Console.ResetColor();
             Environment.ExitCode = 1;
         }
+    }
+
+    // ---------------------------------------------------------------
+    // validateconfig (DecoupledCd.md P3 C, 2026-11-06)
+    //
+    // Loads one environment's system, tenant and subtenant configs exactly as a deploy loads them - validation, the
+    // build-side file, the platform's checks - and calls no AWS. Gate 1 runs it in the tooling image at the Lz version a
+    // config bundle pins, so a config that version refuses is caught before the bundle is recorded. Run it with
+    // LZ_CREDENTIALS unset: under the override a system config needs the ambient account, which is an STS call.
+    // ---------------------------------------------------------------
+    private static void RegisterValidateConfigCommand(RootCommand root)
+    {
+        var cmd = new Command("validateconfig",
+            "Load and validate one environment's system, tenant and subtenant configs, as a deploy would, with no AWS call.");
+        var envOpt = new Option<string?>("--env", "Environment (otherwise auto-detected from the folder hierarchy).");
+        cmd.AddOption(envOpt);
+        cmd.SetHandler((string? envOverride) =>
+        {
+            var env = ConfigResolver.ResolveEnvironment(envOverride);
+            var found = ConfigLoader.DiscoverConfigFile(Directory.GetCurrentDirectory(), $"systemconfig.*.{env}.yaml");
+            if (found is null)
+            {
+                Console.Error.WriteLine($"No systemconfig.*.{env}.yaml found searching upward from {Directory.GetCurrentDirectory()}.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            try
+            {
+                var loaded = ConfigValidation.ValidateEnvironment(Path.GetDirectoryName(found)!, env);
+                foreach (var line in loaded) Console.WriteLine($"  loaded {line}");
+                Console.WriteLine($"{env}: {loaded.Count} config file(s) load and validate.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"{env}: the config does not load: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+        }, envOpt);
+        root.AddCommand(cmd);
     }
 
     private static void RegisterGetTenantsCommand(RootCommand root)
