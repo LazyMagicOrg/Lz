@@ -277,8 +277,16 @@ public class AwsTailscaleAsgComponent : ComponentResource, ITailscaleComponent
     /// Generate the user data script that installs Tailscale as a subnet
     /// router, mounts EFS for file access, and configures SSH for SFTP
     /// (WinSCP) access to EFS content.
+    /// <para>
+    /// ALWAYS LF. The script is a verbatim literal, so it takes the line endings of the checkout that compiled it: CRLF
+    /// on a Windows workstation (core.autocrlf), LF on Linux CI. Unnormalized, the same config planned a launch-template
+    /// change from the pipeline's Plan task and none from a workstation (2026-11-06), and each would rewrite the other's.
+    /// </para>
     /// </summary>
-    private static string GenerateUserData(SystemConfig config, string fileSystemId)
+    internal static string GenerateUserData(SystemConfig config, string fileSystemId)
+        => UserDataScript(config, fileSystemId).ReplaceLineEndings("\n");
+
+    private static string UserDataScript(SystemConfig config, string fileSystemId)
     {
         var prefix = config.SystemKey;
         var vpcCidr = config.VpcCidr;

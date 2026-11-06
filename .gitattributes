@@ -3,3 +3,7 @@ Lz.Aws/Lambda/gate-checker.zip binary
 
 # Bundle fixtures stay as a Linux build wrote them (P4 stage C): a manifest's digest is over LF lines.
 Lz.Tests/Storage.Tests/testdata/bundles/* text eol=lf
+
+# Lambda source zipped as checked out (Pulumi FileArchive): CRLF on a Windows workstation would make its code hash differ
+# from a Linux build's, and the two would rewrite each other's deploy (found 2026-11-06, DecoupledCd P3 D).
+Lz.Aws/Auth/CognitoCustomAuth/*.mjs text eol=lf
