@@ -342,6 +342,9 @@ public static class DeployerEnvironment
 
     // The trigger and the sweep for client bundles (P4 stage D).
     public const string TriggerClientRoutes = "LZ_TRIGGER_CLIENT_ROUTES";
+
+    /// <summary>The config repository's record prefix the start function routes (P3 E); unset where no config record starts a deploy.</summary>
+    public const string TriggerConfigPrefix = "LZ_TRIGGER_CONFIG_PREFIX";
     public const string CorroborateBundleSources = "LZ_CORROBORATE_BUNDLE_SOURCES";
 
     // The outcomes (each environment's deploy-outcomes topic): where the notify function publishes, and the environment it names.

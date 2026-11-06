@@ -305,7 +305,7 @@ public static class PipelineBootstrapPlanner
                 RuleName: ruleName,
                 RuleArn: ruleArn,
                 EventPattern: DeployerTrigger.EventPattern(buildAccount, buildRecords, DeployerPlanner.TriggerRecordClasses(config),
-                    DeployerPlanner.TriggerSitePrefixes(config)),
+                    DeployerPlanner.TriggerSitePrefixes(config), DeployerPlanner.TriggerConfigPrefixes(config)),
                 TargetBusArn: busArn,
                 RoleName: roleName,
                 RoleArn: $"arn:aws:iam::{acct}:role/{roleName}",
@@ -392,7 +392,9 @@ public static class PipelineBootstrapPlanner
             var configPrefix = BuildRecordFormat.PrefixFor("config", configRepo);
             recordGrant = (recordGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.InfraRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
-                    configPrefix, BuildRecordFormat.PrefixFor("tooling", toolingRepo)))
+                    configPrefix, BuildRecordFormat.PrefixFor("tooling", toolingRepo),
+                    // P3 E: the start function reads a config record for its branch, where config records start deploys.
+                    DeployerPlanner.TriggerConfigPrefixes(config).Count > 0 ? DeployerPlanner.StartFunctionRoleName(config) : null))
                 .ToList();
             artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.ConfigBundleReadGrant(artifacts, config.Environment, target, DeployerPlanner.VerifyRoleName(config),

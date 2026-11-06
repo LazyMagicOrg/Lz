@@ -656,8 +656,10 @@ class Program
         var applyKey = new Option<string>("--apply-key", $"Where the result goes, under {InfraPlan.AppliesPrefix}.") { IsRequired = true };
         var allowDestructive = new Option<string>("--allow-destructive", () => "false",
             "true only when ReadPlan let a destructive plan through for an input that allowed it (P-12).");
+        var builtAt = new Option<string>("--built-at", "The config record's builtAt: a bundle built before one already deployed is refused.") { IsRequired = true };
+        var repo = new Option<string>("--repo", "The config repository, owner/name: where its deploys are recorded.") { IsRequired = true };
         cmd.AddOption(envOption);
-        foreach (var o in new Option[] { bundleBucket, bundleKey, bundleVersion, bundleSha, evidenceBucket, planKey, applyKey, allowDestructive }) cmd.AddOption(o);
+        foreach (var o in new Option[] { bundleBucket, bundleKey, bundleVersion, bundleSha, evidenceBucket, planKey, applyKey, allowDestructive, builtAt, repo }) cmd.AddOption(o);
 
         cmd.SetHandler(async ctx =>
         {
@@ -704,6 +706,19 @@ class Program
                 var (approved, approvedVersionId) = await InfraDeploy.ReadApprovedAsync(s3, evidence, plansAt, Cts.Token);
                 approvedVersion = approvedVersionId;
                 Console.WriteLine($"Approved plan s3://{evidence}/{plansAt} version {approvedVersion}: {approved.Plans.Count} stack(s).");
+
+                // NEVER BACKWARDS (P3 E): a bundle built before one already deployed would take the stacks back.
+                var ours = r.GetValueForOption(builtAt)!;
+                var deployed = await InfraDeploy.ReadDeployedAsync(s3, evidence, r.GetValueForOption(repo)!, Cts.Token);
+                if (InfraDeploy.SupersededBy(deployed, ours) is { } newer)
+                {
+                    outcome = InfraDeploy.Refused;
+                    reason = $"superseded: this bundle was built at {ours}, and {newer} is already deployed";
+                    differences = new[] { reason };
+                    Console.WriteLine($"Refusing to apply: {reason}.");
+                    return;
+                }
+                Console.WriteLine($"  built at {ours}; no newer bundle among the {deployed.Count} config deploy(s) recorded.");
                 Console.WriteLine();
 
                 // THE FRESH PREVIEW, held to the approved one before anything is applied.

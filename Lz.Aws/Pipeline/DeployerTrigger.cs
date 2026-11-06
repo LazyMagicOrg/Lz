@@ -41,12 +41,14 @@ public sealed record ClientTriggerRoute(string RecordPrefix, string App, string 
 /// other ref, or naming none, is skipped.</param>
 /// <param name="ClientRoutes">The client repositories' routes (P4 stage D); none where the environment deploys no client
 /// bundle.</param>
-/// <param name="ArtifactStore">The artifact store a client record's identity must name, without which no client record
-/// parses. Set exactly when <paramref name="ClientRoutes"/> names a route.</param>
+/// <param name="ArtifactStore">The artifact store a client or config record's identity must name, without which neither parses.
+/// Set exactly when <paramref name="ClientRoutes"/> names a route or <paramref name="ConfigPrefix"/> is set.</param>
+/// <param name="ConfigPrefix">The config repository's prefix, <c>config/{owner}/{name}/</c>, where the environment deploys its
+/// infrastructure from config bundles on its own (DecoupledCd.md P3 E); null elsewhere.</param>
 public sealed record TriggerSettings(
     string ArtifactAccountId, string BuildRecordStore, string StateMachineArn, IReadOnlyList<TriggerRoute> Routes,
     IReadOnlyList<string> AllowedRefs, IReadOnlyList<ClientTriggerRoute>? ClientRoutes = null, string? ArtifactStore = null,
-    string? HoldParameter = null)
+    string? HoldParameter = null, string? ConfigPrefix = null)
 {
     public static TriggerSettings Read(Func<string, string?> env)
     {
@@ -67,6 +69,16 @@ public sealed record TriggerSettings(
             artifactStore = DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactStore);
         }
 
+        // THE CONFIG ROUTE IS OPTIONAL TOO (P3 E), and needs the store for the same reason.
+        string? configPrefix = null;
+        if (env(DeployerEnvironment.TriggerConfigPrefix) is { Length: > 0 } prefix)
+        {
+            if (!DeployerTrigger.IsConfigRecordPrefix(prefix))
+                throw new InvalidOperationException($"{DeployerEnvironment.TriggerConfigPrefix} is '{prefix}', which is not config/{{owner}}/{{name}}/.");
+            configPrefix = prefix;
+            artifactStore ??= DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactStore);
+        }
+
         return new TriggerSettings(
             DeployerEnvironment.Required(env, DeployerEnvironment.ArtifactAccount),
             DeployerEnvironment.Required(env, DeployerEnvironment.BuildRecordStore),
@@ -76,7 +88,8 @@ public sealed record TriggerSettings(
             clientRoutes,
             artifactStore,
             // THE HOLD (P5 stage J): set by bootstrapdeployer once the hold exists; a function planned before it reads none.
-            env(DeployerEnvironment.HoldParameter) is { Length: > 0 } hold ? hold : null);
+            env(DeployerEnvironment.HoldParameter) is { Length: > 0 } hold ? hold : null,
+            configPrefix);
     }
 }
 
@@ -104,6 +117,12 @@ public static class DeployerTrigger
     /// <summary>The class a trigger also routes where the environment deploys client bundles (P4 stage D).</summary>
     public const string ClientRecordClass = "client";
 
+    /// <summary>The class a trigger also routes where the environment deploys its infrastructure from config bundles (P3 E).</summary>
+    public const string ConfigRecordClass = "config";
+
+    /// <summary>The last part of a config execution's name: one execution per config record, whatever the tenants.</summary>
+    public const string ConfigTarget = "config";
+
     /// <summary>How a record is written — <c>aws s3api put-object --if-none-match "*"</c> in the build workflow.</summary>
     public const string RecordWriteReason = "PutObject";
 
@@ -117,6 +136,7 @@ public static class DeployerTrigger
 
     private static readonly Regex RoutePrefix = new(@"^image/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
     private static readonly Regex ClientRoutePrefix = new(@"^client/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
+    private static readonly Regex ConfigRoutePrefix = new(@"^config/[a-z0-9._-]+/[a-z0-9._-]+/$", RegexOptions.CultureInvariant);
     // A site's route (V-24) is one environment's directory of its repository's prefix, so no environment routes another's bundle.
     private static readonly Regex SiteRoutePrefix = new(@"^site/[a-z0-9._-]+/[a-z0-9._-]+/[a-z0-9][a-z0-9-]{0,31}/$", RegexOptions.CultureInvariant);
     // The last part of an execution's name, as a tenant key is: lowercase, and short enough that the name stays inside 80.
@@ -189,14 +209,15 @@ public static class DeployerTrigger
         var clientRoutes = settings.ClientRoutes ?? Array.Empty<ClientTriggerRoute>();
         var route = settings.Routes.FirstOrDefault(r => key.StartsWith(r.RecordPrefix, StringComparison.Ordinal));
         var clientRoute = route is null ? clientRoutes.FirstOrDefault(r => key.StartsWith(r.RecordPrefix, StringComparison.Ordinal)) : null;
-        if (route is null && clientRoute is null)
+        var config = route is null && clientRoute is null && settings.ConfigPrefix is { } cp && key.StartsWith(cp, StringComparison.Ordinal) ? cp : null;
+        if (route is null && clientRoute is null && config is null)
             throw new TriggerRefused(
-                $"no route for '{key}': this environment's config names no image repository, and no client repository with a web " +
-                "app, whose records are written there (routes: " +
-                $"{string.Join(", ", settings.Routes.Select(r => r.RecordPrefix).Concat(clientRoutes.Select(r => r.RecordPrefix)))}). " +
+                $"no route for '{key}': this environment's config names no image repository, no client repository with a web " +
+                "app, and no config repository it deploys from, whose records are written there (routes: " +
+                $"{string.Join(", ", settings.Routes.Select(r => r.RecordPrefix).Concat(clientRoutes.Select(r => r.RecordPrefix)).Concat(settings.ConfigPrefix is null ? [] : [settings.ConfigPrefix]))}). " +
                 "Re-run `lz bootstrapdeployer --apply` after adding the repository, or start the execution by hand.");
 
-        var file = RecordFile.Match(key[(route?.RecordPrefix ?? clientRoute!.RecordPrefix).Length..]);
+        var file = RecordFile.Match(key[(route?.RecordPrefix ?? clientRoute?.RecordPrefix ?? config!).Length..]);
         if (!file.Success)
             throw new TriggerRefused(
                 $"'{key}' is not a build record's name ({{stamp}}-{{run id}}.json, or {{stamp}}-{{run id}}-{{run attempt}}.json), so no execution name can be derived from it.");
@@ -211,6 +232,14 @@ public static class DeployerTrigger
             return new[]
             {
                 new TriggeredExecution(DeployExecution.Name(RequestIdFor(stamp, run, clientRoute.App), 1), ClientInputFor(record, clientRoute.Bucket), record),
+            };
+
+        // A CONFIG RECORD STARTS ONE EXECUTION (P3 E): the infrastructure branch plans and deploys every stack the bundle names,
+        // with the input a person starting it by hand uses - the record, and nothing else.
+        if (config != null)
+            return new[]
+            {
+                new TriggeredExecution(DeployExecution.Name(RequestIdFor(stamp, run, ConfigTarget), 1), ConfigInputFor(record), record),
             };
 
         return route!.Targets
@@ -312,8 +341,10 @@ public static class DeployerTrigger
     /// rules never forward a record the start function could only dead-letter.</param>
     /// <param name="sitePrefixes">The site's one environment's prefix, <c>site/{owner}/{name}/{environment}/</c> (V-24), matched exactly
     /// after the classes: the forwarding rule is one environment's, so another environment's site record is never forwarded to it.</param>
+    /// <param name="configPrefixes">The config repository's prefix, <c>config/{owner}/{name}/</c>, where the environment deploys from
+    /// config bundles on its own (P3 E), matched exactly after the sites: never the whole class, so no other config is forwarded.</param>
     public static string EventPattern(string artifactAccountId, string buildRecordStore, IReadOnlyList<string> classes,
-        IReadOnlyList<string>? sitePrefixes = null)
+        IReadOnlyList<string>? sitePrefixes = null, IReadOnlyList<string>? configPrefixes = null)
     {
         if (!Account.IsMatch(artifactAccountId))
             throw new InvalidOperationException($"'{artifactAccountId}' is not a 12-digit AWS account id.");
@@ -332,6 +363,9 @@ public static class DeployerTrigger
         foreach (var prefix in sitePrefixes ?? Array.Empty<string>())
             if (!SiteRoutePrefix.IsMatch(prefix))
                 throw new InvalidOperationException($"'{prefix}' is not a site environment's prefix, site/{{owner}}/{{name}}/{{environment}}/.");
+        foreach (var prefix in configPrefixes ?? Array.Empty<string>())
+            if (!ConfigRoutePrefix.IsMatch(prefix))
+                throw new InvalidOperationException($"'{prefix}' is not a config repository's prefix, config/{{owner}}/{{name}}/.");
 
         return new JsonObject
         {
@@ -344,7 +378,7 @@ public static class DeployerTrigger
                 // One prefix matcher per class, in the order given, so ["image"] is the pattern P2 stage D wrote, byte for byte.
                 ["object"] = new JsonObject
                 {
-                    ["key"] = new JsonArray(classes.Select(c => $"{c}/").Concat(sitePrefixes ?? Array.Empty<string>())
+                    ["key"] = new JsonArray(classes.Select(c => $"{c}/").Concat(sitePrefixes ?? Array.Empty<string>()).Concat(configPrefixes ?? Array.Empty<string>())
                         .Select(p => (JsonNode?)new JsonObject { ["prefix"] = p }).ToArray()),
                 },
                 ["reason"] = new JsonArray(RecordWriteReason),
@@ -371,6 +405,15 @@ public static class DeployerTrigger
         ["record"] = new JsonObject { ["bucket"] = record.Bucket, ["key"] = record.Key },
         ["target"] = new JsonObject { ["bucket"] = bucket },
     }.ToJsonString();
+
+    /// <summary>A config record's execution input, <c>{ "record": {...} }</c>: what a person starting it by hand writes (P3 D).</summary>
+    public static string ConfigInputFor(RecordLocation record) => new JsonObject
+    {
+        ["record"] = new JsonObject { ["bucket"] = record.Bucket, ["key"] = record.Key },
+    }.ToJsonString();
+
+    /// <summary>Whether a prefix is one config repository's, <c>config/{owner}/{name}/</c> (P3 E).</summary>
+    public static bool IsConfigRecordPrefix(string prefix) => ConfigRoutePrefix.IsMatch(prefix);
 
     /// <summary>The client routes as the function's environment carries them (P4 stage D).</summary>
     public static string EncodeClientRoutes(IReadOnlyList<ClientTriggerRoute> routes)

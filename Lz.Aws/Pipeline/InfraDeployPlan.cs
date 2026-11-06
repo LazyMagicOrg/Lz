@@ -80,6 +80,25 @@ public static class InfraDeployPlanner
                 Effect = "Allow",
                 Action = new[] { "s3:PutObject" },
                 Resource = $"arn:aws:s3:::{evidence}/{AppliesPrefix}*",
+            },
+            new
+            {
+                // P3 E: the config deploys already recorded, so a bundle older than one deployed is refused (InfraDeploy.SupersededBy).
+                Sid = "ReadTheDeploysAlreadyRecorded",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = $"arn:aws:s3:::{evidence}/deploys/{configPrefix}*",
+            },
+            new
+            {
+                Sid = "ListTheDeploysAlreadyRecorded",
+                Effect = "Allow",
+                Action = new[] { "s3:ListBucket" },
+                Resource = $"arn:aws:s3:::{evidence}",
+                Condition = new Dictionary<string, object>
+                {
+                    ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = $"deploys/{configPrefix}*" },
+                },
             });
 
         return new InfraDeployResources(
@@ -284,7 +303,8 @@ public static class InfraDeployPlanner
                       "'--evidence-bucket', '" + evidence + "', " +
                       "'--plan-key', States.Format('" + InfraPlan.PlansPrefix + "{}.json', $$.Execution.Name), " +
                       "'--apply-key', States.Format('" + AppliesPrefix + "{}.json', $$.Execution.Name), " +
-                      "'--allow-destructive', States.Format('{}', $.planned.destructive))";
+                      "'--allow-destructive', States.Format('{}', $.planned.destructive), " +
+                      "'--built-at', $.verified.builtAt, '--repo', $.verified.builtFrom.repo)";
 
         return new Dictionary<string, object>
         {

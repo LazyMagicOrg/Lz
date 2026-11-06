@@ -39,6 +39,40 @@ public static class InfraDeploy
         return why;
     }
 
+    /// <summary>
+    /// A DEPLOY OF A NEWER BUNDLE, or null (P3 E). Once root pushes start executions on their own, two can run close together and
+    /// finish out of order; a bundle built before one already deployed would take the stacks back. <paramref name="deployed"/> is
+    /// every config deploy recorded under <c>deploys/config/...</c>, with the record's <c>builtAt</c>; a deploy of a build
+    /// built after this one supersedes it; the same build again does not. The same rule as Prepare's for an image, without its override: an older bundle is deployed
+    /// by pushing it again.
+    /// </summary>
+    public static string? SupersededBy(IEnumerable<(string Key, string? BuiltAt)> deployed, string builtAt)
+        => deployed.Where(d => d.BuiltAt is not null && string.CompareOrdinal(d.BuiltAt, builtAt) > 0)
+            .OrderByDescending(d => d.BuiltAt, StringComparer.Ordinal).Select(d => $"{d.Key} (built {d.BuiltAt})").FirstOrDefault();
+
+    /// <summary>Where a config repository's deploys are recorded: Record's key, without the execution.</summary>
+    public static string DeploysPrefixFor(string repo) => $"deploys/{BuildRecordFormat.PrefixFor("config", repo)}";
+
+    /// <summary>Every recorded config deploy of <paramref name="repo"/>, with the build each deployed.</summary>
+    public static async Task<IReadOnlyList<(string Key, string? BuiltAt)>> ReadDeployedAsync(IAmazonS3 s3, string bucket, string repo, CancellationToken ct)
+    {
+        var found = new List<(string, string?)>();
+        string? token = null;
+        do
+        {
+            var page = await s3.ListObjectsV2Async(new ListObjectsV2Request { BucketName = bucket, Prefix = DeploysPrefixFor(repo), ContinuationToken = token }, ct);
+            foreach (var o in page.S3Objects ?? new())
+            {
+                using var response = await s3.GetObjectAsync(bucket, o.Key, ct);
+                using var reader = new StreamReader(response.ResponseStream);
+                var body = JsonNode.Parse(await reader.ReadToEndAsync(ct));
+                found.Add((o.Key, body?["verified"]?["builtAt"]?.GetValue<string>()));
+            }
+            token = page.IsTruncated == true ? page.NextContinuationToken : null;
+        } while (token is not null);
+        return found;
+    }
+
     /// <summary>The approved plan and the version read, from the evidence store.</summary>
     public static async Task<(PlanFile Plan, string? VersionId)> ReadApprovedAsync(IAmazonS3 s3, string bucket, string key, CancellationToken ct)
     {

@@ -430,12 +430,27 @@ public static class CrossAccount
     /// function reads the config repository's records and the tooling repository's, and lists both prefixes - to find the newest
     /// tooling record carrying a bundle's lz, and to tell a missing record from a denied one. Nothing else, and nothing here writes.
     /// </summary>
+    /// <param name="startRoleName">Under P3 E, the start function's role, which reads a config record for its branch: a statement of
+    /// its own, config records only, no list. Null leaves the grant as P3 D wrote it.</param>
     public static IReadOnlyList<JsonObject> InfraRecordReadGrant(
-        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string configPrefix, string toolingPrefix)
+        string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string configPrefix, string toolingPrefix,
+        string? startRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         var verify = $"arn:aws:iam::{targetAccountId}:role/{verifyRoleName}";
-        return new[]
+        var start = startRoleName is null ? Array.Empty<JsonObject>() : new[]
+        {
+            new JsonObject
+            {
+                ["Sid"] = $"TriggerReadsConfigRecords{Suffix(environment)}",
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "s3:GetObject",
+                ["Resource"] = $"arn:aws:s3:::{buildRecordStore}/{configPrefix}*",
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = $"arn:aws:iam::{targetAccountId}:role/{startRoleName}" } },
+            },
+        };
+        return start.Concat(new[]
         {
             new JsonObject
             {
@@ -459,7 +474,7 @@ public static class CrossAccount
                     ["StringLike"] = new JsonObject { ["s3:prefix"] = new JsonArray($"{configPrefix}*", $"{toolingPrefix}*") },
                 },
             },
-        };
+        }).ToList();
     }
 
     /// <summary>

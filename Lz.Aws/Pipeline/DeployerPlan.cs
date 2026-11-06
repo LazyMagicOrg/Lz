@@ -1620,7 +1620,8 @@ public static class DeployerPlanner
             BusPolicy: CrossAccount.TriggerBusPolicy(busArn, artifactAccount, RecordForwarderRoleName(config)),
             RuleName: ruleName,
             RuleArn: ruleArn,
-            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore, TriggerRecordClasses(config), TriggerSitePrefixes(config)),
+            EventPattern: DeployerTrigger.EventPattern(artifactAccount, buildRecordStore, TriggerRecordClasses(config), TriggerSitePrefixes(config),
+                TriggerConfigPrefixes(config)),
             StartFunctionName: function,
             StartFunctionArn: $"arn:aws:lambda:{region}:{acct}:function:{function}",
             DeadLetterQueueName: queue,
@@ -1651,6 +1652,14 @@ public static class DeployerPlanner
             // THE HOLD (P5 stage J), read before every start; anything but "off", or missing, starts nothing.
             [DeployerEnvironment.HoldParameter] = HoldParameterName(config),
         };
+        // THE CONFIG ROUTE (P3 E): where the environment deploys from config bundles, its config repository's records start the
+        // infrastructure branch, and the start function parses them with the artifact store.
+        var configPrefixes = TriggerConfigPrefixes(config);
+        if (configPrefixes.Count == 1)
+        {
+            startEnvironment[DeployerEnvironment.TriggerConfigPrefix] = configPrefixes[0];
+            startEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
+        }
         if (clientRoutes.Count > 0)
         {
             startEnvironment[DeployerEnvironment.TriggerClientRoutes] = DeployerTrigger.EncodeClientRoutes(clientRoutes);
@@ -1669,7 +1678,7 @@ public static class DeployerPlanner
         var startFunction = new DeployerFunction(
             function, DeployerHandlers.Start, StartFunctionRoleName(config),
             Combine(Logs(region, acct, function), [.. StartGrants(stateMachineArn, queueArn, buildRecordStore,
-                clientRecords: clientTargets.Count > 0, sitePrefixes: siteTargets.Select(t => t.RecordPrefix).ToList()),
+                clientRecords: clientTargets.Count > 0, sitePrefixes: siteTargets.Select(t => t.RecordPrefix).ToList(), configPrefixes: configPrefixes),
                 HoldReadGrant(region, acct, HoldParameterName(config))]),
             startEnvironment,
             TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false);
@@ -1878,9 +1887,20 @@ public static class DeployerPlanner
     }
 
     /// <summary>
+    /// The config repository's record prefix the trigger forwards and routes (DecoupledCd.md P3 E): one, where the environment
+    /// deploys its infrastructure (<c>Infrastructure: deploy</c>) and builds start deploys (<c>DeployOnBuildRecord</c>); none
+    /// otherwise. ONE DEFINITION FOR BOTH ACCOUNTS: both rules' patterns and the start function take it from here.
+    /// </summary>
+    public static IReadOnlyList<string> TriggerConfigPrefixes(SystemConfig config)
+        => config.Pipeline is { InfrastructureDeploys: true, DeployOnBuildRecord: true } p
+            ? new[] { BuildRecordFormat.PrefixFor(DeployerTrigger.ConfigRecordClass, InfraPlanPlanner.Repositories(p).ConfigRepo) }
+            : Array.Empty<string>();
+
+    /// <summary>
     /// The record classes the trigger forwards and routes (P4 stage D): <c>image</c>, and <c>client</c> where a client repository
     /// names the web app it deploys as. ONE DEFINITION FOR BOTH ACCOUNTS: the build account's forwarding rule and this environment's
-    /// start rule share <see cref="DeployerTrigger.EventPattern"/>, and both take its classes from here.
+    /// start rule share <see cref="DeployerTrigger.EventPattern"/>, and both take its classes from here. The config repository's
+    /// prefix (P3 E) is matched apart, by <see cref="TriggerConfigPrefixes"/>.
     /// </summary>
     public static IReadOnlyList<string> TriggerRecordClasses(SystemConfig config)
         => ClientApps(config).Count > 0
@@ -3003,9 +3023,18 @@ public static class DeployerPlanner
     /// own failures. It judges nothing about the record but its ref — Verify does the rest — and rolls nothing.
     /// </summary>
     private static object[] StartGrants(string stateMachineArn, string queueArn, string buildRecordStore, bool clientRecords,
-        IReadOnlyList<string>? sitePrefixes = null)
+        IReadOnlyList<string>? sitePrefixes = null, IReadOnlyList<string>? configPrefixes = null)
     {
         var grants = StartImageGrants(stateMachineArn, queueArn, buildRecordStore).ToList();
+        if (configPrefixes is { Count: > 0 })
+            grants.Insert(1, new
+            {
+                // THE CONFIG REPOSITORY'S RECORDS (P3 E), read for their branch; no list, as for the others.
+                Sid = "ReadConfigRecordsBranch",
+                Effect = "Allow",
+                Action = new[] { "s3:GetObject" },
+                Resource = configPrefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}*").ToArray(),
+            });
         if (sitePrefixes is { Count: > 0 })
             grants.Insert(1, new
             {
