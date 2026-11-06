@@ -129,6 +129,26 @@ public sealed class IntakeStepsTests : IDisposable
         Assert.Empty(Directory.GetFiles(_work));   // nothing left on the function's disk
     }
 
+    // ---- the tooling image's smoke check (P3 B) ----
+
+    [Fact]
+    public async Task ASmokeCheckedImage_IsStagedOnce_CheckedAsAnImage_AndHandedToGate1()
+    {
+        // MEASURED SHORT 2026-11-05: the first live tooling run, 42136288264, ended taken-in at HasGate1, which routes on
+        // fetch.tests - written only for a separate test bundle. A smoke check's bundle is the image itself, so it is
+        // Gate 1's bundle as well as the image: the run must reach Gate 1, and the image still be read as one OCI manifest.
+        var smoke = new[] { Service with { Class = "tooling", Gate1 = new IntakeGate1("aiphost", "", "", "", "", Array.Empty<IntakeImage>(), Kind: "smoke") } };
+        var layout = new IntakeArtifactsTests.Layout();
+        var f = WithImage(ImageZip(layout));
+
+        var result = await IntakeFetchStep.RunAsync(Input(), Exec(), smoke, f, f, f, _work);
+
+        Assert.Equal("staged", result["verdict"]!.GetValue<string>());
+        Assert.Single(result["staged"]!.AsArray());
+        Assert.Equal(Digest(layout.Manifest()), result["manifestDigest"]!.GetValue<string>());
+        Assert.Equal($"{Exec()}/aiphost-1.zip", result["tests"]!["key"]!.GetValue<string>());
+    }
+
     // ---- a client's bundle (V-D) ----
 
     private static readonly IReadOnlyList<IntakeRepository> Client = new[] { Service with { Class = "client", Artifacts = new[] { "app" } } };

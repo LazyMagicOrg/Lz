@@ -200,7 +200,11 @@ public static class IntakeFetchStep
                 var key = $"{executionName}/{artifact.Name}.zip";
                 await scratch.PutFileAsync(key, path);
                 staged.Add(new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bytes"] = new FileInfo(path).Length });
-                if (isTests) tests = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
+                // GATE 1'S BUNDLE: the test bundle, or for a smoke check the image itself (P3 B) - which is checked as an image
+                // above and also handed to Gate 1 here. Without it the machine routes past Gate 1 (HasGate1 reads fetch.tests),
+                // as the first live tooling run did on 2026-11-05.
+                if (isTests || (repository.Gate1 is { Kind: "smoke" } smoke && smoke.Artifact == configured))
+                    tests = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
                 if (isSbom) sbom = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256 };
                 if (bundleSha256 is not null && bundle is null)
                     bundle = new JsonObject { ["artifact"] = artifact.Name, ["key"] = key, ["sha256"] = sha256, ["bundleSha256"] = bundleSha256 };
