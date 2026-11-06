@@ -53,6 +53,21 @@ public static class InfraPlanApply
         return inputs;
     }
 
+    /// <summary>
+    /// THE INFRASTRUCTURE ROLE (P3 D's deploy half, §3): the Deploy task's, trusting ECS tasks alone, with AdministratorAccess,
+    /// its own grant, and - in place of the deployer's Deny, which would refuse the topology's own IAM - the pipeline Deny the
+    /// planner computed from the whole deployer plan (<see cref="InfraDeployPlanner.PipelineDeny"/>).
+    /// </summary>
+    public static async Task EnsureDeployRoleAsync(IAmazonIdentityManagementService iam, InfraDeployResources d, string pipelineDeny)
+    {
+        await DeployerBootstrapper.EnsureRoleAsync(iam, d.TaskRoleName, d.TaskTrustPolicy,
+            "lz decoupled-CD deployer: the infrastructure role. Applies a verified config bundle's plan; denied the pipeline.",
+            ($"{d.TaskRoleName}-deploy", d.TaskRolePolicy), pipelineDeny);
+        foreach (var managed in d.TaskRoleManagedPolicies)
+            await iam.AttachRolePolicyAsync(new Amazon.IdentityManagement.Model.AttachRolePolicyRequest { RoleName = d.TaskRoleName, PolicyArn = managed });
+        Console.WriteLine($"  role {d.TaskRoleName} (+ {string.Join(", ", d.TaskRoleManagedPolicies)}, and the pipeline Deny)");
+    }
+
     private static async Task<DeployerInfraInputs> EnsureNetworkAsync(IAmazonEC2 ec2, InfraPlanNetwork n)
     {
         var vpcs = (await ec2.DescribeVpcsAsync(new Ec2.DescribeVpcsRequest { Filters = Tagged(n) })).Vpcs ?? new();

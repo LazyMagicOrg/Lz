@@ -415,15 +415,22 @@ public static class ConfigValidator
         }
 
         // THE INFRASTRUCTURE BRANCH (P3 D) verifies a config record and runs the tooling image: both classes must be accepted.
-        if (p.Infrastructure is not (null or PipelineConfig.InfrastructureOff or PipelineConfig.InfrastructurePlan))
+        if (p.Infrastructure is not (null or PipelineConfig.InfrastructureOff or PipelineConfig.InfrastructurePlan or PipelineConfig.InfrastructureDeploy))
         {
-            errors.Add($"Pipeline.Infrastructure is '{p.Infrastructure}'; it is off or plan.");
+            errors.Add($"Pipeline.Infrastructure is '{p.Infrastructure}'; it is off, plan or deploy.");
         }
         if (p.InfrastructurePlans && (p.Classes?.Contains("config") != true || p.Classes?.Contains("tooling") != true))
         {
             errors.Add(
-                "Pipeline.Infrastructure is plan but Pipeline.Classes does not list both config and tooling. The branch verifies a " +
+                $"Pipeline.Infrastructure is {p.Infrastructure} but Pipeline.Classes does not list both config and tooling. The branch verifies a " +
                 "config record and runs the tooling image that carries the lz it pins; add both, or Infrastructure: off.");
+        }
+        // THE BRANCH'S APPROVE IS A PASS-THROUGH (P3 D): where a person must approve, it would deploy unapproved.
+        if (p.InfrastructureDeploys && p.Approval?.Required == true)
+        {
+            errors.Add(
+                "Pipeline.Infrastructure is deploy but Pipeline.Approval.Required is true. The infrastructure branch's Approve is a " +
+                "pass-through until its approval is built, so it would apply a plan nobody approved; use Infrastructure: plan here.");
         }
 
         // GATE 2 READS WHAT THE TRIGGER ROLLS, AND ALERTS AN ADVISORY CHANGE (V-E): both must be on.

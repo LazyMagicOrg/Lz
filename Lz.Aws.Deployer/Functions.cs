@@ -401,6 +401,20 @@ public sealed class ReadPlanFunction
     }
 }
 
+public sealed class ReadApplyFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var evidence = DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore);
+
+        var result = await InfraPlanSteps.ReadApplyAsync(state, executionName, evidence, new S3RecordStore(Clients.S3.Value), DateTimeOffset.UtcNow);
+
+        context.Logger.LogInformation($"{executionName}: {result["verdict"]}, {result["key"]} version {result["versionId"]}, applied {result["applied"]?.ToJsonString()}");
+        return Io.Write(result);
+    }
+}
+
 [System.Runtime.Versioning.SupportedOSPlatform("linux")]
 public sealed class SignatureHookFunction
 {

@@ -122,6 +122,13 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    cluster {plannedInfra.ClusterName}; task family {plannedInfra.Family}, the tooling image from {plannedInfra.ToolingRepository} by digest; log {plannedInfra.LogGroup} ({plannedInfra.LogRetentionDays} days)");
             Console.WriteLine($"    roles {plannedInfra.ExecutionRoleName} (pull, log) and {plannedInfra.TaskRoleName} ({string.Join(", ", plannedInfra.TaskRoleManagedPolicies)}, " +
                               $"kms:Decrypt on {plannedInfra.StateKeyAlias}, config bundles, s3:PutObject under {InfraPlan.PlansPrefix} in {plan.EvidenceStore}; no DynamoDB or Secrets Manager data)");
+            if (plan.InfrastructureDeploy is { } plannedDeploy)
+            {
+                Console.WriteLine($"  The deploy half (Pipeline.Infrastructure: deploy): ReadPlan -> ApproveInfrastructure (pass-through) -> DeployInfrastructure -> VerifyInfrastructure -> RecordInfrastructure");
+                Console.WriteLine($"    task family {plannedDeploy.Family} on {plannedDeploy.TaskRoleName}: {string.Join(", ", plannedDeploy.TaskRoleManagedPolicies)}, " +
+                                  $"denied every resource of this deployer plan; puts only under {InfraPlan.AppliesPrefix} in {plan.EvidenceStore}");
+                Console.WriteLine($"    function {plannedDeploy.ReadApplyFunctionName} reads the result; a destructive plan needs \"allowDestructivePlan\": true in a hand-started input");
+            }
         }
 
         if (plan.Promotion is { } plannedPromotion)
@@ -223,6 +230,11 @@ public static class DeployerBootstrapper
             var made = await InfraPlanApply.EnsureAsync(ec2, ecs, iam, logs, infra, plan.DenyPolicy);
             if (made != infraInputs)
                 plan = DeployerPlanner.Plan(config, accountId, triggerInputs, clientInputs, siteInputs, gate2Inputs, made);
+
+            // THE INFRASTRUCTURE ROLE, from the plan as it now stands: its Deny names every resource that plan creates.
+            if (plan.InfrastructureDeploy is { } infraDeploy)
+                await InfraPlanApply.EnsureDeployRoleAsync(iam, infraDeploy,
+                    InfraDeployPlanner.PipelineDeny(plan, region, accountId, config.SystemKey, config.Environment));
         }
 
         var roleArn = await EnsureRoleAsync(iam, plan.RoleName, plan.StateMachineTrustPolicy,

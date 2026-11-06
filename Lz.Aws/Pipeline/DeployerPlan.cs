@@ -91,7 +91,8 @@ public sealed record PipelineDeployer(
     DeployerPromotionPlan? Promotion = null,
     string? HoldParameter = null,
     DeployerOutcomesPlan? Outcomes = null,
-    InfraPlanResources? Infrastructure = null);
+    InfraPlanResources? Infrastructure = null,
+    InfraDeployResources? InfrastructureDeploy = null);
 
 /// <summary>
 /// The outcomes list (the environment's chain entry's <c>Outcomes</c>): a topic, a rule matching every end of this deployer's
@@ -260,6 +261,8 @@ public static class DeployerHandlers
     // The infrastructure branch, plan only (P3 D), planned only where Pipeline.Infrastructure is plan.
     public static readonly string VerifyTooling = For("VerifyToolingFunction");
     public static readonly string ReadPlan = For("ReadPlanFunction");
+    // The infrastructure branch's deploy half (P3 D): VerifyRollout for a config record.
+    public static readonly string ReadApply = For("ReadApplyFunction");
     // Gate 2 (V-E), planned only under Pipeline.Gate2.
     public static readonly string Gate2Start = For("Gate2StartFunction");
     public static readonly string Gate2Result = For("Gate2ResultFunction");
@@ -279,7 +282,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployNotify, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        VerifyTooling, ReadPlan,
+        VerifyTooling, ReadPlan, ReadApply,
         Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart, MarkPassed,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
@@ -701,12 +704,15 @@ public static class DeployerPlanner
         // THE INFRASTRUCTURE BRANCH, PLAN ONLY (P3 D), only under Pipeline.Infrastructure: plan. Verify reads config and tooling
         // records and the bundle's HEAD; everything else of the branch is planned below. Without it, nothing of it is planned.
         InfraPlanResources? infra = null;
+        InfraDeployResources? infraDeploy = null;
         if (p.InfrastructurePlans)
         {
             if (p.Predecessor is not null)
                 throw new InvalidOperationException(
                     $"{env} is promoted into, and Pipeline.Infrastructure is plan: a promoted config bundle is P3 I, not planned yet.");
             infra = InfraPlanPlanner.Resources(config, region, acct, evidence, artifactStore);
+            if (p.InfrastructureDeploys)
+                infraDeploy = InfraDeployPlanner.Resources(sk, env, evidence, artifactStore, BuildRecordFormat.PrefixFor("config", infra.ConfigRepo));
             verifyEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
             verifyEnvironment[DeployerEnvironment.ToolingRecords] = BuildRecordFormat.PrefixFor("tooling", infra.ToolingRepo);
             verifyGrants = verifyGrants.Concat(InfraPlanPlanner.VerifyGrants(infra, buildRecordStore, artifactStore)).ToArray();
@@ -848,9 +854,7 @@ public static class DeployerPlanner
                 ?? throw new InvalidOperationException($"the build side plans no signing profile for the tooling repository {infra.ToolingRepo}.");
             var network = infraInputs ?? DeployerInfraInputs.NotYetCreated;
 
-            functions.Add(new(verifyTooling, DeployerHandlers.VerifyTooling, $"{verifyTooling}-fn",
-                Combine(Logs(region, acct, verifyTooling), InfraPlanPlanner.VerifyToolingGrants(infra, region, acct)),
-                new Dictionary<string, string>
+            var verifyToolingEnvironment = new Dictionary<string, string>
                 {
                     // THE TOOLING PROFILE ALONE: a service image's signature does not make an image a tooling image.
                     [ToolingSettings.TrustedProfilesVariable] = PipelineBootstrapPlanner.SigningProfileArn(region, artifactAccount, toolingRole.SigningProfile!),
@@ -863,7 +867,18 @@ public static class DeployerPlanner
                     [ToolingSettings.RegionVariable] = region,
                     [ToolingSettings.SubnetsVariable] = network.SubnetId,
                     [ToolingSettings.SecurityGroupsVariable] = network.SecurityGroupId,
-                },
+                };
+            var verifyToolingGrants = InfraPlanPlanner.VerifyToolingGrants(infra, region, acct);
+            if (infraDeploy is not null)
+            {
+                // THE DEPLOY TASK, REGISTERED BESIDE THE PLAN TASK on the same verified digest (P3 D's deploy half).
+                verifyToolingEnvironment[ToolingSettings.DeployFamilyVariable] = infraDeploy.Family;
+                verifyToolingEnvironment[ToolingSettings.DeployTaskRoleVariable] = InfraDeployPlanner.TaskRoleArn(infraDeploy, acct);
+                verifyToolingGrants = verifyToolingGrants.Concat(InfraDeployPlanner.VerifyToolingGrants(infraDeploy, region, acct)).ToArray();
+            }
+            functions.Add(new(verifyTooling, DeployerHandlers.VerifyTooling, $"{verifyTooling}-fn",
+                Combine(Logs(region, acct, verifyTooling), verifyToolingGrants),
+                verifyToolingEnvironment,
                 // Notation, as the hook runs it: once, checking revocation over the network.
                 TimeoutSeconds: 120, MemoryMb: 1024, DeployerPackages.SignatureHook, InvokedByStateMachine: true));
             functions.Add(new(readPlan, DeployerHandlers.ReadPlan, $"{readPlan}-fn",
@@ -871,9 +886,20 @@ public static class DeployerPlanner
                 new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
 
-            var (vtArn, rpArn, resources) = (FnArn(verifyTooling), FnArn(readPlan), infra);
+            string? raArn = null;
+            if (infraDeploy is not null)
+            {
+                functions.Add(new(infraDeploy.ReadApplyFunctionName, DeployerHandlers.ReadApply, $"{infraDeploy.ReadApplyFunctionName}-fn",
+                    Combine(Logs(region, acct, infraDeploy.ReadApplyFunctionName), InfraDeployPlanner.ReadApplyGrants(evidence)),
+                    new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
+                    TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+                raArn = FnArn(infraDeploy.ReadApplyFunctionName);
+            }
+
+            var (vtArn, rpArn, resources, recordArn) = (FnArn(verifyTooling), FnArn(readPlan), infra, FnArn(record));
             infraStates = (payload, catchAll, transient) =>
-                InfraPlanPlanner.States(resources, env, evidence, vtArn, rpArn, payload, catchAll, transient);
+                InfraPlanPlanner.States(resources, env, evidence, vtArn, rpArn, payload, catchAll, transient,
+                    raArn is null ? null : InfraDeployPlanner.States(resources, env, evidence, raArn, recordArn, payload, catchAll, transient));
         }
 
         // THE DECISION (P5 stage F): written once per marker in this environment's own store, after the set or after its
@@ -1105,15 +1131,20 @@ public static class DeployerPlanner
             RoleName: $"{sk}-{env}-deployer",
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null, p.Gate2IsOn ? gate2?.ProjectArn : null,
-                                      infra is null ? null : InfraPlanPlanner.MachineGrants(infra, region, acct)),
+                                      infra is null ? null : InfraPlanPlanner.MachineGrants(infra, region, acct)
+                                          .Concat(infraDeploy is null ? Array.Empty<object>() : InfraDeployPlanner.MachineGrants(infra, infraDeploy, region, acct)).ToArray()),
             DenyPolicy: DenyPolicyFor(SyncManagedRules(p.Gate2IsOn && gate2 is not null ? CodeBuildSyncRuleArn(region, acct) : null,
                                                        infra is null ? null : InfraPlanPlanner.EcsSyncRuleArn(region, acct)),
                                       pinned ? evidence : null),
             EvidenceStore: evidence,
-            EvidenceStorePolicy: pinned
+            EvidenceStorePolicy: (pinned
                 ? new[] { WriteOnceStore.Deny(evidence) }.Concat(EvidencePin(acct, evidence, functions,
-                        infra is null ? null : $"arn:aws:iam::{acct}:role/{infra.TaskRoleName}")).Concat(SuccessorReadGrant(sk, evidence, p.Successor)).ToArray()
-                : new[] { WriteOnceStore.Deny(evidence) },
+                        infra is null ? null : $"arn:aws:iam::{acct}:role/{infra.TaskRoleName}",
+                        infraDeploy is null ? null : InfraDeployPlanner.TaskRoleArn(infraDeploy, acct))).Concat(SuccessorReadGrant(sk, evidence, p.Successor)).ToArray()
+                : new[] { WriteOnceStore.Deny(evidence) })
+                // THE INFRASTRUCTURE ROLE PUTS NOTHING BUT ITS RESULT, pinned or not: it is the one deployer role with broad rights.
+                .Concat(infraDeploy is null ? Array.Empty<System.Text.Json.Nodes.JsonObject>() : new[] { InfraDeployPlanner.EvidenceConfinement(evidence, acct, infraDeploy.TaskRoleName) })
+                .ToArray(),
             Definition: DefinitionFor(approvalRequired, FnArn(verify), FnArn(prepare),
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
@@ -1154,7 +1185,8 @@ public static class DeployerPlanner
             Promotion: promotionPlan,
             HoldParameter: HoldWanted(config) ? HoldParameterName(config) : null,
             Outcomes: outcomes,
-            Infrastructure: infra);
+            Infrastructure: infra,
+            InfrastructureDeploy: infraDeploy);
     }
 
     /// <summary>
@@ -2029,13 +2061,15 @@ public static class DeployerPlanner
     /// delete. A bucket-policy Deny binds administrators too; changing it is the break-glass path, and no deployer role may.
     /// </summary>
     private static IEnumerable<System.Text.Json.Nodes.JsonObject> EvidencePin(
-        string acct, string evidence, IReadOnlyList<DeployerFunction> functions, string? planTaskRoleArn = null)
+        string acct, string evidence, IReadOnlyList<DeployerFunction> functions, string? planTaskRoleArn = null, string? deployTaskRoleArn = null)
     {
-        // plans/ (P3 D) is pinned only where the branch is planned, to the Plan task's role - a task, not a function.
-        var prefixes = planTaskRoleArn is null
-            ? EvidenceWriters.Select(e => (e.Prefix, Writers: (IReadOnlyList<string>)e.Writers.SelectMany(h => functions.Where(f => f.Handler == h)).Select(f => $"arn:aws:iam::{acct}:role/{f.RoleName}").Distinct().ToList()))
-            : EvidenceWriters.Select(e => (e.Prefix, Writers: (IReadOnlyList<string>)e.Writers.SelectMany(h => functions.Where(f => f.Handler == h)).Select(f => $"arn:aws:iam::{acct}:role/{f.RoleName}").Distinct().ToList()))
-                .Append((InfraPlan.PlansPrefix, (IReadOnlyList<string>)new[] { planTaskRoleArn }));
+        // plans/ (P3 D) is pinned only where the branch is planned, to the Plan task's role - a task, not a function; applies/
+        // only where it deploys, to the Deploy task's.
+        var prefixes = EvidenceWriters.Select(e => (e.Prefix, Writers: (IReadOnlyList<string>)e.Writers.SelectMany(h => functions.Where(f => f.Handler == h)).Select(f => $"arn:aws:iam::{acct}:role/{f.RoleName}").Distinct().ToList()));
+        if (planTaskRoleArn is not null)
+            prefixes = prefixes.Append((InfraPlan.PlansPrefix, (IReadOnlyList<string>)new[] { planTaskRoleArn }));
+        if (deployTaskRoleArn is not null)
+            prefixes = prefixes.Append((InfraPlan.AppliesPrefix, (IReadOnlyList<string>)new[] { deployTaskRoleArn }));
         foreach (var (prefix, writers) in prefixes)
         {
             var statement = new System.Text.Json.Nodes.JsonObject

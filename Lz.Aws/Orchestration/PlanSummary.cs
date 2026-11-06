@@ -5,7 +5,7 @@ using Pulumi.Automation;
 namespace Lz.Aws.Orchestration;
 
 /// <summary>One step a plan summary names: what it does, to which resource, and for a counted task-definition replace, why.</summary>
-public sealed record PlanSummaryStep(string Op, string Type, string Urn, string? Why = null);
+public sealed record PlanSummaryStep(string Op, string Type, string Urn, string? Why = null, IReadOnlyList<string>? Keys = null);
 
 /// <summary>
 /// WHAT A PREVIEW PLANNED, AS DATA (DecoupledCd.md P3 D): the same counts and the same destructive verdict the preview prints,
@@ -25,6 +25,13 @@ public sealed record PlanSummary(
     IReadOnlyList<PlanSummaryStep> CountedTaskDefinitionReplaces,
     IReadOnlyList<string> DigestRefusals)
 {
+    /// <summary>
+    /// EVERY STEP THE PLAN WOULD TAKE, providers included, with the properties each changes: what the deploy half of the
+    /// infrastructure branch holds a fresh preview to (DecoupledCd.md P3 D), so it applies the plan that was read and nothing
+    /// else. Empty where the preview captured no steps.
+    /// </summary>
+    public IReadOnlyList<PlanSummaryStep> Steps { get; init; } = [];
+
     /// <summary>The version of this shape, so a reader can refuse one it does not know.</summary>
     public int Schema { get; init; } = 1;
 
@@ -68,8 +75,13 @@ public sealed record PlanSummary(
             replaces = Math.Max(0, replaces - imageOnly);
         }
 
+        var all = (steps ?? [])
+            .Where(s => s.Op is not (OperationType.Same or OperationType.Read or OperationType.Refresh))
+            .Select(s => new PlanSummaryStep(OpName(s.Op), s.Type, s.Urn, Keys: s.Diffs))
+            .ToList();
+
         return new PlanSummary(stack, changes, replaces, deletes, imageOnly, replaces + deletes > 0,
-            destructiveSteps, counted, digestRefusals ?? []);
+            destructiveSteps, counted, digestRefusals ?? []) { Steps = all };
     }
 
     /// <summary>The type prefix of a Pulumi provider resource, which no change summary counts.</summary>
@@ -99,6 +111,40 @@ public sealed record PlanFile(string Command, IReadOnlyList<PlanSummary> Plans)
     public bool HasChanges => Plans.Any(p => p.HasChanges);
 
     public string ToJson() => JsonSerializer.Serialize(this, PlanSummary.Json);
+
+    /// <summary>A plan file as written, or <see cref="JsonException"/> for one this version cannot read.</summary>
+    public static PlanFile Parse(string json)
+    {
+        var plan = JsonSerializer.Deserialize<PlanFile>(json, PlanSummary.Json) ?? throw new JsonException("not a plan file");
+        if (plan.Schema != 1 || plan.Plans is null) throw new JsonException($"a schema-{plan.Schema} plan file; this lz reads schema 1");
+        return plan;
+    }
+
+    /// <summary>
+    /// WHY <paramref name="fresh"/> IS NOT THE PLAN THAT WAS APPROVED, one line per difference; empty when it is the same: the
+    /// same stacks in the same order, and in each the same steps by operation and URN. The properties a step changes are not
+    /// compared - a computed one such as <c>lastModified</c> is not the operator's choice - but a step's operation is, so an
+    /// update that became a replace is a difference.
+    /// </summary>
+    public IReadOnlyList<string> DifferencesFrom(PlanFile fresh)
+    {
+        var why = new List<string>();
+        var ours = Plans.Select(p => p.Stack).ToList();
+        var theirs = fresh.Plans.Select(p => p.Stack).ToList();
+        if (!ours.SequenceEqual(theirs, StringComparer.Ordinal))
+        {
+            why.Add($"the stacks were [{string.Join(", ", ours)}] and are now [{string.Join(", ", theirs)}]");
+            return why;
+        }
+        foreach (var (approved, now) in Plans.Zip(fresh.Plans))
+        {
+            static HashSet<string> Of(PlanSummary p) => p.Steps.Select(s => $"{s.Op} {s.Urn}").ToHashSet(StringComparer.Ordinal);
+            var (a, n) = (Of(approved), Of(now));
+            foreach (var gone in a.Except(n).Order(StringComparer.Ordinal)) why.Add($"{approved.Stack}: approved, no longer planned: {gone}");
+            foreach (var added in n.Except(a).Order(StringComparer.Ordinal)) why.Add($"{approved.Stack}: planned now, never approved: {added}");
+        }
+        return why;
+    }
 
     /// <summary>Write it to a path, its directory made if missing.</summary>
     public void WriteTo(string path)

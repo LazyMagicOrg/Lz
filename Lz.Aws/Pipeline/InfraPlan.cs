@@ -20,6 +20,12 @@ public static class InfraPlan
     /// <summary>Where plans live in the evidence store. A plan key outside it is refused.</summary>
     public const string PlansPrefix = "plans/";
 
+    /// <summary>Where the deploy half's Deploy task writes its result, once (P3 D); ReadApply reads it.</summary>
+    public const string AppliesPrefix = "applies/";
+
+    /// <summary>The Deploy task's result in the evidence store.</summary>
+    public static string ApplyKeyFor(string executionName) => $"{AppliesPrefix}{DeployEvidence.RequireSafeExecutionName(executionName)}.json";
+
     /// <summary>The exit code for a destructive plan, the same as <c>--fail-on-replace</c>'s.</summary>
     public const int DestructiveExitCode = 2;
 

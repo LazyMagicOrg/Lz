@@ -466,8 +466,11 @@ public static class CrossAccount
     /// The artifact store's grant to ONE environment for its config bundles (DecoupledCd.md P3 D): Verify HEADs one by version, and
     /// the Plan task's role reads it by version. Nothing may read any other prefix, and nothing here writes.
     /// </summary>
+    /// <param name="deployTaskRoleName">Under <c>Infrastructure: deploy</c>, the infrastructure role, which reads the bundle it
+    /// applies the same way; null leaves the grant as the read-only slice wrote it.</param>
     public static IReadOnlyList<JsonObject> ConfigBundleReadGrant(
-        string artifactStore, string environment, string targetAccountId, string verifyRoleName, string planTaskRoleName, string configPrefix)
+        string artifactStore, string environment, string targetAccountId, string verifyRoleName, string planTaskRoleName, string configPrefix,
+        string? deployTaskRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
@@ -482,7 +485,12 @@ public static class CrossAccount
                 ["Resource"] = $"arn:aws:s3:::{artifactStore}/{configPrefix}*",
                 ["Condition"] = new JsonObject
                 {
-                    ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName)) },
+                    ["ArnEquals"] = new JsonObject
+                    {
+                        ["aws:PrincipalArn"] = deployTaskRoleName is null
+                            ? new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName))
+                            : new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName), RoleArn(deployTaskRoleName)),
+                    },
                 },
             },
         };

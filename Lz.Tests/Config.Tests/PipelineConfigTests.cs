@@ -719,4 +719,37 @@ public class PipelineConfigTests
         Assert.NotNull(dir); // the scan is meaningless if the root was not found
         return dir!.FullName;
     }
+
+    // ---- the infrastructure branch's deploy half (P3 D) ----
+
+    private static PipelineConfig Infrastructure(string value, bool approval) => new()
+    {
+        Enabled = true,
+        Classes = new List<string> { "image", "config", "tooling" },
+        Infrastructure = value,
+        Approval = approval ? new PipelineApprovalConfig { Required = true, NotifyTopicArn = "arn:aws:sns:us-west-2:123456789012:approve" } : null,
+    };
+
+    [Fact]
+    public void InfrastructureDeploy_IsRefusedWhereAPersonMustApprove_ForItsApproveIsAPassThrough()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(Infrastructure("deploy", approval: true)), "test.yaml"));
+        Assert.Contains("Infrastructure is deploy but Pipeline.Approval.Required is true", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("plan", true)]
+    [InlineData("deploy", false)]
+    public void InfrastructurePlanAnywhere_AndDeployWithoutApproval_AreAccepted(string value, bool approval)
+    {
+        try { ConfigValidator.Validate(WithPipeline(Infrastructure(value, approval)), "test.yaml"); }
+        catch (InvalidOperationException ex) { Assert.DoesNotContain("Pipeline.Infrastructure", ex.Message); }
+    }
+
+    [Fact]
+    public void InfrastructureOfAnUnknownValue_IsRefused_NamingTheThree()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(WithPipeline(Infrastructure("apply", approval: false)), "test.yaml"));
+        Assert.Contains("it is off, plan or deploy", ex.Message);
+    }
 }

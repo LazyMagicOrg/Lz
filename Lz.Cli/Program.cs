@@ -177,6 +177,7 @@ class Program
         RegisterDeploySubtenantsCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterPreviewCommands(rootCommand, plugin, systemKeyOption, envOption);
         RegisterInfraPlanCommand(rootCommand, plugin, envOption);
+        RegisterInfraDeployCommand(rootCommand, plugin, envOption);
         RegisterDestroySubtenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -632,6 +633,166 @@ class Program
         root.AddCommand(cmd);
     }
 
+    // ---------------------------------------------------------------
+    // infradeploy (DecoupledCd.md P3 D, the deploy half)
+    //
+    // What the deployer's DeployInfrastructure state runs in the tooling image, as an ECS task on the infrastructure role, after
+    // ReadPlan read the plan infraplan wrote: the same bundle, fetched and checked the same way; a fresh preview, refused unless
+    // it takes the approved plan's steps (InfraDeploy.WhyNotApply); then deploysystem for each foundation whose plan has changes,
+    // deploytenant for each tenant whose plan has changes, and for every tenant its subtenants and runtime (deploysubtenants and
+    // deploykvs, which have no preview); then a second preview. The result is written once under applies/, whatever happened,
+    // and ReadApply decides from it. Exits 0 when it deployed, 1 otherwise.
+    // ---------------------------------------------------------------
+    private static void RegisterInfraDeployCommand(RootCommand root, ILzPlugin? plugin, Option<string?> envOption)
+    {
+        var cmd = new Command("infradeploy",
+            "Apply an approved infrastructure plan from a recorded config bundle and write the result to the evidence store (the deployer runs it).");
+        var bundleBucket = new Option<string>("--bundle-bucket", "The artifact store holding the config bundle.") { IsRequired = true };
+        var bundleKey = new Option<string>("--bundle-key", "The config bundle's key.") { IsRequired = true };
+        var bundleVersion = new Option<string?>("--bundle-version", "The config bundle's S3 version.");
+        var bundleSha = new Option<string>("--bundle-sha256", "The SHA-256 the config record carries.") { IsRequired = true };
+        var evidenceBucket = new Option<string>("--evidence-bucket", "The evidence store.") { IsRequired = true };
+        var planKey = new Option<string>("--plan-key", $"The approved plan, under {InfraPlan.PlansPrefix}.") { IsRequired = true };
+        var applyKey = new Option<string>("--apply-key", $"Where the result goes, under {InfraPlan.AppliesPrefix}.") { IsRequired = true };
+        var allowDestructive = new Option<string>("--allow-destructive", () => "false",
+            "true only when ReadPlan let a destructive plan through for an input that allowed it (P-12).");
+        cmd.AddOption(envOption);
+        foreach (var o in new Option[] { bundleBucket, bundleKey, bundleVersion, bundleSha, evidenceBucket, planKey, applyKey, allowDestructive }) cmd.AddOption(o);
+
+        cmd.SetHandler(async ctx =>
+        {
+            var r = ctx.ParseResult;
+            var env = r.GetValueForOption(envOption);
+            var evidence = r.GetValueForOption(evidenceBucket)!;
+            var plansAt = r.GetValueForOption(planKey)!;
+            var resultAt = r.GetValueForOption(applyKey)!;
+            var allow = r.GetValueForOption(allowDestructive);
+
+            var applied = new List<string>();
+            var runtime = new List<string>();
+            var differences = (IReadOnlyList<string>)Array.Empty<string>();
+            string? approvedVersion = null;
+            string outcome = InfraDeploy.Failed;
+            string? reason = null;
+            PlanFile? after = null;
+
+            var region = Environment.GetEnvironmentVariable("AWS_REGION") ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+            using var s3 = region is null
+                ? new Amazon.S3.AmazonS3Client()
+                : new Amazon.S3.AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
+            try
+            {
+                RequirePlugin(plugin, "infradeploy");
+                if (InfraPlan.WhyNotAPlanKey(plansAt) is { } whyPlan) throw new InvalidOperationException(whyPlan);
+                if (InfraDeployPlanner.WhyNotAnApplyKey(resultAt) is { } whyApply) throw new InvalidOperationException(whyApply);
+                if (string.IsNullOrWhiteSpace(env)) throw new InvalidOperationException("--env is required: the task names the environment it deploys");
+                if (allow is not ("true" or "false")) throw new InvalidOperationException($"--allow-destructive is '{allow}'; it is true or false");
+                var allowed = allow == "true";
+
+                var work = Directory.GetCurrentDirectory();
+                var zip = Path.Combine(Path.GetTempPath(), $"config-{Guid.NewGuid():N}.zip");
+                var bucket = r.GetValueForOption(bundleBucket)!;
+                var bundle = r.GetValueForOption(bundleKey)!;
+                var version = r.GetValueForOption(bundleVersion);
+                var sha = r.GetValueForOption(bundleSha)!;
+                Console.WriteLine($"Fetching s3://{bucket}/{bundle} ({version ?? "current version"})...");
+                await InfraPlan.FetchAsync(s3, bucket, bundle, version, zip, Cts.Token);
+                var files = InfraPlan.ExtractVerified(zip, sha, work);
+                File.Delete(zip);
+                Console.WriteLine($"  {files} file(s) into {work}, SHA-256 {sha} checked.");
+
+                var (approved, approvedVersionId) = await InfraDeploy.ReadApprovedAsync(s3, evidence, plansAt, Cts.Token);
+                approvedVersion = approvedVersionId;
+                Console.WriteLine($"Approved plan s3://{evidence}/{plansAt} version {approvedVersion}: {approved.Plans.Count} stack(s).");
+                Console.WriteLine();
+
+                // THE FRESH PREVIEW, held to the approved one before anything is applied.
+                var systems = await PreviewSystemsAsync(plugin!, null, env, null, null, refresh: false);
+                var tenants = await PreviewTenantsAsync(plugin!, null, env, null, null, refresh: false);
+                var fresh = new PlanFile("infradeploy", systems.Concat(tenants).ToList());
+                differences = InfraDeploy.WhyNotApply(approved, fresh, allowed);
+                if (differences.Count > 0)
+                {
+                    outcome = InfraDeploy.Refused;
+                    reason = "the plan it would apply is not the plan that was approved";
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Refusing to apply: the plan is not the one that was approved.");
+                    foreach (var d in differences) Console.WriteLine($"  {d}");
+                    Console.ResetColor();
+                    return;
+                }
+
+                // THE APPLY: each stack whose plan has changes, in the order a person would - foundations, then tenants.
+                var resolvedEnv = ConfigResolver.ResolveEnvironment(env);
+                var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, null).ToList();
+                if (configs.Count != systems.Count)
+                    throw new InvalidOperationException($"{configs.Count} system config(s) but {systems.Count} foundation plan(s)");
+                var tenantPlans = new Queue<PlanSummary>(tenants);
+                foreach (var (config, systemPlan) in configs.Zip(systems))
+                {
+                    if (systemPlan.HasChanges)
+                    {
+                        Console.WriteLine($"=== deploysystem: {systemPlan.Stack} ===");
+                        await DeploySystemAsync(plugin!, config, Array.Empty<string>(), null);
+                        StoppedIfExitCodeSet($"deploysystem of {systemPlan.Stack}");
+                        applied.Add(systemPlan.Stack);
+                    }
+
+                    var keys = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment, null).Select(t => t.TenantKey).ToList();
+                    var byTenant = keys.ToDictionary(k => k, _ => tenantPlans.Dequeue(), StringComparer.Ordinal);
+                    Console.WriteLine($"=== deploytenant: {string.Join(", ", keys.Select(k => $"{k} ({(byTenant[k].HasChanges ? "apply" : "no changes")})"))} ===");
+                    await DeployTenantsAsync(plugin!, config, null, refresh: false, applyTenant: k => byTenant[k].HasChanges);
+                    StoppedIfExitCodeSet($"deploytenant of {config.SystemKey}");
+                    applied.AddRange(keys.Where(k => byTenant[k].HasChanges).Select(k => byTenant[k].Stack));
+                    runtime.AddRange(keys.Select(k => $"{config.SystemKey}/{k}"));
+                }
+                if (tenantPlans.Count != 0)
+                    throw new InvalidOperationException($"{tenantPlans.Count} tenant plan(s) matched no tenant config");
+
+                // THE SECOND PREVIEW: what VerifyRollout requires to be empty.
+                Console.WriteLine();
+                Console.WriteLine("Previewing again: every stack's plan should now be empty...");
+                after = new PlanFile("infradeploy",
+                    (await PreviewSystemsAsync(plugin!, null, env, null, null, refresh: false))
+                        .Concat(await PreviewTenantsAsync(plugin!, null, env, null, null, refresh: false)).ToList());
+                outcome = InfraDeploy.Deployed;
+                reason = after.HasChanges ? "the second preview is not empty" : null;
+            }
+            catch (Exception ex)
+            {
+                outcome = InfraDeploy.Failed;
+                reason = ex.Message;
+                Console.Error.WriteLine($"infradeploy: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
+            finally
+            {
+                Environment.ExitCode = outcome == InfraDeploy.Deployed ? 0 : 1;
+                try
+                {
+                    var json = InfraDeploy.ResultJson(outcome, reason, plansAt, approvedVersion, differences, applied, runtime, after, allow == "true");
+                    await InfraDeploy.PutResultAsync(s3, evidence, resultAt, json, CancellationToken.None);
+                    Console.WriteLine($"Result written to s3://{evidence}/{resultAt}: {outcome}" +
+                        $"{(applied.Count > 0 ? $", applied {string.Join(", ", applied)}" : ", nothing applied")}.");
+                }
+                catch (Exception ex)
+                {
+                    // ReadApply reads a missing result as a failure that may have applied something, which is the truth here.
+                    Console.Error.WriteLine($"infradeploy: the result could not be written: {ex.Message}");
+                    Environment.ExitCode = 1;
+                }
+            }
+        });
+        root.AddCommand(cmd);
+    }
+
+    /// <summary>A deploy that a gate stopped sets the exit code and returns (P3 stage A); infradeploy treats it as a stop.</summary>
+    private static void StoppedIfExitCodeSet(string what)
+    {
+        if (Environment.ExitCode != 0)
+            throw new InvalidOperationException($"{what} stopped (exit code {Environment.ExitCode}); its output says why");
+    }
+
     private static void RegisterPreviewCommands(
         RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
@@ -791,69 +952,78 @@ class Program
             {
                 if (platform != null) config.Platform = platform;
                 if (topology != null) config.Topology = topology;
-
-                // Resolve cross-account shared services references
-                SharedConfig? sharedConfig = null;
-                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
-                {
-                    // Use the shared account's region from sharedconfig.yaml, not the system's region
-                    sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
-                    var sharedRegion = sharedConfig.Region;
-
-                    var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.Aws().SharedProfile, sharedRegion);
-                    config.Aws().SharedSecretArn =
-                        $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
-                    config.Aws().SharedRegion = sharedRegion;
-
-                    // Resolve actual KMS key ARN — alias ARNs can't be used in IAM policy resources
-                    config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
-
-                    Console.WriteLine($"  Shared account: {sharedAccountId}");
-                    Console.WriteLine($"  Shared secret:  {config.Aws().SharedSecretArn}");
-                    if (config.Aws().SharedKmsKeyArn != null)
-                        Console.WriteLine($"  Shared KMS key: {config.Aws().SharedKmsKeyArn}");
-                }
-
-                // Propagate seed bucket config from shared account (only if shared config exists)
-                if (sharedConfig == null)
-                {
-                    try { sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig(); }
-                    catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
-                }
-                if (sharedConfig != null)
-                    ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
-
-                // Ensure Pulumi state backend (S3 bucket + KMS key) exists
-                if (config.State != null)
-                    await AwsStateBootstrapper.BootstrapAsync(
-                        config.Profile, config.Region, config.State,
-                        config.Hygiene?.S3NoncurrentVersionExpirationDays);
-
-                // Required secrets (systemconfig RequiredSecrets, absent = skip):
-                // verify each exists with all keys BEFORE any deploy step; fill
-                // missing values from --secret args or the hidden interactive
-                // prompt; fail fast with instructions when neither is available.
-                if (config.RequiredSecrets is { Count: > 0 })
-                    await Lz.Aws.Secrets.AwsSecretsEnsurer.EnsureAsync(
-                        config,
-                        Lz.Aws.Secrets.SecretsPlanner.ParseSecretArgs(secretArgs),
-                        PromptSecretValue);
-
-                var (system, factory) = PrepareSystem(plugin!, config);
-
-                Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
-                Console.WriteLine($"Platform: {config.Platform}, Topology: {config.Topology}");
-                Console.WriteLine($"Central auth: {config.CentralAuthDomain}");
-                Console.WriteLine();
-
-                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
-                await deployment.DeployFoundationAsync(tailscaleKey);
+                await DeploySystemAsync(plugin!, config, secretArgs, tailscaleKey);
             }
         }, systemKeyOption, envOption, platformOption, topologyOption, secretOption, tailscaleKeyOption);
 
         root.AddCommand(cmd);
+    }
+
+    /// <summary>
+    /// <c>deploysystem</c> for one system config: shared context, the state backend, required secrets, then the foundation's
+    /// Pulumi up and its post-deploy actions. Also what <c>infradeploy</c> runs for a foundation whose plan has changes, so a
+    /// pipeline deploy and a workstation one are the same code. Prompts only where a console is attached.
+    /// </summary>
+    private static async Task DeploySystemAsync(ILzPlugin plugin, SystemConfig config, string[] secretArgs, string? tailscaleKey)
+    {
+        // Resolve cross-account shared services references
+        SharedConfig? sharedConfig = null;
+        if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
+        {
+            // Use the shared account's region from sharedconfig.yaml, not the system's region
+            sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig();
+            var sharedRegion = sharedConfig.Region;
+
+            var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
+                config.Aws().SharedProfile, sharedRegion);
+            config.Aws().SharedSecretArn =
+                $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
+            config.Aws().SharedRegion = sharedRegion;
+
+            // Resolve actual KMS key ARN — alias ARNs can't be used in IAM policy resources
+            config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
+
+            Console.WriteLine($"  Shared account: {sharedAccountId}");
+            Console.WriteLine($"  Shared secret:  {config.Aws().SharedSecretArn}");
+            if (config.Aws().SharedKmsKeyArn != null)
+                Console.WriteLine($"  Shared KMS key: {config.Aws().SharedKmsKeyArn}");
+        }
+
+        // Propagate seed bucket config from shared account (only if shared config exists)
+        if (sharedConfig == null)
+        {
+            try { sharedConfig = ConfigLoader.DiscoverAndLoadSharedConfig(); }
+            catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
+        }
+        if (sharedConfig != null)
+            ConfigLoader.PropagateSharedSeedData(config, sharedConfig);
+
+        // Ensure Pulumi state backend (S3 bucket + KMS key) exists
+        if (config.State != null)
+            await AwsStateBootstrapper.BootstrapAsync(
+                config.Profile, config.Region, config.State,
+                config.Hygiene?.S3NoncurrentVersionExpirationDays);
+
+        // Required secrets (systemconfig RequiredSecrets, absent = skip):
+        // verify each exists with all keys BEFORE any deploy step; fill
+        // missing values from --secret args or the hidden interactive
+        // prompt; fail fast with instructions when neither is available.
+        if (config.RequiredSecrets is { Count: > 0 })
+            await Lz.Aws.Secrets.AwsSecretsEnsurer.EnsureAsync(
+                config,
+                Lz.Aws.Secrets.SecretsPlanner.ParseSecretArgs(secretArgs),
+                PromptSecretValue);
+
+        var (system, factory) = PrepareSystem(plugin, config);
+
+        Console.WriteLine($"System: {config.SystemKey}, Environment: {config.Environment}");
+        Console.WriteLine($"Platform: {config.Platform}, Topology: {config.Topology}");
+        Console.WriteLine($"Central auth: {config.CentralAuthDomain}");
+        Console.WriteLine();
+
+        var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+        await deployment.DeployFoundationAsync(tailscaleKey);
     }
 
     /// <summary>
@@ -1349,133 +1519,151 @@ class Program
             var configs = ConfigResolver.ResolveSystemConfigs(resolvedEnv, systemKey);
 
             foreach (var config in configs)
-            {
-                // Load container service config to check ECR images
-                var containerServiceConfig = ConfigLoader
-                    .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
-
-                // Resolve cross-account shared services references
-                SharedConfig? sharedConfigTenant = null;
-                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
-                {
-                    sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig();
-                    var sharedRegion = sharedConfigTenant.Region;
-
-                    var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
-                        config.Aws().SharedProfile, sharedRegion);
-                    config.Aws().SharedSecretArn =
-                        $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
-                    config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
-                        config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
-                    config.Aws().SharedRegion = sharedRegion;
-                }
-
-                // Propagate seed bucket config from shared account (only if shared config exists)
-                if (sharedConfigTenant == null)
-                {
-                    try { sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig(); }
-                    catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
-                }
-                if (sharedConfigTenant != null)
-                    ConfigLoader.PropagateSharedSeedData(config, sharedConfigTenant);
-
-                // Read SES SMTP secrets from shared/system for keycloak template replacements
-                Dictionary<string, string?> smtpSecrets = new();
-                if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
-                {
-                    smtpSecrets = await AwsAccountResolver.ReadSecretEntriesAsync(
-                        config.Aws().SharedProfile, config.Aws().SharedRegion!, "shared/system",
-                        "SES_SMTP_USER", "SES_SMTP_PASSWORD", "SES_SMTP_DOMAIN", "SES_SMTP_URL");
-                }
-
-                var (system, factory) = PrepareSystem(plugin!, config);
-                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
-
-                await Lz.Core.Orchestration.StackOutputReader.EnsureFoundationDeployedAsync(config);
-
-                var tenants = ConfigResolver.ResolveTenantConfigs(
-                    config.SystemKey, config.Environment, tenantKey);
-
-                foreach (var (tk, tenantConfig) in tenants)
-                {
-                    ValidateTenantConfig(config, tk, tenantConfig);
-
-                    // Pre-flight: verify ECR images exist for all containers.
-                    // Per-tenant ECR naming is uniform across topologies.
-                    var profile = tenantConfig.Profile ?? config.Profile;
-                    var region = tenantConfig.Region ?? config.Region;
-                    var missingImages = new List<string>();
-
-                    Console.WriteLine("Checking ECR images...");
-                    foreach (var (svcName, _) in containerServiceConfig.Containers)
-                    {
-                        var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
-                        var exists = await EcrDeployer.CheckEcrImageExistsAsync(
-                            profile, region, ecrName);
-                        if (!exists)
-                            missingImages.Add(svcName);
-                    }
-
-                    if (missingImages.Count == 0)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine("  \u2713 ecr-images");
-                        Console.ResetColor();
-                    }
-                    else
-                    {
-                        Console.WriteLine();
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine("  GATE: ecr-images");
-                        Console.WriteLine();
-                        Console.WriteLine(
-                            $"  ECR images missing for tenant '{tk}': {string.Join(", ", missingImages)}");
-                        Console.WriteLine(
-                            $"  Run 'lz deploycontainer --tenantkey {tk}' first to build and push container images.");
-                        Console.WriteLine();
-                        Console.WriteLine("  Re-run the same deploy command after completing this step.");
-                        Console.ResetColor();
-                        Console.WriteLine();
-                        Environment.ExitCode = 1;   // a tenant not deployed is a failure to the caller (P3 stage A)
-                        continue;
-                    }
-
-                    // Propagate shared-services context to tenant config
-                    tenantConfig.Aws().SharedSecretArn = config.Aws().SharedSecretArn;
-                    tenantConfig.Aws().SharedKmsKeyArn = config.Aws().SharedKmsKeyArn;
-                    tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
-
-                    Console.WriteLine(
-                        $"Deploying tenant '{tk}' for system " +
-                        $"'{config.SystemKey}' ({config.Environment})");
-                    try
-                    {
-                        await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
-                    }
-                    catch (Exception ex) when (ex is ServiceLeaseHeldException or Lz.Aws.Orchestration.TenantDeployRefusedException)
-                    {
-                        // Refused before anything changed, or a reverted image found after applying, and already said
-                        // why (DecoupledCd.md V-J). The subtenant and runtime steps below are skipped with it.
-                        Environment.ExitCode = 1;
-                        continue;
-                    }
-
-                    // Per-subtenant infrastructure (S3 buckets + DynamoDB tables)
-                    // is managed imperatively, outside Pulumi. This runs after
-                    // the tenant Pulumi up so first-time deploy is a single command.
-                    var subProfile = tenantConfig.Profile ?? config.Profile;
-                    var subRegion = tenantConfig.Region ?? config.Region;
-                    var subAccountId = await AwsAccountResolver.ResolveAccountIdAsync(subProfile, subRegion);
-                    await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
-                        config, tenantConfig, subProfile, subRegion, subAccountId);
-
-                    // Plugin-owned runtime refresh (typically CloudFront KVS).
-                    await plugin!.RefreshTenantRuntimeAsync(config, tenantConfig);
-                }
-            }
+                await DeployTenantsAsync(plugin!, config, tenantKey, refresh);
         }, systemKeyOption, envOption, tenantKeyOption, refreshOption);
 
         root.AddCommand(cmd);
+    }
+
+    /// <summary>
+    /// <c>deploytenant</c> for one system config: every tenant (or one), each with its ECR gate, its Pulumi up, its subtenants
+    /// and its runtime refresh. <paramref name="applyTenant"/>, from <c>infradeploy</c>, says which tenants' stacks to apply;
+    /// the rest get only the subtenants and the runtime refresh. A tenant refused or stopped sets the exit code and is skipped.
+    /// </summary>
+    private static async Task DeployTenantsAsync(
+        ILzPlugin plugin, SystemConfig config, string? tenantKey, bool refresh, Func<string, bool>? applyTenant = null)
+    {
+        // Load container service config to check ECR images
+        var containerServiceConfig = ConfigLoader
+            .DiscoverAndLoadContainerServiceConfig(config.SystemKey, config.Environment);
+
+        // Resolve cross-account shared services references
+        SharedConfig? sharedConfigTenant = null;
+        if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
+        {
+            sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig();
+            var sharedRegion = sharedConfigTenant.Region;
+
+            var sharedAccountId = await AwsAccountResolver.ResolveAccountIdAsync(
+                config.Aws().SharedProfile, sharedRegion);
+            config.Aws().SharedSecretArn =
+                $"arn:aws:secretsmanager:{sharedRegion}:{sharedAccountId}:secret:shared/system";
+            config.Aws().SharedKmsKeyArn = await AwsAccountResolver.ResolveKmsKeyArnAsync(
+                config.Aws().SharedProfile, sharedRegion, "alias/shared-secrets-key");
+            config.Aws().SharedRegion = sharedRegion;
+        }
+
+        // Propagate seed bucket config from shared account (only if shared config exists)
+        if (sharedConfigTenant == null)
+        {
+            try { sharedConfigTenant = ConfigLoader.DiscoverAndLoadSharedConfig(); }
+            catch { /* No sharedconfig.yaml — OK for topologies that don't use shared services */ }
+        }
+        if (sharedConfigTenant != null)
+            ConfigLoader.PropagateSharedSeedData(config, sharedConfigTenant);
+
+        // Read SES SMTP secrets from shared/system for keycloak template replacements
+        Dictionary<string, string?> smtpSecrets = new();
+        if (!string.IsNullOrEmpty(config.Aws().SharedProfile))
+        {
+            smtpSecrets = await AwsAccountResolver.ReadSecretEntriesAsync(
+                config.Aws().SharedProfile, config.Aws().SharedRegion!, "shared/system",
+                "SES_SMTP_USER", "SES_SMTP_PASSWORD", "SES_SMTP_DOMAIN", "SES_SMTP_URL");
+        }
+
+        var (system, factory) = PrepareSystem(plugin, config);
+        var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+
+        await Lz.Core.Orchestration.StackOutputReader.EnsureFoundationDeployedAsync(config);
+
+        var tenants = ConfigResolver.ResolveTenantConfigs(
+            config.SystemKey, config.Environment, tenantKey);
+
+        foreach (var (tk, tenantConfig) in tenants)
+        {
+            ValidateTenantConfig(config, tk, tenantConfig);
+
+            // Propagate shared-services context to tenant config
+            tenantConfig.Aws().SharedSecretArn = config.Aws().SharedSecretArn;
+            tenantConfig.Aws().SharedKmsKeyArn = config.Aws().SharedKmsKeyArn;
+            tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+
+            // infradeploy APPLIES ONLY THE STACKS WHOSE PLAN HAS CHANGES; the subtenants and the runtime below run for every
+            // tenant, as deploysubtenants and deploykvs would.
+            if (applyTenant?.Invoke(tk) == false)
+            {
+                Console.WriteLine($"Tenant '{tk}': its plan has no changes; not applied.");
+            }
+            else
+            {
+                // Pre-flight: verify ECR images exist for all containers.
+                // Per-tenant ECR naming is uniform across topologies.
+                var profile = tenantConfig.Profile ?? config.Profile;
+                var region = tenantConfig.Region ?? config.Region;
+                var missingImages = new List<string>();
+
+                Console.WriteLine("Checking ECR images...");
+                foreach (var (svcName, _) in containerServiceConfig.Containers)
+                {
+                    var ecrName = $"{config.SystemKey}-{tenantConfig.TenantSuffix}-{config.Environment}-{tk}-{svcName}";
+                    var exists = await EcrDeployer.CheckEcrImageExistsAsync(
+                        profile, region, ecrName);
+                    if (!exists)
+                        missingImages.Add(svcName);
+                }
+
+                if (missingImages.Count == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("  \u2713 ecr-images");
+                    Console.ResetColor();
+                }
+                else
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("  GATE: ecr-images");
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"  ECR images missing for tenant '{tk}': {string.Join(", ", missingImages)}");
+                    Console.WriteLine(
+                        $"  Run 'lz deploycontainer --tenantkey {tk}' first to build and push container images.");
+                    Console.WriteLine();
+                    Console.WriteLine("  Re-run the same deploy command after completing this step.");
+                    Console.ResetColor();
+                    Console.WriteLine();
+                    Environment.ExitCode = 1;   // a tenant not deployed is a failure to the caller (P3 stage A)
+                    continue;
+                }
+
+                Console.WriteLine(
+                    $"Deploying tenant '{tk}' for system " +
+                    $"'{config.SystemKey}' ({config.Environment})");
+                try
+                {
+                    await deployment.DeployTenantAsync(tk, tenantConfig, smtpSecrets, refresh);
+                }
+                catch (Exception ex) when (ex is ServiceLeaseHeldException or Lz.Aws.Orchestration.TenantDeployRefusedException)
+                {
+                    // Refused before anything changed, or a reverted image found after applying, and already said
+                    // why (DecoupledCd.md V-J). The subtenant and runtime steps below are skipped with it.
+                    Environment.ExitCode = 1;
+                    continue;
+                }
+            }
+
+            // Per-subtenant infrastructure (S3 buckets + DynamoDB tables)
+            // is managed imperatively, outside Pulumi. This runs after
+            // the tenant Pulumi up so first-time deploy is a single command.
+            var subProfile = tenantConfig.Profile ?? config.Profile;
+            var subRegion = tenantConfig.Region ?? config.Region;
+            var subAccountId = await AwsAccountResolver.ResolveAccountIdAsync(subProfile, subRegion);
+            await Lz.Aws.Shared.SubtenantProvisioner.EnsureAllAsync(
+                config, tenantConfig, subProfile, subRegion, subAccountId);
+
+            // Plugin-owned runtime refresh (typically CloudFront KVS).
+            await plugin.RefreshTenantRuntimeAsync(config, tenantConfig);
+        }
     }
 
     // ---------------------------------------------------------------

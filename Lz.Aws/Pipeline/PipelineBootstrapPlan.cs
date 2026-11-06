@@ -396,7 +396,8 @@ public static class PipelineBootstrapPlanner
                 .ToList();
             artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.ConfigBundleReadGrant(artifacts, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
-                    InfraPlanPlanner.TaskRoleNameFor(sk, config.Environment), configPrefix))
+                    InfraPlanPlanner.TaskRoleNameFor(sk, config.Environment), configPrefix,
+                    p.InfrastructureDeploys ? InfraDeployPlanner.TaskRoleNameFor(sk, config.Environment) : null))
                 .ToList();
         }
 

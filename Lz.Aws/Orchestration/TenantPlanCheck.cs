@@ -11,12 +11,14 @@ namespace Lz.Aws.Orchestration;
 /// <summary>One step of a Pulumi plan, as a preview's engine events report it: the operation, and the inputs before and after.</summary>
 public sealed record PlannedStep(
     OperationType Op, string Type, string Urn,
-    IReadOnlyDictionary<string, object>? OldInputs, IReadOnlyDictionary<string, object>? NewInputs)
+    IReadOnlyDictionary<string, object>? OldInputs, IReadOnlyDictionary<string, object>? NewInputs,
+    IReadOnlyList<string>? Diffs = null)
 {
     public static PlannedStep From(StepEventMetadata m) => new(
         m.Op, m.Type, m.Urn,
         m.Old?.Inputs is { } o ? new Dictionary<string, object>(o) : null,
-        m.New?.Inputs is { } n ? new Dictionary<string, object>(n) : null);
+        m.New?.Inputs is { } n ? new Dictionary<string, object>(n) : null,
+        m.Diffs is { IsDefaultOrEmpty: false } d ? d.OrderBy(k => k, StringComparer.Ordinal).ToList() : null);
 }
 
 /// <summary>

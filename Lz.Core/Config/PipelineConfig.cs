@@ -159,13 +159,21 @@ public class PipelineConfig
     /// image runs <c>lz infraplan</c> as an ECS task, in a small VPC of the deployer's own, on a read-only role, writing the plan
     /// under <c>plans/</c> in the evidence store; ReadPlan reads it back, and the execution ends Planned, or fails on a
     /// destructive plan. Nothing is applied. Requires <c>config</c> and <c>tooling</c> in <see cref="Classes"/>.
+    /// <para><c>deploy</c>, the deploy half: everything <c>plan</c> does, then Approve (a pass-through, so refused where
+    /// <see cref="Approval"/> is required), Deploy (the same image running <c>lz infradeploy</c> on the infrastructure role:
+    /// a fresh preview held to the plan that was read, each stack with changes applied, the subtenants and the KVS written,
+    /// a second preview), VerifyRollout (that second preview must be empty) and Record. A destructive plan is refused unless
+    /// the execution's input carries <c>allowDestructivePlan: true</c>, which only a person starting it by hand writes.</para>
     /// </summary>
     public string? Infrastructure { get; set; }
 
-    public const string InfrastructureOff = "off", InfrastructurePlan = "plan";
+    public const string InfrastructureOff = "off", InfrastructurePlan = "plan", InfrastructureDeploy = "deploy";
 
-    /// <summary>The infrastructure branch is in the machine, plan only.</summary>
-    public bool InfrastructurePlans => Infrastructure == InfrastructurePlan;
+    /// <summary>The infrastructure branch is in the machine: plan only, or plan and deploy.</summary>
+    public bool InfrastructurePlans => Infrastructure is InfrastructurePlan or InfrastructureDeploy;
+
+    /// <summary>The infrastructure branch applies what it planned.</summary>
+    public bool InfrastructureDeploys => Infrastructure == InfrastructureDeploy;
 
     /// <summary>
     /// The repository whose tests records Gate 2's browser tier runs, the newest of them (§15.5): <c>Scutara/ScutaraE2ETests</c>.

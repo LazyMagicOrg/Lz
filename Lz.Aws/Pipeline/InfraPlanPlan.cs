@@ -337,16 +337,18 @@ public static class InfraPlanPlanner
     /// ReadPlan → Planned. A Plan task that fails still goes to ReadPlan, which decides from the plan it wrote or the absence of
     /// one; every other fault goes to RecordFailure, as everywhere in the machine.
     /// </summary>
+    /// <param name="deploy">The deploy half's states (<see cref="InfraDeployPlanner.States"/>), under <c>Infrastructure: deploy</c>:
+    /// ReadPlan then goes to ApproveInfrastructure instead of ending Planned.</param>
     public static Dictionary<string, object> States(
         InfraPlanResources r, string environment, string evidence, string verifyToolingArn, string readPlanArn,
-        object payload, object[] catchAll, Func<object> transient)
+        object payload, object[] catchAll, Func<object> transient, Dictionary<string, object>? deploy = null)
     {
         var command = "States.Array('infraplan', '--env', '" + environment + "', " +
                       "'--bundle-bucket', $.verified.identity.bucket, '--bundle-key', $.verified.identity.key, " +
                       "'--bundle-version', $.verified.identity.versionId, '--bundle-sha256', $.verified.identity.sha256, " +
                       "'--plan-bucket', '" + evidence + "', '--plan-key', States.Format('" + InfraPlan.PlansPrefix + "{}.json', $$.Execution.Name))";
 
-        return new Dictionary<string, object>
+        var states = new Dictionary<string, object>
         {
             ["VerifyTooling"] = new
             {
@@ -400,10 +402,14 @@ public static class InfraPlanPlanner
                 Parameters = payload,
                 ResultPath = "$.planned",
                 Retry = new[] { transient() },
-                Next = "Planned",
+                Next = deploy is null ? "Planned" : "ApproveInfrastructure",
                 Catch = catchAll,
             },
-            ["Planned"] = new { Type = "Succeed" },
         };
+        if (deploy is null)
+            states["Planned"] = new { Type = "Succeed" };
+        else
+            foreach (var (name, state) in deploy) states.Add(name, state);
+        return states;
     }
 }

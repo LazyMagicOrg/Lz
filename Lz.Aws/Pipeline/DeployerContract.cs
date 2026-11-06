@@ -153,25 +153,34 @@ public sealed record DeployerInput(RecordLocation Record, DeployTarget Target)
     /// <summary>
     /// Fields an input MAY carry, and only a person starting an execution by hand would write: the trigger never does.
     /// <c>allowOlderBuild</c> deploys a record older than the build the service runs (<see cref="DeploySuperseded"/>).
+    /// <c>allowDestructivePlan</c> lets the infrastructure branch apply a plan that replaces or deletes (P-12).
     /// </summary>
-    public static readonly string[] OptionalInputFields = { "allowOlderBuild" };
+    public static readonly string[] OptionalInputFields = { "allowOlderBuild", "allowDestructivePlan" };
+
+    /// <summary>
+    /// Whether the input asks to apply a destructive infrastructure plan on purpose (DecoupledCd.md P-12). As
+    /// <see cref="AllowsOlderBuild"/>: only a JSON <c>true</c> does, absent is false, anything else is refused.
+    /// </summary>
+    public static bool AllowsDestructivePlan(JsonObject state) => Flag(state, "allowDestructivePlan");
 
     /// <summary>
     /// Whether the input asks to deploy an older build on purpose. Only a JSON <c>true</c> does; absent is false, and
     /// anything else is refused rather than read as a yes or a no — a quoted "true" is exactly the kind of override
     /// that should not be guessed at.
     /// </summary>
-    public static bool AllowsOlderBuild(JsonObject state)
+    public static bool AllowsOlderBuild(JsonObject state) => Flag(state, "allowOlderBuild");
+
+    private static bool Flag(JsonObject state, string name)
     {
-        var node = state["allowOlderBuild"];
+        var node = state[name];
         if (node is null) return false;
 
         return node.GetValueKind() switch
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            _ => throw new DeployRefused("allowOlderBuild",
-                $"allowOlderBuild is {node.ToJsonString()}; it must be the JSON boolean true or false."),
+            _ => throw new DeployRefused(name,
+                $"{name} is {node.ToJsonString()}; it must be the JSON boolean true or false."),
         };
     }
 
