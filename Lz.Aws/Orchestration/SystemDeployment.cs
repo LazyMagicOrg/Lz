@@ -452,16 +452,19 @@ public class SystemDeployment
         await ResolveImageDigestsAsync(tenantKey, tenantConfig);
         var stack = await CreateOrSelectStack(stackName, BuildTenantProgram(tenantKey, tenantConfig));
 
-        Console.WriteLine("Running Pulumi refresh...");
-        await stack.RefreshAsync(new RefreshOptions { OnEvent = HandleEngineEvent, OnStandardError = PrintStdErr }, _ct);
-
-        // THE WHOLE PLAN IS HELD TO THE IMAGES (V-J): this service to the input, every other to what it runs.
-        await RefuseAnImageChangingPlanAsync(stack);
-
         var exported = await stack.ExportStackAsync(_ct);
         var resources = exported.Json.GetProperty("deployment").GetProperty("resources").EnumerateArray()
             .Select(r => (r.GetProperty("urn").GetString()!, r.GetProperty("type").GetString()!));
         var targets = Lz.Aws.Pipeline.ImageInputEcs.TargetUrns(resources, ecsService);
+
+        // ONLY THE TWO RESOURCES ARE REFRESHED (P3 J3): they are all the update touches, and a whole-stack refresh reads every
+        // resource's live state - the tenant's secret's value and its roles' inline policies among them, which the targeted-update
+        // role is denied (measured 2026-11-06, the second live image deploy). The deployer's own revision is what drifts here.
+        Console.WriteLine("Running Pulumi refresh of the task definition and the service...");
+        await stack.RefreshAsync(new RefreshOptions { Target = targets.ToList(), OnEvent = HandleEngineEvent, OnStandardError = PrintStdErr }, _ct);
+
+        // THE WHOLE PLAN IS HELD TO THE IMAGES (V-J): this service to the input, every other to what it runs.
+        await RefuseAnImageChangingPlanAsync(stack);
         Console.WriteLine($"Running Pulumi up, targeted at {string.Join(", ", targets.Select(t => t[(t.LastIndexOf("::", StringComparison.Ordinal) + 2)..]))}...");
 
         TenantPlanCheck.DeclaredImages.Clear();
