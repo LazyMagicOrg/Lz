@@ -71,6 +71,47 @@ public class ImageInputTests
         Assert.Contains("deployer:req-1", disagree);
     }
 
+    // ---- J2: the targeted update ----
+
+    private const string Stack = "urn:pulumi:scu-mp-dev::scu-mp-dev::lz:aws:EcsExpressTenantService$";
+
+    [Fact]
+    public void ATargetedUpdate_AppliesTheServicesTaskDefinitionAndServiceAlone()
+    {
+        var resources = new (string, string)[]
+        {
+            (Stack + "aws:ecs/taskDefinition:TaskDefinition::scu-mp-aiphost-task-def", "aws:ecs/taskDefinition:TaskDefinition"),
+            (Stack + "aws:ecs/service:Service::scu-mp-aiphost-service", "aws:ecs/service:Service"),
+            (Stack + "aws:ecs/taskDefinition:TaskDefinition::scu-mp-other-task-def", "aws:ecs/taskDefinition:TaskDefinition"),
+            (Stack + "aws:ecs/service:Service::scu-mp-aiphost-service-alarm", "aws:cloudwatch/metricAlarm:MetricAlarm"),
+        };
+        Assert.Equal(new[] { resources[0].Item1, resources[1].Item1 }, ImageInputEcs.TargetUrns(resources, "scu-mp-aiphost"));
+    }
+
+    [Fact]
+    public void ATargetedUpdate_WithNoneOrTwoOfEither_IsRefused()
+    {
+        Assert.Throws<InvalidOperationException>(() => ImageInputEcs.TargetUrns(
+            new[] { (Stack + "aws:ecs/service:Service::scu-mp-aiphost-service", "aws:ecs/service:Service") }, "scu-mp-aiphost"));
+        Assert.Throws<InvalidOperationException>(() => ImageInputEcs.TargetUrns(new[]
+        {
+            (Stack + "a::scu-mp-aiphost-task-def", "aws:ecs/taskDefinition:TaskDefinition"),
+            (Stack + "b::scu-mp-aiphost-task-def", "aws:ecs/taskDefinition:TaskDefinition"),
+            (Stack + "aws:ecs/service:Service::scu-mp-aiphost-service", "aws:ecs/service:Service"),
+        }, "scu-mp-aiphost"));
+    }
+
+    [Fact]
+    public void ATargetedUpdate_DeclaresOnlyWhatItWrote_ByItsDigestAndItsWriter()
+    {
+        const string name = "/scu/dev/pipeline/image/scu-mp-aiphost";
+        var mine = Input with { Writer = "updatecontainer:me@host" };
+        Assert.Null(ImageInputEcs.WhyNotTarget(name, mine, Digest, "updatecontainer:me@host"));
+        Assert.Contains("another writer came between", ImageInputEcs.WhyNotTarget(name, mine with { Digest = Other }, Digest, "updatecontainer:me@host"));
+        Assert.Contains("another writer came between", ImageInputEcs.WhyNotTarget(name, mine, Digest, "deployer:req-2"));
+        Assert.Contains("reads nothing", ImageInputEcs.WhyNotTarget(name, null, Digest, "updatecontainer:me@host"));
+    }
+
     // ---- the plan ----
 
     private static PipelineDeployer Plan(bool enforce)

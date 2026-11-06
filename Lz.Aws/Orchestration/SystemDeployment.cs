@@ -358,6 +358,96 @@ public class SystemDeployment
         }
     }
 
+    /// <summary>The one service a targeted image update moves, and to what (P3 J2); null outside one.</summary>
+    private sealed record ImageTarget(string Service, string Digest, string Repository, string Writer);
+    private ImageTarget? _imageTarget;
+
+    /// <summary>
+    /// THE IMAGE DEPLOY THROUGH PULUMI (DecoupledCd.md P3 J, stage J2): under the tenant's service leases, write the service's image
+    /// input, run the tenant program with that service declared from it - read back and required to be exactly this write - and
+    /// apply ONLY its task definition and service (<c>pulumi up --target</c>), refreshed first and held to the plan check; then wait
+    /// for the rollout. Whatever fails, the input is written back to what the service runs before the lease goes, and the failure
+    /// is thrown. Pulumi's state then names the revision that runs.
+    /// </summary>
+    public async Task UpdateImageAsync(string tenantKey, TenantConfig tenantConfig, string serviceName, string digest, string repository, string writer)
+    {
+        var stackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
+        var ecsService = $"{_config.SystemKey}-{tenantKey}-{serviceName}";
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+        var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+        var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+        using var ssm = credentials != null
+            ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(credentials, endpoint)
+            : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+        using var ecs = credentials != null ? new Amazon.ECS.AmazonECSClient(credentials, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+        var inputs = new Lz.Aws.Pipeline.SsmImageInputs(ssm);
+        var name = Lz.Aws.Pipeline.ImageInputFormat.NameFor(_config.SystemKey, _config.Environment, ecsService);
+
+        Console.WriteLine($"=== Image update through Pulumi: {ecsService} -> {repository}@{digest} (stack {stackName}) ===");
+        var leases = await ClaimTenantServiceLeasesAsync(tenantKey, tenantConfig);
+        try
+        {
+            var marks = await ReadRolloutMarksAsync(leases, tenantConfig);
+            await inputs.WriteAsync(name, new Lz.Aws.Pipeline.ImageInput(digest, repository, null, writer, DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")));
+            Console.WriteLine($"  input {name} written.");
+            _imageTarget = new ImageTarget(ecsService, digest, repository, writer);
+            try
+            {
+                await TenantPulumiUpTargetedAsync(stackName, tenantKey, tenantConfig, ecsService);
+                await CheckForRevertsAsync(tenantKey, tenantConfig);
+                await WaitForOwnRolloutsAsync(tenantKey, tenantConfig, leases, marks);
+            }
+            catch
+            {
+                // THE INPUT NAMES WHAT RUNS, whatever failed - before the lease is released.
+                var running = await Lz.Aws.Pipeline.ImageInputEcs.FromServiceAsync(ecs, leases.Cluster, ecsService, serviceName, $"{writer} (written back)", DateTimeOffset.UtcNow, _ct);
+                if (running is not null)
+                {
+                    await inputs.WriteAsync(name, running);
+                    Console.WriteLine($"  input {name} written back to {running.Repository}@{running.Digest}, what the service is set to.");
+                }
+                throw;
+            }
+            finally
+            {
+                _imageTarget = null;
+            }
+        }
+        finally
+        {
+            await ReleaseTenantServiceLeasesAsync(leases);
+        }
+    }
+
+    /// <summary>The tenant up of a targeted image update: refresh, plan check, then <c>up --target</c> the service's two resources.</summary>
+    private async Task TenantPulumiUpTargetedAsync(string stackName, string tenantKey, TenantConfig tenantConfig, string ecsService)
+    {
+        await ResolveImageDigestsAsync(tenantKey, tenantConfig);
+        var stack = await CreateOrSelectStack(stackName, BuildTenantProgram(tenantKey, tenantConfig));
+
+        Console.WriteLine("Running Pulumi refresh...");
+        await stack.RefreshAsync(new RefreshOptions { OnEvent = HandleEngineEvent, OnStandardError = PrintStdErr }, _ct);
+
+        // THE WHOLE PLAN IS HELD TO THE IMAGES (V-J): this service to the input, every other to what it runs.
+        await RefuseAnImageChangingPlanAsync(stack);
+
+        var exported = await stack.ExportStackAsync(_ct);
+        var resources = exported.Json.GetProperty("deployment").GetProperty("resources").EnumerateArray()
+            .Select(r => (r.GetProperty("urn").GetString()!, r.GetProperty("type").GetString()!));
+        var targets = Lz.Aws.Pipeline.ImageInputEcs.TargetUrns(resources, ecsService);
+        Console.WriteLine($"Running Pulumi up, targeted at {string.Join(", ", targets.Select(t => t[(t.LastIndexOf("::", StringComparison.Ordinal) + 2)..]))}...");
+
+        TenantPlanCheck.DeclaredImages.Clear();
+        var result = await stack.UpAsync(new UpOptions
+        {
+            Target = targets.ToList(),
+            OnEvent = HandleEngineEvent,
+            OnStandardError = PrintStdErr,
+        }, _ct);
+        PrintResourceChanges("Update", result.Summary);
+    }
+
     private async Task<IReadOnlyDictionary<string, AwsContainerUpdater.RolloutMark>> ReadRolloutMarksAsync(
         TenantServiceLeases leases, TenantConfig tenantConfig)
     {
@@ -1443,6 +1533,30 @@ public class SystemDeployment
                     $"  No image digest for {ecrName} (no pinned service, no :latest) — image reference " +
                     $"falls back to the tag (this is normal before the first deploycontainer).");
                 Console.ResetColor();
+                continue;
+            }
+
+            // THE TARGETED UPDATE'S SERVICE (P3 J2): declared from the input this update wrote, read back and required to be exactly it.
+            if (_imageTarget is { } target && target.Service == ecsService)
+            {
+                if (service.State != ServiceImageState.DigestPinned)
+                    throw new TenantDeployRefusedException($"{ecsService} runs no pinned digest ({service.State}); a targeted image update moves a running service only.");
+                var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+                using var ssm = credentials != null
+                    ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(credentials, Amazon.RegionEndpoint.GetBySystemName(region))
+                    : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(Amazon.RegionEndpoint.GetBySystemName(region));
+                var name = Lz.Aws.Pipeline.ImageInputFormat.NameFor(_config.SystemKey, _config.Environment, ecsService);
+                var input = await new Lz.Aws.Pipeline.SsmImageInputs(ssm).ReadAsync(name);
+                if (Lz.Aws.Pipeline.ImageInputEcs.WhyNotTarget(name, input, target.Digest, target.Writer) is { } why)
+                    throw new TenantDeployRefusedException(why);
+
+                tenantConfig.ResolvedImageDigests[svc.Name] = target.Digest;
+                tenantConfig.ResolvedImageRepositories[svc.Name] = target.Repository;
+                if (input!.BuiltAt is { } targetBuiltAt) tenantConfig.ResolvedImageBuiltAt[svc.Name] = targetBuiltAt;
+                else tenantConfig.ResolvedImageBuiltAt.Remove(svc.Name);
+                // What the plan check holds the plan to, and the revert check the result to: the digest this update moves to.
+                _runningImages[ecsService] = new RunningServiceImage(svc.Name, target.Digest, input.BuiltAt);
+                Console.WriteLine($"  {svc.Name}: declaring the image input this update wrote, {target.Repository}@{target.Digest}.");
                 continue;
             }
 

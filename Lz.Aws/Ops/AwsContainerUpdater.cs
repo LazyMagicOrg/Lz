@@ -794,6 +794,20 @@ public class AwsContainerUpdater
     /// Whether <paramref name="repository"/> holds <paramref name="digest"/>, as a tri-state: a failed read
     /// is never taken as absent.
     /// </summary>
+    /// <summary>
+    /// The repository a <c>--digest</c> is deployed from (P3 J2's targeted update uses it): the workstation's, or under the pipeline
+    /// whichever of the two holds it - the rule <c>updatecontainer</c> has always applied, refused as it refuses.
+    /// </summary>
+    public async Task<(string? Repository, string? Refusal)> RepositoryForDigestAsync(ServiceImageSources sources, string digest, CancellationToken ct)
+    {
+        if (sources.PipelineSource is not { } pipeline) return (sources.WorkstationRepository, null);
+        return ImagePinPolicy.IsSha256Digest(digest)
+            ? ImagePinPolicy.RepositoryForDigest(digest, sources,
+                await DigestPresenceAsync(sources.WorkstationRepository, digest, ct),
+                await DigestPresenceAsync(pipeline.Repository, digest, ct))
+            : ImagePinPolicy.RepositoryForDigest(digest, sources, DigestPresence.Absent, DigestPresence.Absent);
+    }
+
     private async Task<DigestPresence> DigestPresenceAsync(string repository, string digest, CancellationToken ct)
     {
         try

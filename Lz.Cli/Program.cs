@@ -171,7 +171,7 @@ class Program
         RegisterDeployWebappCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployStaticSiteCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeployTenantCommand(rootCommand, plugin, systemKeyOption, envOption);
-        RegisterUpdateContainerCommand(rootCommand, systemKeyOption, envOption);
+        RegisterUpdateContainerCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterUpdateEdgeCommand(rootCommand, systemKeyOption, envOption);
         RegisterUpdateConfigCommand(rootCommand, systemKeyOption, envOption);
         RegisterDeploySubtenantsCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -1701,7 +1701,7 @@ class Program
     // ---------------------------------------------------------------
 
     private static void RegisterUpdateContainerCommand(
-        RootCommand root,
+        RootCommand root, ILzPlugin? plugin,
         Option<string?> systemKeyOption, Option<string?> envOption)
     {
         var cmd = new Command("updatecontainer",
@@ -1884,6 +1884,37 @@ class Program
                         var sources = new Lz.Aws.Compute.ServiceImageSources(
                             svcName, ecrRepo,
                             Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(config, svcName, tk, region));
+
+                        // THROUGH PULUMI (P3 J2): a --digest on a service whose images the pipeline signs is a targeted update of the
+                        // tenant stack - the input written, the task definition and the service applied, the state naming what runs.
+                        var requestedDigest = ctx.ParseResult.GetValueForOption(digestOption);
+                        if (!dryRun && !string.IsNullOrWhiteSpace(requestedDigest)
+                            && Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(config, svcName) is not null)
+                        {
+                            try
+                            {
+                                RequirePlugin(plugin, "updatecontainer --digest");
+                                var (repositoryForDigest, refusal) = await updater.RepositoryForDigestAsync(sources, requestedDigest, Cts.Token);
+                                if (refusal is not null) throw new InvalidOperationException(refusal);
+                                ValidateTenantConfig(config, tk, tenantConfig);
+                                tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+                                var (system, factory) = PrepareSystem(plugin!, config);
+                                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+                                await deployment.UpdateImageAsync(tk, tenantConfig, svcName, requestedDigest, repositoryForDigest!,
+                                    $"updatecontainer:{Environment.UserName}@{Environment.MachineName}");
+                                Console.ForegroundColor = ConsoleColor.Green;
+                                Console.WriteLine($"  [verified] {ecsService}: {repositoryForDigest}@{requestedDigest}, through Pulumi.");
+                                Console.ResetColor();
+                            }
+                            catch (Exception ex)
+                            {
+                                anyFailure = true;
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.WriteLine($"  [error] {ecsService}: {ex.Message}");
+                                Console.ResetColor();
+                            }
+                            continue;
+                        }
 
                         // THE IMAGE INPUT (P3 J1), where the pipeline signs this service's images: after the roll, under the lease,
                         // it is set to what the service now names, so the next deploytenant finds them agreeing.

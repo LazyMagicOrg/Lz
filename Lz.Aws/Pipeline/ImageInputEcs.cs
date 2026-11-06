@@ -31,6 +31,33 @@ public static class ImageInputEcs
     }
 
     /// <summary>
+    /// THE TWO RESOURCES A TARGETED IMAGE UPDATE APPLIES (P3 J2): the service's task definition and the service, found by their
+    /// logical names (<c>{service}-task-def</c>, <c>{service}-service</c>) among the stack's resources - exactly one of each, or
+    /// the update is refused rather than aimed at something else.
+    /// </summary>
+    public static IReadOnlyList<string> TargetUrns(IEnumerable<(string Urn, string Type)> resources, string service)
+    {
+        var list = resources.ToList();
+        string One(string type, string logical)
+        {
+            var found = list.Where(r => r.Type == type && r.Urn.EndsWith("::" + logical, StringComparison.Ordinal)).Select(r => r.Urn).ToList();
+            return found.Count == 1 ? found[0]
+                : throw new InvalidOperationException($"the stack holds {found.Count} {type} named {logical}; a targeted update needs exactly one.");
+        }
+        return new[] { One("aws:ecs/taskDefinition:TaskDefinition", $"{service}-task-def"), One("aws:ecs/service:Service", $"{service}-service") };
+    }
+
+    /// <summary>
+    /// WHY A TARGETED UPDATE MAY NOT DECLARE ITS DIGEST (P3 J2), or null: the program reads the input back and must find exactly
+    /// what this update wrote - its digest, by its writer. Anything else is another writer between the write and the update.
+    /// </summary>
+    public static string? WhyNotTarget(string name, ImageInput? input, string digest, string writer)
+        => input is not null && input.Digest == digest && input.Writer == writer
+            ? null
+            : $"{name} reads {(input is null ? "nothing" : $"{input.Repository}@{input.Digest} by {input.Writer}")}, not the {digest} this update " +
+              $"wrote as {writer}: another writer came between. Nothing has been applied.";
+
+    /// <summary>
     /// WHY <c>deploytenant</c> MAY NOT PROCEED with this service's input, or null (P3 J1): an input is required where the pipeline
     /// signs the service's images, and must name exactly the digest the service runs - anything else is a deploy in flight, or one
     /// whose write-back failed, and the tenant program is not the one to settle which image is right.
