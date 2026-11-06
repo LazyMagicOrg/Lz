@@ -85,7 +85,7 @@ public static class IntakeBootstrapper
             var roleArn = await DeployerBootstrapper.EnsureRoleAsync(iam, fn.RoleName, plan.FunctionTrustPolicy,
                 $"lz intake: {fn.Name} (DecoupledCd.md V-B).", ($"{fn.RoleName}-grant", fn.Policy), plan.DenyPolicy);
             await DeployerBootstrapper.EnsureFunctionAsync(lambda, fn, roleArn, packages[fn.Package],
-                fn.Handler == DeployerHandlers.IntakeFetch ? IntakeBuildPlanner.FetchEphemeralStorageMb : null);
+                IntakeBuildPlanner.EphemeralStorageMbFor(fn.Handler));
         }
 
         // ONE POLL AT A TIME (§5.3 rule 1): a reserved concurrency of one, ticks at most a minute old, none retried.

@@ -193,6 +193,16 @@ public class IntakeBuildPlanTests
         Assert.True(IntakeBuildPlanner.FetchEphemeralStorageMb >= 4096);
     }
 
+    [Fact]
+    public void ThePublish_HasRoomForTheImageItPushes_TheOthersKeepTheDefault()
+    {
+        // MEASURED SHORT 2026-11-05: the publish reads the staged image zip into /tmp before pushing it, and was left at
+        // Lambda's 512 MB - room for the aiphost's 132 MB, not the tooling image's 795 MB (P3 B).
+        Assert.Equal(IntakeBuildPlanner.FetchEphemeralStorageMb, IntakeBuildPlanner.EphemeralStorageMbFor(DeployerHandlers.IntakeFetch));
+        Assert.Equal(IntakeBuildPlanner.FetchEphemeralStorageMb, IntakeBuildPlanner.EphemeralStorageMbFor(DeployerHandlers.IntakePublish));
+        Assert.Null(IntakeBuildPlanner.EphemeralStorageMbFor(DeployerHandlers.IntakeCheckRun));
+    }
+
     // ---- Gate 1 (V-C) ----
 
     private static IntakeBuildPlan WithGate1()

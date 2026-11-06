@@ -63,6 +63,14 @@ public static class IntakeBuildPlanner
     public const int FetchMemoryMb = 2048;
     public const int FetchEphemeralStorageMb = 4096;
 
+    /// <summary>
+    /// The /tmp a function is given, or null for Lambda's default (512 MB). The two that hold an image archive: the fetch, which
+    /// downloads and checks it, and the publish, which reads the staged zip back before pushing it - left at the default until
+    /// 2026-11-05, when the tooling image (795 MB, P3 B) was found not to fit where the aiphost (132 MB) always had.
+    /// </summary>
+    public static int? EphemeralStorageMbFor(string handler)
+        => handler == DeployerHandlers.IntakeFetch || handler == DeployerHandlers.IntakePublish ? FetchEphemeralStorageMb : null;
+
     public const string Gate1Image = "aws/codebuild/standard:8.0";
     public const string Gate1ComputeType = "BUILD_GENERAL1_MEDIUM";
     public const int Gate1TimeoutMinutes = 60;
