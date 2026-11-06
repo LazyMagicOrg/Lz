@@ -209,8 +209,12 @@
     <PackageReference Include="AWSSDK.SecurityToken" Version="4.*" />
     <PackageReference Include="AWSSDK.SSO" Version="4.0.2.14" />
     <PackageReference Include="AWSSDK.SSOOIDC" Version="4.0.3.15" />
-    <PackageReference Include="Pulumi.Aws" Version="7.*" />
-    <PackageReference Include="Pulumi.Random" Version="4.*" />
+    <!-- THE PROVIDERS ARE PINNED, never floating (2026-11-06, P3 J2): the provider a program plans with is recorded in the stack's
+         state, and a targeted update (up with a target) refuses a provider change ("a change of providers mixed with target"). With
+         7.* a workstation that restored before a release planned with 7.53 while the tooling image, built after it, had moved the
+         state to 7.54. Move these on purpose, in their own commit, and let the next deploys move the state. -->
+    <PackageReference Include="Pulumi.Aws" Version="7.54.0" />
+    <PackageReference Include="Pulumi.Random" Version="4.21.6" />
     <PackageReference Include="NUglify" Version="1.*" />
   </ItemGroup>
 
