@@ -119,10 +119,10 @@ public class InfraPlanStepsTests
     // ---- VerifyTooling ----
 
     private static readonly ToolingSettings Tool = new(
-        new[] { "arn:aws:signer:us-west-2:147440642635:/signing-profiles/scu_build_ci_scutara_scutara" },
+        new[] { "arn:aws:signer:us-west-2:147440642635:/signing-profiles/scu_build_ci_scutara" },
         Registry, "scu-4df6-b9c6-tooling", "scu-dev-deployer-plan",
         "arn:aws:iam::503947800380:role/scu-dev-deployer-tooling-exec", "arn:aws:iam::503947800380:role/scu-dev-deployer-plan-task",
-        "/lz/scu-dev-deployer-plan", "us-west-2");
+        "/lz/scu-dev-deployer-plan", "us-west-2", new[] { "subnet-0abc" }, new[] { "sg-0abc" });
 
     private sealed class Notation(int exit = 0, string? say = null) : INotation
     {
@@ -165,7 +165,7 @@ public class InfraPlanStepsTests
 
         var reference = $"{Registry}/scu-4df6-b9c6-tooling@{Tooling158}";
         Assert.Equal(reference, notation.Verified);
-        Assert.Contains("scu_build_ci_scutara_scutara", notation.Policy);
+        Assert.Contains("signing-profiles/scu_build_ci_scutara", notation.Policy);
         Assert.Contains($"{Registry}/scu-4df6-b9c6-tooling", notation.Policy);
         Assert.Equal(reference, r["reference"]!.GetValue<string>());
 
@@ -177,6 +177,19 @@ public class InfraPlanStepsTests
         Assert.Equal(Tool.ExecutionRoleArn, d.ExecutionRoleArn);
         Assert.Contains(d.ContainerDefinitions[0].Environment, e => e.Name == "LZ_CREDENTIALS" && e.Value == "ambient");
         Assert.Equal("arn:aws:ecs:us-west-2:503947800380:task-definition/scu-dev-deployer-plan:1", r["taskDefinitionArn"]!.GetValue<string>());
+        Assert.Equal("subnet-0abc", Assert.Single(r["subnets"]!.AsArray())!.GetValue<string>());
+        Assert.Equal("sg-0abc", Assert.Single(r["securityGroups"]!.AsArray())!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ANetworkTheApplyHasNotCreated_IsRefused_AndNoDefinitionIsRegistered()
+    {
+        var definitions = new Definitions();
+        var placeholders = Tool with { Subnets = new[] { "<subnet-created-by-apply>" }, SecurityGroups = new[] { "<security-group-created-by-apply>" } };
+        var ex = await Assert.ThrowsAsync<DeployRefused>(() => InfraPlanSteps.VerifyToolingAsync(Verified(), "exec-1", placeholders,
+            () => Task.FromResult(("AWS", "token")), new Notation(), NotationLayout.Under("/tmp/lz-notation"), definitions));
+        Assert.Contains("Run the apply", ex.Message);
+        Assert.Null(definitions.Registered);
     }
 
     [Theory]

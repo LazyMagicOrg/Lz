@@ -621,12 +621,12 @@ class Program
                 await InfraPlan.PutPlanAsync(s3, evidence, key, plan.ToJson(), Cts.Token);
                 Console.WriteLine($"Plan written to s3://{evidence}/{key}: {plans.Count} stack(s), " +
                     $"{(plan.HasChanges ? "changes" : "no changes")}, {(plan.Destructive ? "DESTRUCTIVE" : "not destructive")}.");
-                if (plan.Destructive) ctx.ExitCode = InfraPlan.DestructiveExitCode;
+                if (plan.Destructive) Environment.ExitCode = InfraPlan.DestructiveExitCode;
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"infraplan: {ex.Message}");
-                ctx.ExitCode = 1;
+                Environment.ExitCode = 1;
             }
         });
         root.AddCommand(cmd);

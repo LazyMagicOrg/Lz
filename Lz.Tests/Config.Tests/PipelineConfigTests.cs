@@ -139,6 +139,12 @@ public class PipelineConfigTests
             // no deploy path calls it. Absent paths: IntakeBuildPlanTests.ASystemWithNoPipelineBlock_GetsNoIntake_AndReadsNothingElse
             // and ASystemWithNoIntakeRepository_GetsNoIntake, which plan nothing.
             Path.Combine("Lz.Aws", "Pipeline", "IntakeBuildPlan.cs"),
+
+            // InfraPlanPlan, 2026-11-06 (DecoupledCd P3 D). Reads Pipeline.Repositories for the one config and one tooling
+            // repository, called only by DeployerPlan under Pipeline.Infrastructure: plan, and so reached only from
+            // `lz bootstrapdeployer`; no deploy path calls it. Absent paths: InfraPlanPlannerTests.WithoutTheBranch_ThePlanIsWhatItWas
+            // (null and off) and InAChain_WithoutTheBranch_NothingIsPinnedUnderPlans_AndThePlanIsWhatItWas.
+            Path.Combine("Lz.Aws", "Pipeline", "InfraPlanPlan.cs"),
         };
 
         var root = RepoRoot();

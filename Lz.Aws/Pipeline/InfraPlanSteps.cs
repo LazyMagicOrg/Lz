@@ -12,7 +12,8 @@ public sealed class PlanMissing(string message) : Exception(message);
 /// <summary>What VerifyTooling is configured with (DecoupledCd.md P3 D).</summary>
 public sealed record ToolingSettings(
     IReadOnlyList<string> TrustedProfiles, string Registry, string Repository,
-    string Family, string ExecutionRoleArn, string TaskRoleArn, string LogGroup, string Region)
+    string Family, string ExecutionRoleArn, string TaskRoleArn, string LogGroup, string Region,
+    IReadOnlyList<string> Subnets, IReadOnlyList<string> SecurityGroups)
 {
     public const string TrustedProfilesVariable = DeployerEnvironment.TrustedProfiles;
     public const string RegistryVariable = DeployerEnvironment.Registry;
@@ -22,6 +23,8 @@ public sealed record ToolingSettings(
     public const string TaskRoleVariable = "LZ_TOOLING_TASK_ROLE";
     public const string LogGroupVariable = "LZ_TOOLING_LOG_GROUP";
     public const string RegionVariable = "LZ_TOOLING_REGION";
+    public const string SubnetsVariable = "LZ_TOOLING_SUBNETS";
+    public const string SecurityGroupsVariable = "LZ_TOOLING_SECURITY_GROUPS";
 
     public string Scope => $"{Registry}/{Repository}";
 
@@ -33,7 +36,9 @@ public sealed record ToolingSettings(
         DeployerEnvironment.Required(env, ExecutionRoleVariable),
         DeployerEnvironment.Required(env, TaskRoleVariable),
         DeployerEnvironment.Required(env, LogGroupVariable),
-        DeployerEnvironment.Required(env, RegionVariable));
+        DeployerEnvironment.Required(env, RegionVariable),
+        DeployerEnvironment.List(env, SubnetsVariable),
+        DeployerEnvironment.List(env, SecurityGroupsVariable));
 }
 
 /// <summary>
@@ -143,6 +148,13 @@ public static class InfraPlanSteps
         if (!verdict.Verified)
             throw new DeployRefused("tooling", $"{reference}: {verdict.Detail}");
 
+        // THE NETWORK THE BOOTSTRAP MADE (P-13), handed to the Plan state: exactly one subnet and one group, or nothing runs.
+        var (subnets, groups) = (settings.Subnets, settings.SecurityGroups);
+        if (subnets.Count != 1 || groups.Count != 1 || subnets.Concat(groups).Any(id => id.StartsWith('<')))
+            throw new DeployRefused("tooling.network",
+                $"the Plan task runs in the one subnet and one security group `lz bootstrapdeployer --apply` creates; this function is " +
+                $"configured with {string.Join(",", subnets)} and {string.Join(",", groups)}. Run the apply.");
+
         var arn = await definitions.RegisterAsync(PlanTaskDefinition(settings, reference, executionName));
         return new JsonObject
         {
@@ -150,6 +162,8 @@ public static class InfraPlanSteps
             ["verified"] = verdict.Detail,
             ["taskDefinitionArn"] = arn,
             ["container"] = Container,
+            ["subnets"] = new JsonArray(subnets.Select(x => (JsonNode?)x).ToArray()),
+            ["securityGroups"] = new JsonArray(groups.Select(x => (JsonNode?)x).ToArray()),
         };
     }
 
