@@ -123,6 +123,20 @@ public class TenantPlanCheckTests
     }
 
     [Fact]
+    public void AProviderVersionSwap_IsNotNamedAsDestructive()
+    {
+        // As dev's foundation planned it on 2026-11-06: the summary counts two updates and no provider step.
+        var steps = new[]
+        {
+            new PlannedStep(OperationType.Create, "pulumi:providers:aws", "urn:pulumi:scu-dev::lz-scu::pulumi:providers:aws::default_7_53_0", null, null),
+            new PlannedStep(OperationType.Delete, "pulumi:providers:aws", "urn:pulumi:scu-dev::lz-scu::pulumi:providers:aws::default_7_52_1", null, null),
+        };
+        var plan = PlanSummary.From("scu-dev", new Dictionary<OperationType, int> { [OperationType.Update] = 2 }, steps);
+        Assert.False(plan.Destructive);
+        Assert.Empty(plan.DestructiveSteps);
+    }
+
+    [Fact]
     public void ARollThatOnlyMovesTheImage_IsNotDestructive()
     {
         var same = Inputs("x", "h1", null);

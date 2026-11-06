@@ -59,13 +59,21 @@ public sealed record PlanSummary(
             foreach (var td in steps.Where(s => s.Type == TenantPlanCheck.TaskDefinitionType && s.Op == OperationType.Replace))
                 if (TenantPlanCheck.WhyNotImageOnly(td) is { } why)
                     counted.Add(new PlanSummaryStep(OpName(td.Op), td.Type, td.Urn, why));
-            destructiveSteps.AddRange(TenantPlanCheck.Destructive(steps).Select(s => new PlanSummaryStep(OpName(s.Op), s.Type, s.Urn)));
+            // A PROVIDER IS NOT A RESOURCE. Pulumi's change summary leaves provider steps out (measured on dev's foundation,
+            // 2026-11-06: the default aws provider moving 7.52.1 -> 7.53.0 planned a create and a delete, and the summary
+            // counted neither), so the list leaves them out too, or it would name a step the verdict never counted.
+            destructiveSteps.AddRange(TenantPlanCheck.Destructive(steps)
+                .Where(s => !s.Type.StartsWith(ProviderTypePrefix, StringComparison.Ordinal))
+                .Select(s => new PlanSummaryStep(OpName(s.Op), s.Type, s.Urn)));
             replaces = Math.Max(0, replaces - imageOnly);
         }
 
         return new PlanSummary(stack, changes, replaces, deletes, imageOnly, replaces + deletes > 0,
             destructiveSteps, counted, digestRefusals ?? []);
     }
+
+    /// <summary>The type prefix of a Pulumi provider resource, which no change summary counts.</summary>
+    public const string ProviderTypePrefix = "pulumi:providers:";
 
     private static string OpName(OperationType op) => op.ToString().ToLowerInvariant();
 
