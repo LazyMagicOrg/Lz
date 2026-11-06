@@ -370,6 +370,25 @@ public class IntakePublishTests : IDisposable
             Targets, Records, Artifacts, f, f, f, f, _work);
 
     [Fact]
+    public async Task AConfigBundlesPass_WritesItsBundleAndRecordUnderConfig_AndNoTestsRecord()
+    {
+        // MEASURED SHORT 2026-11-06: the first live config run (42145970403) passed Gate 1 and faulted here, on a list of the
+        // classes publish wrote that config was not on (P3 C). Its bundle is the client's shape, and checked by its own Gate 1.
+        var (f, state, bundle, _) = ClientPassed();
+        var config = Seller() with { Class = "config", Gate1 = new IntakeGate1("sellerapp", "", "", "", "", Array.Empty<IntakeImage>(), Kind: "config") };
+
+        var result = await PublishClient(f, state, config);
+
+        Assert.Equal("published", result["outcome"]!.GetValue<string>());
+        const string stem = "20261022T090000Z-39700000001-1";
+        Assert.Equal(new[] { $"config/scutara/scutarasellerapp/{stem}.json" }, f.RecordWrites);
+        Assert.Equal(bundle, f.ArtifactStore[$"config/scutara/scutarasellerapp/{stem}.zip"].Bytes);
+        var record = BuildRecordFormat.Parse(f.RecordStore[$"config/scutara/scutarasellerapp/{stem}.json"], Artifacts);
+        Assert.Equal("config", record.Class);
+        Assert.Equal(Hex(bundle), record.Identity.Sha256);
+    }
+
+    [Fact]
     public async Task AClientsPass_WritesItsTestsThenItsBundleAndRecord_TheBundleBeingTheBuildsOwnZip()
     {
         var (f, state, bundle, artifact) = ClientPassed();

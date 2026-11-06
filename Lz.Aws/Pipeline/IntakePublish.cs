@@ -134,8 +134,10 @@ public static class IntakePublishStep
 
         // Everything a record needs is checked BEFORE anything is pushed or written, so a refusal leaves nothing behind.
         var isImage = BuildRecordFormat.IsImageClass(repository.Class);
-        if (!isImage && repository.Class is not ("client" or BuildRecordFormat.SiteClass or "tests"))
-            throw new IntakeFault($"{repository.Class} records are not published yet; an image's, a client's, a site's and a test bundle's are (V-D, V-24, V-E)");
+        // A CONFIG BUNDLE (P3 C, 2026-11-06) is published as a client's is: the one zip the build made, and its record - under its
+        // own class, with no tests record, since its Gate 1 checked the bundle itself.
+        if (!isImage && repository.Class is not ("client" or "config" or BuildRecordFormat.SiteClass or "tests"))
+            throw new IntakeFault($"{repository.Class} records are not published yet; an image's, a client's, a config bundle's, a site's and a test bundle's are (V-D, P3 C, V-24, V-E)");
 
         // A SITE (V-24): one zip and one record per environment's bundle, each record naming its environment, and no tests record,
         // since a site has no test bundle. Every bundle is held to Gate 1's pass before anything is written.
