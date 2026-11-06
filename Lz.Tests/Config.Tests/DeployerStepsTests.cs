@@ -1176,4 +1176,78 @@ public class DeployerStepsTests
 
         Assert.Equal(HookStatus.FAILED, status);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The image input (P3 J1): Prepare writes it, RecordFailure writes it back
+    // ---------------------------------------------------------------------------------------
+
+    private sealed class Inputs : IImageInputs
+    {
+        public readonly Dictionary<string, ImageInput> Values = new();
+        public Task<ImageInput?> ReadAsync(string name) => Task.FromResult(Values.TryGetValue(name, out var v) ? v : null);
+        public Task WriteAsync(string name, ImageInput input) { Values[name] = input; return Task.CompletedTask; }
+        public Task<bool> CreateAsync(string name, ImageInput input) => Task.FromResult(Values.TryAdd(name, input));
+    }
+
+    private const string InputPrefix = "/scu/dev/pipeline/image/";
+
+    [Fact]
+    public async Task Prepare_WritesTheServicesImageInput_WithTheVerifiedDigestItsRepositoryAndTheRecordsBuildTime()
+    {
+        var inputs = new Inputs();
+        var result = await PrepareStep.RunAsync(PrepareState(), LeaseExecution, RegistryHost, new Services(Service()), new Definitions(CurrentDefinition()),
+            new InMemoryServiceLeaseStore(), LeaseNow, inputs, InputPrefix);
+
+        var input = inputs.Values["/scu/dev/pipeline/image/scu-mp-aiphost"];
+        Assert.Equal(Digest, input.Digest);
+        Assert.Equal(Repository, input.Repository);
+        Assert.Equal(BuiltAt, input.BuiltAt);
+        Assert.Equal("deployer:req-abc-1", input.Writer);
+        Assert.Equal("/scu/dev/pipeline/image/scu-mp-aiphost", result["input"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Prepare_ThatRefusesAnOlderBuild_WritesNoInput()
+    {
+        var inputs = new Inputs();
+        await Assert.ThrowsAsync<DeploySuperseded>(() => PrepareStep.RunAsync(PrepareState("2026-01-01T00:00:00Z"), LeaseExecution, RegistryHost,
+            new Services(Service()), new Definitions(CurrentDefinition(), runningBuiltAt: BuiltAt), new InMemoryServiceLeaseStore(), LeaseNow, inputs, InputPrefix));
+        Assert.Empty(inputs.Values);
+    }
+
+    [Fact]
+    public async Task RecordFailure_WritesTheInputBackToWhatTheServiceRuns_OnlyWhereThisExecutionWroteIt()
+    {
+        var inputs = new Inputs();
+        var name = "/scu/dev/pipeline/image/scu-mp-aiphost";
+        inputs.Values[name] = new ImageInput(Digest, Repository, BuiltAt, "deployer:req-abc-1", "2026-10-20T18:00:00Z");
+        var writeBack = new ImageInputWriteBack(inputs, InputPrefix, new Services(Service()), new Definitions(CurrentDefinition(), runningBuiltAt: "2026-09-01T00:00:00Z"));
+
+        var result = await RecordFailureStep.RunAsync(State(), LeaseExecution, "evidence", new Evidence(), LeaseNow, new InMemoryServiceLeaseStore(), writeBack);
+
+        // THE SERVICE STILL RUNS THE OLD REVISION, so the input names it again: its digest, its repository, its build time.
+        Assert.Equal(OldDigest, inputs.Values[name].Digest);
+        Assert.Equal("scu-4df6-b9c6-dev-mp-aiphost", inputs.Values[name].Repository);
+        Assert.Equal("2026-09-01T00:00:00Z", inputs.Values[name].BuiltAt);
+        Assert.Contains("written back", result["input"]!.GetValue<string>());
+
+        // Another writer's input is left alone.
+        inputs.Values[name] = new ImageInput(Digest, Repository, BuiltAt, "updatecontainer:someone@host", "2026-10-20T18:00:00Z");
+        var other = await RecordFailureStep.RunAsync(State(), LeaseExecution, "evidence", new Evidence(), LeaseNow, new InMemoryServiceLeaseStore(), writeBack);
+        Assert.Equal(Digest, inputs.Values[name].Digest);
+        Assert.StartsWith("untouched", other["input"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task RecordFailure_WhoseWriteBackFails_StillRecordsAndReleases_AndSaysSo()
+    {
+        var inputs = new Inputs();
+        var name = "/scu/dev/pipeline/image/scu-mp-aiphost";
+        inputs.Values[name] = new ImageInput(Digest, Repository, BuiltAt, "deployer:req-abc-1", "2026-10-20T18:00:00Z");
+        var broken = new ImageInputWriteBack(inputs, InputPrefix, new Services(Service()), new Definitions(new Amazon.ECS.Model.TaskDefinition()));
+
+        var result = await RecordFailureStep.RunAsync(State(), LeaseExecution, "evidence", new Evidence(), LeaseNow, new InMemoryServiceLeaseStore(), broken);
+        Assert.StartsWith("NOT written back", result["input"]!.GetValue<string>());
+        Assert.NotNull(result["lease"]);
+    }
 }

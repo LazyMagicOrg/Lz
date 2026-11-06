@@ -42,6 +42,7 @@
     <!-- The infrastructure branch, plan only (DecoupledCd P3 D): Verify's config branch, VerifyTooling and ReadPlan. -->
     <Compile Include="..\Lz.Aws\Pipeline\InfraPlanSteps.cs" Link="Linked\Lz.Aws\Pipeline\InfraPlanSteps.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\InfraPlan.cs" Link="Linked\Lz.Aws\Pipeline\InfraPlan.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\ImageInput.cs" Link="Linked\Lz.Aws\Pipeline\ImageInput.cs" />
     <!-- Promotion (DecoupledCd P5): the pass marker, VerifySet and the decision. BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\PassMarker.cs" Link="Linked\Lz.Aws\Pipeline\PassMarker.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />

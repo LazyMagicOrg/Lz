@@ -1885,11 +1885,33 @@ class Program
                             svcName, ecrRepo,
                             Lz.Aws.Pipeline.EcrRepositoryNaming.PipelineImageSourceFor(config, svcName, tk, region));
 
+                        // THE IMAGE INPUT (P3 J1), where the pipeline signs this service's images: after the roll, under the lease,
+                        // it is set to what the service now names, so the next deploytenant finds them agreeing.
+                        Func<CancellationToken, Task<string>>? afterRoll = null;
+                        if (!dryRun && Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(config, svcName) is not null)
+                        {
+                            var inputName = Lz.Aws.Pipeline.ImageInputFormat.NameFor(config.SystemKey, config.Environment, ecsService);
+                            var writer = $"updatecontainer:{Environment.UserName}@{Environment.MachineName}";
+                            afterRoll = async token =>
+                            {
+                                var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+                                var endpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+                                using var ecs = credentials != null ? new Amazon.ECS.AmazonECSClient(credentials, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+                                using var ssm = credentials != null
+                                    ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(credentials, endpoint)
+                                    : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+                                var now = await Lz.Aws.Pipeline.ImageInputEcs.FromServiceAsync(ecs, cluster, ecsService, svcName, writer, DateTimeOffset.UtcNow, token);
+                                if (now is null) return $"input {inputName} untouched: no ACTIVE service";
+                                await new Lz.Aws.Pipeline.SsmImageInputs(ssm).WriteAsync(inputName, now);
+                                return $"input {inputName} set to {now.Repository}@{now.Digest}";
+                            };
+                        }
+
                         try
                         {
                             var result = await updater.UpdateIfNewerAsync(
                                 cluster, ecsService, sources, tag, force, wait, dryRun, Cts.Token,
-                                ctx.ParseResult.GetValueForOption(digestOption), lease);
+                                ctx.ParseResult.GetValueForOption(digestOption), lease, afterRoll);
                             PrintUpdateResult(result);
                             if (result.Outcome is UpdateOutcome.Failed or UpdateOutcome.LeaseHeld)
                                 anyFailure = true;

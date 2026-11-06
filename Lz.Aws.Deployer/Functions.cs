@@ -151,9 +151,11 @@ public sealed class PrepareFunction
             new EcsServices(Clients.Ecs.Value),
             new EcsTaskDefinitions(Clients.Ecs.Value),
             Clients.Leases(),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            new SsmImageInputs(Clients.Ssm.Value),
+            Environment.GetEnvironmentVariable(DeployerEnvironment.ImageInputPrefix) is { Length: > 0 } prefix ? prefix : null);
 
-        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}, holding the service's lease");
+        context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}, holding the service's lease; input {result["input"]?.GetValue<string>() ?? "not written (none configured)"}");
         return Io.Write(result);
     }
 }
@@ -292,9 +294,12 @@ public sealed class RecordFailureFunction
             DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
             new S3EvidenceWriter(Clients.S3.Value),
             DateTimeOffset.UtcNow,
-            Clients.Leases());
+            Clients.Leases(),
+            Environment.GetEnvironmentVariable(DeployerEnvironment.ImageInputPrefix) is { Length: > 0 } prefix
+                ? new ImageInputWriteBack(new SsmImageInputs(Clients.Ssm.Value), prefix, new EcsServices(Clients.Ecs.Value), new EcsTaskDefinitions(Clients.Ecs.Value))
+                : null);
 
-        context.Logger.LogInformation($"{executionName}: failure recorded at {result["key"]} (written: {result["written"]}); lease {result["lease"]}");
+        context.Logger.LogInformation($"{executionName}: failure recorded at {result["key"]} (written: {result["written"]}); input {result["input"]?.GetValue<string>() ?? "(none configured)"}; lease {result["lease"]}");
         return Io.Write(result);
     }
 }

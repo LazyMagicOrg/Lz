@@ -182,7 +182,7 @@ public class AwsContainerUpdater
     public async Task<ContainerUpdateResult> UpdateIfNewerAsync(
         string cluster, string ecsService, ServiceImageSources sources, string tag,
         bool force, bool wait, bool dryRun, CancellationToken ct,
-        string? targetDigest = null, ServiceLeaseRequest? lease = null)
+        string? targetDigest = null, ServiceLeaseRequest? lease = null, Func<CancellationToken, Task<string>>? afterRoll = null)
     {
         var ecrRepo = sources.WorkstationRepository;
 
@@ -236,10 +236,16 @@ public class AwsContainerUpdater
 
         // 4. Deploy, under the service's lease when one is asked for: from here to the end of the wait this
         //    command is the service's one writer (DecoupledCd.md V-J).
+        // AFTER THE ROLL, STILL UNDER THE LEASE (P3 J1): the image input is set to what the service now names, whatever the roll's
+        // outcome, so it never names an image the service does not run.
+        async Task<ContainerUpdateResult> RollThenAfter()
+        {
+            var rolled = await RollAsync(cluster, ecsService, sources, repository, ecrDigest, alreadyCurrent, wait, ct);
+            return afterRoll is null ? rolled : rolled with { Detail = $"{rolled.Detail}; {await afterRoll(ct)}" };
+        }
         return lease is null
-            ? await RollAsync(cluster, ecsService, sources, repository, ecrDigest, alreadyCurrent, wait, ct)
-            : await RunUnderLeaseAsync(lease, cluster, ecsService, wait, DateTimeOffset.UtcNow,
-                () => RollAsync(cluster, ecsService, sources, repository, ecrDigest, alreadyCurrent, wait, ct));
+            ? await RollThenAfter()
+            : await RunUnderLeaseAsync(lease, cluster, ecsService, wait, DateTimeOffset.UtcNow, RollThenAfter);
     }
 
     /// <summary>
@@ -610,6 +616,10 @@ public class AwsContainerUpdater
     /// <para>The copied container definitions carry environment values including a plaintext
     /// client secret, so this must never be logged, serialized to a temp file, or echoed.</para>
     /// </summary>
+    /// <summary>A revision's tags for the one this command registers: every tag but the build time, which named the previous image.</summary>
+    internal static List<Tag>? TagsWithoutBuiltAt(List<Tag>? tags)
+        => tags?.Where(t => t.Key != Lz.Aws.Pipeline.DeployOrdering.BuiltAtTag).ToList();
+
     private async Task<string> RegisterRevisionWithImageAsync(
         string cluster, string ecsService, ServiceImageSources sources, string repository, string digest,
         CancellationToken ct)
@@ -647,7 +657,10 @@ public class AwsContainerUpdater
 
         // THE FIELD COPY IS SHARED with the decoupled-CD deployer's Prepare function — see
         // TaskDefinitionRevision for why it must not exist twice.
-        var register = TaskDefinitionRevision.RegisterRequestFor(td, described.Tags);
+        // NOT THE OLD BUILD TIME (P3 J1): the previous revision's lz:builtAt named the previous image, and copied onto this one it
+        // misled the deployer's older-build check and deploytenant's revert verdict. This command does not know the build's
+        // time, so the tag is left off, which both read as "not compared" rather than as a wrong answer.
+        var register = TaskDefinitionRevision.RegisterRequestFor(td, TagsWithoutBuiltAt(described.Tags));
 
         var registered = await _ecs.RegisterTaskDefinitionAsync(register, ct);
         return registered.TaskDefinition.TaskDefinitionArn;

@@ -307,6 +307,9 @@ public static class DeployerEnvironment
     public const string PredecessorEvidenceStore = "LZ_PREDECESSOR_EVIDENCE_STORE";
     // The promotion poller (P5 stage I): the hold it reads before every start, and the image target each execution names.
     public const string HoldParameter = "LZ_HOLD_PARAMETER";
+
+    /// <summary>Where the services' image inputs live (P3 J1); unset where the pipeline does not sign the images, and nothing is written.</summary>
+    public const string ImageInputPrefix = "LZ_IMAGE_INPUT_PREFIX";
     public const string PromotionTarget = "LZ_PROMOTION_TARGET";
     // MarkPassed (P5 stage D): the members a set may name, and the environment its markers are written for.
     public const string MarkMembers = "LZ_MARK_MEMBERS";

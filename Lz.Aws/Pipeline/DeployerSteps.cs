@@ -400,9 +400,11 @@ public static class PrepareStep
     /// by their own path, and one landing between this read and the roll would be reverted by it. A held lease throws
     /// <see cref="ServiceRollInProgress"/>, which the definition retries; a refusal after the claim releases it.</para>
     /// </summary>
+    /// <param name="inputs">With <paramref name="inputPrefix"/>, the services' image inputs (P3 J1): written once the revision is
+    /// registered, still under the lease, naming the digest, its repository and the record's build time.</param>
     public static async Task<JsonObject> RunAsync(
         JsonObject state, string executionName, string registry, IServices services, ITaskDefinitions definitions,
-        Lz.Aws.Ops.IServiceLeaseStore leases, DateTimeOffset now)
+        Lz.Aws.Ops.IServiceLeaseStore leases, DateTimeOffset now, IImageInputs? inputs = null, string? inputPrefix = null)
     {
         var target = DeployerInput.From(state).Target;
         var holder = LeaseHolder(executionName);
@@ -418,6 +420,15 @@ public static class PrepareStep
         {
             var prepared = await PrepareAsync(state, target, registry, services, definitions);
             prepared["lease"] = new JsonObject { ["holder"] = holder, ["expiresAt"] = lease.ExpiresAt.ToString("O") };
+            if (inputs is not null && inputPrefix is not null)
+            {
+                var verified = (JsonObject)state["verified"]!;
+                var name = inputPrefix + target.Service;
+                await inputs.WriteAsync(name, new ImageInput(
+                    verified["digest"]!.GetValue<string>(), target.Repository, verified["builtAt"]!.GetValue<string>(), holder,
+                    now.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")));
+                prepared["input"] = name;
+            }
             return prepared;
         }
         catch
@@ -754,9 +765,11 @@ public static class RecordStep
 /// </summary>
 public static class RecordFailureStep
 {
+    /// <param name="writeBack">With the image inputs (P3 J1): the input this execution's Prepare wrote is written back to what the
+    /// service's current revision names, before the lease is released.</param>
     public static async Task<JsonObject> RunAsync(
         JsonObject state, string executionName, string evidenceStore, IEvidenceWriter writer, DateTimeOffset now,
-        Lz.Aws.Ops.IServiceLeaseStore leases)
+        Lz.Aws.Ops.IServiceLeaseStore leases, ImageInputWriteBack? writeBack = null)
     {
         var key = DeployEvidence.FailureKey(executionName);
 
@@ -765,7 +778,45 @@ public static class RecordFailureStep
         // real failure under an evidence error.
         var written = await writer.PutOnceAsync(evidenceStore, key, DeployEvidence.Failed(executionName, now, state));
 
-        return new JsonObject { ["key"] = key, ["written"] = written, ["lease"] = await LeaseRelease.AfterAsync(state, executionName, leases) };
+        var result = new JsonObject { ["key"] = key, ["written"] = written };
+        if (writeBack is not null) result["input"] = await writeBack.AfterFailureAsync(state, executionName, now);
+        result["lease"] = await LeaseRelease.AfterAsync(state, executionName, leases);
+        return result;
+    }
+}
+
+/// <summary>
+/// THE INPUT WRITTEN BACK AFTER A FAILED DEPLOY (P3 J1): where this execution's Prepare wrote the service's input, it is set to what
+/// the service's current revision names - the old image after a refusal or a rollback, the new one if the failure came after it
+/// landed - so the input never names an image the service does not run. NEVER THROWS, like the lease's release: the evidence is
+/// written by then, and it says what happened instead. Where the service is still mid-rollback the revision read may be the
+/// failed one; deploytenant then finds the input and the running image disagree, and refuses rather than guess.
+/// </summary>
+public sealed class ImageInputWriteBack(IImageInputs inputs, string prefix, IServices services, ITaskDefinitions definitions)
+{
+    public async Task<string> AfterFailureAsync(JsonObject state, string executionName, DateTimeOffset now)
+    {
+        DeployTarget target;
+        try { target = DeployerInput.From(state).Target; }
+        catch (DeployRefused) { return "none: the input names no service"; }
+
+        var name = prefix + target.Service;
+        var holder = PrepareStep.LeaseHolder(executionName);
+        try
+        {
+            var current = await inputs.ReadAsync(name);
+            if (current?.Writer != holder)
+                return $"untouched: {name} was last written by {current?.Writer ?? "nobody"}, not this execution";
+            var running = await ImageInputFromService.ReadAsync(services, definitions, target.Cluster, target.Service, target.Container,
+                $"{holder} (written back)", now);
+            if (running is null) return $"not written back: there is no ACTIVE {target.Service}";
+            await inputs.WriteAsync(name, running);
+            return $"written back to {running.Repository}@{running.Digest}, what {target.Service} is set to";
+        }
+        catch (Exception ex)
+        {
+            return $"NOT written back ({ex.GetType().Name}: {ex.Message}); deploytenant will refuse until {name} names what runs";
+        }
     }
 }
 

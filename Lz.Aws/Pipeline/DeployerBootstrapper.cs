@@ -251,6 +251,37 @@ public static class DeployerBootstrapper
             await PromotionApply.EnsureHoldAsync(ssm, holdParameter);
         }
 
+        // THE IMAGE INPUTS (P3 J1), BEFORE THE FUNCTIONS THAT WRITE THEM: one per service the trigger rolls, where the pipeline signs
+        // the images, created from what the service runs where none exists, and never overwritten - an existing input is the one the
+        // service's writers keep, and resetting it here could undo a deploy.
+        if (config.Pipeline?.EnforceSignatures == true && plan.Trigger is { } seeded)
+        {
+            using var ssm = creds != null
+                ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(creds, endpoint)
+                : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
+            using var ecs = creds != null ? new Amazon.ECS.AmazonECSClient(creds, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
+            var inputs = new SsmImageInputs(ssm);
+            foreach (var target in seeded.Routes.SelectMany(r => r.Targets).Select(t => t.Target))
+            {
+                var name = ImageInputFormat.NameFor(config.SystemKey, config.Environment, target.Service);
+                if (await inputs.ReadAsync(name) is { } existing)
+                {
+                    Console.WriteLine($"  image input {name} exists: {existing.Repository}@{existing.Digest} ({existing.Writer}); left as it is.");
+                    continue;
+                }
+                var running = await ImageInputEcs.FromServiceAsync(ecs, target.Cluster, target.Service, target.Container,
+                    "bootstrapdeployer (seeded from the running revision)", DateTimeOffset.UtcNow, CancellationToken.None);
+                if (running is null)
+                {
+                    Console.WriteLine($"  image input {name}: {target.Service} is not running yet; the first deploy's Prepare creates it.");
+                    continue;
+                }
+                Console.WriteLine(await inputs.CreateAsync(name, running)
+                    ? $"  image input {name} created: {running.Repository}@{running.Digest}, built {running.BuiltAt ?? "(unknown)"}."
+                    : $"  image input {name} appeared while this ran; left as it is.");
+            }
+        }
+
         foreach (var fn in plan.Functions)
         {
             // THE LOG GROUP BEFORE THE FUNCTION, so its first line lands where retention already applies.

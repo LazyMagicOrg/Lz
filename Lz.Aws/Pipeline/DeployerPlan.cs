@@ -749,6 +749,9 @@ public static class DeployerPlanner
                 .ToArray();
         }
 
+        // THE IMAGE INPUTS (P3 J1), where the pipeline signs the images: Prepare writes a service's input, RecordFailure writes it back.
+        var imageInputs = p.EnforceSignatures;
+
         var functions = new List<DeployerFunction>
         {
             new(verify, DeployerHandlers.Verify, $"{verify}-fn",
@@ -758,8 +761,9 @@ public static class DeployerPlanner
 
             new(prepare, DeployerHandlers.Prepare, $"{prepare}-fn",
                 Combine(Logs(region, acct, prepare), [.. PrepareGrants(region, acct, sk, env),
-                         .. LeaseGrants(region, acct, sk, "ClaimAndReleaseTheServiceLease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem")]),
-                new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry, [DeployerEnvironment.LeaseTable] = sk },
+                         .. LeaseGrants(region, acct, sk, "ClaimAndReleaseTheServiceLease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"),
+                         .. ImageInputGrants(region, acct, sk, env, imageInputs)]),
+                WithImageInput(new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry, [DeployerEnvironment.LeaseTable] = sk }, sk, env, imageInputs),
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(rollout, DeployerHandlers.VerifyRollout, $"{rollout}-fn",
@@ -775,8 +779,9 @@ public static class DeployerPlanner
 
             new(failure, DeployerHandlers.RecordFailure, $"{failure}-fn",
                 Combine(Logs(region, acct, failure), [.. FailureGrants(evidence),
-                         .. LeaseGrants(region, acct, sk, "ReleaseTheServiceLease", "dynamodb:GetItem", "dynamodb:UpdateItem")]),
-                new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence, [DeployerEnvironment.LeaseTable] = sk },
+                         .. LeaseGrants(region, acct, sk, "ReleaseTheServiceLease", "dynamodb:GetItem", "dynamodb:UpdateItem"),
+                         .. ImageInputWriteBackGrants(region, acct, sk, env, imageInputs)]),
+                WithImageInput(new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence, [DeployerEnvironment.LeaseTable] = sk }, sk, env, imageInputs),
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(hook, DeployerHandlers.SignatureHook, $"{hook}-fn",
@@ -2356,6 +2361,36 @@ public static class DeployerPlanner
             Resource = "*",
         },
     };
+
+    /// <summary>The image inputs' prefix in a function's environment, where they are on; the environment as it was otherwise.</summary>
+    private static Dictionary<string, string> WithImageInput(Dictionary<string, string> environment, string sk, string env, bool on)
+    {
+        if (on) environment[DeployerEnvironment.ImageInputPrefix] = ImageInputFormat.PrefixFor(sk, env);
+        return environment;
+    }
+
+    /// <summary>Prepare's grant on the image inputs (P3 J1): read and write them, and nothing else in SSM.</summary>
+    private static object[] ImageInputGrants(string region, string accountId, string sk, string env, bool on) => on
+        ? new object[]
+        {
+            new
+            {
+                Sid = "ReadAndWriteTheImageInputs",
+                Effect = "Allow",
+                Action = new[] { "ssm:GetParameter", "ssm:PutParameter" },
+                Resource = $"arn:aws:ssm:{region}:{accountId}:parameter{ImageInputFormat.PrefixFor(sk, env)}*",
+            },
+        }
+        : Array.Empty<object>();
+
+    /// <summary>RecordFailure's (P3 J1): the inputs, and the reads that say what the service runs now, to write it back.</summary>
+    private static object[] ImageInputWriteBackGrants(string region, string accountId, string sk, string env, bool on) => on
+        ? ImageInputGrants(region, accountId, sk, env, on).Concat(new object[]
+        {
+            new { Sid = "ReadWhatTheServiceRuns", Effect = "Allow", Action = new[] { "ecs:DescribeServices" }, Resource = ServiceArns(region, accountId, sk, env) },
+            new { Sid = "ReadItsRevision", Effect = "Allow", Action = new[] { "ecs:DescribeTaskDefinition" }, Resource = "*" },
+        }).ToArray()
+        : Array.Empty<object>();
 
     private static object[] PrepareGrants(string region, string accountId, string sk, string env) => new object[]
     {

@@ -1446,6 +1446,26 @@ public class SystemDeployment
                 continue;
             }
 
+            // THE IMAGE INPUT MUST AGREE (P3 J1), where the pipeline signs this service's images: what the deployer, updatecontainer
+            // and a write-back keep in step with what runs. A missing or disagreeing input is refused before anything is planned.
+            if (service.State == ServiceImageState.DigestPinned && Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(_config, svc.Name) is not null)
+            {
+                var inputName = Lz.Aws.Pipeline.ImageInputFormat.NameFor(_config.SystemKey, _config.Environment, ecsService);
+                var credentials = AwsCredentialsFactory.ResolveOrThrow(profile);
+                using var ssm = credentials != null
+                    ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(credentials, Amazon.RegionEndpoint.GetBySystemName(region))
+                    : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(Amazon.RegionEndpoint.GetBySystemName(region));
+                var input = await new Lz.Aws.Pipeline.SsmImageInputs(ssm).ReadAsync(inputName);
+                if (Lz.Aws.Pipeline.ImageInputEcs.WhyNotProceed(inputName, input, digest) is { } why)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"  {svc.Name}: {why}");
+                    Console.ResetColor();
+                    throw new TenantDeployRefusedException(why);
+                }
+                Console.WriteLine($"  {svc.Name}: its image input {inputName} names what it runs ({input!.Writer}, {input.WrittenAt}).");
+            }
+
             tenantConfig.ResolvedImageDigests[svc.Name] = digest;
             if (service.Repository is { } pipelineRepository)
                 tenantConfig.ResolvedImageRepositories[svc.Name] = pipelineRepository;
