@@ -121,7 +121,7 @@ public static class VerifyStep
 {
     public static async Task<JsonObject> RunAsync(
         JsonObject state, VerifySettings settings, IRecordStore records, IRegistryImages registry, IServices services,
-        ITaskDefinitions definitions, IArtifactObjects artifacts)
+        ITaskDefinitions definitions, IArtifactObjects artifacts, IToolingRecords? tooling = null)
     {
         // The record's location only: what the target must name depends on the class, which the record says.
         var location = DeployerInput.RecordFrom(state);
@@ -174,6 +174,11 @@ public static class VerifyStep
 
             case BuildRecordFormat.SiteClass:
                 return await SiteAsync(state, settings, artifacts, record, stored, refusals);
+
+            // THE INFRASTRUCTURE BRANCH, plan only (P3 D): planned where Pipeline.Infrastructure is plan, which is what hands
+            // Verify the tooling records; without them the class is refused by name.
+            case "config":
+                return await InfraPlanSteps.VerifyConfigAsync(settings, artifacts, tooling, record, stored, refusals);
 
             default:
                 refusals.Add(new VerifyRefusal("class",
@@ -354,7 +359,7 @@ public static class VerifyStep
     private static string ShortCommit(BuildRecord record)
         => record.BuiltFrom.Commit.Length > 12 ? record.BuiltFrom.Commit[..12] : record.BuiltFrom.Commit;
 
-    private static JsonObject BuiltFrom(BuildRecord record)
+    internal static JsonObject BuiltFrom(BuildRecord record)
     {
         var builtFrom = new JsonObject
         {

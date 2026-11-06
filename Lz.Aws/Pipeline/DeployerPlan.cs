@@ -256,6 +256,9 @@ public static class DeployerHandlers
     public static readonly string VerifyBundle = For("VerifyBundleFunction");
     public static readonly string DeploySite = For("DeploySiteFunction");
     public static readonly string VerifySite = For("VerifySiteFunction");
+    // The infrastructure branch, plan only (P3 D), planned only where Pipeline.Infrastructure is plan.
+    public static readonly string VerifyTooling = For("VerifyToolingFunction");
+    public static readonly string ReadPlan = For("ReadPlanFunction");
     // Gate 2 (V-E), planned only under Pipeline.Gate2.
     public static readonly string Gate2Start = For("Gate2StartFunction");
     public static readonly string Gate2Result = For("Gate2ResultFunction");
@@ -275,6 +278,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployNotify, DeployBundle, VerifyBundle, DeploySite, VerifySite,
+        VerifyTooling, ReadPlan,
         Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart, MarkPassed,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };

@@ -414,6 +414,18 @@ public static class ConfigValidator
                 "both ids are needed. Set both, or Alerts: false.");
         }
 
+        // THE INFRASTRUCTURE BRANCH (P3 D) verifies a config record and runs the tooling image: both classes must be accepted.
+        if (p.Infrastructure is not (null or PipelineConfig.InfrastructureOff or PipelineConfig.InfrastructurePlan))
+        {
+            errors.Add($"Pipeline.Infrastructure is '{p.Infrastructure}'; it is off or plan.");
+        }
+        if (p.InfrastructurePlans && (p.Classes?.Contains("config") != true || p.Classes?.Contains("tooling") != true))
+        {
+            errors.Add(
+                "Pipeline.Infrastructure is plan but Pipeline.Classes does not list both config and tooling. The branch verifies a " +
+                "config record and runs the tooling image that carries the lz it pins; add both, or Infrastructure: off.");
+        }
+
         // GATE 2 READS WHAT THE TRIGGER ROLLS, AND ALERTS AN ADVISORY CHANGE (V-E): both must be on.
         if (p.Gate2 is not (null or PipelineConfig.Gate2Off or PipelineConfig.Gate2Provisioned or PipelineConfig.Gate2On))
         {

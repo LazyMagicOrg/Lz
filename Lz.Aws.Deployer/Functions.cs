@@ -27,7 +27,12 @@ public sealed class VerifyFunction
             new EcrImages(Clients.Ecr.Value),
             new EcsServices(Clients.Ecs.Value),
             new EcsTaskDefinitions(Clients.Ecs.Value),
-            new S3ArtifactObjects(Clients.S3.Value));
+            new S3ArtifactObjects(Clients.S3.Value),
+            // THE INFRASTRUCTURE BRANCH (P3 D): the tooling records, where the planner wrote their prefix; absent, a config
+            // record is refused by name.
+            Environment.GetEnvironmentVariable(DeployerEnvironment.ToolingRecords) is { Length: > 0 } toolingPrefix
+                ? new S3ToolingRecords(Clients.S3.Value, settings.BuildRecordStore, toolingPrefix)
+                : null);
 
         // A PROMOTED ENVIRONMENT (P5 stage F) admits a set by its predecessor's marker, then verifies each member here.
         if (Environment.GetEnvironmentVariable(DeployerEnvironment.Predecessor) is { Length: > 0 } predecessor)
@@ -51,9 +56,12 @@ public sealed class VerifyFunction
 
         var result = await Verify(state);
 
-        context.Logger.LogInformation(result["class"]?.GetValue<string>() == "client"
-            ? $"{executionName}: verified bundle {result["identity"]?["key"]} version {result["identity"]?["versionId"]} for {result["target"]?["bucket"]}"
-            : $"{executionName}: verified {result["digest"]}; scan {result["scan"]?["verdict"]}");
+        context.Logger.LogInformation(result["class"]?.GetValue<string>() switch
+        {
+            "client" => $"{executionName}: verified bundle {result["identity"]?["key"]} version {result["identity"]?["versionId"]} for {result["target"]?["bucket"]}",
+            "config" => $"{executionName}: verified config bundle {result["identity"]?["key"]} version {result["identity"]?["versionId"]}; tooling {result["tooling"]?["digest"]}",
+            _ => $"{executionName}: verified {result["digest"]}; scan {result["scan"]?["verdict"]}",
+        });
         return Io.Write(result);
     }
 }
@@ -355,6 +363,40 @@ public sealed class DeployNotifyFunction
             new SnsAlerts(Clients.Sns.Value));
 
         context.Logger.LogInformation($"{result["execution"]} {result["status"]}: sent \"{result["subject"]}\"");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>VerifyTooling (DecoupledCd.md P3 D, P-11): the tooling digest by Notation, then the Plan task's revision pinning it.</summary>
+[System.Runtime.Versioning.SupportedOSPlatform("linux")]
+public sealed class VerifyToolingFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var packageRoot = Environment.GetEnvironmentVariable("LAMBDA_TASK_ROOT") ?? AppContext.BaseDirectory;
+        var reads = new HookReads(Clients.Ecs.Value, Clients.Ecr.Value);
+
+        var result = await InfraPlanSteps.VerifyToolingAsync(
+            state, executionName, ToolingSettings.Read(Environment.GetEnvironmentVariable), reads.RegistryCredentialsAsync,
+            new NotationCli(packageRoot), NotationLayout.Under("/tmp/lz-notation"), new EcsTaskDefinitions(Clients.Ecs.Value));
+
+        context.Logger.LogInformation($"{executionName}: {result["reference"]} {result["verified"]}; plan task {result["taskDefinitionArn"]}");
+        return Io.Write(result);
+    }
+}
+
+/// <summary>ReadPlan (DecoupledCd.md P3 D): the plan the Plan task wrote under plans/, read back, decides.</summary>
+public sealed class ReadPlanFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, state) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var evidence = DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore);
+
+        var result = await InfraPlanSteps.ReadPlanAsync(state, executionName, evidence, new S3RecordStore(Clients.S3.Value));
+
+        context.Logger.LogInformation($"{executionName}: {result["verdict"]}, {result["key"]} version {result["versionId"]}, changes {result["hasChanges"]}");
         return Io.Write(result);
     }
 }

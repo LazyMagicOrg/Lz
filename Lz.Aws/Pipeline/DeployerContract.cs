@@ -318,6 +318,8 @@ public static class DeployerEnvironment
     public const string ClientTargets = "LZ_CLIENT_TARGETS";
     // The site (DecoupledCd.md V-24): the environment's one site target, read by Verify.
     public const string SiteTargets = "LZ_SITE_TARGETS";
+    // The infrastructure branch, plan only (P3 D): the tooling records' prefix in the build-record store, read by Verify.
+    public const string ToolingRecords = "LZ_TOOLING_RECORDS";
     // The repositories whose records Verify requires to be the intake's (DecoupledCd.md §4.4 step 1b, V-D).
     public const string VerifyLiveRepositories = "LZ_VERIFY_LIVE_REPOSITORIES";
     // Gate 2 (DecoupledCd.md §15.5, V-E): what the environment runs, its one-at-a-time lease, and where the build uploads.
