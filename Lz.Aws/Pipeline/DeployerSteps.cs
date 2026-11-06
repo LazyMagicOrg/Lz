@@ -404,7 +404,8 @@ public static class PrepareStep
     /// registered, still under the lease, naming the digest, its repository and the record's build time.</param>
     public static async Task<JsonObject> RunAsync(
         JsonObject state, string executionName, string registry, IServices services, ITaskDefinitions definitions,
-        Lz.Aws.Ops.IServiceLeaseStore leases, DateTimeOffset now, IImageInputs? inputs = null, string? inputPrefix = null)
+        Lz.Aws.Ops.IServiceLeaseStore leases, DateTimeOffset now, IImageInputs? inputs = null, string? inputPrefix = null,
+        bool registers = true)
     {
         var target = DeployerInput.From(state).Target;
         var holder = LeaseHolder(executionName);
@@ -418,7 +419,7 @@ public static class PrepareStep
 
         try
         {
-            var prepared = await PrepareAsync(state, target, registry, services, definitions);
+            var prepared = await PrepareAsync(state, target, registry, services, definitions, registers);
             prepared["lease"] = new JsonObject { ["holder"] = holder, ["expiresAt"] = lease.ExpiresAt.ToString("O") };
             if (inputs is not null && inputPrefix is not null)
             {
@@ -438,8 +439,10 @@ public static class PrepareStep
         }
     }
 
+    /// <param name="registers">False under <c>Pipeline.ImageDeploy: pulumi</c> (P3 J3): the Deploy task's targeted Pulumi update
+    /// registers the revision, so Prepare only judges, holds the lease and writes the input.</param>
     private static async Task<JsonObject> PrepareAsync(
-        JsonObject state, DeployTarget target, string registry, IServices services, ITaskDefinitions definitions)
+        JsonObject state, DeployTarget target, string registry, IServices services, ITaskDefinitions definitions, bool registers = true)
     {
 
         // The digest Verify established — never one from the input, which names only where to deploy.
@@ -471,6 +474,16 @@ public static class PrepareStep
         var container = Lz.Aws.Ops.TaskDefinitionRevision.SingleContainerNamed(definition, target.Container);
         var previousImage = container.Image;
         container.Image = image;
+
+        if (!registers)
+            return new JsonObject
+            {
+                ["image"] = image,
+                ["previousTaskDefinitionArn"] = service.TaskDefinitionArn,
+                ["previousImage"] = previousImage,
+                ["ordering"] = ordering,
+                ["throughPulumi"] = true,
+            };
 
         var registered = await definitions.RegisterAsync(
             Lz.Aws.Ops.TaskDefinitionRevision.RegisterRequestFor(definition, DeployOrdering.TagsFor(tags, builtAt)));
@@ -573,8 +586,9 @@ public static class VerifyRolloutStep
         var cls = Text(verified, "class");
         var repo = (verified["builtFrom"] as JsonObject) is { } bf ? Text(bf, "repo") : null;
         var taskDefinition = Text(deploy, "taskDefinitionArn");
+        var throughPulumi = deploy["throughPulumi"]?.GetValue<bool>() == true;
 
-        if (digest is null || cls is null || repo is null || taskDefinition is null)
+        if (digest is null || cls is null || repo is null || (taskDefinition is null && !throughPulumi))
             throw new DeployRefused("state",
                 "the state is missing verified.digest, verified.class, verified.builtFrom.repo or " +
                 "deploy.taskDefinitionArn.");
@@ -582,6 +596,10 @@ public static class VerifyRolloutStep
         var service = await services.DescribeAsync(input.Target.Cluster, input.Target.Service)
             ?? throw new RolloutNotDeployed(
                 $"the service '{input.Target.Service}' is no longer ACTIVE, so nothing this execution deployed is running.");
+
+        // THROUGH PULUMI (P3 J3) the Deploy task's targeted update registered the revision, so it is read off the service: the one
+        // it is set to now. The digests below still decide whether it is this execution's image.
+        taskDefinition ??= service.TaskDefinitionArn;
 
         var (rolloutState, problem) = DeploymentStateOf(service.Deployments, taskDefinition);
         if (problem != null)

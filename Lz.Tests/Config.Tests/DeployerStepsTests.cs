@@ -1250,4 +1250,49 @@ public class DeployerStepsTests
         Assert.StartsWith("NOT written back", result["input"]!.GetValue<string>());
         Assert.NotNull(result["lease"]);
     }
+
+    // ---------------------------------------------------------------------------------------
+    //  The image through Pulumi (P3 J3): Prepare registers nothing, VerifyRollout reads the service's revision
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Prepare_ThroughPulumi_JudgesHoldsAndWritesTheInput_AndRegistersNothing()
+    {
+        var inputs = new Inputs();
+        var definitions = new Definitions(CurrentDefinition());
+        var result = await PrepareStep.RunAsync(PrepareState(), LeaseExecution, RegistryHost, new Services(Service()), definitions,
+            new InMemoryServiceLeaseStore(), LeaseNow, inputs, InputPrefix, registers: false);
+
+        Assert.Empty(definitions.Registered);
+        Assert.True(result["throughPulumi"]!.GetValue<bool>());
+        Assert.Null(result["taskDefinitionArn"]);
+        Assert.Equal(Digest, inputs.Values["/scu/dev/pipeline/image/scu-mp-aiphost"].Digest);
+        Assert.NotNull(result["lease"]);
+
+        // The older-build check still refuses, before anything is written.
+        var refused = new Inputs();
+        await Assert.ThrowsAsync<DeploySuperseded>(() => PrepareStep.RunAsync(PrepareState("2026-01-01T00:00:00Z"), LeaseExecution, RegistryHost,
+            new Services(Service()), new Definitions(CurrentDefinition(), runningBuiltAt: BuiltAt), new InMemoryServiceLeaseStore(), LeaseNow, refused, InputPrefix, registers: false));
+        Assert.Empty(refused.Values);
+    }
+
+    [Fact]
+    public async Task VerifyRollout_ThroughPulumi_ReadsTheRevisionOffTheService_AndStillRequiresTheDigestOnEveryTask()
+    {
+        var state = RolloutState();
+        state["deploy"] = new JsonObject { ["image"] = $"r/{Repository}@{Digest}", ["throughPulumi"] = true };
+
+        var landed = await VerifyRolloutStep.RunAsync(state, "req-abc-1",
+            new Services(Rolling("COMPLETED"), new[] { Running(Digest), Running(Digest) }), DateTimeOffset.Parse("2026-11-06T21:00:00Z"));
+        Assert.Equal("Landed", landed["verdict"]!.GetValue<string>());
+
+        await Assert.ThrowsAsync<RolloutNotDeployed>(() => VerifyRolloutStep.RunAsync(state, "req-abc-1",
+            new Services(Rolling("COMPLETED"), new[] { Running(OldDigest) }), DateTimeOffset.Parse("2026-11-06T21:00:00Z")));
+
+        // WITHOUT THE SWITCH a missing revision is still refused, as before J3.
+        var ecs = RolloutState();
+        ecs["deploy"] = new JsonObject { ["image"] = $"r/{Repository}@{Digest}" };
+        await Assert.ThrowsAsync<DeployRefused>(() => VerifyRolloutStep.RunAsync(ecs, "req-abc-1",
+            new Services(Rolling("COMPLETED"), new[] { Running(Digest) }), DateTimeOffset.Parse("2026-11-06T21:00:00Z")));
+    }
 }

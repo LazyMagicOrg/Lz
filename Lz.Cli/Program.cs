@@ -178,6 +178,7 @@ class Program
         RegisterPreviewCommands(rootCommand, plugin, systemKeyOption, envOption);
         RegisterInfraPlanCommand(rootCommand, plugin, envOption);
         RegisterInfraDeployCommand(rootCommand, plugin, envOption);
+        RegisterUpdateImageCommand(rootCommand, plugin, envOption);
         RegisterDestroySubtenantCommand(rootCommand, plugin, systemKeyOption, envOption);
         RegisterDestroySharedCommand(rootCommand);
         RegisterDestroyFoundationCommand(rootCommand, plugin, systemKeyOption, envOption);
@@ -796,6 +797,79 @@ class Program
                     Console.Error.WriteLine($"infradeploy: the result could not be written: {ex.Message}");
                     Environment.ExitCode = 1;
                 }
+            }
+        });
+        root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // updateimage (DecoupledCd.md P3 J, stage J3)
+    //
+    // What the deployer's Deploy state runs in the tooling image, as an ECS task on the targeted-update role, for an IMAGE
+    // record: the config bundle LAST DEPLOYED in the environment (ChooseConfig names it), fetched and checked like infraplan's,
+    // then SystemDeployment.UpdateImageAsync - the service's input, the tenant program declaring it, `up --target` its task
+    // definition and service, the rollout wait - under the lease the execution's Prepare took, claimed re-entrantly and left
+    // held for Record. Exits 0 when the image landed, 1 otherwise (the input then written back).
+    // ---------------------------------------------------------------
+    private static void RegisterUpdateImageCommand(RootCommand root, ILzPlugin? plugin, Option<string?> envOption)
+    {
+        var cmd = new Command("updateimage",
+            "Move one service's image through a targeted Pulumi update, from a recorded config bundle (the deployer runs it).");
+        var service = new Option<string>("--service", "The ECS service, {sk}-{tenant}-{container}.") { IsRequired = true };
+        var digest = new Option<string>("--digest", "The verified image digest.") { IsRequired = true };
+        var repository = new Option<string>("--repository", "The repository the digest is deployed from.") { IsRequired = true };
+        var builtAt = new Option<string?>("--built-at", "The record's build time.");
+        var holder = new Option<string>("--lease-holder", "The deployer's lease holder, deployer:{execution}.") { IsRequired = true };
+        var bundleBucket = new Option<string>("--bundle-bucket", "The artifact store holding the config bundle.") { IsRequired = true };
+        var bundleKey = new Option<string>("--bundle-key", "The config bundle's key.") { IsRequired = true };
+        var bundleVersion = new Option<string?>("--bundle-version", "The config bundle's S3 version.");
+        var bundleSha = new Option<string>("--bundle-sha256", "The SHA-256 its record carries.") { IsRequired = true };
+        cmd.AddOption(envOption);
+        foreach (var o in new Option[] { service, digest, repository, builtAt, holder, bundleBucket, bundleKey, bundleVersion, bundleSha }) cmd.AddOption(o);
+
+        cmd.SetHandler(async ctx =>
+        {
+            var r = ctx.ParseResult;
+            try
+            {
+                RequirePlugin(plugin, "updateimage");
+                var env = r.GetValueForOption(envOption);
+                if (string.IsNullOrWhiteSpace(env)) throw new InvalidOperationException("--env is required: the task names the environment it deploys");
+                var leaseHolder = r.GetValueForOption(holder)!;
+                if (!leaseHolder.StartsWith("deployer:", StringComparison.Ordinal))
+                    throw new InvalidOperationException($"--lease-holder '{leaseHolder}' is not a deployer execution's; updateimage runs inside the deployer");
+
+                var region = Environment.GetEnvironmentVariable("AWS_REGION") ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION");
+                using (var s3 = region is null ? new Amazon.S3.AmazonS3Client() : new Amazon.S3.AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region)))
+                {
+                    var zip = Path.Combine(Path.GetTempPath(), $"config-{Guid.NewGuid():N}.zip");
+                    await InfraPlan.FetchAsync(s3, r.GetValueForOption(bundleBucket)!, r.GetValueForOption(bundleKey)!, r.GetValueForOption(bundleVersion), zip, Cts.Token);
+                    var files = InfraPlan.ExtractVerified(zip, r.GetValueForOption(bundleSha)!, Directory.GetCurrentDirectory());
+                    File.Delete(zip);
+                    Console.WriteLine($"  {files} file(s) of the last deployed config bundle into {Directory.GetCurrentDirectory()}, SHA-256 checked.");
+                }
+
+                // THE TENANT THAT OWNS THE SERVICE: {sk}-{tenant}-{container}, exactly one.
+                var ecsService = r.GetValueForOption(service)!;
+                var config = ConfigResolver.ResolveSystemConfigs(ConfigResolver.ResolveEnvironment(env), null).Single();
+                var matches = ConfigResolver.ResolveTenantConfigs(config.SystemKey, config.Environment, null)
+                    .Where(t => ecsService.StartsWith($"{config.SystemKey}-{t.TenantKey}-", StringComparison.Ordinal)).ToList();
+                if (matches.Count != 1) throw new InvalidOperationException($"{matches.Count} tenants own {ecsService}; updateimage needs exactly one");
+                var (tk, tenantConfig) = matches[0];
+                var container = ecsService[$"{config.SystemKey}-{tk}-".Length..];
+
+                ValidateTenantConfig(config, tk, tenantConfig);
+                tenantConfig.CentralAuthDomain = config.CentralAuthDomain;
+                var (system, factory) = PrepareSystem(plugin!, config);
+                var deployment = new SystemDeployment(factory, system, config, Cts.Token);
+                await deployment.UpdateImageAsync(tk, tenantConfig, container, r.GetValueForOption(digest)!, r.GetValueForOption(repository)!,
+                    leaseHolder, r.GetValueForOption(builtAt), deployerHolder: leaseHolder);
+                Console.WriteLine($"updateimage: {ecsService} runs {r.GetValueForOption(digest)} through Pulumi.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"updateimage: {ex.Message}");
+                Environment.ExitCode = 1;
             }
         });
         root.AddCommand(cmd);

@@ -235,6 +235,10 @@ public static class DeployerBootstrapper
             if (plan.InfrastructureDeploy is { } infraDeploy)
                 await InfraPlanApply.EnsureDeployRoleAsync(iam, infraDeploy,
                     InfraDeployPlanner.PipelineDeny(plan, region, accountId, config.SystemKey, config.Environment));
+
+            // THE TARGETED-UPDATE ROLE (P3 J3), where the image deploys through Pulumi.
+            if (plan.ImageDeploy is { } imageDeploy)
+                await InfraPlanApply.EnsureImageRoleAsync(iam, imageDeploy, plan.DenyPolicy);
         }
 
         var roleArn = await EnsureRoleAsync(iam, plan.RoleName, plan.StateMachineTrustPolicy,

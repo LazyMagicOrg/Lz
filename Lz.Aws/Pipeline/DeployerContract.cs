@@ -310,6 +310,12 @@ public static class DeployerEnvironment
 
     /// <summary>Where the services' image inputs live (P3 J1); unset where the pipeline does not sign the images, and nothing is written.</summary>
     public const string ImageInputPrefix = "LZ_IMAGE_INPUT_PREFIX";
+
+    /// <summary>Set to <c>pulumi</c> on Prepare where the image deploys through Pulumi (P3 J3): it then registers nothing.</summary>
+    public const string ImageDeploy = "LZ_IMAGE_DEPLOY";
+
+    /// <summary>ChooseConfig's prefix of the config deploys recorded here (P3 J3).</summary>
+    public const string ConfigDeploysPrefix = "LZ_CONFIG_DEPLOYS_PREFIX";
     public const string PromotionTarget = "LZ_PROMOTION_TARGET";
     // MarkPassed (P5 stage D): the members a set may name, and the environment its markers are written for.
     public const string MarkMembers = "LZ_MARK_MEMBERS";

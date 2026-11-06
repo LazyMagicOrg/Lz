@@ -369,7 +369,13 @@ public class SystemDeployment
     /// for the rollout. Whatever fails, the input is written back to what the service runs before the lease goes, and the failure
     /// is thrown. Pulumi's state then names the revision that runs.
     /// </summary>
-    public async Task UpdateImageAsync(string tenantKey, TenantConfig tenantConfig, string serviceName, string digest, string repository, string writer)
+    /// <param name="builtAt">The build's time where the writer knows it (the deployer, from the record); the input and the revision
+    /// carry it. Null from updatecontainer, which does not.</param>
+    /// <param name="deployerHolder">Inside the deployer (P3 J3): the execution's lease holder, <c>deployer:{execution}</c>. Its
+    /// Prepare took the service's lease; this claims it RE-ENTRANTLY - any other holder is refused - and leaves it held for Record or
+    /// RecordFailure to release. Null outside the deployer, where every tenant service's lease is claimed and released here.</param>
+    public async Task UpdateImageAsync(string tenantKey, TenantConfig tenantConfig, string serviceName, string digest, string repository, string writer,
+        string? builtAt = null, string? deployerHolder = null)
     {
         var stackName = $"{_config.SystemKey}-{tenantKey}-{_config.Environment}";
         var ecsService = $"{_config.SystemKey}-{tenantKey}-{serviceName}";
@@ -385,11 +391,13 @@ public class SystemDeployment
         var name = Lz.Aws.Pipeline.ImageInputFormat.NameFor(_config.SystemKey, _config.Environment, ecsService);
 
         Console.WriteLine($"=== Image update through Pulumi: {ecsService} -> {repository}@{digest} (stack {stackName}) ===");
-        var leases = await ClaimTenantServiceLeasesAsync(tenantKey, tenantConfig);
+        var leases = deployerHolder is null
+            ? await ClaimTenantServiceLeasesAsync(tenantKey, tenantConfig)
+            : await ClaimDeployersLeaseAsync(tenantConfig, ecsService, deployerHolder);
         try
         {
             var marks = await ReadRolloutMarksAsync(leases, tenantConfig);
-            await inputs.WriteAsync(name, new Lz.Aws.Pipeline.ImageInput(digest, repository, null, writer, DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")));
+            await inputs.WriteAsync(name, new Lz.Aws.Pipeline.ImageInput(digest, repository, builtAt, writer, DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")));
             Console.WriteLine($"  input {name} written.");
             _imageTarget = new ImageTarget(ecsService, digest, repository, writer);
             try
@@ -416,8 +424,26 @@ public class SystemDeployment
         }
         finally
         {
-            await ReleaseTenantServiceLeasesAsync(leases);
+            // THE DEPLOYER'S LEASE STAYS HELD: its Record or RecordFailure releases it, after VerifyRollout.
+            if (deployerHolder is null) await ReleaseTenantServiceLeasesAsync(leases);
         }
+    }
+
+    /// <summary>The deployer's own lease on the one service, claimed re-entrantly; refused where another writer holds it.</summary>
+    private async Task<TenantServiceLeases> ClaimDeployersLeaseAsync(TenantConfig tenantConfig, string ecsService, string holder)
+    {
+        var profile = tenantConfig.Profile ?? _config.Profile;
+        var region = tenantConfig.Region ?? _config.Region;
+        var cluster = await new AwsContainerUpdater(profile, region).ResolveClusterAsync(
+            new[] { $"{_config.SystemKey}-{_config.Environment}-cluster", $"{_config.SystemKey}-cluster" }, _ct)
+            ?? throw new InvalidOperationException($"no cluster holds {ecsService}.");
+        var store = await DynamoDbServiceLeaseStore.OpenAsync(profile, region, _config.SystemKey, _ct)
+            ?? throw new InvalidOperationException($"no system table '{_config.SystemKey}', so the deployer's lease cannot be read.");
+        var claim = await ServiceLease.ClaimReentrantAsync(store, cluster, ecsService, holder, "the deployer's image roll", DateTimeOffset.UtcNow);
+        if (claim is ServiceLeaseClaim.Held held)
+            throw new ServiceLeaseHeldException($"{ecsService} is held by another writer: {ServiceLease.Describe(held.By)}. Nothing has been changed.");
+        Console.WriteLine($"Holding the deployer's lease on {ecsService} as {holder}.");
+        return new TenantServiceLeases(store, cluster, new[] { (ecsService, ((ServiceLeaseClaim.Claimed)claim).Lease) });
     }
 
     /// <summary>The tenant up of a targeted image update: refresh, plan check, then <c>up --target</c> the service's two resources.</summary>

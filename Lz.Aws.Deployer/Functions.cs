@@ -153,7 +153,8 @@ public sealed class PrepareFunction
             Clients.Leases(),
             DateTimeOffset.UtcNow,
             new SsmImageInputs(Clients.Ssm.Value),
-            Environment.GetEnvironmentVariable(DeployerEnvironment.ImageInputPrefix) is { Length: > 0 } prefix ? prefix : null);
+            Environment.GetEnvironmentVariable(DeployerEnvironment.ImageInputPrefix) is { Length: > 0 } prefix ? prefix : null,
+            registers: Environment.GetEnvironmentVariable(DeployerEnvironment.ImageDeploy) != "pulumi");
 
         context.Logger.LogInformation($"{executionName}: registered {result["taskDefinitionArn"]} pinning {result["image"]}, holding the service's lease; input {result["input"]?.GetValue<string>() ?? "not written (none configured)"}");
         return Io.Write(result);
@@ -402,6 +403,20 @@ public sealed class ReadPlanFunction
         var result = await InfraPlanSteps.ReadPlanAsync(state, executionName, evidence, new S3RecordStore(Clients.S3.Value));
 
         context.Logger.LogInformation($"{executionName}: {result["verdict"]}, {result["key"]} version {result["versionId"]}, changes {result["hasChanges"]}");
+        return Io.Write(result);
+    }
+}
+
+public sealed class ChooseConfigFunction
+{
+    public async Task<Stream> HandleAsync(Stream input, ILambdaContext context)
+    {
+        var (executionName, _) = DeployerInput.Unwrap(await Io.ReadAsync(input));
+        var result = await ChooseConfigStep.RunAsync(
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.EvidenceStore),
+            DeployerEnvironment.Required(Environment.GetEnvironmentVariable, DeployerEnvironment.ConfigDeploysPrefix),
+            new S3RecordKeys(Clients.S3.Value), new S3RecordStore(Clients.S3.Value));
+        context.Logger.LogInformation($"{executionName}: runs with the config last deployed, {result["evidence"]} (tooling {result["tooling"]?["digest"]})");
         return Io.Write(result);
     }
 }

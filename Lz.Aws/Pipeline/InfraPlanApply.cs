@@ -68,6 +68,20 @@ public static class InfraPlanApply
         Console.WriteLine($"  role {d.TaskRoleName} (+ {string.Join(", ", d.TaskRoleManagedPolicies)}, and the pipeline Deny)");
     }
 
+    /// <summary>
+    /// THE TARGETED-UPDATE ROLE (P3 J3, §3): the image Deploy task's, trusting ECS tasks alone, with ReadOnlyAccess, its own grant
+    /// (the tenant stacks' state, the revision and service writes, the inputs, the leases) and the deployer's own Deny.
+    /// </summary>
+    public static async Task EnsureImageRoleAsync(IAmazonIdentityManagementService iam, ImageDeployResources d, string denyPolicy)
+    {
+        await DeployerBootstrapper.EnsureRoleAsync(iam, d.TaskRoleName, d.TaskTrustPolicy,
+            "lz decoupled-CD deployer: the targeted-update role. Moves one service's image through a targeted Pulumi update.",
+            ($"{d.TaskRoleName}-deploy", d.TaskRolePolicy), denyPolicy);
+        foreach (var managed in d.TaskRoleManagedPolicies)
+            await iam.AttachRolePolicyAsync(new Amazon.IdentityManagement.Model.AttachRolePolicyRequest { RoleName = d.TaskRoleName, PolicyArn = managed });
+        Console.WriteLine($"  role {d.TaskRoleName} (+ {string.Join(", ", d.TaskRoleManagedPolicies)}, the tenant stacks' state, the deployer's Deny)");
+    }
+
     private static async Task<DeployerInfraInputs> EnsureNetworkAsync(IAmazonEC2 ec2, InfraPlanNetwork n)
     {
         var vpcs = (await ec2.DescribeVpcsAsync(new Ec2.DescribeVpcsRequest { Filters = Tagged(n) })).Vpcs ?? new();

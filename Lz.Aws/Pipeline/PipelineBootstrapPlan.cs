@@ -399,7 +399,9 @@ public static class PipelineBootstrapPlanner
             artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.ConfigBundleReadGrant(artifacts, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
                     InfraPlanPlanner.TaskRoleNameFor(sk, config.Environment), configPrefix,
-                    p.InfrastructureDeploys ? InfraDeployPlanner.TaskRoleNameFor(sk, config.Environment) : null))
+                    p.InfrastructureDeploys ? InfraDeployPlanner.TaskRoleNameFor(sk, config.Environment) : null,
+                    // P3 J3: the targeted-update task runs with the config bundle last deployed.
+                    p.ImageDeploysThroughPulumi ? ImageDeployPlanner.TaskRoleNameFor(sk, config.Environment) : null))
                 .ToList();
         }
 

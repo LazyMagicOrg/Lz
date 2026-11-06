@@ -485,7 +485,7 @@ public static class CrossAccount
     /// applies the same way; null leaves the grant as the read-only slice wrote it.</param>
     public static IReadOnlyList<JsonObject> ConfigBundleReadGrant(
         string artifactStore, string environment, string targetAccountId, string verifyRoleName, string planTaskRoleName, string configPrefix,
-        string? deployTaskRoleName = null)
+        string? deployTaskRoleName = null, string? imageTaskRoleName = null)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         string RoleArn(string role) => $"arn:aws:iam::{targetAccountId}:role/{role}";
@@ -502,9 +502,8 @@ public static class CrossAccount
                 {
                     ["ArnEquals"] = new JsonObject
                     {
-                        ["aws:PrincipalArn"] = deployTaskRoleName is null
-                            ? new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName))
-                            : new JsonArray(RoleArn(verifyRoleName), RoleArn(planTaskRoleName), RoleArn(deployTaskRoleName)),
+                        ["aws:PrincipalArn"] = new JsonArray(new[] { verifyRoleName, planTaskRoleName, deployTaskRoleName, imageTaskRoleName }
+                            .Where(n => n is not null).Select(n => (JsonNode?)JsonValue.Create(RoleArn(n!))).ToArray()),
                     },
                 },
             },

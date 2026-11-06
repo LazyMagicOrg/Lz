@@ -167,6 +167,21 @@ public class PipelineConfig
     /// </summary>
     public string? Infrastructure { get; set; }
 
+    /// <summary>
+    /// HOW THE DEPLOYER MOVES A SERVICE'S IMAGE (DecoupledCd.md §12 P3 J, stage J3). <c>ecs</c> (or absent): Prepare registers a revision
+    /// and the Deploy state calls ECS's UpdateService, outside Pulumi. <c>pulumi</c>: Prepare judges, holds the lease and writes the
+    /// image input; ChooseConfig names the config bundle last deployed here and its tooling image; the Deploy state runs that image as
+    /// an ECS task doing a targeted Pulumi update of the service's task definition and service (<c>lz updateimage</c>). Requires
+    /// <c>Infrastructure</c> plan or deploy (the tooling task's cluster, network and VerifyTooling), <c>EnforceSignatures</c> (the
+    /// image inputs) and <c>DeployOnBuildRecord</c> (the tenants the trigger rolls).
+    /// </summary>
+    public string? ImageDeploy { get; set; }
+
+    public const string ImageDeployEcs = "ecs", ImageDeployPulumi = "pulumi";
+
+    /// <summary>The deployer moves images through Pulumi.</summary>
+    public bool ImageDeploysThroughPulumi => ImageDeploy == ImageDeployPulumi;
+
     public const string InfrastructureOff = "off", InfrastructurePlan = "plan", InfrastructureDeploy = "deploy";
 
     /// <summary>The infrastructure branch is in the machine: plan only, or plan and deploy.</summary>

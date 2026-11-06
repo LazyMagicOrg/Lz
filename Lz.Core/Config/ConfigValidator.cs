@@ -426,6 +426,16 @@ public static class ConfigValidator
                 $"Pipeline.Infrastructure is {p.Infrastructure} but Pipeline.Classes does not list both config and tooling. The branch verifies a " +
                 "config record and runs the tooling image that carries the lz it pins; add both, or Infrastructure: off.");
         }
+        // THE IMAGE THROUGH PULUMI (P3 J3) runs as the tooling task, on the image inputs, for the trigger's tenants.
+        if (p.ImageDeploy is not (null or PipelineConfig.ImageDeployEcs or PipelineConfig.ImageDeployPulumi))
+            errors.Add($"Pipeline.ImageDeploy is '{p.ImageDeploy}'; it is ecs or pulumi.");
+        if (p.ImageDeploysThroughPulumi && (!p.InfrastructurePlans || !p.EnforceSignatures || !p.DeployOnBuildRecord))
+            errors.Add(
+                "Pipeline.ImageDeploy is pulumi, which runs the image deploy as the tooling task (Infrastructure plan or deploy), on the " +
+                "services' image inputs (EnforceSignatures) for the tenants the trigger rolls (DeployOnBuildRecord); turn those on, or ImageDeploy: ecs.");
+        if (p.ImageDeploysThroughPulumi && p.Predecessor is not null)
+            errors.Add("Pipeline.ImageDeploy is pulumi in an environment promoted into; a promoted set's image through Pulumi is not built yet (P3 I).");
+
         // THE BRANCH'S APPROVE IS A PASS-THROUGH (P3 D): where a person must approve, it would deploy unapproved.
         if (p.InfrastructureDeploys && p.Approval?.Required == true)
         {

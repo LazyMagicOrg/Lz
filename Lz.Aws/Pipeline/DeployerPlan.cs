@@ -92,7 +92,8 @@ public sealed record PipelineDeployer(
     string? HoldParameter = null,
     DeployerOutcomesPlan? Outcomes = null,
     InfraPlanResources? Infrastructure = null,
-    InfraDeployResources? InfrastructureDeploy = null);
+    InfraDeployResources? InfrastructureDeploy = null,
+    ImageDeployResources? ImageDeploy = null);
 
 /// <summary>
 /// The outcomes list (the environment's chain entry's <c>Outcomes</c>): a topic, a rule matching every end of this deployer's
@@ -263,6 +264,8 @@ public static class DeployerHandlers
     public static readonly string ReadPlan = For("ReadPlanFunction");
     // The infrastructure branch's deploy half (P3 D): VerifyRollout for a config record.
     public static readonly string ReadApply = For("ReadApplyFunction");
+    // The image branch through Pulumi (P3 J3): the config an image deploy runs with.
+    public static readonly string ChooseConfig = For("ChooseConfigFunction");
     // Gate 2 (V-E), planned only under Pipeline.Gate2.
     public static readonly string Gate2Start = For("Gate2StartFunction");
     public static readonly string Gate2Result = For("Gate2ResultFunction");
@@ -282,7 +285,7 @@ public static class DeployerHandlers
     public static IReadOnlyList<string> All => new[]
     {
         Verify, Prepare, VerifyRollout, Record, RecordFailure, SignatureHook, Start, Corroborate, DeployNotify, DeployBundle, VerifyBundle, DeploySite, VerifySite,
-        VerifyTooling, ReadPlan, ReadApply,
+        VerifyTooling, ReadPlan, ReadApply, ChooseConfig,
         Gate2Start, Gate2Result, Decide, PromotionPoller, SetHold, RecordRevert, RevertStart, MarkPassed,
         IntakePoller, IntakeCheckRun, IntakeFetch, IntakeRecord, IntakeGate1Start, IntakeGate1Verdict, IntakePush, IntakePublish, IntakeSiteCheck,
     };
@@ -705,6 +708,7 @@ public static class DeployerPlanner
         // records and the bundle's HEAD; everything else of the branch is planned below. Without it, nothing of it is planned.
         InfraPlanResources? infra = null;
         InfraDeployResources? infraDeploy = null;
+        ImageDeployResources? imageDeploy = null;
         if (p.InfrastructurePlans)
         {
             if (p.Predecessor is not null)
@@ -713,6 +717,13 @@ public static class DeployerPlanner
             infra = InfraPlanPlanner.Resources(config, region, acct, evidence, artifactStore);
             if (p.InfrastructureDeploys)
                 infraDeploy = InfraDeployPlanner.Resources(sk, env, evidence, artifactStore, BuildRecordFormat.PrefixFor("config", infra.ConfigRepo));
+            if (p.ImageDeploysThroughPulumi)
+            {
+                if (triggerInputs is null)
+                    throw new InvalidOperationException("Pipeline.ImageDeploy is pulumi, and the image deploy task's state grant names each tenant stack: the trigger's tenants are needed.");
+                imageDeploy = ImageDeployPlanner.Resources(config, region, acct, artifactStore, BuildRecordFormat.PrefixFor("config", infra.ConfigRepo),
+                    infra.StateBucket, infra.StateKeyAlias, triggerInputs.TenantKeys);
+            }
             verifyEnvironment[DeployerEnvironment.ArtifactStore] = artifactStore;
             verifyEnvironment[DeployerEnvironment.ToolingRecords] = BuildRecordFormat.PrefixFor("tooling", infra.ToolingRepo);
             verifyGrants = verifyGrants.Concat(InfraPlanPlanner.VerifyGrants(infra, buildRecordStore, artifactStore)).ToArray();
@@ -763,7 +774,7 @@ public static class DeployerPlanner
                 Combine(Logs(region, acct, prepare), [.. PrepareGrants(region, acct, sk, env),
                          .. LeaseGrants(region, acct, sk, "ClaimAndReleaseTheServiceLease", "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"),
                          .. ImageInputGrants(region, acct, sk, env, imageInputs)]),
-                WithImageInput(new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry, [DeployerEnvironment.LeaseTable] = sk }, sk, env, imageInputs),
+                WithImageDeploy(WithImageInput(new Dictionary<string, string> { [DeployerEnvironment.Registry] = registry, [DeployerEnvironment.LeaseTable] = sk }, sk, env, imageInputs), p.ImageDeploysThroughPulumi),
                 TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true),
 
             new(rollout, DeployerHandlers.VerifyRollout, $"{rollout}-fn",
@@ -851,6 +862,7 @@ public static class DeployerPlanner
         }
 
         Func<object, object[], Func<object>, Dictionary<string, object>?>? infraStates = null;
+        Func<object, object[], Func<object>, Dictionary<string, object>>? imageStates = null;
         if (infra is not null)
         {
             var verifyTooling = InfraPlanPlanner.VerifyToolingFunctionName(sk, env);
@@ -881,6 +893,13 @@ public static class DeployerPlanner
                 verifyToolingEnvironment[ToolingSettings.DeployTaskRoleVariable] = InfraDeployPlanner.TaskRoleArn(infraDeploy, acct);
                 verifyToolingGrants = verifyToolingGrants.Concat(InfraDeployPlanner.VerifyToolingGrants(infraDeploy, region, acct)).ToArray();
             }
+            if (imageDeploy is not null)
+            {
+                // THE IMAGE DEPLOY TASK (P3 J3), registered beside the others on the verified tooling digest.
+                verifyToolingEnvironment[ToolingSettings.ImageFamilyVariable] = imageDeploy.Family;
+                verifyToolingEnvironment[ToolingSettings.ImageTaskRoleVariable] = ImageDeployPlanner.TaskRoleArn(imageDeploy, acct);
+                verifyToolingGrants = verifyToolingGrants.Concat(ImageDeployPlanner.VerifyToolingGrants(imageDeploy, region, acct)).ToArray();
+            }
             functions.Add(new(verifyTooling, DeployerHandlers.VerifyTooling, $"{verifyTooling}-fn",
                 Combine(Logs(region, acct, verifyTooling), verifyToolingGrants),
                 verifyToolingEnvironment,
@@ -899,6 +918,16 @@ public static class DeployerPlanner
                     new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence },
                     TimeoutSeconds: 30, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
                 raArn = FnArn(infraDeploy.ReadApplyFunctionName);
+            }
+
+            if (imageDeploy is not null)
+            {
+                functions.Add(new(imageDeploy.ChooseConfigFunctionName, DeployerHandlers.ChooseConfig, $"{imageDeploy.ChooseConfigFunctionName}-fn",
+                    Combine(Logs(region, acct, imageDeploy.ChooseConfigFunctionName), ImageDeployPlanner.ChooseConfigGrants(evidence, imageDeploy)),
+                    new Dictionary<string, string> { [DeployerEnvironment.EvidenceStore] = evidence, [DeployerEnvironment.ConfigDeploysPrefix] = imageDeploy.ConfigDeploysPrefix },
+                    TimeoutSeconds: 60, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: true));
+                var (ccArn, vt, res) = (FnArn(imageDeploy.ChooseConfigFunctionName), FnArn(verifyTooling), infra);
+                imageStates = (payload, catchAll, transient) => ImageDeployPlanner.States(res, env, ccArn, vt, payload, catchAll, transient);
             }
 
             var (vtArn, rpArn, resources, recordArn) = (FnArn(verifyTooling), FnArn(readPlan), infra, FnArn(record));
@@ -1137,7 +1166,8 @@ public static class DeployerPlanner
             RolePolicy: RolePolicyFor(region, acct, sk, env, invoked,
                                       approvalRequired ? p.Approval?.NotifyTopicArn : null, p.Gate2IsOn ? gate2?.ProjectArn : null,
                                       infra is null ? null : InfraPlanPlanner.MachineGrants(infra, region, acct)
-                                          .Concat(infraDeploy is null ? Array.Empty<object>() : InfraDeployPlanner.MachineGrants(infra, infraDeploy, region, acct)).ToArray()),
+                                          .Concat(infraDeploy is null ? Array.Empty<object>() : InfraDeployPlanner.MachineGrants(infra, infraDeploy, region, acct))
+                                          .Concat(imageDeploy is null ? Array.Empty<object>() : ImageDeployPlanner.MachineGrants(infra, imageDeploy, region, acct)).ToArray()),
             DenyPolicy: DenyPolicyFor(SyncManagedRules(p.Gate2IsOn && gate2 is not null ? CodeBuildSyncRuleArn(region, acct) : null,
                                                        infra is null ? null : InfraPlanPlanner.EcsSyncRuleArn(region, acct)),
                                       pinned ? evidence : null),
@@ -1154,7 +1184,7 @@ public static class DeployerPlanner
                                       FnArn(rollout), FnArn(record), FnArn(failure),
                                       p.Approval?.HeartbeatSeconds ?? 86400, p.Approval?.NotifyTopicArn, bundleFunctions, siteFunctions,
                                       gate2 is null || !p.Gate2IsOn ? null : (FnArn(gate2.StartFunctionName), FnArn(gate2.ResultFunctionName), gate2.ProjectName),
-                                      decideFn, setHoldFn, recordRevertFn, markPassedFn, marksSite, infraStates),
+                                      decideFn, setHoldFn, recordRevertFn, markPassedFn, marksSite, infraStates, imageStates),
             ApprovalRequired: approvalRequired,
             Functions: functions,
             HookInvokerRoleName: SignatureHookInvokerRoleName(config),
@@ -1191,7 +1221,8 @@ public static class DeployerPlanner
             HoldParameter: HoldWanted(config) ? HoldParameterName(config) : null,
             Outcomes: outcomes,
             Infrastructure: infra,
-            InfrastructureDeploy: infraDeploy);
+            InfrastructureDeploy: infraDeploy,
+            ImageDeploy: imageDeploy);
     }
 
     /// <summary>
@@ -2266,7 +2297,7 @@ public static class DeployerPlanner
     /// the tenant list, which it does not and should not. The PassedToService condition is the backstop
     /// that keeps these usable only as ECS task roles.</para>
     /// </summary>
-    private static object PassRoleStatement(string accountId, string sk, string sid) => new
+    internal static object PassRoleStatement(string accountId, string sk, string sid) => new
     {
         Sid = sid,
         Effect = "Allow",
@@ -2361,6 +2392,13 @@ public static class DeployerPlanner
             Resource = "*",
         },
     };
+
+    /// <summary>Prepare's switch where the image deploys through Pulumi (P3 J3); the environment as it was otherwise.</summary>
+    private static Dictionary<string, string> WithImageDeploy(Dictionary<string, string> environment, bool throughPulumi)
+    {
+        if (throughPulumi) environment[DeployerEnvironment.ImageDeploy] = PipelineConfig.ImageDeployPulumi;
+        return environment;
+    }
 
     /// <summary>The image inputs' prefix in a function's environment, where they are on; the environment as it was otherwise.</summary>
     private static Dictionary<string, string> WithImageInput(Dictionary<string, string> environment, string sk, string env, bool on)
@@ -2540,7 +2578,7 @@ public static class DeployerPlanner
         new { Sid = "AlertAPerson", Effect = "Allow", Action = new[] { "sns:Publish" }, Resource = topicArn },
     };
 
-    private static object[] LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions)
+    internal static object[] LeaseGrants(string region, string accountId, string sk, string sid, params string[] actions)
         => LeaseItemGrants(region, accountId, sk, sid, Lz.Aws.Ops.ServiceLease.KeyPrefix, actions);
 
     private static object[] LeaseItemGrants(string region, string accountId, string sk, string sid, string keyPrefix, string[] actions) => new object[]
@@ -3385,7 +3423,8 @@ public static class DeployerPlanner
         (string DeploySite, string VerifySite)? siteFunctions = null,
         (string Start, string Result, string Project)? gate2 = null,
         string? decideFn = null, string? setHoldFn = null, string? recordRevertFn = null, string? markPassedFn = null,
-        bool marksSite = false, Func<object, object[], Func<object>, Dictionary<string, object>?>? infraStates = null)
+        bool marksSite = false, Func<object, object[], Func<object>, Dictionary<string, object>?>? infraStates = null,
+        Func<object, object[], Func<object>, Dictionary<string, object>>? imageStates = null)
     {
         // Where a verified (and, in prod, approved) execution goes next: straight to Prepare on the class-1 machine, or to
         // the branch on its class.
@@ -3904,6 +3943,15 @@ public static class DeployerPlanner
         if (decideFn is not null)
             Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite(),
                 site: siteFunctions is not null);
+
+        // THE IMAGE THROUGH PULUMI (P3 J3): Prepare goes on to ChooseConfig, and Deploy is the tooling task, not UpdateService.
+        if (imageStates?.Invoke(payload, catchAll, Transient) is { } imageBranch)
+        {
+            var prepare = JsonSerializer.SerializeToNode(states["Prepare"], Asl)!.AsObject();
+            prepare["Next"] = "ChooseConfig";
+            states["Prepare"] = prepare;
+            foreach (var (name, state) in imageBranch) states[name] = state;
+        }
 
         return JsonSerializer.Serialize(new
         {

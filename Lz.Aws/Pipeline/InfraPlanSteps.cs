@@ -39,6 +39,16 @@ public sealed record ToolingSettings(
     public const string DeployFamilyVariable = "LZ_TOOLING_DEPLOY_FAMILY";
     public const string DeployTaskRoleVariable = "LZ_TOOLING_DEPLOY_TASK_ROLE";
 
+    /// <summary>Set only under <c>Pipeline.ImageDeploy: pulumi</c> (P3 J3): the image Deploy task's family and the targeted-update role.</summary>
+    public const string ImageFamilyVariable = "LZ_TOOLING_IMAGE_FAMILY";
+    public const string ImageTaskRoleVariable = "LZ_TOOLING_IMAGE_TASK_ROLE";
+
+    /// <summary>Whether this function also registers the image Deploy task.</summary>
+    public bool DeploysImages => ImageFamily is not null;
+
+    public string? ImageFamily { get; init; }
+    public string? ImageTaskRoleArn { get; init; }
+
     /// <summary>Whether this function also registers the Deploy task: both variables, or neither.</summary>
     public bool Deploys => DeployFamily is not null;
 
@@ -56,7 +66,11 @@ public sealed record ToolingSettings(
         DeployerEnvironment.List(env, SubnetsVariable),
         DeployerEnvironment.List(env, SecurityGroupsVariable),
         Optional(env, DeployFamilyVariable, DeployTaskRoleVariable).Family,
-        Optional(env, DeployFamilyVariable, DeployTaskRoleVariable).Role);
+        Optional(env, DeployFamilyVariable, DeployTaskRoleVariable).Role)
+    {
+        ImageFamily = Optional(env, ImageFamilyVariable, ImageTaskRoleVariable).Family,
+        ImageTaskRoleArn = Optional(env, ImageFamilyVariable, ImageTaskRoleVariable).Role,
+    };
 
     private static (string? Family, string? Role) Optional(Func<string, string?> env, string family, string role)
     {
@@ -186,12 +200,23 @@ public static class InfraPlanSteps
         var deployArn = settings.Deploys
             ? await definitions.RegisterAsync(DeployTaskDefinition(settings, reference, executionName))
             : null;
+        // THE IMAGE DEPLOY TASK (P3 J3), on the targeted-update role, pinning the same verified digest.
+        string? imageArn = null;
+        if (settings.DeploysImages)
+        {
+            var image = PlanTaskDefinition(settings, reference, executionName);
+            image.Family = settings.ImageFamily;
+            image.TaskRoleArn = settings.ImageTaskRoleArn;
+            image.ContainerDefinitions[0].LogConfiguration.Options["awslogs-stream-prefix"] = "image";
+            imageArn = await definitions.RegisterAsync(image);
+        }
         return new JsonObject
         {
             ["reference"] = reference,
             ["verified"] = verdict.Detail,
             ["taskDefinitionArn"] = arn,
             ["deployTaskDefinitionArn"] = deployArn,
+            ["imageTaskDefinitionArn"] = imageArn,
             ["container"] = Container,
             ["subnets"] = new JsonArray(subnets.Select(x => (JsonNode?)x).ToArray()),
             ["securityGroups"] = new JsonArray(groups.Select(x => (JsonNode?)x).ToArray()),
@@ -419,6 +444,53 @@ public static class InfraPlanSteps
             ["applied"] = applied.DeepClone(),
             ["evidence"] = new JsonObject { ["key"] = evidenceKey, ["body"] = body.ToJsonString() },
         };
+    }
+}
+
+/// <summary>No config bundle has deployed here, so an image deploy through Pulumi has none to run with (P3 J3). NOT RETRIED.</summary>
+public sealed class NoConfigDeployed(string message) : Exception(message);
+
+/// <summary>
+/// CHOOSECONFIG (P3 J3, owner 2026-11-06: "Last deployed"): the configuration an image deploy runs with is the config bundle LAST
+/// DEPLOYED in this environment - the newest <c>deploys/config/...</c> evidence by when it was recorded - with the tooling image it
+/// ran with. Returned in the shape VerifyTooling reads as <c>verified</c>: <c>class</c> config, the bundle's identity, the tooling
+/// digest. An image deploy so never runs configuration that has not itself deployed.
+/// </summary>
+public static class ChooseConfigStep
+{
+    public static async Task<JsonObject> RunAsync(string evidenceStore, string prefix, IRecordKeys keys, IRecordStore records)
+    {
+        var listed = new List<string>();
+        var after = "";
+        while (true)
+        {
+            var page = await keys.ListAsync(evidenceStore, prefix, after);
+            if (page.Count == 0) break;
+            listed.AddRange(page);
+            after = page[^1];
+        }
+
+        JsonObject? newest = null;
+        string? newestKey = null, newestAt = null;
+        foreach (var key in listed)
+        {
+            var stored = await records.ReadAsync(evidenceStore, key);
+            if (stored is null || JsonNode.Parse(stored.Json) is not JsonObject body) continue;
+            var at = body["recordedAt"]?.GetValue<string>();
+            if (at is null || body["verified"] is not JsonObject verified || verified["class"]?.GetValue<string>() != "config") continue;
+            if (newestAt is null || string.CompareOrdinal(at, newestAt) > 0) (newest, newestKey, newestAt) = (verified, key, at);
+        }
+        if (newest is null)
+            throw new NoConfigDeployed(
+                $"no config bundle has deployed in this environment (nothing under s3://{evidenceStore}/{prefix}); an image deploy runs with the " +
+                "last one. Deploy the root's config first.");
+        if (newest["tooling"]?["digest"] is null || newest["identity"]?["sha256"] is null)
+            throw new NoConfigDeployed($"{newestKey} names no tooling digest or bundle hash, so it cannot be run again.");
+
+        var chosen = (JsonObject)newest.DeepClone();
+        chosen["evidence"] = newestKey;
+        chosen["recordedAt"] = newestAt;
+        return chosen;
     }
 }
 
