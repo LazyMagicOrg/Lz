@@ -2562,6 +2562,19 @@ public static class DeployerPlanner
     private static object[] Gate2ResultGrants(string resultsBucket, string evidence, string topicArn) => new object[]
     {
         new { Sid = "ReadTheResultFiles", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{resultsBucket}/*" },
+        // Without it S3 answers a read of a file the build never wrote with AccessDenied rather than NoSuchKey, so a build that
+        // never ran (left QUEUED to the task's timeout, 2026-11-06) faulted the gate instead of being judged as having no results.
+        new
+        {
+            Sid = "ListTheResultFiles",
+            Effect = "Allow",
+            Action = new[] { "s3:ListBucket" },
+            Resource = $"arn:aws:s3:::{resultsBucket}",
+            Condition = new Dictionary<string, object>
+            {
+                ["StringLike"] = new Dictionary<string, object> { ["s3:prefix"] = new[] { $"{Gate2ResultStep.ResultsPrefix}*" } },
+            },
+        },
         new { Sid = "ReadThePreviousGates", Effect = "Allow", Action = new[] { "s3:GetObject" }, Resource = $"arn:aws:s3:::{evidence}/{Gate2ResultStep.TestsPrefix}*" },
         new
         {

@@ -422,6 +422,16 @@ public class DeployerGate2PlanTests
     }
 
     [Fact]
+    public void Gate2Result_MayListItsResultFiles_SoAFileTheBuildNeverWroteReadsAsAbsent()
+    {
+        var statements = Statements(Function(Plan("on"), DeployerHandlers.Gate2Result).Policy).ToList();
+        var list = statements.Single(s => s.GetProperty("Sid").GetString() == "ListTheResultFiles");
+        Assert.Equal(new[] { "s3:ListBucket" }, Strings(list.GetProperty("Action")));
+        Assert.Equal(new[] { "arn:aws:s3:::scu-dev-gate2-results-4df6-b9c6" }, Strings(list.GetProperty("Resource")));
+        Assert.Equal(new[] { $"{Gate2ResultStep.ResultsPrefix}*" }, Strings(list.GetProperty("Condition").GetProperty("StringLike").GetProperty("s3:prefix")));
+    }
+
+    [Fact]
     public void OnlyGate2Start_MayClaimTheGate2Lease()
     {
         var plan = Plan("on");
