@@ -77,7 +77,8 @@ public sealed record PipelineBootstrapPlan(
     string? ForwardRuleToRemove = null,
     string? ArtifactStore = null,
     IReadOnlyList<System.Text.Json.Nodes.JsonObject>? ArtifactReadGrant = null,
-    IReadOnlyList<string>? ReplicatedRepositories = null);
+    IReadOnlyList<string>? ReplicatedRepositories = null,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? RepositoryPolicy = null);
 
 /// <summary>
 /// The trigger's build-account half (DecoupledCd.md §4.3, P2 stage D): the record store sends its S3 events to the
@@ -262,6 +263,15 @@ public static class PipelineBootstrapPlanner
             .Concat(roles.Where(r => !r.Retired).Select(r => $"arn:aws:iam::{acct}:role/{r.Name}"))
             .Distinct()
             .ToList();
+        // THE PIPELINE REPOSITORIES (P3 H2): the intake's publish function, where there is an intake, and each GitHub role not yet
+        // retired that pushes images; image and repository deletes refused. The same statements on every pipeline repository.
+        var pushers = (repos.Any(r => !string.IsNullOrEmpty(r.Intake))
+                ? new[] { $"arn:aws:iam::{acct}:role/{IntakeBuildPlanner.PublishRoleName(sk)}" }
+                : Array.Empty<string>())
+            .Concat(roles.Where(r => !r.Retired && r.EcrRepositories.Count > 0).Select(r => $"arn:aws:iam::{acct}:role/{r.Name}"))
+            .Distinct()
+            .ToList();
+        var repositoryPolicy = accountId is null || pushers.Count == 0 ? null : StoreWriters.RepositoryStatements(pushers);
         System.Text.Json.Nodes.JsonObject[] Closed(string bucket) => accountId is null || writers.Count == 0
             ? new[] { WriteOnceStore.Deny(bucket) }
             : new[] { WriteOnceStore.Deny(bucket), StoreWriters.OnlyTheseWrite(bucket, writers), StoreWriters.NoDeletes(bucket) };
@@ -431,7 +441,8 @@ public static class PipelineBootstrapPlanner
             ForwardRuleToRemove: target != null && !p.DeployOnBuildRecord ? DeployerPlanner.ForwardRuleName(config) : null,
             ArtifactStore: artifacts,
             ArtifactReadGrant: artifactGrant,
-            ReplicatedRepositories: imageRepositories);
+            ReplicatedRepositories: imageRepositories,
+            RepositoryPolicy: repositoryPolicy);
     }
 
     /// <summary>

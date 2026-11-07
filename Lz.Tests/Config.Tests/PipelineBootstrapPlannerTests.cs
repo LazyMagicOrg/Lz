@@ -536,6 +536,29 @@ public class PipelineBootstrapPlannerTests
     }
 
     [Fact]
+    public void ThePipelineRepositories_RefuseAPushFromAnyoneButThePipeline_AndEveryDelete_ServicesExcepted()
+    {
+        // P3 H2. ECR's managed signing and its lifecycle act as the service, not as a principal of the account, so they stay exempt.
+        var p = Enabled();
+        p.Repositories![0].Intake = "live";
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        var pushers = plan.RepositoryPolicy!.Single(s => s["Sid"]!.GetValue<string>() == StoreWriters.PushersSid);
+        Assert.Equal("Deny", pushers["Effect"]!.GetValue<string>());
+        Assert.Equal(StoreWriters.PushActions, pushers["Action"]!.AsArray().Select(a => a!.GetValue<string>()));
+        var admitted = pushers["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"]!.AsArray().Select(a => a!.GetValue<string>()).ToList();
+        Assert.Contains("arn:aws:iam::147440642635:role/scu-intake-publish-fn", admitted);
+        Assert.All(plan.Roles.Where(r => !r.Retired && r.EcrRepositories.Count > 0), r => Assert.Contains($"arn:aws:iam::147440642635:role/{r.Name}", admitted));
+        Assert.DoesNotContain(admitted, a => plan.Roles.Any(r => r.EcrRepositories.Count == 0 && a.EndsWith("/" + r.Name)));   // bundle roles push no image
+        Assert.Equal("false", pushers["Condition"]!["BoolIfExists"]!["aws:PrincipalIsAWSService"]!.GetValue<string>());
+
+        var deletes = plan.RepositoryPolicy!.Single(s => s["Sid"]!.GetValue<string>() == StoreWriters.NoImageDeletesSid);
+        Assert.Equal(new[] { "ecr:BatchDeleteImage", "ecr:DeleteRepository" }, deletes["Action"]!.AsArray().Select(a => a!.GetValue<string>()));
+        Assert.Null(deletes["Condition"]!["ArnNotEquals"]);   // no principal excepted
+        Assert.DoesNotContain("ecr:PutImageTagMutability", deletes.ToJsonString());   // the bootstrap re-applies immutability each run
+    }
+
+    [Fact]
     public void WithoutAKnownAccount_NoWriterDenyIsPlanned_SinceItNamesRoleArns()
     {
         var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));

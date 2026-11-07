@@ -121,6 +121,11 @@ public static class PipelineBootstrapper
 
         await ApplySigningConfigurationAsync(ecr, signingRules);
 
+        // ONLY THE PIPELINE PUSHES, AND NO IMAGE IS DELETED (P3 H2), on every pipeline repository, once each exists.
+        if (plan.RepositoryPolicy is { } repositoryPolicy)
+            foreach (var repo in plan.EcrRepositories)
+                await RepositoryPolicies.MergeAsync(ecr, repo, repositoryPolicy);
+
         foreach (var role in plan.Roles)
         {
             if (role.Retired) await RemoveRetiredRoleAsync(iam, role);
@@ -233,6 +238,13 @@ public static class PipelineBootstrapper
             Console.WriteLine("  ECR repositories (immutable tags, AES256, signed at push, scan-on-push by the repository setting and a merged registry rule):");
             foreach (var name in plan.EcrRepositories)
                 Console.WriteLine($"    {name}");
+            if (plan.RepositoryPolicy?.FirstOrDefault(p => p["Sid"]?.GetValue<string>() == StoreWriters.PushersSid) is { } pushers)
+            {
+                var arns = pushers["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"] is System.Text.Json.Nodes.JsonArray a
+                    ? a.Select(x => x!.GetValue<string>()) : new[] { pushers["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"]!.GetValue<string>() };
+                Console.WriteLine($"    pushers: repository policy {StoreWriters.PushersSid} refuses every push but from {string.Join(", ", arns.Select(arn => arn[(arn.LastIndexOf('/') + 1)..]))}");
+                Console.WriteLine($"    deletes: repository policy {StoreWriters.NoImageDeletesSid} refuses BatchDeleteImage and DeleteRepository, from anyone (AWS services acting on their own excepted)");
+            }
         }
 
         Console.WriteLine();
