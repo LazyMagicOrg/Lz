@@ -99,11 +99,8 @@ public static class VerifySetStep
         var images = marker.Members.Where(m => m.Class == "image").ToList();
         if (images.Count != 1)
             throw new DeployRefused("members", $"the set names {images.Count} image members; a set is the Service image and the clients beside it, so exactly one.");
-        // A CONFIG MEMBER (P3 G) IS READ, NOT YET PROMOTED: infrastructure promoted into this environment is P3 I. Refused by name
-        // here, rather than mistaken for a client bundle with no web app.
-        if (marker.Members.FirstOrDefault(m => m.Class == PassMarkerFormat.ConfigClass) is { } config)
-            throw new DeployRefused("members",
-                $"the set names a config member ({config.Repo}, bundle version {config.Identity.VersionId}); promoting infrastructure is P3 I, not built yet.");
+        // A CONFIG MEMBER (P3 I2) is verified here like any member, then planned before the image moves. Where this environment
+        // plans no config, its own Verify refuses the class by name ("Pipeline.Infrastructure is off").
 
         var records = new BuildRecord[marker.Members.Count];
         for (var i = 0; i < marker.Members.Count; i++)
@@ -132,11 +129,16 @@ public static class VerifySetStep
         }
 
         // EACH MEMBER THROUGH THIS ENVIRONMENT'S OWN VERIFY, the image first (T-13): its registry, its service, its web apps.
-        JsonObject? image = null;
+        JsonObject? image = null, configMember = null;
         var bundles = new JsonArray();
         foreach (var i in Enumerable.Range(0, marker.Members.Count).OrderBy(i => marker.Members[i].Class == "image" ? 0 : 1))
         {
             var m = marker.Members[i];
+            if (m.Class == PassMarkerFormat.ConfigClass)
+            {
+                configMember = await ConfigMemberAsync(m, i, marker, verifyMember);
+                continue;
+            }
             var target = m.Class == "image"
                 ? state["target"]?.DeepClone() as JsonObject ?? throw new DeployRefused("target", "the input names no target for the image member.")
                 : new JsonObject
@@ -158,7 +160,7 @@ public static class VerifySetStep
             if (m.Class == "image") image = memberState; else bundles.Add(memberState);
         }
 
-        return new JsonObject
+        var result = new JsonObject
         {
             ["markerId"] = marker.MarkerId,
             ["marker"] = new JsonObject { ["key"] = key, ["versionId"] = versionId },
@@ -168,6 +170,32 @@ public static class VerifySetStep
             ["image"] = image,
             ["bundles"] = bundles,
         };
+        if (configMember is not null) result["config"] = configMember;
+        return result;
+    }
+
+    /// <summary>
+    /// THE SET'S CONFIG MEMBER (P3 I2), through this environment's own Verify - the record, its bundle's HEAD - and then planned by
+    /// the machine before the image moves. The tooling that plans it is the marker's: the image that applied this bundle in the
+    /// predecessor, whose signature VerifyTooling checks in this account's replica. Verify's own choice, the newest tooling record
+    /// carrying the bundle's lz, could be a later build of the same lz, so the marker's digest replaces it.
+    /// </summary>
+    private static async Task<JsonObject> ConfigMemberAsync(PassMarkerMember m, int i, PassMarker marker, Func<JsonObject, Task<JsonObject>> verifyMember)
+    {
+        var memberState = new JsonObject { ["record"] = new JsonObject { ["bucket"] = m.Record.Bucket, ["key"] = m.Record.Key } };
+        var verified = await verifyMember(memberState);
+        var read = verified["recordVersionId"]?.GetValue<string>();
+        if (!string.Equals(read, m.Record.VersionId, StringComparison.Ordinal))
+            throw new DeployRefused($"members[{i}].record", $"this environment's Verify read {m.Record.Key} at version {read}, not the marker's {m.Record.VersionId}.");
+        if (verified["identity"]?["versionId"]?.GetValue<string>() != m.Identity.VersionId)
+            throw new DeployRefused($"members[{i}].identity", $"this environment's Verify found bundle version {verified["identity"]?["versionId"]}, not the marker's {m.Identity.VersionId}.");
+
+        var tooling = verified["tooling"] as JsonObject ?? throw new DeployRefused($"members[{i}].tooling", "this environment's Verify chose no tooling image for the config.");
+        tooling["digest"] = marker.ToolingDigest ?? throw new DeployRefused("toolingDigest", "the set names a config member and no tooling digest.");
+        tooling["record"] = null;
+        tooling["from"] = "the predecessor's marker";
+        memberState["verified"] = verified;
+        return memberState;
     }
 
     /// <summary>

@@ -432,9 +432,10 @@ public static class CrossAccount
     /// </summary>
     /// <param name="startRoleName">Under P3 E, the start function's role, which reads a config record for its branch: a statement of
     /// its own, config records only, no list. Null leaves the grant as P3 D wrote it.</param>
+    /// <param name="byVersion">A promoted environment (P3 I2): its Verify reads a set's config record at the version the marker names.</param>
     public static IReadOnlyList<JsonObject> InfraRecordReadGrant(
         string buildRecordStore, string environment, string targetAccountId, string verifyRoleName, string configPrefix, string toolingPrefix,
-        string? startRoleName = null)
+        string? startRoleName = null, bool byVersion = false)
     {
         RequireAccount(targetAccountId, nameof(targetAccountId));
         var verify = $"arn:aws:iam::{targetAccountId}:role/{verifyRoleName}";
@@ -457,7 +458,7 @@ public static class CrossAccount
                 ["Sid"] = $"DeployerReadsConfigAndToolingRecords{Suffix(environment)}",
                 ["Effect"] = "Allow",
                 ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
-                ["Action"] = "s3:GetObject",
+                ["Action"] = ReadAction(byVersion),
                 ["Resource"] = new JsonArray($"arn:aws:s3:::{buildRecordStore}/{configPrefix}*", $"arn:aws:s3:::{buildRecordStore}/{toolingPrefix}*"),
                 ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = verify } },
             },

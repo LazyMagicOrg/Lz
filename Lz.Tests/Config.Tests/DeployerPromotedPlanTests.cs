@@ -36,6 +36,71 @@ public class DeployerPromotedPlanTests
 
     private static JsonElement States(PipelineDeployer p) => JsonDocument.Parse(p.Definition).RootElement.GetProperty("States");
 
+    // ---- P3 I2: a promoted environment plans its set's config before the image moves ----
+
+    /// <summary>Test as P3 I2 plans it: config and tooling accepted, Infrastructure: plan (or as given).</summary>
+    private static SystemConfig TestPlanningConfig(string infrastructure = PipelineConfig.InfrastructurePlan)
+    {
+        var c = Test();
+        c.Pipeline!.Classes = new List<string> { "image", "client", "config", "tooling" };
+        c.Pipeline.Repositories!.Add(new PipelineRepositoryConfig { Repo = "Scutara/Scutara", Class = "config", Artifacts = new List<string> { "config" } });
+        c.Pipeline.Repositories.Add(new PipelineRepositoryConfig { Repo = "Scutara/Scutara", Class = "tooling", Artifacts = new List<string> { "tooling" } });
+        c.State = new StateConfig
+        {
+            Backend = "s3://scu-test-pulumi-state-d5e0-b27f?region=us-west-2",
+            SecretsProvider = "awskms://alias/scu-test-pulumi-key-d5e0-b27f",
+        };
+        c.Pipeline.Infrastructure = infrastructure;
+        return c;
+    }
+
+    private static PipelineDeployer PlanningPlan(SystemConfig? c = null)
+        => DeployerPlanner.Plan(c ?? TestPlanningConfig(), TestAccount, triggerInputs: Cluster, clientInputs: DeployerClientPlanTests.Distributions,
+            infraInputs: new DeployerInfraInputs("subnet-0test", "sg-0test"));
+
+    [Fact]
+    public void UnderInfrastructurePlan_ASetsConfigIsPlannedHere_ThenTheImage_AndNothingIsApplied()
+    {
+        var states = States(PlanningPlan());
+        Assert.Equal("HasConfig", states.GetProperty("IsRevert").GetProperty("Default").GetString());
+        var has = states.GetProperty("HasConfig");
+        Assert.Equal("ConfigMember", has.GetProperty("Choices")[0].GetProperty("Next").GetString());
+        Assert.Equal("$.set.config", has.GetProperty("Choices")[0].GetProperty("Variable").GetString());
+        Assert.Equal("ImageMember", has.GetProperty("Default").GetString());
+        var member = states.GetProperty("ConfigMember");
+        Assert.Equal("VerifyTooling", member.GetProperty("Next").GetString());
+        Assert.Equal("$.set.config.verified", member.GetProperty("Parameters").GetProperty("verified.$").GetString());
+        Assert.Equal("$.marker", member.GetProperty("Parameters").GetProperty("marker.$").GetString());   // ImageMember reads it next
+        Assert.Equal("Plan", states.GetProperty("VerifyTooling").GetProperty("Next").GetString());
+        Assert.Contains("'--env', 'test'", states.GetProperty("Plan").GetProperty("Parameters").GetRawText());
+        Assert.Equal("ImageMember", states.GetProperty("ReadPlan").GetProperty("Next").GetString());
+        Assert.False(states.TryGetProperty("Planned", out _));
+        Assert.False(states.TryGetProperty("DeployInfrastructure", out _));
+        Assert.Equal("RevertImageMember", states.GetProperty("SetHold").GetProperty("Next").GetString());   // a revert skips the config
+    }
+
+    [Fact]
+    public void UnderInfrastructurePlan_VerifyReadsAConfigRecordByVersion()
+    {
+        var verify = PlanningPlan().Functions.Single(f => f.Handler == DeployerHandlers.Verify);
+        Assert.True(Grants(verify.Policy, "s3:GetObjectVersion", "arn:aws:s3:::scu-build-records-4df6-b9c6/config/*"));
+        Assert.False(Grants(Plan().Functions.Single(f => f.Handler == DeployerHandlers.Verify).Policy,
+            "s3:GetObjectVersion", "arn:aws:s3:::scu-build-records-4df6-b9c6/config/*"));
+    }
+
+    [Fact]
+    public void WithoutInfrastructure_ThePromotedMachineHasNoConfigStep()
+    {
+        var states = States(Plan());
+        Assert.Equal("ImageMember", states.GetProperty("IsRevert").GetProperty("Default").GetString());
+        Assert.False(states.TryGetProperty("HasConfig", out _));
+        Assert.False(states.TryGetProperty("VerifyTooling", out _));
+    }
+
+    [Fact]
+    public void UnderInfrastructureDeploy_APromotedEnvironmentIsRefused_UntilI3()
+        => Assert.Contains("P3 I3", Assert.Throws<InvalidOperationException>(() => PlanningPlan(TestPlanningConfig(PipelineConfig.InfrastructureDeploy))).Message);
+
     private static IEnumerable<JsonElement> Statements(string policy) => JsonDocument.Parse(policy).RootElement.GetProperty("Statement").EnumerateArray();
 
     private static IEnumerable<string> Strings(JsonElement e)

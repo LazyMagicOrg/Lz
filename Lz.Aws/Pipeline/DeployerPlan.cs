@@ -712,9 +712,11 @@ public static class DeployerPlanner
         ImageDeployResources? imageDeploy = null;
         if (p.InfrastructurePlans)
         {
-            if (p.Predecessor is not null)
+            // A PROMOTED ENVIRONMENT PLANS ITS SET'S CONFIG (P3 I2) before the image moves; applying it is I3, not built yet.
+            if (p.Predecessor is not null && p.InfrastructureDeploys)
                 throw new InvalidOperationException(
-                    $"{env} is promoted into, and Pipeline.Infrastructure is plan: a promoted config bundle is P3 I, not planned yet.");
+                    $"{env} is promoted into, and Pipeline.Infrastructure is deploy: a promoted config bundle is planned (P3 I2), and " +
+                    "applying it is P3 I3, not built yet. Use Infrastructure: plan.");
             infra = InfraPlanPlanner.Resources(config, region, acct, evidence, artifactStore);
             if (p.InfrastructureDeploys)
                 infraDeploy = InfraDeployPlanner.Resources(sk, env, evidence, artifactStore, BuildRecordFormat.PrefixFor("config", infra.ConfigRepo));
@@ -756,7 +758,9 @@ public static class DeployerPlanner
             verifyEnvironment[DeployerEnvironment.StateMachine] = ownMachine;
             verifyGrants = verifyGrants.Concat(PromotedVerifyGrants(promoted.EvidenceStore, evidence, buildRecordStore,
                     // A SITE (V-K step 5): the predecessor's record of the run, by version, beside this environment's own.
-                    siteTargets.Select(t => $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, t.Repo)}{promoted.Environment}/").ToList()))
+                    siteTargets.Select(t => $"{BuildRecordFormat.PrefixFor(BuildRecordFormat.SiteClass, t.Repo)}{promoted.Environment}/").ToList(),
+                    // A CONFIG MEMBER (P3 I2): its record by version, where this environment plans config.
+                    infra is not null))
                 .Append(new { Sid = "ListItsOwnExecutions", Effect = "Allow", Action = new[] { "states:ListExecutions" }, Resource = ownMachine })
                 .ToArray();
         }
@@ -2631,7 +2635,7 @@ public static class DeployerPlanner
     /// a marker decided here. Listing its own decisions is what lets a missing one read as absent rather than denied.
     /// </summary>
     private static object[] PromotedVerifyGrants(string predecessorStore, string evidence, string buildRecordStore,
-        IReadOnlyList<string> predecessorSitePrefixes) => new object[]
+        IReadOnlyList<string> predecessorSitePrefixes, bool config = false) => new object[]
     {
         new
         {
@@ -2641,6 +2645,7 @@ public static class DeployerPlanner
             Effect = "Allow",
             Action = new[] { "s3:GetObjectVersion" },
             Resource = new[] { $"arn:aws:s3:::{buildRecordStore}/image/*", $"arn:aws:s3:::{buildRecordStore}/client/*" }
+                .Concat(config ? new[] { $"arn:aws:s3:::{buildRecordStore}/config/*" } : Array.Empty<string>())
                 .Concat(predecessorSitePrefixes.Select(p => $"arn:aws:s3:::{buildRecordStore}/{p}*")).ToArray(),
         },
         new
@@ -2711,8 +2716,11 @@ public static class DeployerPlanner
     /// Map's processor); then Decide. A failure is recorded and then decided. No branch on a class remains: the set says what
     /// each member is.
     /// </summary>
+    /// <param name="config">P3 I2: the set's config member, where it has one, is planned first - ConfigMember lifts it into place, then
+    /// VerifyTooling, Plan and ReadPlan, whose refusal of a destructive plan fails the set before the image moves - and the image
+    /// member follows. A revert goes back to an image, never past this environment's infrastructure, so it skips the config.</param>
     private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
-        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false)
+        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false, bool config = false)
     {
         System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
 
@@ -2729,8 +2737,33 @@ public static class DeployerPlanner
         {
             Type = "Choice",
             Choices = choices,
-            Default = "ImageMember",
+            Default = config ? "HasConfig" : "ImageMember",
         };
+        if (config)
+        {
+            states["HasConfig"] = new
+            {
+                Type = "Choice",
+                Choices = new[] { new { Variable = "$.set.config", IsPresent = true, Next = "ConfigMember" } },
+                Default = "ImageMember",
+            };
+            states["ConfigMember"] = new
+            {
+                Type = "Pass",
+                Parameters = new Dictionary<string, object>
+                {
+                    ["set.$"] = "$.set",
+                    ["marker.$"] = "$.marker",
+                    ["record.$"] = "$.set.config.record",
+                    ["verified.$"] = "$.set.config.verified",
+                },
+                Next = "VerifyTooling",
+            };
+            var readPlan = Node("ReadPlan");
+            readPlan["Next"] = "ImageMember";
+            states["ReadPlan"] = readPlan;
+            states.Remove("Planned");
+        }
         states["SetHold"] = new
         {
             Type = "Task",
@@ -3968,7 +4001,7 @@ public static class DeployerPlanner
 
         if (decideFn is not null)
             Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite(),
-                site: siteFunctions is not null);
+                site: siteFunctions is not null, config: infraStates is not null);
 
         // THE IMAGE THROUGH PULUMI (P3 J3): Prepare goes on to ChooseConfig, and Deploy is the tooling task, not UpdateService.
         if (imageStates?.Invoke(payload, catchAll, Transient) is { } imageBranch)

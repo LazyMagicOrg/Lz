@@ -252,24 +252,82 @@ public class VerifySetTests
         Assert.DoesNotContain($"{Dev}/{moved[0].Record.Key}@rv-img", f.Store.Reads);
     }
 
-    [Fact]
-    public async Task ASetWithAConfigMember_IsRefusedByName_UntilInfrastructureIsPromoted()
+    private const string MarkerTooling = "sha256:8a15e378fb4f7650cbd0f80b2e7b23902fe7da3ac61f618dd1c19cbd77ce9923";
+
+    private static BuildRecord ConfigRecord()
     {
-        // P3 G lets a marker name the config bundle; promoting it is P3 I. It must not reach the client branch, where it would be
-        // refused for having no web app - or, with one named like it, deployed as a bundle.
+        var r = new BuildRecord(
+            1, "config",
+            new BuildRecordBuiltFrom("Scutara/Scutara", new string('3', 40), "published", new Dictionary<string, string> { ["Lz.Cli"] = "0.13.178" }, "refs/heads/main"),
+            new BuildRecordIdentity("bundle", Bucket: Artifacts, Key: "placeholder", VersionId: "cfg-v1", Sha256: new string('d', 64)),
+            "20261107T154428Z", "tmay57", "42387834609",
+            new BuildRecordIntake("42387834609", 1, "1233186125", "Scutara/Scutara/.github/workflows/build-config.yml@refs/heads/main",
+                "sha256:" + new string('f', 64), new BuildRecordGate1("passed", "gate1/1233186125-42387834609-1.json")));
+        return r with { Identity = r.Identity with { Key = BuildRecordFormat.BundleKeyFor(r) } };
+    }
+
+    /// <summary>The fixture's set with a config member (P3 I1's marker), its record and its dev deploy evidence in place.</summary>
+    private static (Fixture F, string Key) WithConfig()
+    {
         var f = Set();
-        var config = f.Marker.Members.First(m => m.Class == "client") with
-        {
-            Class = "config", Repo = "Scutara/Scutara",
-            Identity = new BuildRecordIdentity("bundle", Bucket: "scu-artifacts-4df6-b9c6", Key: "config/scutara/scutara/x.zip", VersionId: "cfg-v1", Sha256: new string('d', 64)),
-        };
+        var cfg = ConfigRecord();
+        f.Store.Put(Records, BuildRecordFormat.KeyFor(cfg), "rv-cfg", BuildRecordFormat.Serialize(cfg));
+        var config = new PassMarkerMember("config", "Scutara/Scutara", new PassMarkerRecordReference(Records, BuildRecordFormat.KeyFor(cfg), "rv-cfg"),
+            cfg.Identity, "cfg-v1", cfg.BuiltFrom, new PassMarkerReference("deploys/config/scutara/scutara/req-cfg.json", "dv-cfg"));
+        f.Store.Put(Dev, config.Deploy.Key, config.Deploy.VersionId, new JsonObject { ["schema"] = 1, ["outcome"] = "deployed" }.ToJsonString());
         var members = f.Marker.Members.Append(config).ToList();
-        const string tooling = "sha256:8a15e378fb4f7650cbd0f80b2e7b23902fe7da3ac61f618dd1c19cbd77ce9923";
-        var marker = f.Marker with { Members = members, MarkerId = PassMarkerFormat.MarkerIdFor(members, tooling), ToolingDigest = tooling, ConfigBundleVersion = "cfg-v1" };
+        var marker = f.Marker with { Members = members, MarkerId = PassMarkerFormat.MarkerIdFor(members, MarkerTooling), ToolingDigest = MarkerTooling, ConfigBundleVersion = "cfg-v1" };
         var key = PassMarkerFormat.KeyFor(marker.MarkerId);
         f.Store.Put(Dev, key, "mv-1", PassMarkerFormat.Write(marker));
-        Assert.Contains("promoting infrastructure is P3 I", await Refused(f, "members", Input(key, "mv-1")));
+        return (f with { Marker = marker, Key = key }, key);
     }
+
+    /// <summary>This environment's Verify of a config record, faked: it chose ANOTHER tooling build of the same lz.</summary>
+    private static MemberVerify ConfigAware() => new()
+    {
+        Answer = s => s["record"]!["key"]!.GetValue<string>() switch
+        {
+            var k when k.StartsWith("config/", StringComparison.Ordinal) => new JsonObject
+            {
+                ["class"] = "config", ["recordVersionId"] = "rv-cfg",
+                ["identity"] = new JsonObject { ["bucket"] = Artifacts, ["key"] = "x.zip", ["versionId"] = "cfg-v1", ["sha256"] = new string('d', 64) },
+                ["tooling"] = new JsonObject { ["digest"] = "sha256:" + new string('9', 64), ["record"] = "tooling/scutara/scutara/later.json", ["lz"] = "0.13.178" },
+            },
+            var k when k.StartsWith("image/", StringComparison.Ordinal) => new JsonObject { ["class"] = "image", ["recordVersionId"] = "rv-img" },
+            _ => new JsonObject { ["class"] = "client", ["recordVersionId"] = "rv-sel" },
+        },
+    };
+
+    [Fact]
+    public async Task ASetWithAConfigMember_IsAdmitted_ItsConfigVerifiedHere_AndPlannedWithTheMarkersTooling()
+    {
+        // P3 I2: the config is verified by this environment's own Verify (its record, its bundle) and planned before the image moves,
+        // with the tooling that applied it in dev - not Verify's newest build of the same lz.
+        var (f, key) = WithConfig();
+        var verify = ConfigAware();
+        var set = await Run(f, Input(key, "mv-1"), verify);
+
+        var config = set["config"]!.AsObject();
+        Assert.Equal(BuildRecordFormat.KeyFor(ConfigRecord()), config["record"]!["key"]!.GetValue<string>());
+        Assert.Equal(MarkerTooling, config["verified"]!["tooling"]!["digest"]!.GetValue<string>());
+        Assert.Null(config["target"]);   // infrastructure has no target: its stacks are this environment's
+        Assert.Equal(1, set["bundles"]!.AsArray().Count);   // the config is no bundle
+        Assert.Contains(verify.Asked, a => a["record"]!["key"]!.GetValue<string>().StartsWith("config/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ASetsConfigMember_ReadAtAnotherVersionHere_IsRefused()
+    {
+        var (f, key) = WithConfig();
+        var verify = ConfigAware();
+        var answer = verify.Answer!;
+        verify.Answer = s => { var a = answer(s); if (a["class"]!.GetValue<string>() == "config") a["recordVersionId"] = "rv-other"; return a; };
+        Assert.Contains("not the marker's rv-cfg", await Refused(f, "members[2].record", Input(key, "mv-1"), verify));
+    }
+
+    [Fact]
+    public async Task WithoutAConfigMember_TheSetNamesNoConfig()
+        => Assert.Null((await Run(Set()))["config"]);
 
     [Fact]
     public async Task ASetWithoutAnImageMember_IsRefused()

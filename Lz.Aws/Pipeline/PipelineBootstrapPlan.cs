@@ -394,7 +394,9 @@ public static class PipelineBootstrapPlanner
                 .Concat(CrossAccount.InfraRecordReadGrant(buildRecords, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
                     configPrefix, BuildRecordFormat.PrefixFor("tooling", toolingRepo),
                     // P3 E: the start function reads a config record for its branch, where config records start deploys.
-                    DeployerPlanner.TriggerConfigPrefixes(config).Count > 0 ? DeployerPlanner.StartFunctionRoleName(config) : null))
+                    DeployerPlanner.TriggerConfigPrefixes(config).Count > 0 ? DeployerPlanner.StartFunctionRoleName(config) : null,
+                    // P3 I2: a promoted environment reads a set's config record at the marker's version.
+                    byVersion: p.Predecessor is not null))
                 .ToList();
             artifactGrant = (artifactGrant ?? Array.Empty<System.Text.Json.Nodes.JsonObject>())
                 .Concat(CrossAccount.ConfigBundleReadGrant(artifacts, config.Environment, target, DeployerPlanner.VerifyRoleName(config),
