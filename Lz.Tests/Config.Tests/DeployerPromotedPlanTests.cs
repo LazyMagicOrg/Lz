@@ -98,8 +98,21 @@ public class DeployerPromotedPlanTests
     }
 
     [Fact]
-    public void UnderInfrastructureDeploy_APromotedEnvironmentIsRefused_UntilI3()
-        => Assert.Contains("P3 I3", Assert.Throws<InvalidOperationException>(() => PlanningPlan(TestPlanningConfig(PipelineConfig.InfrastructureDeploy))).Message);
+    public void UnderInfrastructureDeploy_ASetsConfigIsAppliedHere_ThenTheImage()
+    {
+        // P3 I3: plan, approve (a pass-through: test requires no approval), apply, the empty second preview, the evidence - and only
+        // then the image member. The config's branch never ends the execution: the set does, at Decide.
+        var states = States(PlanningPlan(TestPlanningConfig(PipelineConfig.InfrastructureDeploy)));
+        Assert.Equal("ApproveInfrastructure", states.GetProperty("ReadPlan").GetProperty("Next").GetString());
+        Assert.Equal("DeployInfrastructure", states.GetProperty("ApproveInfrastructure").GetProperty("Next").GetString());
+        Assert.Contains("'infradeploy', '--env', 'test'", states.GetProperty("DeployInfrastructure").GetProperty("Parameters").GetRawText());
+        Assert.Equal("VerifyInfrastructure", states.GetProperty("DeployInfrastructure").GetProperty("Next").GetString());
+        Assert.Equal("RecordInfrastructure", states.GetProperty("VerifyInfrastructure").GetProperty("Next").GetString());
+        Assert.Equal("ImageMember", states.GetProperty("RecordInfrastructure").GetProperty("Next").GetString());
+        Assert.False(states.TryGetProperty("InfrastructureDeployed", out _));
+        Assert.False(states.TryGetProperty("Planned", out _));
+        Assert.Equal("RevertImageMember", states.GetProperty("SetHold").GetProperty("Next").GetString());
+    }
 
     private static IEnumerable<JsonElement> Statements(string policy) => JsonDocument.Parse(policy).RootElement.GetProperty("Statement").EnumerateArray();
 

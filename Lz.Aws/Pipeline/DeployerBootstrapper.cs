@@ -117,7 +117,8 @@ public static class DeployerBootstrapper
             var n = plannedInfra.Network;
             Console.WriteLine();
             Console.WriteLine(plan.Promotion is not null
-                ? $"  The infrastructure branch (Pipeline.Infrastructure: plan, P3 I2): a set's config member -> VerifyTooling (the marker's tooling) -> Plan -> ReadPlan -> the image member; nothing applied"
+                ? $"  The infrastructure branch (P3 I2): a set's config member -> VerifyTooling (the marker's tooling) -> Plan -> ReadPlan -> " +
+                  (plan.InfrastructureDeploy is null ? "the image member; nothing applied" : "the deploy half below (P3 I3) -> the image member")
                 : $"  The infrastructure branch (Pipeline.Infrastructure: plan, P3 D): a config record -> VerifyTooling -> Plan -> ReadPlan -> Planned; nothing applied");
             Console.WriteLine($"    network {n.Name}: {n.VpcCidr}, public subnet {n.SubnetCidr} in {n.AvailabilityZone}, internet gateway, no NAT, a group with no inbound rule" +
                               (infraInputs is { } found ? $" - exists: {found.SubnetId}, {found.SecurityGroupId}" : " - created by the apply"));

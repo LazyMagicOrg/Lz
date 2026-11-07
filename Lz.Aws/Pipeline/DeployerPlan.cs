@@ -712,11 +712,7 @@ public static class DeployerPlanner
         ImageDeployResources? imageDeploy = null;
         if (p.InfrastructurePlans)
         {
-            // A PROMOTED ENVIRONMENT PLANS ITS SET'S CONFIG (P3 I2) before the image moves; applying it is I3, not built yet.
-            if (p.Predecessor is not null && p.InfrastructureDeploys)
-                throw new InvalidOperationException(
-                    $"{env} is promoted into, and Pipeline.Infrastructure is deploy: a promoted config bundle is planned (P3 I2), and " +
-                    "applying it is P3 I3, not built yet. Use Infrastructure: plan.");
+            // A PROMOTED ENVIRONMENT PLANS (P3 I2) AND, UNDER deploy, APPLIES (P3 I3) ITS SET'S CONFIG before the image moves.
             infra = InfraPlanPlanner.Resources(config, region, acct, evidence, artifactStore);
             if (p.InfrastructureDeploys)
                 infraDeploy = InfraDeployPlanner.Resources(sk, env, evidence, artifactStore, BuildRecordFormat.PrefixFor("config", infra.ConfigRepo));
@@ -2718,7 +2714,9 @@ public static class DeployerPlanner
     /// </summary>
     /// <param name="config">P3 I2: the set's config member, where it has one, is planned first - ConfigMember lifts it into place, then
     /// VerifyTooling, Plan and ReadPlan, whose refusal of a destructive plan fails the set before the image moves - and the image
-    /// member follows. A revert goes back to an image, never past this environment's infrastructure, so it skips the config.</param>
+    /// member follows. Under Infrastructure: deploy (P3 I3) it is applied there too - ApproveInfrastructure, DeployInfrastructure,
+    /// VerifyInfrastructure's empty second preview, RecordInfrastructure - before the image member. A revert goes back to an image,
+    /// never past this environment's infrastructure, so it skips the config.</param>
     private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
         Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false, bool config = false)
     {
@@ -2759,10 +2757,14 @@ public static class DeployerPlanner
                 },
                 Next = "VerifyTooling",
             };
-            var readPlan = Node("ReadPlan");
-            readPlan["Next"] = "ImageMember";
-            states["ReadPlan"] = readPlan;
+            // The config's last state - RecordInfrastructure where it is applied (I3), ReadPlan where it is only planned (I2) - goes on
+            // to the image member instead of ending the execution.
+            var last = states.ContainsKey("RecordInfrastructure") ? "RecordInfrastructure" : "ReadPlan";
+            var after = Node(last);
+            after["Next"] = "ImageMember";
+            states[last] = after;
             states.Remove("Planned");
+            states.Remove("InfrastructureDeployed");
         }
         states["SetHold"] = new
         {
