@@ -140,6 +140,8 @@ public static class DeployerBootstrapper
             Console.WriteLine($"    hold:     {plannedPromotion.HoldParameter}, created 'off' if missing and never reset; anything else, or missing, starts nothing");
             Console.WriteLine($"    alarms:   {string.Join(", ", plannedPromotion.Alarms.Select(a => a.Name))}");
             Console.WriteLine($"    decide:   {DeployerHandlers.Decide.Split("::")[1]} writes decisions/ in {plan.EvidenceStore}");
+            if (plannedPromotion.ImageTarget is { } imageTarget && config.Pipeline.EnforceSignatures)
+                Console.WriteLine($"    input:    {ImageInputFormat.NameFor(config.SystemKey, config.Environment, imageTarget.Service)}, created from what {imageTarget.Service} runs if missing, never overwritten");
         }
 
         if (!apply)
@@ -255,17 +257,22 @@ public static class DeployerBootstrapper
             await PromotionApply.EnsureHoldAsync(ssm, holdParameter);
         }
 
-        // THE IMAGE INPUTS (P3 J1), BEFORE THE FUNCTIONS THAT WRITE THEM: one per service the trigger rolls, where the pipeline signs
-        // the images, created from what the service runs where none exists, and never overwritten - an existing input is the one the
-        // service's writers keep, and resetting it here could undo a deploy.
-        if (config.Pipeline?.EnforceSignatures == true && plan.Trigger is { } seeded)
+        // THE IMAGE INPUTS (P3 J1), BEFORE THE FUNCTIONS THAT WRITE THEM: one per service the trigger rolls, or a promoted image
+        // member rolls (P3 J4: a promoted environment has no trigger, and its deploytenant refused for want of an input), where the
+        // pipeline signs the images, created from what the service runs where none exists, and never overwritten - an existing input
+        // is the one the service's writers keep, and resetting it here could undo a deploy.
+        var seeded = (plan.Trigger?.Routes.SelectMany(r => r.Targets).Select(t => t.Target) ?? [])
+            .Concat(plan.Promotion?.ImageTarget is { } promotedTarget ? [promotedTarget] : Array.Empty<DeployTarget>())
+            .DistinctBy(t => t.Service)
+            .ToList();
+        if (config.Pipeline?.EnforceSignatures == true && seeded.Count > 0)
         {
             using var ssm = creds != null
                 ? new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(creds, endpoint)
                 : new Amazon.SimpleSystemsManagement.AmazonSimpleSystemsManagementClient(endpoint);
             using var ecs = creds != null ? new Amazon.ECS.AmazonECSClient(creds, endpoint) : new Amazon.ECS.AmazonECSClient(endpoint);
             var inputs = new SsmImageInputs(ssm);
-            foreach (var target in seeded.Routes.SelectMany(r => r.Targets).Select(t => t.Target))
+            foreach (var target in seeded)
             {
                 var name = ImageInputFormat.NameFor(config.SystemKey, config.Environment, target.Service);
                 if (await inputs.ReadAsync(name) is { } existing)

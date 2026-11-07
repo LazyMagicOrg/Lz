@@ -110,10 +110,11 @@ public sealed record DeployerOutcomesPlan(
 /// A promoted environment's poller (DecoupledCd.md §12 P5 stage I), its only trigger: a function the schedule invokes every
 /// minute, one at a time, on ticks at most a minute old and never retried; the hold it reads before every start; and its
 /// alarms, on its errors and on its silence. The function itself is in <see cref="PipelineDeployer.Functions"/>.
+/// <see cref="ImageTarget"/> is the service a promoted image member rolls, whose image input <c>bootstrapdeployer</c> seeds.
 /// </summary>
 public sealed record DeployerPromotionPlan(
     string PollerFunctionName, string ScheduleRuleName, string ScheduleExpression, int ReservedConcurrency,
-    int MaximumEventAgeSeconds, string HoldParameter, IReadOnlyList<IntakeAlarm> Alarms);
+    int MaximumEventAgeSeconds, string HoldParameter, IReadOnlyList<IntakeAlarm> Alarms, DeployTarget? ImageTarget = null);
 
 /// <summary>
 /// Gate 2 in this environment (DecoupledCd.md §15.5, V-E), under <c>Pipeline.Gate2</c>: the CodeBuild project that runs the
@@ -975,7 +976,8 @@ public static class DeployerPlanner
                     [DeployerEnvironment.PromotionTarget] = target.ToJsonString(),
                 },
                 TimeoutSeconds: 50, MemoryMb: 512, DeployerPackages.Deployer, InvokedByStateMachine: false));
-            promotionPlan = new DeployerPromotionPlan(poller, $"{poller}-schedule", "rate(1 minute)", 1, 60, hold, PollerAlarms(config));
+            promotionPlan = new DeployerPromotionPlan(poller, $"{poller}-schedule", "rate(1 minute)", 1, 60, hold, PollerAlarms(config),
+                new DeployTarget(triggerInputs.Cluster, target["service"]!.GetValue<string>(), artifact, EcrRepositoryNaming.For(config, artifact)));
 
             // THE REVERT (stage J, T-14): the hold before Prepare, its record, and the function the operator set starts it with.
             var setHold = $"{sk}-{env}-deployer-set-hold";
@@ -1831,6 +1833,13 @@ public static class DeployerPlanner
 
     public static string AlertsTopicArn(string region, string targetAccountId, SystemConfig config)
         => $"arn:aws:sns:{region}:{targetAccountId}:{AlertsTopicName(config)}";
+
+    /// <summary>
+    /// Whether this environment's image deploys go through Pulumi (<c>Pipeline.ImageDeploy: pulumi</c>, P3 J3): read by
+    /// <c>deploytenant</c> to leave off the interim pieces (P3 J4). False without the block, so a system that has not opted in
+    /// deploys exactly as before.
+    /// </summary>
+    public static bool ImageDeploysThroughPulumi(SystemConfig config) => config.Pipeline?.ImageDeploysThroughPulumi == true;
 
     /// <summary>
     /// The alerts topic, or null where this environment has none (no Pipeline block, or Alerts off): for an alert raised

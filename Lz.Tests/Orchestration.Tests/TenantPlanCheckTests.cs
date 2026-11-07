@@ -137,6 +137,21 @@ public class TenantPlanCheckTests
     }
 
     [Fact]
+    public void UnderImageDeployPulumi_AnImageOnlyReplace_CountsLikeAnyOther()
+    {
+        // P3 J4: where every image deploy lands in the tenant state, a full plan has no image step, so no replace is exempt.
+        var step = Replace(Inputs($"{Repo}@{Other}", "h1", "2026-10-20T21:00:00Z"), Inputs($"{Repo}@{Running}", "h1", "2026-10-20T22:12:00Z"));
+        Assert.Single(TenantPlanCheck.Destructive(new[] { step }, imageOnlyExempt: false));
+
+        var plan = PlanSummary.From("s", new Dictionary<OperationType, int> { [OperationType.Replace] = 1 }, [step], imageOnlyExempt: false);
+        Assert.True(plan.Destructive);
+        Assert.Equal(1, plan.Replaces);
+        Assert.Equal(0, plan.ImageOnlyReplaces);
+        Assert.Single(plan.DestructiveSteps);
+        Assert.Equal(TenantPlanCheck.NotExempt, Assert.Single(plan.CountedTaskDefinitionReplaces).Why);
+    }
+
+    [Fact]
     public void ARollThatOnlyMovesTheImage_IsNotDestructive()
     {
         var same = Inputs("x", "h1", null);

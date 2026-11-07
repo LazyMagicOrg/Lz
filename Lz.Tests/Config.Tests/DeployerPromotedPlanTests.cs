@@ -234,6 +234,18 @@ public class DeployerPromotedPlanTests
     private static DeployerFunction Poller(PipelineDeployer p) => p.Functions.Single(f => f.Handler == DeployerHandlers.PromotionPoller);
 
     [Fact]
+    public void ThePromotionsImageTarget_IsThePollersTarget_SoBootstrapSeedsTheInputItRolls()
+    {
+        // P3 J4: a promoted environment has no trigger, so its image input is seeded from this target.
+        var plan = Plan();
+        var target = plan.Promotion!.ImageTarget!;
+        var polled = System.Text.Json.Nodes.JsonNode.Parse(Poller(plan).Environment[DeployerEnvironment.PromotionTarget])!;
+        Assert.Equal(
+            (polled["cluster"]!.GetValue<string>(), polled["service"]!.GetValue<string>(), polled["container"]!.GetValue<string>(), polled["repository"]!.GetValue<string>()),
+            (target.Cluster, target.Service, target.Container, target.Repository));
+    }
+
+    [Fact]
     public void ThePoller_RunsEveryMinute_OneAtATime_OnTicksAMinuteOld()
     {
         var plan = Plan();

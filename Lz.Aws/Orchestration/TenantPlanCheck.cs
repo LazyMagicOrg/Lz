@@ -78,9 +78,14 @@ public static class TenantPlanCheck
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(defs)))).ToLowerInvariant();
     }
 
-    /// <summary>The steps a replace-or-delete count includes, an image-only task-definition replace left out.</summary>
-    public static IReadOnlyList<PlannedStep> Destructive(IEnumerable<PlannedStep> steps)
-        => steps.Where(s => s.Op is OperationType.Replace or OperationType.Delete && !IsImageOnlyTaskDefinitionReplace(s)).ToList();
+    /// <summary>The steps a replace-or-delete count includes, an image-only task-definition replace left out where
+    /// <paramref name="imageOnlyExempt"/>; under <c>Pipeline.ImageDeploy: pulumi</c> (P3 J4) it is false and every one counts.</summary>
+    public static IReadOnlyList<PlannedStep> Destructive(IEnumerable<PlannedStep> steps, bool imageOnlyExempt = true)
+        => steps.Where(s => s.Op is OperationType.Replace or OperationType.Delete && !(imageOnlyExempt && IsImageOnlyTaskDefinitionReplace(s))).ToList();
+
+    /// <summary>Why a task-definition replace counts where no replace is exempt (P3 J4).</summary>
+    public const string NotExempt =
+        "image deploys go through Pulumi here (Pipeline.ImageDeploy: pulumi), so a full plan has no image step and every replace counts";
 
     /// <summary>
     /// A task-definition replace that changes nothing but its containers' images: every input equal, the container

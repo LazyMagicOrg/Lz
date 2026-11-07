@@ -42,10 +42,12 @@ public sealed record PlanSummary(
     /// The verdict from the change summary and the steps. Replaces and deletes are counted from the change summary; an
     /// image-only task-definition replace (<see cref="TenantPlanCheck.IsImageOnlyTaskDefinitionReplace"/>) is taken out, since
     /// every image roll makes one. Without steps (the shared stack's preview captures none) nothing is taken out.
+    /// <para><paramref name="imageOnlyExempt"/> false under <c>Pipeline.ImageDeploy: pulumi</c> (P3 J4): there every image deploy
+    /// lands in the tenant state, so a full plan has no image step, and a task-definition replace is counted like any other.</para>
     /// </summary>
     public static PlanSummary From(
         string stack, IReadOnlyDictionary<OperationType, int>? changeSummary,
-        IReadOnlyList<PlannedStep>? steps = null, IReadOnlyList<string>? digestRefusals = null)
+        IReadOnlyList<PlannedStep>? steps = null, IReadOnlyList<string>? digestRefusals = null, bool imageOnlyExempt = true)
     {
         var changes = (changeSummary ?? new Dictionary<OperationType, int>())
             .Where(kv => kv.Key != OperationType.Same && kv.Value > 0)
@@ -62,14 +64,14 @@ public sealed record PlanSummary(
         var destructiveSteps = new List<PlanSummaryStep>();
         if (steps is not null)
         {
-            imageOnly = steps.Count(TenantPlanCheck.IsImageOnlyTaskDefinitionReplace);
+            imageOnly = imageOnlyExempt ? steps.Count(TenantPlanCheck.IsImageOnlyTaskDefinitionReplace) : 0;
             foreach (var td in steps.Where(s => s.Type == TenantPlanCheck.TaskDefinitionType && s.Op == OperationType.Replace))
-                if (TenantPlanCheck.WhyNotImageOnly(td) is { } why)
+                if ((imageOnlyExempt ? TenantPlanCheck.WhyNotImageOnly(td) : TenantPlanCheck.NotExempt) is { } why)
                     counted.Add(new PlanSummaryStep(OpName(td.Op), td.Type, td.Urn, why));
             // A PROVIDER IS NOT A RESOURCE. Pulumi's change summary leaves provider steps out (measured on dev's foundation,
             // 2026-11-06: the default aws provider moving 7.52.1 -> 7.53.0 planned a create and a delete, and the summary
             // counted neither), so the list leaves them out too, or it would name a step the verdict never counted.
-            destructiveSteps.AddRange(TenantPlanCheck.Destructive(steps)
+            destructiveSteps.AddRange(TenantPlanCheck.Destructive(steps, imageOnlyExempt)
                 .Where(s => !s.Type.StartsWith(ProviderTypePrefix, StringComparison.Ordinal))
                 .Select(s => new PlanSummaryStep(OpName(s.Op), s.Type, s.Urn)));
             replaces = Math.Max(0, replaces - imageOnly);

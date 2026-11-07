@@ -33,6 +33,13 @@ public class SystemDeployment
     // ResolveImageDigestsAsync, read by the plan check and the after-apply check.
     private readonly Dictionary<string, RunningServiceImage> _runningImages = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// <c>Pipeline.ImageDeploy: pulumi</c> (P3 J3): every image deploy here lands in the tenant state, so the interim pieces that made
+    /// up for a state that did not name what runs are off (P3 J4) - the revert check after applying, the build time copied off the
+    /// running revision, and the image-only replace exception. An environment still on <c>ecs</c> keeps all three.
+    /// </summary>
+    private bool ImageDeploysThroughPulumi => Lz.Aws.Pipeline.DeployerPlanner.ImageDeploysThroughPulumi(_config);
+
     public SystemDeployment(
         IPlatformFactory factory, SystemDefinition system, SystemConfig config,
         CancellationToken cancellationToken = default)
@@ -345,8 +352,10 @@ public class SystemDeployment
 
             await DeployTenantUnderLeaseAsync(stackName, tenantKey, tenantConfig, checker, smtpSecrets);
 
-            // Still under the lease, so what is read is what this deploy left, and nothing else's.
-            await CheckForRevertsAsync(tenantKey, tenantConfig);
+            // Still under the lease, so what is read is what this deploy left, and nothing else's. Not under ImageDeploy: pulumi
+            // (P3 J4), where the image is declared from the input, which only an image deploy writes.
+            if (!ImageDeploysThroughPulumi)
+                await CheckForRevertsAsync(tenantKey, tenantConfig);
 
             // THE LEASE IS HELD UNTIL THIS DEPLOY'S OWN ROLLOUTS FINISH (V-J): released while ECS still rolled, another
             // writer could start on a service mid-rollout, the very thing the lease is there to stop.
@@ -403,7 +412,8 @@ public class SystemDeployment
             try
             {
                 await TenantPulumiUpTargetedAsync(stackName, tenantKey, tenantConfig, ecsService);
-                await CheckForRevertsAsync(tenantKey, tenantConfig);
+                if (!ImageDeploysThroughPulumi)
+                    await CheckForRevertsAsync(tenantKey, tenantConfig);
                 await WaitForOwnRolloutsAsync(tenantKey, tenantConfig, leases, marks);
             }
             catch
@@ -1591,6 +1601,7 @@ public class SystemDeployment
 
             // THE IMAGE INPUT MUST AGREE (P3 J1), where the pipeline signs this service's images: what the deployer, updatecontainer
             // and a write-back keep in step with what runs. A missing or disagreeing input is refused before anything is planned.
+            Lz.Aws.Pipeline.ImageInput? agreedInput = null;
             if (service.State == ServiceImageState.DigestPinned && Lz.Aws.Pipeline.DeployerPlanner.SignatureHookFor(_config, svc.Name) is not null)
             {
                 var inputName = Lz.Aws.Pipeline.ImageInputFormat.NameFor(_config.SystemKey, _config.Environment, ecsService);
@@ -1607,6 +1618,7 @@ public class SystemDeployment
                     throw new TenantDeployRefusedException(why);
                 }
                 Console.WriteLine($"  {svc.Name}: its image input {inputName} names what it runs ({input!.Writer}, {input.WrittenAt}).");
+                agreedInput = input;
             }
 
             tenantConfig.ResolvedImageDigests[svc.Name] = digest;
@@ -1615,10 +1627,16 @@ public class SystemDeployment
 
             // WHAT THE SERVICE IS SET TO, for the plan check before applying and the revert check after (V-J), and its
             // build time, which the new revision carries on. Only a pinned service has either; a first deploy has none.
+            // Under ImageDeploy: pulumi (P3 J4) the build time is the input's, which an image deploy wrote, and not copied off
+            // the running revision. The input's digest was checked against what runs just above.
             if (service.State == ServiceImageState.DigestPinned)
             {
                 _runningImages[ecsService] = new RunningServiceImage(svc.Name, digest, service.BuiltAt);
-                if (service.BuiltAt is { } builtAt)
+                var builtAt = ImageDeploysThroughPulumi
+                    ? (agreedInput ?? throw new TenantDeployRefusedException(
+                        $"{ecsService}: image deploys go through Pulumi here, but its image input was not read, so the build time it declares is unknown.")).BuiltAt
+                    : service.BuiltAt;
+                if (builtAt is not null)
                     tenantConfig.ResolvedImageBuiltAt[svc.Name] = builtAt;
             }
 
@@ -1739,7 +1757,7 @@ public class SystemDeployment
         Console.WriteLine();
         // What deploytenant would refuse, so a preview says so before a deploy finds out (V-J).
         var refusals = TenantPlanCheck.DigestRefusals(steps, _runningImages, TenantPlanCheck.DeclaredImages);
-        LastPlan = PlanSummary.From(stackName, result.ChangeSummary, steps, refusals);
+        LastPlan = PlanSummary.From(stackName, result.ChangeSummary, steps, refusals, imageOnlyExempt: !ImageDeploysThroughPulumi);
         var destructive = PrintPlanSummary(LastPlan);
 
         if (refusals.Count > 0)
