@@ -505,6 +505,43 @@ public class PipelineBootstrapPlannerTests
         Assert.Equal(new[] { "scu-abcd-1234-aiphost" }, plan.Replication!.RepositoryFilters.Select(f => f.Filter));
     }
 
+    // ---- P3 H1: the stores admit the pipeline's writers alone, and nobody deletes ----
+
+    private static System.Text.Json.Nodes.JsonObject Statement(PipelineBootstrapPlan plan, string store, string sid)
+        => plan.Stores.Single(s => s.Name == store).PolicyStatements.Single(st => st["Sid"]!.GetValue<string>() == sid);
+
+    [Fact]
+    public void TheRecordAndArtifactStores_RefuseAWriteFromAnyoneButTheIntakeAndTheUnretiredRoles()
+    {
+        var p = Enabled();
+        p.Repositories![0].Verify = "live";   // the Service, switched to the intake: its GitHub role is retired
+        p.Repositories[0].Intake = "live";
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(p), "147440642635");
+
+        foreach (var store in new[] { plan.BuildRecordStore!, plan.ArtifactStore! })
+        {
+            var only = Statement(plan, store, StoreWriters.WritersSid);
+            Assert.Equal("Deny", only["Effect"]!.GetValue<string>());
+            Assert.Equal("*", only["Principal"]!.GetValue<string>());
+            Assert.Equal($"arn:aws:s3:::{store}/*", only["Resource"]!.GetValue<string>());
+            var admitted = only["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"]!.AsArray().Select(a => a!.GetValue<string>()).ToList();
+            Assert.Contains("arn:aws:iam::147440642635:role/scu-intake-publish-fn", admitted);
+            Assert.Equal(plan.Roles.Count(r => !r.Retired) + 1, admitted.Count);   // each live GitHub role, and the intake
+            Assert.DoesNotContain(plan.Roles.Single(r => r.Retired).Name, string.Join(",", admitted));
+
+            var deletes = Statement(plan, store, StoreWriters.NoDeletesSid);
+            Assert.Equal(new[] { "s3:DeleteObject", "s3:DeleteObjectVersion" }, deletes["Action"]!.AsArray().Select(a => a!.GetValue<string>()));
+            Assert.Null(deletes["Condition"]);   // to everyone, no exception (owner, 2026-11-07)
+        }
+    }
+
+    [Fact]
+    public void WithoutAKnownAccount_NoWriterDenyIsPlanned_SinceItNamesRoleArns()
+    {
+        var plan = PipelineBootstrapPlanner.Plan(WithPipeline(Enabled()));
+        Assert.All(plan.Stores, s => Assert.DoesNotContain(s.PolicyStatements, st => st["Sid"]!.GetValue<string>() == StoreWriters.WritersSid));
+    }
+
     [Fact]
     public void WhatGitHubMayWrite_LeavesOutEveryRetiredRole()
     {

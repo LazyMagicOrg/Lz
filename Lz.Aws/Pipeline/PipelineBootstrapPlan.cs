@@ -254,14 +254,25 @@ public static class PipelineBootstrapPlanner
         //
         // ALL THREE ARE WRITE-ONCE — §2 says so of bundles, §4.3 of records, §6 of requests — and the store enforces it
         // rather than trusting its writers (§14.3).
+        // ONLY THE PIPELINE'S WRITERS WRITE THEM (P3 H1): the intake's publish function, where there is an intake, and each GitHub role
+        // not yet retired; every delete refused. Planned only where a real account is known, since the Deny names role ARNs.
+        var writers = (repos.Any(r => !string.IsNullOrEmpty(r.Intake))
+                ? new[] { $"arn:aws:iam::{acct}:role/{IntakeBuildPlanner.PublishRoleName(sk)}" }
+                : Array.Empty<string>())
+            .Concat(roles.Where(r => !r.Retired).Select(r => $"arn:aws:iam::{acct}:role/{r.Name}"))
+            .Distinct()
+            .ToList();
+        System.Text.Json.Nodes.JsonObject[] Closed(string bucket) => accountId is null || writers.Count == 0
+            ? new[] { WriteOnceStore.Deny(bucket) }
+            : new[] { WriteOnceStore.Deny(bucket), StoreWriters.OnlyTheseWrite(bucket, writers), StoreWriters.NoDeletes(bucket) };
         var stores = new List<PipelineStore>
         {
             new(artifacts,
                 "bundles, written once and named by object version id", prefixes,
-                new[] { WriteOnceStore.Deny(artifacts) }),
+                Closed(artifacts)),
             new(buildRecords,
                 "one build record per artifact — the uniform trigger (§4.3)", prefixes,
-                new[] { WriteOnceStore.Deny(buildRecords) }),
+                Closed(buildRecords)),
             new(requests,
                 "deploy requests: what may enter an environment (§6)",
                 // EMPTY ON PURPOSE. The request store is written by the DEPLOYER, never by GitHub —

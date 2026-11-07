@@ -90,6 +90,10 @@ public static class IntakeBuildPlanner
     /// <summary>The record function's role: the one principal an environment's outcomes topic admits from the build account.</summary>
     public static string RecordRoleName(string systemKey) => $"{systemKey}-intake-record-fn";
 
+    /// <summary>The publish function's role: the one intake principal that writes the record and artifact stores and pushes images
+    /// (P3 H names it in their Denies).</summary>
+    public static string PublishRoleName(string systemKey) => $"{systemKey}-intake-publish-fn";
+
     /// <summary>The repositories the intake takes: those with an <c>Intake</c> mode, all of whose ids the validator required.</summary>
     public static IReadOnlyList<IntakeRepository> RepositoriesFor(SystemConfig config)
         => (config.Pipeline?.Repositories ?? new List<PipelineRepositoryConfig>())
@@ -375,6 +379,8 @@ public static class IntakeBuildPlanner
 
             // THE PUBLISH (V-D), after Gate 1's pass: a no-op for a dry repository, so the machine is one shape for all.
             var publish = Fn("publish");
+            if ($"{publish}-fn" != PublishRoleName(sk))
+                throw new InvalidOperationException("the intake's publish role diverged from PublishRoleName, which the stores' Deny admits.");
             var recordStore = PipelineBootstrapPlanner.BuildRecordStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
             var artifactStore = PipelineBootstrapPlanner.ArtifactStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config));
             var targets = PublishTargetsFor(config, accountId, repositories);

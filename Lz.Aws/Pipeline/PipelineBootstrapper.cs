@@ -205,6 +205,13 @@ public static class PipelineBootstrapper
                 : $"      writable by GitHub under: {string.Join(", ", s.WriterPrefixes)}");
             if (s.PolicyStatements.Any(p => p["Sid"]?.GetValue<string>() == WriteOnceStore.Sid))
                 Console.WriteLine($"      write-once: bucket policy {WriteOnceStore.Sid} refuses any PutObject without If-None-Match, from anyone");
+            if (s.PolicyStatements.FirstOrDefault(p => p["Sid"]?.GetValue<string>() == StoreWriters.WritersSid) is { } only)
+                Console.WriteLine($"      writers: bucket policy {StoreWriters.WritersSid} refuses any PutObject but from " +
+                                  string.Join(", ", (only["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"] is System.Text.Json.Nodes.JsonArray a
+                                      ? a.Select(x => x!.GetValue<string>()) : new[] { only["Condition"]!["ArnNotEquals"]!["aws:PrincipalArn"]!.GetValue<string>() })
+                                      .Select(arn => arn[(arn.LastIndexOf('/') + 1)..])));
+            if (s.PolicyStatements.Any(p => p["Sid"]?.GetValue<string>() == StoreWriters.NoDeletesSid))
+                Console.WriteLine($"      deletes: bucket policy {StoreWriters.NoDeletesSid} refuses every object delete, from anyone");
         }
 
         Console.WriteLine();
