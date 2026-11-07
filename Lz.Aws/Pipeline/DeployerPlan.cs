@@ -2184,28 +2184,38 @@ public static class DeployerPlanner
     private static IEnumerable<System.Text.Json.Nodes.JsonObject> SuccessorReadGrant(string sk, string evidence, PipelineNeighbour? successor)
     {
         if (successor is null) yield break;
-        System.Text.Json.Nodes.JsonObject Readers() => new()
+        // THE SUCCESSOR'S ACCOUNT, NARROWED TO ITS TWO ROLES BY CONDITION (P6, PB-14): S3 refuses a bucket policy whose principal is
+        // a role that does not exist, and a successor's roles are created by its own bootstrapdeployer, after its predecessor already
+        // marks for it. The account as the principal and the roles' ARNs in aws:PrincipalArn admit exactly the same two callers,
+        // whether or not they exist yet - the form the build account's grants to the environments use (CrossAccount).
+        System.Text.Json.Nodes.JsonObject Account() => new() { ["AWS"] = $"arn:aws:iam::{successor.AccountId}:root" };
+        System.Text.Json.Nodes.JsonObject TheTwoRoles() => new()
         {
-            ["AWS"] = new System.Text.Json.Nodes.JsonArray(
-                $"arn:aws:iam::{successor.AccountId}:role/{VerifyRoleNameFor(sk, successor.Environment)}",
-                $"arn:aws:iam::{successor.AccountId}:role/{PollerRoleNameFor(sk, successor.Environment)}"),
+            ["aws:PrincipalArn"] = new System.Text.Json.Nodes.JsonArray(
+                $"arn:aws:iam::{successor.AccountId}:role/{PollerRoleNameFor(sk, successor.Environment)}",
+                $"arn:aws:iam::{successor.AccountId}:role/{VerifyRoleNameFor(sk, successor.Environment)}"),
         };
         yield return new System.Text.Json.Nodes.JsonObject
         {
             ["Sid"] = "LzTheSuccessorListsMarkers",
             ["Effect"] = "Allow",
-            ["Principal"] = Readers(),
+            ["Principal"] = Account(),
             ["Action"] = "s3:ListBucket",
             ["Resource"] = $"arn:aws:s3:::{evidence}",
-            ["Condition"] = new System.Text.Json.Nodes.JsonObject { ["StringLike"] = new System.Text.Json.Nodes.JsonObject { ["s3:prefix"] = "passed/*" } },
+            ["Condition"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["StringLike"] = new System.Text.Json.Nodes.JsonObject { ["s3:prefix"] = "passed/*" },
+                ["ArnEquals"] = TheTwoRoles(),
+            },
         };
         yield return new System.Text.Json.Nodes.JsonObject
         {
             ["Sid"] = "LzTheSuccessorReadsMarkersAndEvidence",
             ["Effect"] = "Allow",
-            ["Principal"] = Readers(),
+            ["Principal"] = Account(),
             ["Action"] = new System.Text.Json.Nodes.JsonArray("s3:GetObject", "s3:GetObjectVersion"),
             ["Resource"] = new System.Text.Json.Nodes.JsonArray($"arn:aws:s3:::{evidence}/passed/*", $"arn:aws:s3:::{evidence}/deploys/*", $"arn:aws:s3:::{evidence}/tests/*"),
+            ["Condition"] = new System.Text.Json.Nodes.JsonObject { ["ArnEquals"] = TheTwoRoles() },
         };
     }
 

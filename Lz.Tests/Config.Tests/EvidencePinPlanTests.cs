@@ -113,17 +113,24 @@ public class EvidencePinPlanTests
         }
     }
 
+    private static string TestAccountId(string roleArn) => roleArn.Split(':')[4];
+
     [Fact]
     public void DevGrantsItsSuccessorsPollerAndVerify_ItsMarkersAndTheEvidenceTheyName()
     {
         var p = PlanDev();
-        var readers = new[] { Role(Test, "scu-test-deployer-verify-fn"), Role(Test, "scu-test-deployer-poller-fn") };
+        // P6, PB-14: the successor's ACCOUNT as principal, its two roles by condition - S3 refuses a principal role that does not
+        // exist yet, and a successor's roles come after its predecessor starts marking for it.
+        var readers = new[] { Role(Test, "scu-test-deployer-poller-fn"), Role(Test, "scu-test-deployer-verify-fn") };
+        var account = $"arn:aws:iam::{TestAccountId(Role(Test, "x"))}:root";
         var list = Statement(p, "LzTheSuccessorListsMarkers");
-        Assert.Equal(readers, list["Principal"]!["AWS"]!.AsArray().Select(a => a!.GetValue<string>()));
+        Assert.Equal(account, list["Principal"]!["AWS"]!.GetValue<string>());
+        Assert.Equal(readers, list["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.AsArray().Select(a => a!.GetValue<string>()));
         Assert.Equal(("s3:ListBucket", $"arn:aws:s3:::{DevStore}", "passed/*"),
             (list["Action"]!.GetValue<string>(), list["Resource"]!.GetValue<string>(), list["Condition"]!["StringLike"]!["s3:prefix"]!.GetValue<string>()));
         var read = Statement(p, "LzTheSuccessorReadsMarkersAndEvidence");
-        Assert.Equal(readers, read["Principal"]!["AWS"]!.AsArray().Select(a => a!.GetValue<string>()));
+        Assert.Equal(account, read["Principal"]!["AWS"]!.GetValue<string>());
+        Assert.Equal(readers, read["Condition"]!["ArnEquals"]!["aws:PrincipalArn"]!.AsArray().Select(a => a!.GetValue<string>()));
         Assert.Equal(new[] { $"arn:aws:s3:::{DevStore}/passed/*", $"arn:aws:s3:::{DevStore}/deploys/*", $"arn:aws:s3:::{DevStore}/tests/*" },
             read["Resource"]!.AsArray().Select(a => a!.GetValue<string>()));
         Assert.Equal(new[] { "s3:GetObject", "s3:GetObjectVersion" }, read["Action"]!.AsArray().Select(a => a!.GetValue<string>()));
