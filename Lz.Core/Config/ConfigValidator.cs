@@ -456,7 +456,8 @@ public static class ConfigValidator
         {
             errors.Add($"Pipeline.Gate2 is '{p.Gate2}'; it is off, provisioned or on.");
         }
-        if (p.Gate2IsProvisioned && (!p.DeployOnBuildRecord || !p.Alerts))
+        // A PROMOTED ENVIRONMENT (P6, PB-13) gates the set its predecessor passed: the promotion's target names what it reads.
+        if (p.Gate2IsProvisioned && ((!p.DeployOnBuildRecord && p.Predecessor is null) || !p.Alerts))
         {
             errors.Add(
                 "Pipeline.Gate2 is on but Pipeline.DeployOnBuildRecord or Pipeline.Alerts is off. Gate 2 reads the services the " +

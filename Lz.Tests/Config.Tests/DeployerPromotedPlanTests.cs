@@ -121,6 +121,59 @@ public class DeployerPromotedPlanTests
         Assert.Contains("Infrastructure: deploy", Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(planOnly, "test.yaml")).Message);
     }
 
+    // ---- P6, PB-13: a promoted environment's own Gate 2 ----
+
+    private static readonly DeployerGate2Inputs TestGate2Hosts =
+        new("match.scutara-test.click", "scutara-test.click", "vpc-0test", new[] { "subnet-0testprivate" });
+
+    private static SystemConfig TestWithGate2()
+    {
+        var c = TestThroughPulumi();
+        c.Pipeline!.Gate2 = PipelineConfig.Gate2On;
+        c.Pipeline.Gate2BrowserTests = "Scutara/ScutaraE2ETests";
+        c.Pipeline.Repositories!.First(r => r.Class == "image").Gate1 = new PipelineGate1Config
+        {
+            Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
+        };
+        return c;
+    }
+
+    private static PipelineDeployer GatedPlan(SystemConfig c)
+        => DeployerPlanner.Plan(c, TestAccount, triggerInputs: Cluster, clientInputs: DeployerClientPlanTests.Distributions,
+            infraInputs: new DeployerInfraInputs("subnet-0test", "sg-0test"), gate2Inputs: TestGate2Hosts);
+
+    [Fact]
+    public void UnderGate2On_ADecidedSet_GoesOnToThisEnvironmentsGate2_WithTheImageMemberBackInPlace()
+    {
+        var plan = GatedPlan(TestWithGate2());
+        var states = States(plan);
+        Assert.Equal("GateTheSet", states.GetProperty("Decide").GetProperty("Next").GetString());
+        var gate = states.GetProperty("GateTheSet");
+        Assert.Equal("$.set.site", gate.GetProperty("Choices")[0].GetProperty("Variable").GetString());
+        Assert.Equal("Decided", gate.GetProperty("Choices")[0].GetProperty("Next").GetString());   // a site is never gated
+        Assert.Equal("Gate2Image", gate.GetProperty("Default").GetString());
+        var image = states.GetProperty("Gate2Image");
+        Assert.Equal("Gate2Start", image.GetProperty("Next").GetString());
+        Assert.Equal("$.set.image.verified", image.GetProperty("Parameters").GetProperty("verified.$").GetString());
+        Assert.Equal("$.set.image.target", image.GetProperty("Parameters").GetProperty("target.$").GetString());
+        Assert.False(states.TryGetProperty("GatesThisClass", out _));   // dev's entry, from Record, has no place in a promoted machine
+        Assert.Equal("Reverted", states.GetProperty("RecordRevert").GetProperty("Next").GetString());   // a revert is never gated
+
+        // What it reads: the service a promoted image member rolls, not a trigger's routes.
+        var start = plan.Functions.Single(f => f.Handler == DeployerHandlers.Gate2Start);
+        Assert.Contains("scu-test-cluster", start.Environment[DeployerEnvironment.Gate2Set]);
+        Assert.Contains("scu-mp-aiphost", start.Environment[DeployerEnvironment.Gate2Set]);
+    }
+
+    [Fact]
+    public void Gate2_WhenPromotedInto_IsValid_WithoutATrigger()
+    {
+        var c = TestWithGate2();
+        ConfigValidator.Validate(c, "test.yaml");   // no throw: DeployOnBuildRecord is a promoted environment's poller's to replace
+        c.Pipeline!.Predecessor = null;
+        Assert.Contains("Pipeline.Gate2 is on", Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(c, "test.yaml")).Message);
+    }
+
     [Fact]
     public void WithoutInfrastructure_ThePromotedMachineHasNoConfigStep()
     {

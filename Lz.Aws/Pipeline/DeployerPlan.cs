@@ -734,10 +734,11 @@ public static class DeployerPlanner
         var promoted = p.Predecessor;
         if (promoted is not null)
         {
-            if (approvalRequired || p.Gate2IsProvisioned)
+            // ITS OWN GATE 2 ARRIVES WITH P6 (PB-13): planned below, over the promotion's target. The approval is still to come.
+            if (approvalRequired)
                 throw new InvalidOperationException(
-                    $"{env} is promoted into from {promoted.Environment}, and its Approval or Gate2 is set: an approval after a " +
-                    "predecessor's marker and a promoted environment's own Gate 2 arrive with P6 (DecoupledCd.md §12), and are not planned yet.");
+                    $"{env} is promoted into from {promoted.Environment}, and its Approval is set: an approval after a predecessor's " +
+                    "marker arrives with P6's approval (PB-24), and is not planned yet.");
             if (string.IsNullOrWhiteSpace(promoted.EvidenceStore))
                 throw new InvalidOperationException($"the chain names no EvidenceStore for {promoted.Environment}, where {env} reads its markers.");
             if (!p.Alerts)
@@ -1065,11 +1066,15 @@ public static class DeployerPlanner
         DeployerGate2Plan? gate2 = null;
         if (p.Gate2IsProvisioned)
         {
-            if (trigger is null || alerts is null)
-                throw new InvalidOperationException("Pipeline.Gate2 needs DeployOnBuildRecord, whose routes name what it reads, and Alerts.");
+            if ((trigger is null && promoted is null) || alerts is null)
+                throw new InvalidOperationException("Pipeline.Gate2 needs DeployOnBuildRecord, whose routes name what it reads, or a predecessor whose sets it is promoted, and Alerts.");
+            // WHAT IT READS: the trigger's routes, or in a promoted environment (P6, PB-13) the service a promoted image member rolls.
+            var gatedServices = trigger is not null
+                ? trigger.Routes.SelectMany(r => r.Targets).Select(t => new Gate2Service(t.Target.Cluster, t.Target.Service, t.Target.Container))
+                : p.AcceptedRepositories.Where(r => r.Class == "image").SelectMany(r => r.Artifacts ?? new List<string>())
+                    .Select(a => new Gate2Service(triggerInputs!.Cluster, $"{sk}-{triggerInputs.TenantKeys[0]}-{a}", a));
             var set = new Gate2Set(
-                trigger.Routes.SelectMany(r => r.Targets).Select(t => new Gate2Service(t.Target.Cluster, t.Target.Service, t.Target.Container))
-                    .Distinct().OrderBy(s => $"{s.Cluster}/{s.Service}", StringComparer.Ordinal).ToList(),
+                gatedServices.Distinct().OrderBy(s => $"{s.Cluster}/{s.Service}", StringComparer.Ordinal).ToList(),
                 clientTargets.Select(c => new Gate2App(c.App, c.Bucket)).OrderBy(a => a.App, StringComparer.Ordinal).ToList());
             var project = Gate2ProjectName(config);
             var results = $"{sk}-{env}-gate2-results-{config.SystemSuffix}";
@@ -2717,8 +2722,12 @@ public static class DeployerPlanner
     /// member follows. Under Infrastructure: deploy (P3 I3) it is applied there too - ApproveInfrastructure, DeployInfrastructure,
     /// VerifyInfrastructure's empty second preview, RecordInfrastructure - before the image member. A revert goes back to an image,
     /// never past this environment's infrastructure, so it skips the config.</param>
+    /// <param name="gated">P6, PB-13: under <c>Gate2: on</c> a decided set goes on to this environment's own Gate 2 - Gate2Image lifts
+    /// the image member back into place, so Gate2Start reads its service and its tests record - and, with a successor, MarkPassed. A
+    /// site is never gated (V-24): it goes to MarkSitePassed where it is marked, and ends Decided otherwise. A revert is never gated.</param>
     private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
-        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false, bool config = false)
+        Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false, bool config = false,
+        bool gated = false)
     {
         System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
 
@@ -2888,10 +2897,43 @@ public static class DeployerPlanner
             Parameters = payload,
             ResultPath = "$.decision",
             Retry = new[] { transient, evidenceWrite },
-            Next = "Decided",
+            Next = gated ? "GateTheSet" : "Decided",
             Catch = catchAll,
         };
         states["Decided"] = new { Type = "Succeed" };
+        if (gated)
+        {
+            var marksSite = states.ContainsKey("MarkSitePassed");
+            states["GateTheSet"] = new
+            {
+                Type = "Choice",
+                Choices = new[] { new { Variable = "$.set.site", IsPresent = true, Next = marksSite ? "MarkSitePassed" : "Decided" } },
+                Default = "Gate2Image",
+            };
+            states["Gate2Image"] = new
+            {
+                Type = "Pass",
+                Parameters = new Dictionary<string, object>
+                {
+                    ["set.$"] = "$.set",
+                    ["marker.$"] = "$.marker",
+                    ["decision.$"] = "$.decision",
+                    ["record.$"] = "$.set.image.record",
+                    ["target.$"] = "$.set.image.target",
+                    ["verified.$"] = "$.set.image.verified",
+                },
+                Next = "Gate2Start",
+            };
+            if (marksSite)
+            {
+                var markSite = Node("MarkSitePassed");
+                markSite["Next"] = "Decided";
+                states["MarkSitePassed"] = markSite;
+            }
+            // Dev's entry to the gate, from Record, has no place here: a promoted set's Record goes on to its bundles.
+            states.Remove("GatesThisClass");
+            states.Remove("Recorded");
+        }
 
         var failure = Node("RecordFailure");
         failure["Next"] = "DecideFailure";
@@ -4003,7 +4045,7 @@ public static class DeployerPlanner
 
         if (decideFn is not null)
             Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite(),
-                site: siteFunctions is not null, config: infraStates is not null);
+                site: siteFunctions is not null, config: infraStates is not null, gated: gate2 is not null);
 
         // THE IMAGE THROUGH PULUMI (P3 J3): Prepare goes on to ChooseConfig, and Deploy is the tooling task, not UpdateService.
         if (imageStates?.Invoke(payload, catchAll, Transient) is { } imageBranch)
