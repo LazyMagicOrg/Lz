@@ -31,7 +31,17 @@ public class InfraDeployPlannerTests
     }
 
     /// <summary>Dev as it runs: in a chain, with the trigger, alerts and Gate 2, so every pipeline resource is in the plan.</summary>
-    private static PipelineDeployer DevAsItRuns(string infrastructure = PipelineConfig.InfrastructureDeploy)
+    private static PipelineDeployer DevAsItRuns(string infrastructure = PipelineConfig.InfrastructureDeploy, bool markConfig = false)
+    {
+        var c = DevAsItRunsConfig(infrastructure);
+        c.Pipeline!.MarkConfig = markConfig;
+        return DeployerPlanner.Plan(c, TargetAccount,
+            triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
+            gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click", "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc" }),
+            infraInputs: Network);
+    }
+
+    private static SystemConfig DevAsItRunsConfig(string infrastructure = PipelineConfig.InfrastructureDeploy)
     {
         var c = Dev(infrastructure);
         c.Pipeline!.DeployOnBuildRecord = true;
@@ -43,10 +53,7 @@ public class InfraDeployPlannerTests
             Run = "ServiceTest/bin/Debug/net10.0/ServiceTest.dll", SdkVersion = "10.0.301", SdkSha512 = new string('a', 128),
         };
         c.Pipeline.Successor = new PipelineNeighbour("test", "456687462751", "scu-test-deploy-evidence-d5e0-b27f");
-        return DeployerPlanner.Plan(c, TargetAccount,
-            triggerInputs: new DeployerTriggerInputs("scu-dev-cluster", new[] { "mp" }), clientInputs: DeployerClientPlanTests.Distributions,
-            gate2Inputs: new DeployerGate2Inputs("match.aiproxydev.click", "aiproxydev.click", "vpc-0c9d2cd926f4959a7", new[] { "subnet-01e0ec2475ecf0bfc" }),
-            infraInputs: Network);
+        return c;
     }
 
     private static PipelineDeployer Plan(SystemConfig config)
@@ -65,6 +72,47 @@ public class InfraDeployPlannerTests
         => patterns.Any(p => System.Text.RegularExpressions.Regex.IsMatch(arn, "^" + System.Text.RegularExpressions.Regex.Escape(p).Replace(@"\*", ".*") + "$"));
 
     private static string Deny(PipelineDeployer plan) => InfraDeployPlanner.PipelineDeny(plan, "us-west-2", TargetAccount, "scu", "dev");
+
+    // ---- P3 I1: a config execution is gated, and its set may name the config ----
+
+    [Fact]
+    public void UnderGate2_AConfigExecution_GoesOnFromRecordToGate2_AndHasNoEndOfItsOwn()
+    {
+        var states = States(DevAsItRuns());
+        Assert.Equal("GatesThisClass", states.GetProperty("RecordInfrastructure").GetProperty("Next").GetString());
+        Assert.False(states.TryGetProperty("InfrastructureDeployed", out _));
+        Assert.Equal("Gate2Start", states.GetProperty("GatesThisClass").GetProperty("Default").GetString());
+    }
+
+    private static List<MarkMember> MarkMembers(PipelineDeployer plan)
+        => JsonSerializer.Deserialize<List<MarkMember>>(Function(plan, DeployerHandlers.MarkPassed).Environment[DeployerEnvironment.MarkMembers],
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+
+    [Fact]
+    public void UnderMarkConfig_EverySetNamesTheRootsConfig_AndWithoutItNone()
+    {
+        Assert.DoesNotContain(MarkMembers(DevAsItRuns()), m => m.Class == PassMarkerFormat.ConfigClass);
+        var config = Assert.Single(MarkMembers(DevAsItRuns(markConfig: true)), m => m.Class == PassMarkerFormat.ConfigClass);
+        Assert.Equal("Scutara/Scutara", config.Repo);
+    }
+
+    [Fact]
+    public void MarkConfig_NeedsADeployedConfig_APassedGate_AndASuccessor()
+    {
+        var ok = DevAsItRunsConfig();
+        ok.Pipeline!.MarkConfig = true;
+        ok.Rollback = new RollbackConfig { PinImageDigest = true };
+        ConfigValidator.Validate(ok, "dev.yaml");   // no throw
+
+        foreach (var breakIt in new Action<PipelineConfig>[] { p => p.Successor = null, p => p.Gate2 = "provisioned", p => p.Infrastructure = PipelineConfig.InfrastructurePlan })
+        {
+            var c = DevAsItRunsConfig();
+            c.Pipeline!.MarkConfig = true;
+            c.Rollback = new RollbackConfig { PinImageDigest = true };
+            breakIt(c.Pipeline);
+            Assert.Contains("Pipeline.MarkConfig", Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(c, "dev.yaml")).Message);
+        }
+    }
 
     // ---- plan only is unchanged ----
 

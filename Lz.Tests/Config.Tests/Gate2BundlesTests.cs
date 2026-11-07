@@ -111,6 +111,26 @@ public sealed class Gate2BundlesTests
     }
 
     [Fact]
+    public async Task AConfigsGate_RunsTheRunningImagesTests_AsAClientsDoes()
+    {
+        // P3 I1: a config record names no tests of its own; the gate tests the image that runs on the infrastructure it applied.
+        var s = Filled();
+        s.Objects[(Evidence, "deploys/image/scutara/scutaraservice/req-new-mp-1.json")] = new JsonObject
+        {
+            ["record"] = new JsonObject { ["key"] = $"image/scutara/scutaraservice/{Stem}.json" }, ["verified"] = new JsonObject { ["digest"] = Digest },
+        }.ToJsonString();
+        var config = new JsonObject
+        {
+            ["record"] = new JsonObject { ["bucket"] = Records, ["key"] = "config/scutara/scutara/20261107T145809Z-1-1.json" },
+            ["verified"] = new JsonObject { ["class"] = "config" },
+        };
+
+        var bundles = await Bundles(s).ResolveAsync(config, Running(Digest));
+
+        Assert.Contains($"tests/scutara/scutaraservice/{Stem}.zip", bundles.Variables["GATE2_E2E_BUNDLE_URL"]);
+    }
+
+    [Fact]
     public async Task AClientsGate_WhileTheServiceRunsTwoImages_CannotNameItsImageMember()
     {
         var ex = await Assert.ThrowsAsync<Gate2NotResolvable>(() => Bundles(Filled()).ResolveAsync(ClientState(), Running(Digest, "sha256:other")));

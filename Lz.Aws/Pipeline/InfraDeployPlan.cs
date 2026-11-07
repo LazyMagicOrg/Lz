@@ -293,9 +293,11 @@ public static class InfraDeployPlanner
     /// function, writing <c>deploys/config/...</c>) → InfrastructureDeployed. A Deploy task that fails still goes to
     /// VerifyInfrastructure, which decides from the result it wrote or the absence of one.
     /// </summary>
+    /// <param name="gated">Under <c>Pipeline.Gate2: on</c> (P3 I1): RecordInfrastructure goes on to GatesThisClass, so a config
+    /// execution runs Gate 2 and, with a successor, MarkPassed, as an image's and a client's do; InfrastructureDeployed is then left out.</param>
     public static Dictionary<string, object> States(
         InfraPlanResources r, string environment, string evidence, string readApplyArn, string recordArn,
-        object payload, object[] catchAll, Func<object> transient)
+        object payload, object[] catchAll, Func<object> transient, bool gated = false)
     {
         var command = "States.Array('infradeploy', '--env', '" + environment + "', " +
                       "'--bundle-bucket', $.verified.identity.bucket, '--bundle-key', $.verified.identity.key, " +
@@ -306,7 +308,7 @@ public static class InfraDeployPlanner
                       "'--allow-destructive', States.Format('{}', $.planned.destructive), " +
                       "'--built-at', $.verified.builtAt, '--repo', $.verified.builtFrom.repo)";
 
-        return new Dictionary<string, object>
+        var states = new Dictionary<string, object>
         {
             ["ApproveInfrastructure"] = new
             {
@@ -371,11 +373,12 @@ public static class InfraDeployPlanner
                 Parameters = payload,
                 ResultPath = "$.recorded",
                 Retry = new[] { transient() },
-                Next = "InfrastructureDeployed",
+                Next = gated ? "GatesThisClass" : "InfrastructureDeployed",
                 Catch = catchAll,
             },
-            ["InfrastructureDeployed"] = new { Type = "Succeed" },
         };
+        if (!gated) states["InfrastructureDeployed"] = new { Type = "Succeed" };
+        return states;
     }
 
     /// <summary>The machine's rights for DeployInfrastructure: run the Deploy family in the tooling cluster, and pass its role.</summary>

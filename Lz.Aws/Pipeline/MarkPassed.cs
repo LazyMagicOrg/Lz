@@ -38,9 +38,16 @@ public static class MarkPassedStep
         var before = state["gate2Start"]?["before"] as JsonObject ?? throw new MarkPassedRefused("the state has no Gate 2 reading of what ran.");
 
         var members = new List<PassMarkerMember>();
+        string? toolingDigest = null;
         foreach (var m in settings.Members)
         {
-            if (m.Class == "image")
+            if (m.Class == PassMarkerFormat.ConfigClass)
+            {
+                var (config, tooling) = await ConfigMemberAsync(m, settings, keys, reads);
+                members.Add(config);
+                toolingDigest = tooling;
+            }
+            else if (m.Class == "image")
             {
                 var digests = (before["digests"]?[m.Key] as JsonArray ?? new JsonArray()).Select(d => d?.GetValue<string>()).Distinct().ToList();
                 if (digests.Count != 1 || digests[0] is not { } digest)
@@ -63,8 +70,10 @@ public static class MarkPassedStep
         if (tests?.VersionId is not { Length: > 0 } testsVersion || testsVersion == "null")
             throw new MarkPassedRefused($"{testsKey} could not be read at a version.");
 
-        var marker = new PassMarker(PassMarkerFormat.CurrentSchema, PassMarkerFormat.MarkerIdFor(members), settings.Environment, members,
-            new PassMarkerEvidence(new PassMarkerReference(testsKey, testsVersion)), executionName, now.ToString("O"));
+        var configVersion = members.SingleOrDefault(m => m.Class == PassMarkerFormat.ConfigClass)?.Identity.VersionId;
+        var marker = new PassMarker(PassMarkerFormat.CurrentSchema, PassMarkerFormat.MarkerIdFor(members, toolingDigest), settings.Environment, members,
+            new PassMarkerEvidence(new PassMarkerReference(testsKey, testsVersion)), executionName, now.ToString("O"), toolingDigest, configVersion);
+        PassMarkerFormat.RequireClasses5To7(marker.Members, marker.ToolingDigest, marker.ConfigBundleVersion);
         var key = PassMarkerFormat.KeyFor(marker.MarkerId);
         var written = await writer.PutOnceAsync(settings.EvidenceStore, key, PassMarkerFormat.Write(marker));
         return new JsonObject { ["markerId"] = marker.MarkerId, ["key"] = key, ["written"] = written, ["members"] = members.Count };
@@ -130,6 +139,51 @@ public static class MarkPassedStep
             built["repo"]!.GetValue<string>(), built["commit"]!.GetValue<string>(), built["lane"]!.GetValue<string>(),
             (built["packages"] as JsonObject ?? new JsonObject()).ToDictionary(p => p.Key, p => p.Value!.GetValue<string>()),
             built["ref"]?.GetValue<string>());
+    }
+
+    /// <summary>
+    /// THE CONFIG MEMBER (P3 I1, owner 2026-11-07: "in every set"): the config bundle LAST DEPLOYED here - the newest
+    /// <c>deploys/config/{repo}/</c> evidence by <c>recordedAt</c>, as ChooseConfig reads it - with the tooling image that applied it.
+    /// Gate 2 ran against the infrastructure that bundle left, so the set names it. The newest must itself say it deployed and name
+    /// its record (evidence written before I1 does neither): skipping it would name an OLDER config than the one applied. None, or
+    /// a newest that cannot be named: the set is not marked.
+    /// </summary>
+    private static async Task<(PassMarkerMember Member, string ToolingDigest)> ConfigMemberAsync(MarkMember m, MarkPassedSettings settings,
+        IGate2EvidenceReader keys, IRecordStore reads)
+    {
+        var prefix = $"deploys/{BuildRecordFormat.PrefixFor(m.Class, m.Repo)}";
+        (JsonObject Deploy, string Key, string Version, string At)? newest = null;
+        foreach (var key in await keys.KeysAsync(settings.EvidenceStore, prefix))
+        {
+            var stored = await reads.ReadAsync(settings.EvidenceStore, key);
+            if (stored is null || JsonNode.Parse(stored.Json) is not JsonObject deploy) continue;
+            if (deploy["verified"]?["class"]?.GetValue<string>() != PassMarkerFormat.ConfigClass) continue;
+            if (deploy["recordedAt"]?.GetValue<string>() is not { } at) continue;
+            if (stored.VersionId is not { Length: > 0 } version || version == "null")
+                throw new MarkPassedRefused($"{key} could not be read at a version.");
+            if (newest is null || string.CompareOrdinal(at, newest.Value.At) > 0) newest = (deploy, key, version, at);
+        }
+        if (newest is not { } chosen)
+            throw new MarkPassedRefused(
+                $"no config bundle has deployed here (nothing under {prefix}), so the infrastructure Gate 2 ran against is not accounted for in " +
+                $"{settings.Environment}'s evidence, and the set is not promoted.");
+        if (chosen.Deploy["outcome"]?.GetValue<string>() != "deployed")
+            throw new MarkPassedRefused(
+                $"{chosen.Key}, the config last deployed here, does not record itself deployed (evidence written before P3 I1 does not); the next " +
+                "config deploy writes evidence a set can name.");
+
+        var verified = (JsonObject)chosen.Deploy["verified"]!;
+        var record = chosen.Deploy["record"] as JsonObject ?? throw new MarkPassedRefused($"{chosen.Key} names no record.");
+        var identity = verified["identity"] as JsonObject ?? throw new MarkPassedRefused($"{chosen.Key} names no bundle identity.");
+        var tooling = verified["tooling"]?["digest"]?.GetValue<string>() ?? throw new MarkPassedRefused($"{chosen.Key} names no tooling digest.");
+        var bundleVersion = identity["versionId"]!.GetValue<string>();
+        var member = new PassMarkerMember(m.Class, m.Repo,
+            new PassMarkerRecordReference(record["bucket"]!.GetValue<string>(), record["key"]!.GetValue<string>(),
+                verified["recordVersionId"]?.GetValue<string>() ?? throw new MarkPassedRefused($"{chosen.Key} names no record version.")),
+            new BuildRecordIdentity("bundle", Bucket: identity["bucket"]!.GetValue<string>(), Key: identity["key"]!.GetValue<string>(),
+                VersionId: bundleVersion, Sha256: identity["sha256"]!.GetValue<string>()),
+            bundleVersion, BuiltFromOf(verified, chosen.Key), new PassMarkerReference(chosen.Key, chosen.Version));
+        return (member, tooling);
     }
 
     private static async Task<PassMarkerMember> MemberAsync(MarkMember m, MarkPassedSettings settings, IGate2EvidenceReader keys, IRecordStore reads,

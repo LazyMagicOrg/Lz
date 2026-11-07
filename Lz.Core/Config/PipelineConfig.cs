@@ -179,6 +179,15 @@ public class PipelineConfig
 
     public const string ImageDeployEcs = "ecs", ImageDeployPulumi = "pulumi";
 
+    /// <summary>
+    /// WHETHER THIS ENVIRONMENT'S PASS MARKERS NAME ITS CONFIG (DecoupledCd.md §12 P3 I, stage I1): every set MarkPassed writes carries
+    /// the config bundle last deployed here, with the tooling image that applied it, so the successor applies the infrastructure the
+    /// set was tested against. Off (or absent): markers name images and clients only. A successor that cannot yet take a config member
+    /// refuses every marker that names one, so this is turned on together with the successor's config branch (stage I2). Requires
+    /// <c>Infrastructure: deploy</c>, <c>Gate2: on</c> and a successor in the chain.
+    /// </summary>
+    public bool MarkConfig { get; set; }
+
     /// <summary>The deployer moves images through Pulumi.</summary>
     public bool ImageDeploysThroughPulumi => ImageDeploy == ImageDeployPulumi;
 

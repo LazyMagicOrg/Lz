@@ -47,6 +47,20 @@ public class MarkPassedTests
             },
         }.ToJsonString(), "dv-" + exec);
 
+        public void ConfigDeploy(string exec, string recordedAt, string bundleVersion, bool withRecord = true, string? outcome = "deployed") =>
+            Objects[$"deploys/config/scutara/scutara/{exec}.json"] = (new JsonObject
+            {
+                ["schema"] = 1, ["execution"] = exec, ["recordedAt"] = recordedAt, ["class"] = "config", ["outcome"] = outcome,
+                ["record"] = withRecord ? new JsonObject { ["bucket"] = Records, ["key"] = $"config/scutara/scutara/{exec[4..20]}-1.json" } : null,
+                ["verified"] = new JsonObject
+                {
+                    ["class"] = "config", ["recordVersionId"] = "rv-" + exec,
+                    ["identity"] = new JsonObject { ["bucket"] = "scu-artifacts-4df6-b9c6", ["key"] = $"config/scutara/scutara/{exec[4..20]}-1.zip", ["versionId"] = bundleVersion, ["sha256"] = new string('d', 64), ["bytes"] = 219898 },
+                    ["tooling"] = new JsonObject { ["digest"] = "sha256:" + new string('7', 64), ["lz"] = "0.13.177" },
+                    ["builtFrom"] = BuiltFrom("Scutara/Scutara"),
+                },
+            }.ToJsonString(), "dv-" + exec);
+
         public void ClientDeploy(string repo, string exec, string version) => Objects[$"deploys/client/scutara/{repo.ToLowerInvariant()}/{exec}.json"] = (new JsonObject
         {
             ["schema"] = 1, ["outcome"] = "deployed",
@@ -110,6 +124,57 @@ public class MarkPassedTests
         Assert.Equal(("bun-sel-7", "bun-sel-7"), (seller.Identity.VersionId, seller.Version));
         Assert.Equal(($"tests/{Execution}.json", "tv-1"), (marker.Evidence.Tests.Key, marker.Evidence.Tests.VersionId));
         Assert.Equal(Execution, marker.Execution);
+    }
+
+    // ---- P3 I1: the config member ----
+
+    private static readonly MarkPassedSettings WithConfig = Settings with
+    {
+        Members = Settings.Members.Append(new MarkMember("config", "Scutara/Scutara", "config")).ToList(),
+    };
+
+    [Fact]
+    public async Task UnderMarkConfig_TheSetNamesTheConfigLastDeployed_WithTheToolingThatAppliedIt()
+    {
+        var e = World();
+        // The newer KEY recorded earlier: what counts is when it was recorded, as ChooseConfig reads it.
+        e.ConfigDeploy("req-20261107T150000Z-42400000000-1-config-1", "2026-11-07T15:05:00Z", "cfg-older");
+        e.ConfigDeploy("req-20261107T140000Z-42300000000-1-config-1", "2026-11-07T15:13:00Z", "cfg-last");
+        var result = await MarkPassedStep.RunAsync(State(), Execution, WithConfig, e, e, e, Now);
+
+        var marker = PassMarkerFormat.Parse(e.Written[result["key"]!.GetValue<string>()], "dev");   // as test will read it
+        var config = marker.Members.Single(m => m.Class == "config");
+        Assert.Equal(("cfg-last", "cfg-last", "rv-req-20261107T140000Z-42300000000-1-config-1"), (config.Identity.VersionId, config.Version, config.Record.VersionId));
+        Assert.Equal("deploys/config/scutara/scutara/req-20261107T140000Z-42300000000-1-config-1.json", config.Deploy.Key);
+        Assert.Equal(("sha256:" + new string('7', 64), "cfg-last"), (marker.ToolingDigest, marker.ConfigBundleVersion));
+        Assert.Equal(4, marker.Members.Count);
+    }
+
+    [Fact]
+    public async Task UnderMarkConfig_TheNewestConfigMustBeNameable_NeverAnOlderOneInItsPlace()
+    {
+        // Evidence written before I1 carries no outcome and no record. Skipping it would name the older config instead.
+        var e = World();
+        e.ConfigDeploy("req-20261107T140000Z-42300000000-1-config-1", "2026-11-07T14:10:00Z", "cfg-older");
+        e.ConfigDeploy("req-20261107T145809Z-42384062854-1-config-1", "2026-11-07T15:13:00Z", "cfg-old-shape", withRecord: false, outcome: null);
+        var ex = await Assert.ThrowsAsync<MarkPassedRefused>(() => MarkPassedStep.RunAsync(State(), Execution, WithConfig, e, e, e, Now));
+        Assert.Contains("req-20261107T145809Z-42384062854-1-config-1", ex.Message);
+        Assert.Empty(e.Written);
+
+        var none = World();
+        Assert.Contains("no config bundle has deployed", (await Assert.ThrowsAsync<MarkPassedRefused>(
+            () => MarkPassedStep.RunAsync(State(), Execution, WithConfig, none, none, none, Now))).Message);
+    }
+
+    [Fact]
+    public async Task WithoutMarkConfig_TheSetNamesNoConfig_AndCarriesNeitherField()
+    {
+        var e = World();
+        e.ConfigDeploy("req-20261107T140000Z-42300000000-1-config-1", "2026-11-07T15:13:00Z", "cfg-last");
+        var marker = PassMarkerFormat.Parse(e.Written[(await Mark(e))["key"]!.GetValue<string>()], "dev");
+        Assert.DoesNotContain(marker.Members, m => m.Class == "config");
+        Assert.Null(marker.ToolingDigest);
+        Assert.Null(marker.ConfigBundleVersion);
     }
 
     [Fact]

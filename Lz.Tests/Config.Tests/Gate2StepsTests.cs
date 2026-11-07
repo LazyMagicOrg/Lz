@@ -157,6 +157,14 @@ public sealed class Gate2StepsTests
     public async Task AClientsGate_IsOurs_OnlyWhileItsBundleIsTheOneItsAppServes(string version, string verdict)
         => Assert.Equal(verdict, (await Start(ClientState(version), new InMemoryServiceLeaseStore(), new Services(Other)))["verdict"]!.GetValue<string>());
 
+    [Fact]
+    public async Task AConfigsGate_IsOurs_WhateverRuns_SinceInfrastructureHasNoRunningVersion()
+    {
+        // P3 I1: a config execution gates the set as it runs; there is no running config to compare with this one.
+        var config = new JsonObject { ["verified"] = new JsonObject { ["class"] = "config" } };
+        Assert.Equal("ours", (await Start(config, new InMemoryServiceLeaseStore(), new Services(Other)))["verdict"]!.GetValue<string>());
+    }
+
     // ---- Gate2Result ----
 
     private const string Ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";

@@ -58,10 +58,11 @@ public sealed class Gate2RecordBundles(
             new Gate2Recorded(e2eLists.Precondition, e2eLists.Blocking, e2eLists.Advisory, gateCount));
     }
 
-    /// <summary>The tests record of the image member that runs.</summary>
+    /// <summary>The tests record of the image member that runs: an image's own, or for a client's or a config's gate (P3 I1) the
+    /// running image's.</summary>
     private async Task<string> TestsKeyAsync(JsonObject state, Gate2Running running)
     {
-        if (state["verified"]?["class"]?.GetValue<string>() != "client")
+        if (state["verified"]?["class"]?.GetValue<string>() is not ("client" or PassMarkerFormat.ConfigClass))
         {
             var key = state["record"]?["key"]?.GetValue<string>() ?? throw new Gate2NotResolvable("the state names no record");
             return ToTests(key);

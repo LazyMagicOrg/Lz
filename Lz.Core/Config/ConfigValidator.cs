@@ -433,6 +433,11 @@ public static class ConfigValidator
             errors.Add(
                 "Pipeline.ImageDeploy is pulumi, which runs the image deploy as the tooling task (Infrastructure plan or deploy), on the " +
                 "services' image inputs (EnforceSignatures) for the tenants the trigger rolls (DeployOnBuildRecord); turn those on, or ImageDeploy: ecs.");
+        // THE CONFIG MEMBER (P3 I1): a config last deployed here, marked after a passed Gate 2, for a successor to read.
+        if (p.MarkConfig && (!p.InfrastructureDeploys || !p.Gate2IsOn || p.Successor is null))
+            errors.Add(
+                "Pipeline.MarkConfig names the config bundle last deployed here in every pass marker: it needs Infrastructure: deploy (a " +
+                "config that deploys), Gate2: on (markers follow a passed gate) and a successor in the chain (someone to read them).");
         if (p.ImageDeploysThroughPulumi && p.Predecessor is not null)
             errors.Add("Pipeline.ImageDeploy is pulumi in an environment promoted into; a promoted set's image through Pulumi is not built yet (P3 I).");
 

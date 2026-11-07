@@ -423,6 +423,10 @@ public static class InfraPlanSteps
             ["execution"] = executionName,
             ["recordedAt"] = now.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             ["class"] = "config",
+            // P3 I1: the outcome and the record, as an image's and a client's evidence carry them, so MarkPassed can name this bundle
+            // as a set's config member - its record by key and version - the way it names every other member.
+            ["outcome"] = "deployed",
+            ["record"] = state["record"]?.DeepClone(),
             ["verified"] = verified.DeepClone(),
             ["tooling"] = state["tooling"]?["reference"]?.DeepClone(),
             ["plan"] = state["planned"]?.DeepClone(),

@@ -934,7 +934,7 @@ public static class DeployerPlanner
             var (vtArn, rpArn, resources, recordArn) = (FnArn(verifyTooling), FnArn(readPlan), infra, FnArn(record));
             infraStates = (payload, catchAll, transient) =>
                 InfraPlanPlanner.States(resources, env, evidence, vtArn, rpArn, payload, catchAll, transient,
-                    raArn is null ? null : InfraDeployPlanner.States(resources, env, evidence, raArn, recordArn, payload, catchAll, transient));
+                    raArn is null ? null : InfraDeployPlanner.States(resources, env, evidence, raArn, recordArn, payload, catchAll, transient, gated: p.Gate2IsOn));
         }
 
         // THE DECISION (P5 stage F): written once per marker in this environment's own store, after the set or after its
@@ -1135,6 +1135,10 @@ public static class DeployerPlanner
                     p.AcceptedRepositories.Single(r => r.Class == "image" && (r.Artifacts ?? new List<string>()).Contains(s.Container)).Repo!,
                     $"{s.Cluster}/{s.Service}"))
                 .Concat(clientTargets.Select(c => new MarkMember("client", c.Repo, c.App)))
+                // THE CONFIG MEMBER (P3 I1), under Pipeline.MarkConfig: the config bundle last deployed here, in every set.
+                .Concat(p.MarkConfig
+                    ? new[] { new MarkMember(PassMarkerFormat.ConfigClass, p.AcceptedRepositories.Single(r => r.Class == PassMarkerFormat.ConfigClass).Repo!, PassMarkerFormat.ConfigClass) }
+                    : Array.Empty<MarkMember>())
                 .ToList();
             var markPassed = $"{sk}-{env}-deployer-mark-passed";
             functions.Add(new(markPassed, DeployerHandlers.MarkPassed, $"{markPassed}-fn",

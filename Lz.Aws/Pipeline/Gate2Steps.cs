@@ -136,6 +136,9 @@ public static class Gate2Reads
     {
         var verified = state["verified"] as JsonObject ?? throw new DeployRefused("verified", "Gate 2 runs after Verify; the state has no Verify result.");
         var cls = verified["class"]?.GetValue<string>();
+        // A CONFIG BUNDLE (P3 I1) has no running version to compare: what it applied is the infrastructure itself. Its gate
+        // tests the set as it runs, and MarkPassed names the config last deployed here, whichever execution that was.
+        if (cls == PassMarkerFormat.ConfigClass) return null;
         if (cls == "client")
         {
             var app = verified["target"]?["app"]?.GetValue<string>() ?? throw new DeployRefused("verified", "a client's Verify result names no app.");
