@@ -31,6 +31,39 @@ public class IntakeBuildPlanTests
     private static IEnumerable<string> Strings(JsonElement e) => e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().Select(x => x.GetString()!) : new[] { e.GetString()! };
     private static IEnumerable<string> Actions(string policy) => Statements(policy).SelectMany(s => Strings(s.GetProperty("Action")));
 
+    // ---- P3 H3: the edit alarm ----
+
+    [Fact]
+    public void TheEditAlarm_WatchesTheStoresTheRepositoriesTheRegistryAndTheSigner_AndPublishesASentenceToTheAlerts()
+    {
+        var plan = Plan();
+        var edits = plan.PolicyEdits!;
+        Assert.Equal("scu-intake-policy-edits", edits.Name);
+
+        var pattern = JsonDocument.Parse(edits.EventPattern).RootElement;
+        Assert.Equal("AWS API Call via CloudTrail", Assert.Single(Strings(pattern.GetProperty("detail-type"))));
+        var branches = pattern.GetProperty("$or").EnumerateArray().ToList();
+        var s3 = branches.Single(b => Strings(b.GetProperty("source")).Single() == "aws.s3").GetProperty("detail");
+        Assert.Equal(new[] { "scu-build-records-4df6-b9c6", "scu-artifacts-4df6-b9c6" }, Strings(s3.GetProperty("requestParameters").GetProperty("bucketName")));
+        Assert.Contains("PutBucketPolicy", Strings(s3.GetProperty("eventName")));
+        Assert.Contains("DeleteBucketPolicy", Strings(s3.GetProperty("eventName")));
+        var repositories = branches.Single(b => b.GetProperty("detail").TryGetProperty("requestParameters", out var r) && r.TryGetProperty("repositoryName", out _)).GetProperty("detail");
+        Assert.Equal(IntakeBuildPlanner.PublishTargetsFor(Config(), Account, plan.Repositories).Select(t => t.Repository).Distinct(),
+            Strings(repositories.GetProperty("requestParameters").GetProperty("repositoryName")));
+        Assert.Contains("SetRepositoryPolicy", Strings(repositories.GetProperty("eventName")));
+        Assert.Contains(branches, b => Strings(b.GetProperty("source")).Single() == "aws.signer");
+        Assert.Contains(branches, b => Strings(b.GetProperty("detail").GetProperty("eventName")).Contains("PutReplicationConfiguration"));
+        Assert.False(pattern.TryGetProperty("detail", out _));   // no errorCode filter: a refused attempt alerts too
+
+        // Every placeholder the sentence names is a path it reads.
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(edits.InputTemplate, "<([a-z]+)>"))
+            Assert.True(edits.InputPaths.ContainsKey(m.Groups[1].Value), m.Value);
+
+        var publish = Statements(plan.AlertsTopicPolicy).Single(st => st.GetProperty("Sid").GetString() == "TheEditAlarmPublishes");
+        Assert.Equal("events.amazonaws.com", publish.GetProperty("Principal").GetProperty("Service").GetString());
+        Assert.Equal(edits.Arn, publish.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:SourceArn").GetString());
+    }
+
     private static IEnumerable<(string Action, string Resource)> Grants(string policy)
         => Statements(policy).Where(s => s.GetProperty("Effect").GetString() == "Allow")
             .SelectMany(s => Strings(s.GetProperty("Action")).SelectMany(a => Strings(s.GetProperty("Resource")).Select(r => (a, r))));

@@ -44,7 +44,19 @@ public sealed record IntakeBuildPlan(
     int PollerMaximumEventAgeSeconds,
     IReadOnlyList<IntakeAlarm> Alarms,
     IReadOnlyList<IntakeRepository> Repositories,
-    IntakeGate1Build? Gate1 = null);
+    IntakeGate1Build? Gate1 = null,
+    IntakePolicyEditsRule? PolicyEdits = null);
+
+/// <summary>
+/// THE EDIT ALARM (DecoupledCd.md §12 P3 H, stage H3; BuildWritePath.md): an EventBridge rule on the build account's default bus
+/// matching CloudTrail's record of any change - or attempted change - to what keeps the pipeline's stores, repositories and signing
+/// closed, published to the intake's alerts topic as one sentence naming the call, the resource, the caller and the time. Every
+/// edit alerts, <c>bootstrappipeline</c>'s own included: an edit is the one way past H1 and H2, and with one operator the alert is
+/// the record (owner, 2026-11-07). Delivery was measured, not assumed: the organization's trail delivers this account's management
+/// write events to this account's default bus (a probe rule matched a PutParameter in about 40 s, 2026-11-07).
+/// </summary>
+public sealed record IntakePolicyEditsRule(
+    string Name, string Arn, string EventPattern, IReadOnlyDictionary<string, string> InputPaths, string InputTemplate);
 
 /// <summary>
 /// Gate 1's CodeBuild project (DecoupledCd.md §15.4, §3; V-C): privileged, so the docker and workflow tiers have a daemon; its
@@ -93,6 +105,91 @@ public static class IntakeBuildPlanner
     /// <summary>The publish function's role: the one intake principal that writes the record and artifact stores and pushes images
     /// (P3 H names it in their Denies).</summary>
     public static string PublishRoleName(string systemKey) => $"{systemKey}-intake-publish-fn";
+
+    /// <summary>The edit alarm's rule (P3 H3).</summary>
+    public static string PolicyEditsRuleName(string systemKey) => $"{systemKey}-intake-policy-edits";
+
+    /// <summary>The S3 calls that change what keeps a store closed: its policy, versioning, replication, lifecycle, ownership.</summary>
+    public static readonly string[] StoreEditEvents =
+    {
+        "PutBucketPolicy", "DeleteBucketPolicy", "PutBucketVersioning", "PutBucketReplication", "DeleteBucketReplication",
+        "PutBucketLifecycle", "PutBucketLifecycleConfiguration", "DeleteBucketLifecycle", "PutBucketOwnershipControls",
+        "PutBucketAcl", "PutPublicAccessBlock", "DeletePublicAccessBlock",
+    };
+
+    /// <summary>The ECR calls on a pipeline repository that change what keeps it closed.</summary>
+    public static readonly string[] RepositoryEditEvents =
+    {
+        "SetRepositoryPolicy", "DeleteRepositoryPolicy", "PutImageTagMutability", "PutLifecyclePolicy", "DeleteLifecyclePolicy",
+        "DeleteRepository", "BatchDeleteImage",
+    };
+
+    /// <summary>The ECR calls on the registry: replication, its policy, and the signing rules that name the profiles.</summary>
+    public static readonly string[] RegistryEditEvents =
+    {
+        "PutReplicationConfiguration", "PutRegistryPolicy", "DeleteRegistryPolicy", "PutSigningConfiguration", "DeleteSigningConfiguration",
+    };
+
+    /// <summary>The Signer calls that change who may sign, or what a signature is worth.</summary>
+    public static readonly string[] SignerEditEvents =
+    {
+        "AddProfilePermission", "RemoveProfilePermission", "RevokeSignature", "RevokeSigningProfile", "CancelSigningProfile", "PutSigningProfile",
+    };
+
+    /// <summary>The rule's pattern: any of those calls, succeeded or refused, on these stores and repositories.</summary>
+    public static string PolicyEditsPattern(IReadOnlyList<string> stores, IReadOnlyList<string> repositories)
+    {
+        System.Text.Json.Nodes.JsonArray Strings(IEnumerable<string> v) => new(v.Select(x => (System.Text.Json.Nodes.JsonNode?)System.Text.Json.Nodes.JsonValue.Create(x)).ToArray());
+        return new System.Text.Json.Nodes.JsonObject
+        {
+            ["detail-type"] = Strings(new[] { "AWS API Call via CloudTrail" }),
+            ["$or"] = new System.Text.Json.Nodes.JsonArray(
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["source"] = Strings(new[] { "aws.s3" }),
+                    ["detail"] = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["eventName"] = Strings(StoreEditEvents),
+                        ["requestParameters"] = new System.Text.Json.Nodes.JsonObject { ["bucketName"] = Strings(stores) },
+                    },
+                },
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["source"] = Strings(new[] { "aws.ecr" }),
+                    ["detail"] = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["eventName"] = Strings(RepositoryEditEvents),
+                        ["requestParameters"] = new System.Text.Json.Nodes.JsonObject { ["repositoryName"] = Strings(repositories) },
+                    },
+                },
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["source"] = Strings(new[] { "aws.ecr" }),
+                    ["detail"] = new System.Text.Json.Nodes.JsonObject { ["eventName"] = Strings(RegistryEditEvents) },
+                },
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["source"] = Strings(new[] { "aws.signer" }),
+                    ["detail"] = new System.Text.Json.Nodes.JsonObject { ["eventName"] = Strings(SignerEditEvents) },
+                }),
+        }.ToJsonString();
+    }
+
+    /// <summary>What the alert email says: the call, its resource, the caller, the time and any error - one sentence.</summary>
+    public static readonly IReadOnlyDictionary<string, string> PolicyEditsInputPaths = new Dictionary<string, string>
+    {
+        ["call"] = "$.detail.eventName",
+        ["bucket"] = "$.detail.requestParameters.bucketName",
+        ["repository"] = "$.detail.requestParameters.repositoryName",
+        ["profile"] = "$.detail.requestParameters.profileName",
+        ["caller"] = "$.detail.userIdentity.arn",
+        ["at"] = "$.time",
+        ["error"] = "$.detail.errorCode",
+    };
+
+    public const string PolicyEditsInputTemplate =
+        "\"Build account: <call> on <bucket><repository><profile> by <caller> at <at> (error: <error>). This changes what keeps the " +
+        "pipeline's stores, repositories or signing closed (BuildWritePath.md). Expected only from bootstrappipeline; otherwise investigate.\"";
 
     /// <summary>The repositories the intake takes: those with an <c>Intake</c> mode, all of whose ids the validator required.</summary>
     public static IReadOnlyList<IntakeRepository> RepositoriesFor(SystemConfig config)
@@ -473,6 +570,19 @@ public static class IntakeBuildPlanner
             new IntakeAlarm($"{fetch}-errors", "an intake fetch failed", fetch, "Errors", "Sum", "GreaterThanOrEqualToThreshold", 1, 300, "notBreaching"),
         };
 
+        // THE EDIT ALARM (P3 H3): the record and artifact stores, the repositories the intake publishes to, the registry, the signer.
+        var editsRule = PolicyEditsRuleName(sk);
+        var editsRuleArn = $"arn:aws:events:{region}:{accountId}:rule/{editsRule}";
+        var policyEdits = new IntakePolicyEditsRule(editsRule, editsRuleArn,
+            PolicyEditsPattern(
+                new[]
+                {
+                    PipelineBootstrapPlanner.BuildRecordStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config)),
+                    PipelineBootstrapPlanner.ArtifactStoreFor(sk, PipelineBootstrapPlanner.BuildSuffixFor(config)),
+                },
+                PublishTargetsFor(config, accountId, repositories).Select(t => t.Repository).Distinct().OrderBy(r => r, StringComparer.Ordinal).ToList()),
+            PolicyEditsInputPaths, PolicyEditsInputTemplate);
+
         var topicPolicy = DeployerPlanner.Policy(new
         {
             Sid = "OnlyTheIntakesAlarmsPublish", Effect = "Allow", Principal = new { Service = "cloudwatch.amazonaws.com" },
@@ -480,6 +590,15 @@ public static class IntakeBuildPlanner
             Condition = new Dictionary<string, object>
             {
                 ["ArnLike"] = new Dictionary<string, object> { ["aws:SourceArn"] = alarms.Select(a => $"arn:aws:cloudwatch:{region}:{accountId}:alarm:{a.Name}").ToArray() },
+            },
+        },
+        new
+        {
+            Sid = "TheEditAlarmPublishes", Effect = "Allow", Principal = new { Service = "events.amazonaws.com" },
+            Action = "sns:Publish", Resource = topicArn,
+            Condition = new Dictionary<string, object>
+            {
+                ["ArnEquals"] = new Dictionary<string, object> { ["aws:SourceArn"] = editsRuleArn },
             },
         });
 
@@ -503,6 +622,7 @@ public static class IntakeBuildPlanner
             FunctionTrustPolicy: DeployerPlanner.ServiceTrustPolicy("lambda.amazonaws.com"),
             DenyPolicy: DeployerPlanner.DenyPolicyFor(),
             Definition: DefinitionFor(FnArn(check), FnArn(fetch), FnArn(record), gate1StartArn, gate1VerdictArn, publishArn, siteCheckArn),
+            PolicyEdits: policyEdits,
             ScheduleRuleName: $"{sk}-intake-poll",
             ScheduleExpression: "rate(1 minute)",
             PollerFunctionName: poller,

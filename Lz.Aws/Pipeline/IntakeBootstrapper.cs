@@ -40,6 +40,8 @@ public static class IntakeBootstrapper
             Console.WriteLine($"    {f.Name,-28} {f.TimeoutSeconds,4}s {f.MemoryMb,5} MB  role {f.RoleName}");
         Console.WriteLine($"    schedule:   {plan.ScheduleRuleName} {plan.ScheduleExpression} -> {plan.PollerFunctionName} (one at a time, ticks at most {plan.PollerMaximumEventAgeSeconds} s old, never retried)");
         Console.WriteLine($"    alerts:     {plan.AlertsTopicName}; alarms {string.Join(", ", plan.Alarms.Select(a => a.Name))}");
+        if (plan.PolicyEdits is { } edits)
+            Console.WriteLine($"    edits:      rule {edits.Name}: any change to the record and artifact stores' policies, the pipeline repositories' policies, the registry's replication and signing, or the signer - by anyone, bootstrappipeline included - emails {plan.AlertsTopicName}");
         if (plan.Gate1 is { } g)
             Console.WriteLine($"    Gate 1:     CodeBuild {g.ProjectName} ({g.Image}, {g.ComputeType}, privileged, {g.TimeoutMinutes} min, buildspec fixed here), " +
                               $"role {g.RoleName} (its logs and {g.ReportGroupName} only), the bundle by a 15-minute URL");
@@ -125,6 +127,7 @@ public static class IntakeBootstrapper
 
         await EnsureScheduleAsync(events, lambda, plan, enabled: secretExists);
         foreach (var alarm in plan.Alarms) await EnsureAlarmAsync(cloudWatch, plan, alarm);
+        if (plan.PolicyEdits is { } edits) await EnsurePolicyEditsAsync(events, plan, edits);
     }
 
     /// <summary>
@@ -306,6 +309,30 @@ public static class IntakeBootstrapper
         if (read.State != state || read.ScheduleExpression != plan.ScheduleExpression)
             throw new InvalidOperationException($"rule {plan.ScheduleRuleName} reads back {read.State} on {read.ScheduleExpression}; written {state} on {plan.ScheduleExpression}.");
         Console.WriteLine($"  rule '{plan.ScheduleRuleName}' read back: {read.State}, {plan.ScheduleExpression} -> {plan.PollerFunctionName}.");
+    }
+
+    /// <summary>The edit alarm (P3 H3): the rule, its one target - the alerts topic, through a sentence - and both read back.</summary>
+    private static async Task EnsurePolicyEditsAsync(IAmazonEventBridge events, IntakeBuildPlan plan, IntakePolicyEditsRule edits)
+    {
+        await events.PutRuleAsync(new PutRuleRequest
+        {
+            Name = edits.Name, EventPattern = edits.EventPattern, State = RuleState.ENABLED,
+            Description = "lz intake: any change to what keeps the pipeline's stores, repositories or signing closed (P3 H3).",
+        });
+        await TriggerApply.EnsureOnlyTargetAsync(events, null, edits.Name, new Target
+        {
+            Id = "intake-alerts",
+            Arn = plan.AlertsTopicArn,
+            InputTransformer = new InputTransformer
+            {
+                InputPathsMap = edits.InputPaths.ToDictionary(p => p.Key, p => p.Value),
+                InputTemplate = edits.InputTemplate,
+            },
+        });
+        var read = await events.DescribeRuleAsync(new DescribeRuleRequest { Name = edits.Name });
+        if (read.State != RuleState.ENABLED || !CrossAccount.SamePolicy(edits.EventPattern, read.EventPattern))
+            throw new InvalidOperationException($"rule {edits.Name} reads back {read.State} with another pattern than was written.");
+        Console.WriteLine($"  rule '{edits.Name}' read back: ENABLED, store, repository, registry and signer edits -> {plan.AlertsTopicName}.");
     }
 
     private static async Task EnsureAlarmAsync(IAmazonCloudWatch cloudWatch, IntakeBuildPlan plan, IntakeAlarm alarm)
