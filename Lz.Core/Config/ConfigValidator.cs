@@ -429,17 +429,19 @@ public static class ConfigValidator
         // THE IMAGE THROUGH PULUMI (P3 J3) runs as the tooling task, on the image inputs, for the trigger's tenants.
         if (p.ImageDeploy is not (null or PipelineConfig.ImageDeployEcs or PipelineConfig.ImageDeployPulumi))
             errors.Add($"Pipeline.ImageDeploy is '{p.ImageDeploy}'; it is ecs or pulumi.");
-        if (p.ImageDeploysThroughPulumi && (!p.InfrastructurePlans || !p.EnforceSignatures || !p.DeployOnBuildRecord))
+        // A PROMOTED ENVIRONMENT (P3 I4) has no trigger: its tenant is the promotion's, and the config its image deploys run with is the
+        // one its own infrastructure branch last deployed, so it needs Infrastructure: deploy rather than DeployOnBuildRecord.
+        if (p.ImageDeploysThroughPulumi && (!p.InfrastructurePlans || !p.EnforceSignatures
+                || (p.Predecessor is null ? !p.DeployOnBuildRecord : !p.InfrastructureDeploys)))
             errors.Add(
                 "Pipeline.ImageDeploy is pulumi, which runs the image deploy as the tooling task (Infrastructure plan or deploy), on the " +
-                "services' image inputs (EnforceSignatures) for the tenants the trigger rolls (DeployOnBuildRecord); turn those on, or ImageDeploy: ecs.");
+                "services' image inputs (EnforceSignatures), for the tenants the trigger rolls (DeployOnBuildRecord) or, promoted into, with " +
+                "the config this environment deployed (Infrastructure: deploy); turn those on, or ImageDeploy: ecs.");
         // THE CONFIG MEMBER (P3 I1): a config last deployed here, marked after a passed Gate 2, for a successor to read.
         if (p.MarkConfig && (!p.InfrastructureDeploys || !p.Gate2IsOn || p.Successor is null))
             errors.Add(
                 "Pipeline.MarkConfig names the config bundle last deployed here in every pass marker: it needs Infrastructure: deploy (a " +
                 "config that deploys), Gate2: on (markers follow a passed gate) and a successor in the chain (someone to read them).");
-        if (p.ImageDeploysThroughPulumi && p.Predecessor is not null)
-            errors.Add("Pipeline.ImageDeploy is pulumi in an environment promoted into; a promoted set's image through Pulumi is not built yet (P3 I).");
 
         // THE BRANCH'S APPROVE IS A PASS-THROUGH (P3 D): where a person must approve, it would deploy unapproved.
         if (p.InfrastructureDeploys && p.Approval?.Required == true)

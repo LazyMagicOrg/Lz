@@ -88,6 +88,39 @@ public class DeployerPromotedPlanTests
             "s3:GetObjectVersion", "arn:aws:s3:::scu-build-records-4df6-b9c6/config/*"));
     }
 
+    // ---- P3 I4: a promoted environment's image through Pulumi ----
+
+    private static SystemConfig TestThroughPulumi(string infrastructure = PipelineConfig.InfrastructureDeploy)
+    {
+        var c = TestPlanningConfig(infrastructure);
+        c.Pipeline!.ImageDeploy = PipelineConfig.ImageDeployPulumi;
+        c.Pipeline.EnforceSignatures = true;
+        c.Rollback = new RollbackConfig { PinImageDigest = true };
+        return c;
+    }
+
+    [Fact]
+    public void UnderImageDeployPulumi_ThePromotedImageMember_GoesThroughChooseConfigAndUpdateimage_AfterTheConfig()
+    {
+        var states = States(PlanningPlan(TestThroughPulumi()));
+        Assert.Equal("ImageMember", states.GetProperty("RecordInfrastructure").GetProperty("Next").GetString());   // the config first
+        Assert.Equal("Prepare", states.GetProperty("ImageMember").GetProperty("Next").GetString());
+        Assert.Equal("ChooseConfig", states.GetProperty("Prepare").GetProperty("Next").GetString());
+        Assert.Equal("VerifyImageTooling", states.GetProperty("ChooseConfig").GetProperty("Next").GetString());
+        Assert.Contains("'updateimage', '--env', 'test'", states.GetProperty("Deploy").GetProperty("Parameters").GetRawText());
+        Assert.Equal("Prepare", states.GetProperty("RevertImageMember").GetProperty("Next").GetString());   // a revert rides the same path
+    }
+
+    [Fact]
+    public void ImageDeployPulumi_WhenPromotedInto_NeedsTheConfigDeployedHere_NotATrigger()
+    {
+        var ok = TestThroughPulumi();
+        ConfigValidator.Validate(ok, "test.yaml");   // no throw: no DeployOnBuildRecord, and none needed
+
+        var planOnly = TestThroughPulumi(PipelineConfig.InfrastructurePlan);
+        Assert.Contains("Infrastructure: deploy", Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(planOnly, "test.yaml")).Message);
+    }
+
     [Fact]
     public void WithoutInfrastructure_ThePromotedMachineHasNoConfigStep()
     {
