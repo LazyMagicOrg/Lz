@@ -270,4 +270,22 @@ public class ContainerUpdaterWaitTests
         Assert.False((await Wait(ecs, Previous, Signed)).Landed);
         Assert.Equal(0, ecs.DeploymentReads);
     }
+
+    [Fact]
+    public async Task AServiceThatDoesNotExistYet_HasAnEmptyMark_AndItsDeploymentsAreNotAskedFor()
+    {
+        var asked = false;
+        var mark = await AwsContainerUpdater.RolloutMarkOf(null, () => { asked = true; throw new InvalidOperationException("ServiceNotFoundException"); });
+        Assert.False(asked);
+        Assert.Equal(new AwsContainerUpdater.RolloutMark(null, null), mark);
+        // The deploy that creates it is a rollout this command waits out, from no baseline.
+        Assert.True(AwsContainerUpdater.StartedARollout(mark, new AwsContainerUpdater.RolloutMark("td:1", "arn:deployment/1")));
+    }
+
+    [Fact]
+    public async Task ARunningService_IsMarkedWithItsRevisionAndNewestDeployment()
+    {
+        var mark = await AwsContainerUpdater.RolloutMarkOf("td:7", () => Task.FromResult<string?>("arn:deployment/7"));
+        Assert.Equal(new AwsContainerUpdater.RolloutMark("td:7", "arn:deployment/7"), mark);
+    }
 }

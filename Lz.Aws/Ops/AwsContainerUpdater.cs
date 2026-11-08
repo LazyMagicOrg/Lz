@@ -501,8 +501,19 @@ public class AwsContainerUpdater
             Services = new List<string> { ecsService },
         }, ct);
         var taskDefinition = svc.Services?.FirstOrDefault(x => x.Status == "ACTIVE")?.TaskDefinition;
-        return new RolloutMark(taskDefinition, (await NewestServiceDeploymentAsync(cluster, ecsService, ct))?.Arn);
+        return await RolloutMarkOf(taskDefinition, async () => (await NewestServiceDeploymentAsync(cluster, ecsService, ct))?.Arn);
     }
+
+    /// <summary>
+    /// The mark of a service whose ACTIVE revision is <paramref name="activeTaskDefinition"/>. A SERVICE THAT DOES NOT EXIST YET - the
+    /// first <c>deploytenant</c> in a new environment, which creates it - has neither a revision nor a deployment, and its deployments
+    /// are not asked for: ECS answers that with ServiceNotFoundException (measured in prod, 2026-11-08). The deploy that creates it
+    /// then starts a rollout from this empty mark, which its wait follows from no baseline.
+    /// </summary>
+    internal static async Task<RolloutMark> RolloutMarkOf(string? activeTaskDefinition, Func<Task<string?>> newestDeploymentArn)
+        => activeTaskDefinition is null
+            ? new RolloutMark(null, null)
+            : new RolloutMark(activeTaskDefinition, await newestDeploymentArn());
 
     /// <summary>
     /// Follows the deployment newer than <paramref name="baselineDeploymentArn"/> until ECS finishes it and every running
