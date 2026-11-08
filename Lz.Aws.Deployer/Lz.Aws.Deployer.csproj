@@ -46,6 +46,7 @@
     <!-- Promotion (DecoupledCd P5): the pass marker, VerifySet and the decision. BCL-only. -->
     <Compile Include="..\Lz.Aws\Pipeline\PassMarker.cs" Link="Linked\Lz.Aws\Pipeline\PassMarker.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\ApprovalAnswer.cs" Link="Linked\Lz.Aws\Pipeline\ApprovalAnswer.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\PromotionPoll.cs" Link="Linked\Lz.Aws\Pipeline\PromotionPoll.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\MarkPassed.cs" Link="Linked\Lz.Aws\Pipeline\MarkPassed.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />

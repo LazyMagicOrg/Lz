@@ -285,8 +285,74 @@ public class DeployerPromotedPlanTests
     }
 
     [Fact]
-    public void ProdsApprovalOrAGate2AfterAPredecessor_IsRefused_UntilP6()
-        => Assert.Contains("P6", Assert.Throws<InvalidOperationException>(() => Plan(Test(approval: true))).Message);
+    public void UnderApproval_APromotedSetWithNoConfig_WaitsOnceAtApprove_ThenItsAnswerIsChecked()
+    {
+        var states = States(Plan(Test(approval: true)));
+        Assert.Equal("Approve", states.GetProperty("IsRevert").GetProperty("Default").GetString());
+        Assert.Equal("RevertImageMember", states.GetProperty("SetHold").GetProperty("Next").GetString());   // a revert is never approved here
+
+        var approve = states.GetProperty("Approve");
+        Assert.Equal("arn:aws:states:::sns:publish.waitForTaskToken", approve.GetProperty("Resource").GetString());
+        Assert.Equal(86400, approve.GetProperty("HeartbeatSeconds").GetInt32());
+        Assert.Equal("$.approval", approve.GetProperty("ResultPath").GetString());
+        Assert.Equal("CheckApproval", approve.GetProperty("Next").GetString());
+        var parameters = approve.GetProperty("Parameters");
+        Assert.Equal("arn:aws:sns:us-west-2:1:deploys", parameters.GetProperty("TopicArn").GetString());
+        Assert.DoesNotContain("Task.Token", parameters.GetProperty("Message.$").GetString());   // an email is no place for a credential
+        Assert.Contains("lz approve", parameters.GetProperty("Message.$").GetString());
+        Assert.Equal("$$.Task.Token", parameters.GetProperty("MessageAttributes").GetProperty(ApprovalAnswer.TokenAttribute).GetProperty("StringValue.$").GetString());
+
+        var catches = approve.GetProperty("Catch").EnumerateArray().ToList();
+        Assert.Equal((ApprovalAnswer.RejectedError, "RecordFailure", "$.error"),
+            (catches[0].GetProperty("ErrorEquals")[0].GetString(), catches[0].GetProperty("Next").GetString(), catches[0].GetProperty("ResultPath").GetString()));
+        Assert.Equal(("States.Timeout", "ApprovalTimedOut"), (catches[1].GetProperty("ErrorEquals")[0].GetString(), catches[1].GetProperty("Next").GetString()));
+        Assert.Equal(ApprovalAnswer.TimedOutError, states.GetProperty("ApprovalTimedOut").GetProperty("Result").GetProperty("Error").GetString());
+        Assert.Equal("$.error", states.GetProperty("ApprovalTimedOut").GetProperty("ResultPath").GetString());
+
+        var check = states.GetProperty("CheckApproval");
+        Assert.Equal("ApprovalDiffers", check.GetProperty("Default").GetString());
+        var plain = check.GetProperty("Choices").EnumerateArray().Single(c => c.GetProperty("Next").GetString() == "ImageMember").Compact();
+        Assert.Contains("\"StringEqualsPath\":\"$.set.markerId\"", plain);
+        Assert.Contains("\"StringEqualsPath\":\"$.marker.versionId\"", plain);
+        Assert.DoesNotContain("planVersionId", plain);
+        Assert.Equal("RecordFailure", states.GetProperty("ApprovalDiffers").GetProperty("Next").GetString());
+        Assert.Equal("$.approval", states.GetProperty("ImageMember").GetProperty("Parameters").GetProperty("approval.$").GetString());
+    }
+
+    [Fact]
+    public void WithoutApproval_APromotedMachine_HasNoApproveState()
+    {
+        var states = States(Plan());
+        Assert.False(states.TryGetProperty("Approve", out _));
+        Assert.False(states.TryGetProperty("CheckApproval", out _));
+        Assert.Equal("ImageMember", states.GetProperty("IsRevert").GetProperty("Default").GetString());
+    }
+
+    [Fact]
+    public void UnderApproval_AConfigsPlanIsWhatIsApproved_BeforeAnythingIsApplied()
+    {
+        var c = TestThroughPulumi();
+        c.Pipeline!.Approval = new PipelineApprovalConfig { Required = true, NotifyTopicArn = "arn:aws:sns:us-west-2:1:deploys" };
+        ConfigValidator.Validate(c, "test.yaml");   // admitted after a predecessor
+
+        var states = States(PlanningPlan(c));
+        Assert.Equal("Approve", states.GetProperty("ReadPlan").GetProperty("Next").GetString());
+        Assert.Equal("Approve", states.GetProperty("HasConfig").GetProperty("Default").GetString());
+        Assert.False(states.TryGetProperty("ApproveInfrastructure", out _));
+        var config = states.GetProperty("CheckApproval").GetProperty("Choices").EnumerateArray()
+            .Single(ch => ch.GetProperty("Next").GetString() == "DeployInfrastructure").Compact();
+        Assert.Contains("\"StringEqualsPath\":\"$.planned.versionId\"", config);
+        Assert.Contains("\"StringEqualsPath\":\"$.set.markerId\"", config);
+    }
+
+    [Fact]
+    public void UnderApproval_AFirstEnvironment_StillRefusesAnInfrastructureDeploy()
+    {
+        var c = TestThroughPulumi();
+        c.Pipeline!.Predecessor = null;
+        c.Pipeline.Approval = new PipelineApprovalConfig { Required = true, NotifyTopicArn = "arn:aws:sns:us-west-2:1:deploys" };
+        Assert.Throws<InvalidOperationException>(() => ConfigValidator.Validate(c, "dev.yaml"));
+    }
 
     // ---- what its functions read and write ----
 

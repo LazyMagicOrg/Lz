@@ -197,6 +197,7 @@ class Program
         RegisterBootstrapPipelineCommand(rootCommand, systemKeyOption, envOption);
         RegisterProbeIntakePushCommand(rootCommand, systemKeyOption, envOption);
         RegisterBootstrapDeployerCommand(rootCommand, systemKeyOption, envOption);
+        RegisterApprovalCommands(rootCommand, systemKeyOption, envOption);
         RegisterPackagesCommand(rootCommand);
         RegisterUtilCommand(rootCommand);
         RegisterGenCommand(rootCommand, plugin);
@@ -3609,6 +3610,69 @@ class Program
         }, systemKeyOption, envOption, applyOption, profileOption);
 
         root.AddCommand(cmd);
+    }
+
+    // ---------------------------------------------------------------
+    // lz approve / lz reject - answer a set waiting at the deployer's Approve state (ProdApproval.md A3).
+    // The token comes from the execution's history, the answer from what Approve was given; nothing is typed but yes and a reason.
+    // ---------------------------------------------------------------
+    private static void RegisterApprovalCommands(RootCommand root, Option<string?> systemKeyOption, Option<string?> envOption)
+    {
+        var profileOption = new Option<string?>("--profile", "AWS profile for the TARGET account, as the approver identity (e.g. scu-prod-approver).");
+        var executionOption = new Option<string?>("--execution", "The waiting execution to answer; needed only when more than one waits.");
+
+        var approve = new Command("approve",
+            "Show the set waiting at this environment's Approve state - its members, versions, commits and plan - and, on 'yes', " +
+            "approve it. The answer repeats the marker and plan offered, so the deployer can check it; who approved is these credentials.");
+        approve.AddOption(systemKeyOption);
+        approve.AddOption(envOption);
+        approve.AddOption(profileOption);
+        approve.AddOption(executionOption);
+        approve.SetHandler(async (systemKey, env, profileOverride, execution) =>
+        {
+            var config = ConfigResolver.ResolveSystemConfigs(ConfigResolver.ResolveEnvironment(env), systemKey).Single();
+            if (!string.IsNullOrWhiteSpace(profileOverride)) config.Profile = profileOverride;
+            try
+            {
+                await Lz.Aws.Pipeline.ApprovalCommands.ApproveAsync(config, execution,
+                    question => { Console.WriteLine(question); return Confirmation.Ask("Type 'yes' to approve: ", exact: true); });
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Amazon.Runtime.AmazonServiceException)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(ex.Message);
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+            }
+        }, systemKeyOption, envOption, profileOption, executionOption);
+        root.AddCommand(approve);
+
+        var reasonOption = new Option<string>("--reason", "Why the set is rejected; recorded in its decision.") { IsRequired = true };
+        var reject = new Command("reject",
+            "Reject the set waiting at this environment's Approve state, with a reason. The set is decided 'rejected' and never offered again.");
+        reject.AddOption(systemKeyOption);
+        reject.AddOption(envOption);
+        reject.AddOption(profileOption);
+        reject.AddOption(executionOption);
+        reject.AddOption(reasonOption);
+        reject.SetHandler(async (systemKey, env, profileOverride, execution, reason) =>
+        {
+            var config = ConfigResolver.ResolveSystemConfigs(ConfigResolver.ResolveEnvironment(env), systemKey).Single();
+            if (!string.IsNullOrWhiteSpace(profileOverride)) config.Profile = profileOverride;
+            try
+            {
+                await Lz.Aws.Pipeline.ApprovalCommands.RejectAsync(config, execution, reason,
+                    question => { Console.WriteLine(question); return Confirmation.Ask("Type 'yes' to reject: ", exact: true); });
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Amazon.Runtime.AmazonServiceException)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(ex.Message);
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+            }
+        }, systemKeyOption, envOption, profileOption, executionOption, reasonOption);
+        root.AddCommand(reject);
     }
 
     private static void RegisterCloneReposCommand(RootCommand root)

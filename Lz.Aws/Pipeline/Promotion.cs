@@ -317,6 +317,9 @@ public static class DecisionStep
 {
     public const string Deployed = "deployed", Refused = "refused", Failed = "failed";
 
+    /// <summary>ProdApproval.md A1: a set rejected by the approver, or offered and never answered. Final, like failed.</summary>
+    public const string Rejected = "rejected", Unapproved = "unapproved";
+
     // A set's or a site's (V-K step 5): either, undecided, would alarm at every poll and never be started again.
     private static readonly System.Text.RegularExpressions.Regex SetKey = new(@$"^{PassMarkerFormat.Prefix}((?:sets|site)/[0-9a-f]{{64}})\.json$");
 
@@ -328,7 +331,13 @@ public static class DecisionStep
             return new JsonObject { ["written"] = false, ["reason"] = "a revert writes no decision" };
 
         var error = state["error"] as JsonObject;
-        var outcome = error is null ? Deployed : error["Error"]?.GetValue<string>() == nameof(DeployRefused) ? Refused : Failed;
+        var outcome = error is null ? Deployed : (error["Error"]?.GetValue<string>()) switch
+        {
+            nameof(DeployRefused) => Refused,
+            ApprovalAnswer.RejectedError => Rejected,
+            ApprovalAnswer.TimedOutError => Unapproved,
+            _ => Failed,
+        };
 
         var markerId = state["set"]?["markerId"]?.GetValue<string>();
         var key = state["marker"]?["key"] is JsonValue k && k.TryGetValue<string>(out var s) ? s : null;
@@ -350,6 +359,8 @@ public static class DecisionStep
             ["decidedAt"] = now.ToString("O"),
         };
         if (error is not null) body["error"] = new JsonObject { ["type"] = error["Error"]?.DeepClone(), ["cause"] = error["Cause"]?.DeepClone() };
+        // THE APPROVAL (ProdApproval.md A2), where there was one: what the approver answered, who the answer names, and when.
+        if (state["approval"] is JsonObject approval) body["approval"] = approval.DeepClone();
 
         var written = await writer.PutOnceAsync(evidenceStore, decisionKey, body.ToJsonString());
         if (!written && outcome == Deployed)

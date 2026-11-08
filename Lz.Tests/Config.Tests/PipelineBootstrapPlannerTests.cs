@@ -292,7 +292,8 @@ public class PipelineBootstrapPlannerTests
         Assert.Equal(
             new[]
             {
-                "states:UpdateStateMachine", "events:PutRule", "events:PutTargets",
+                "states:UpdateStateMachine", "states:SendTaskSuccess", "states:SendTaskFailure", "states:SendTaskHeartbeat",
+                "events:PutRule", "events:PutTargets",
                 "events:RemoveTargets", "events:DeleteRule", "events:DisableRule", "events:PutPermission", "events:RemovePermission",
                 "scheduler:*", "iam:*Policy*",
                 "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:AddPermission", "lambda:RemovePermission",

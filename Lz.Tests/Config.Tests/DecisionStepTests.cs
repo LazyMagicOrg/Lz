@@ -53,6 +53,25 @@ public class DecisionStepTests
     }
 
     [Fact]
+    public async Task ARejectedOrUnansweredApproval_IsDecidedRejectedOrUnapproved_AndTheAnswerIsRecorded()
+    {
+        var rejected = new Writer();
+        await DecisionStep.RunAsync(Failed(ApprovalAnswer.RejectedError), Execution, Store, rejected, Now);
+        Assert.Equal("rejected", Body(rejected)["outcome"]!.GetValue<string>());
+
+        var unapproved = new Writer();
+        await DecisionStep.RunAsync(Failed(ApprovalAnswer.TimedOutError), Execution, Store, unapproved, Now);
+        Assert.Equal("unapproved", Body(unapproved)["outcome"]!.GetValue<string>());
+
+        var approved = new Writer();
+        var state = Deployed();
+        state["approval"] = new JsonObject { ["markerId"] = Id, ["approver"] = "arn:aws:sts::1:assumed-role/Approver/me" };
+        await DecisionStep.RunAsync(state, Execution, Store, approved, Now);
+        Assert.Equal("arn:aws:sts::1:assumed-role/Approver/me", Body(approved)["approval"]!["approver"]!.GetValue<string>());
+        Assert.False(Body(rejected).ContainsKey("approval"));
+    }
+
+    [Fact]
     public async Task AVerifyRefusal_IsDecidedRefused_AndAnyOtherFailure_Failed()
     {
         var refused = new Writer();

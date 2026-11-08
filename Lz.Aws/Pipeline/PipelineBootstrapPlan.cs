@@ -146,6 +146,10 @@ public static class PipelineBootstrapPlanner
     public static readonly string[] SelfRewriteDenied =
     {
         "states:UpdateStateMachine",
+        // NO DEPLOYER ROLE ANSWERS AN APPROVAL (ProdApproval.md A4): only the approver identity may send a task's answer.
+        "states:SendTaskSuccess",
+        "states:SendTaskFailure",
+        "states:SendTaskHeartbeat",
         "events:PutRule",
         "events:PutTargets",
         // THE TRIGGER, since P2 stage D. A role that could remove its targets, disable or delete its rule, or change who

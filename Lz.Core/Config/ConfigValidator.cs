@@ -444,7 +444,8 @@ public static class ConfigValidator
                 "config that deploys), Gate2: on (markers follow a passed gate) and a successor in the chain (someone to read them).");
 
         // THE BRANCH'S APPROVE IS A PASS-THROUGH (P3 D): where a person must approve, it would deploy unapproved.
-        if (p.InfrastructureDeploys && p.Approval?.Required == true)
+        // In an environment PROMOTED INTO it is not (ProdApproval.md A1): one Approve per set, after the config's plan, before the apply.
+        if (p.InfrastructureDeploys && p.Approval?.Required == true && p.Predecessor is null)
         {
             errors.Add(
                 "Pipeline.Infrastructure is deploy but Pipeline.Approval.Required is true. The infrastructure branch's Approve is a " +

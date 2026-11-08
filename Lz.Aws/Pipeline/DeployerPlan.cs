@@ -735,10 +735,7 @@ public static class DeployerPlanner
         if (promoted is not null)
         {
             // ITS OWN GATE 2 ARRIVES WITH P6 (PB-13): planned below, over the promotion's target. The approval is still to come.
-            if (approvalRequired)
-                throw new InvalidOperationException(
-                    $"{env} is promoted into from {promoted.Environment}, and its Approval is set: an approval after a predecessor's " +
-                    "marker arrives with P6's approval (PB-24), and is not planned yet.");
+            // ITS APPROVAL (ProdApproval.md A1): one Approve per set, planned in the promoted machine below.
             if (string.IsNullOrWhiteSpace(promoted.EvidenceStore))
                 throw new InvalidOperationException($"the chain names no EvidenceStore for {promoted.Environment}, where {env} reads its markers.");
             if (!p.Alerts)
@@ -2735,9 +2732,17 @@ public static class DeployerPlanner
     /// <param name="gated">P6, PB-13: under <c>Gate2: on</c> a decided set goes on to this environment's own Gate 2 - Gate2Image lifts
     /// the image member back into place, so Gate2Start reads its service and its tests record - and, with a successor, MarkPassed. A
     /// site is never gated (V-24): it goes to MarkSitePassed where it is marked, and ends Decided otherwise. A revert is never gated.</param>
+    /// <param name="approval">ProdApproval.md A1-A2, under <c>Pipeline.Approval.Required</c>: every set waits ONCE at Approve - after
+    /// the config's plan where it has one (so the plan is what is approved), else after Verify - and a site too (owner, Q4). The
+    /// message names the execution and the set and says to run <c>lz approve</c>; the task token travels only as a message ATTRIBUTE,
+    /// which <c>lz approve</c> reads from the execution's history, never in the body an email shows. CheckApproval requires the answer to
+    /// name the set offered (marker id and version) and, with a config, the plan offered (version); anything else is ApprovalDiffers. A
+    /// rejection (<c>lz reject</c>, error ApprovalRejected) and an unanswered approval (the heartbeat's States.Timeout, renamed
+    /// ApprovalTimedOut) are recorded and decided like a failure - <c>rejected</c> and <c>unapproved</c>, final. A revert is never
+    /// approved here: its start, by the approver identity, is its approval (V-15).</param>
     private static void Promote(Dictionary<string, object> states, string decideFn, string setHoldFn, string recordRevertFn, bool bundles,
         Dictionary<string, object> payload, object[] catchAll, object transient, object evidenceWrite, bool site = false, bool config = false,
-        bool gated = false)
+        bool gated = false, (string TopicArn, int HeartbeatSeconds)? approval = null)
     {
         System.Text.Json.Nodes.JsonObject Node(string name) => JsonSerializer.SerializeToNode(states[name], Asl)!.AsObject();
 
@@ -2943,6 +2948,98 @@ public static class DeployerPlanner
             // Dev's entry to the gate, from Record, has no place here: a promoted set's Record goes on to its bundles.
             states.Remove("GatesThisClass");
             states.Remove("Recorded");
+        }
+
+        if (approval is { } a)
+        {
+            System.Text.Json.Nodes.JsonObject Rewired(string name, Action<System.Text.Json.Nodes.JsonObject> change)
+            {
+                var n = Node(name);
+                change(n);
+                states[name] = n;
+                return n;
+            }
+
+            // WHERE A SET ENTERS THE APPROVAL: after ReadPlan (a config's plan), or straight from HasConfig / IsRevert without one.
+            if (config)
+            {
+                Rewired("ReadPlan", n => n["Next"] = "Approve");
+                Rewired("HasConfig", n => n["Default"] = "Approve");
+            }
+            Rewired("IsRevert", n =>
+            {
+                if (!config) n["Default"] = "Approve";
+                foreach (var choice in n["Choices"]!.AsArray().OfType<System.Text.Json.Nodes.JsonObject>())
+                    if (choice["Next"]?.GetValue<string>() == "SiteMember") choice["Next"] = "Approve";   // a site is approved too
+            });
+            var applies = states.ContainsKey("DeployInfrastructure");
+            states.Remove("ApproveInfrastructure");
+
+            // The answer is carried past the Pass states that rebuild the state, so the decision can name it.
+            foreach (var member in new[] { "ImageMember", "SiteMember" })
+                if (states.ContainsKey(member))
+                    Rewired(member, n => n["Parameters"]!["approval.$"] = "$.approval");
+
+            states["Approve"] = new
+            {
+                Type = "Task",
+                Resource = "arn:aws:states:::sns:publish.waitForTaskToken",
+                HeartbeatSeconds = a.HeartbeatSeconds,
+                Parameters = new Dictionary<string, object>
+                {
+                    ["TopicArn"] = a.TopicArn,
+                    ["Subject.$"] = "States.Format('{} waits for approval', $$.StateMachine.Name)",
+                    ["Message.$"] = "States.Format('{} waits for approval: execution {}, set {}. Review and answer with lz approve (or lz reject --reason) for this environment.', $$.StateMachine.Name, $$.Execution.Name, $.set.markerId)",
+                    ["MessageAttributes"] = new Dictionary<string, object>
+                    {
+                        [ApprovalAnswer.TokenAttribute] = new Dictionary<string, object> { ["DataType"] = "String", ["StringValue.$"] = "$$.Task.Token" },
+                    },
+                },
+                ResultPath = "$.approval",
+                Next = "CheckApproval",
+                Catch = new object[]
+                {
+                    new { ErrorEquals = new[] { ApprovalAnswer.RejectedError }, Next = "RecordFailure", ResultPath = "$.error" },
+                    new { ErrorEquals = new[] { "States.Timeout" }, Next = "ApprovalTimedOut", ResultPath = "$.approvalTimeout" },
+                }.Concat(catchAll).ToArray(),
+            };
+            states["ApprovalTimedOut"] = new
+            {
+                Type = "Pass",
+                Result = new Dictionary<string, object> { ["Error"] = ApprovalAnswer.TimedOutError, ["Cause"] = $"no answer within the approval's heartbeat ({a.HeartbeatSeconds} s)" },
+                ResultPath = "$.error",
+                Next = "RecordFailure",
+            };
+            object[] Offered(bool plan)
+            {
+                var rules = new List<object>
+                {
+                    new { Variable = "$.approval.markerId", IsPresent = true },
+                    new { Variable = "$.approval.markerId", StringEqualsPath = "$.set.markerId" },
+                    new { Variable = "$.approval.markerVersionId", IsPresent = true },
+                    new { Variable = "$.approval.markerVersionId", StringEqualsPath = "$.marker.versionId" },
+                };
+                if (plan)
+                {
+                    rules.Add(new { Variable = "$.approval.planVersionId", IsPresent = true });
+                    rules.Add(new { Variable = "$.approval.planVersionId", StringEqualsPath = "$.planned.versionId" });
+                }
+                return rules.ToArray();
+            }
+            var approvalChoices = new List<object>();
+            if (config)
+                approvalChoices.Add(new { And = new object[] { new { Variable = "$.set.config", IsPresent = true } }.Concat(Offered(plan: true)).ToArray(), Next = applies ? "DeployInfrastructure" : "ImageMember" });
+            if (site)
+                approvalChoices.Add(new { And = new object[] { new { Variable = "$.set.site", IsPresent = true } }.Concat(Offered(plan: false)).ToArray(), Next = "SiteMember" });
+            approvalChoices.Add(new { And = new object[] { new { Not = new { Variable = "$.set.config", IsPresent = true } }, new { Not = new { Variable = "$.set.site", IsPresent = true } } }.Concat(Offered(plan: false)).ToArray(), Next = "ImageMember" });
+            states["CheckApproval"] = new { Type = "Choice", Choices = approvalChoices.ToArray(), Default = "ApprovalDiffers" };
+            states["ApprovalDiffers"] = new
+            {
+                Type = "Pass",
+                Result = new Dictionary<string, object> { ["Error"] = ApprovalAnswer.DiffersError, ["Cause"] = "the approval does not name the set (and plan) this execution offered" },
+                ResultPath = "$.error",
+                Next = "RecordFailure",
+            };
         }
 
         var failure = Node("RecordFailure");
@@ -4055,7 +4152,10 @@ public static class DeployerPlanner
 
         if (decideFn is not null)
             Promote(states, decideFn, setHoldFn!, recordRevertFn!, bundleFunctions is not null, payload, catchAll, Transient(), EvidenceWrite(),
-                site: siteFunctions is not null, config: infraStates is not null, gated: gate2 is not null);
+                site: siteFunctions is not null, config: infraStates is not null, gated: gate2 is not null,
+                approval: approvalRequired
+                    ? (approvalTopicArn ?? throw new InvalidOperationException("approval is required but Pipeline.Approval.NotifyTopicArn is not set."), heartbeatSeconds)
+                    : null);
 
         // THE IMAGE THROUGH PULUMI (P3 J3): Prepare goes on to ChooseConfig, and Deploy is the tooling task, not UpdateService.
         if (imageStates?.Invoke(payload, catchAll, Transient) is { } imageBranch)
