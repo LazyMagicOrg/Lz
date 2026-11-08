@@ -3673,6 +3673,38 @@ class Program
             }
         }, systemKeyOption, envOption, profileOption, executionOption, reasonOption);
         root.AddCommand(reject);
+
+        var policies = new Command("approverpolicies",
+            "Print the two Identity Center permission sets' policies for an environment that requires approval (ProdApproval.md A4-A5): " +
+            "the approver set, which alone may answer, and the daily set - ReadOnlyAccess plus the hold, with answering denied. " +
+            "Changes nothing: the owner creates both sets in the management account and assigns them.");
+        policies.AddOption(systemKeyOption);
+        policies.AddOption(envOption);
+        policies.SetHandler((systemKey, env) =>
+        {
+            var config = ConfigResolver.ResolveSystemConfigs(ConfigResolver.ResolveEnvironment(env), systemKey).Single();
+            try
+            {
+                var p = Lz.Aws.Pipeline.ApproverPolicies.For(config);
+                var indented = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+                Console.WriteLine($"# {p.Environment} (account {p.Account})");
+                Console.WriteLine();
+                Console.WriteLine("## The approver permission set - inline policy; assign it to a dedicated user with MFA, in this account only");
+                Console.WriteLine(p.Approver.ToJsonString(indented));
+                Console.WriteLine();
+                Console.WriteLine($"## The daily permission set - AWS managed {Lz.Aws.Pipeline.ApproverPolicies.DailyManagedPolicyArn}, plus this inline policy;");
+                Console.WriteLine("## assign it in place of the administrator set, which becomes break-glass");
+                Console.WriteLine(p.DailyInline.ToJsonString(indented));
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Error.WriteLine(ex.Message);
+                Console.ResetColor();
+                Environment.ExitCode = 1;
+            }
+        }, systemKeyOption, envOption);
+        root.AddCommand(policies);
     }
 
     private static void RegisterCloneReposCommand(RootCommand root)

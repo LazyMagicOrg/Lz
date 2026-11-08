@@ -145,6 +145,10 @@ public class PipelineConfigTests
             // `lz bootstrapdeployer`; no deploy path calls it. Absent paths: InfraPlanPlannerTests.WithoutTheBranch_ThePlanIsWhatItWas
             // (null and off) and InAChain_WithoutTheBranch_NothingIsPinnedUnderPlans_AndThePlanIsWhatItWas.
             Path.Combine("Lz.Aws", "Pipeline", "InfraPlanPlan.cs"),
+            // ApproverPolicies, 2026-11-08 (ProdApproval.md A4-A5). Reads the account, the chain store, the predecessor and
+            // Approval.Required to print two Identity Center policies; reached only from `lz approverpolicies`, which changes
+            // nothing, and no deploy path calls it. Absent path: ApproverPoliciesTests.AnEnvironmentThePipelineDoesNotKnow_OrThatRequiresNoApproval_IsRefused.
+            Path.Combine("Lz.Aws", "Pipeline", "ApproverPolicies.cs"),
         };
 
         var root = RepoRoot();
