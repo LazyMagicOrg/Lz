@@ -95,6 +95,10 @@ public static class DeployerBootstrapper
             await ReportSubscriptionsAsync(profile, region, "alerts", plannedAlerts.TopicName, plannedAlerts.TopicArn, config);
         if (plan.Outcomes is { } plannedOutcomes)
             await ReportSubscriptionsAsync(profile, region, "outcomes", plannedOutcomes.TopicName, plannedOutcomes.TopicArn, config);
+        if (plan.ApprovalTopic is { } plannedApprovals)
+            await ReportSubscriptionsAsync(profile, region, "approvals", plannedApprovals.TopicName, plannedApprovals.TopicArn, config);
+        else if (plan.ApprovalRequired)
+            Console.WriteLine($"  approval topic {config.Pipeline?.Approval?.NotifyTopicArn}: not in this account and region, so not created here.");
 
         // A VERIFIER-LESS HOOK IS REFUSED WHERE IT WOULD BE USED (DecoupledCd.md §14.2). Checked before the
         // dry-run return so a dry run says what the apply will do.
@@ -127,7 +131,7 @@ public static class DeployerBootstrapper
                               $"kms:Decrypt on {plannedInfra.StateKeyAlias}, config bundles, s3:PutObject under {InfraPlan.PlansPrefix} in {plan.EvidenceStore}; no DynamoDB or Secrets Manager data)");
             if (plan.InfrastructureDeploy is { } plannedDeploy)
             {
-                Console.WriteLine($"  The deploy half (Pipeline.Infrastructure: deploy): ReadPlan -> ApproveInfrastructure (pass-through) -> DeployInfrastructure -> VerifyInfrastructure -> RecordInfrastructure");
+                Console.WriteLine($"  The deploy half (Pipeline.Infrastructure: deploy): ReadPlan -> {(plan.ApprovalRequired && plan.Promotion is not null ? "Approve (the set's one approval, ProdApproval.md A1)" : "ApproveInfrastructure (pass-through)")} -> DeployInfrastructure -> VerifyInfrastructure -> RecordInfrastructure");
                 Console.WriteLine($"    task family {plannedDeploy.Family} on {plannedDeploy.TaskRoleName}: {string.Join(", ", plannedDeploy.TaskRoleManagedPolicies)}, " +
                                   $"denied every resource of this deployer plan; puts only under {InfraPlan.AppliesPrefix} in {plan.EvidenceStore}");
                 Console.WriteLine($"    function {plannedDeploy.ReadApplyFunctionName} reads the result; a destructive plan needs \"allowDestructivePlan\": true in a hand-started input");
@@ -199,6 +203,8 @@ public static class DeployerBootstrapper
             await AlertsApply.EnsureTopicAsync(sns, alertsTopic);
         if (plan.Outcomes is { } outcomesTopic)
             await AlertsApply.EnsureTopicAsync(sns, outcomesTopic);
+        if (plan.ApprovalTopic is { } approvalTopic)
+            await AlertsApply.EnsureTopicAsync(sns, approvalTopic);
 
         // THE REPOSITORIES BEFORE THE PERMISSION, so there is no moment at which the build account may
         // replicate into a repository this account has not hardened. Without ecr:CreateRepository in the
@@ -368,6 +374,8 @@ public static class DeployerBootstrapper
             await ReportSubscriptionsAsync(profile, region, "alerts", wired.TopicName, wired.TopicArn, config);
         if (plan.Outcomes is { } wiredOutcomes)
             await ReportSubscriptionsAsync(profile, region, "outcomes", wiredOutcomes.TopicName, wiredOutcomes.TopicArn, config);
+        if (plan.ApprovalTopic is { } wiredApprovals)
+            await ReportSubscriptionsAsync(profile, region, "approvals", wiredApprovals.TopicName, wiredApprovals.TopicArn, config);
         Console.WriteLine("Not built:");
         Console.WriteLine("  - a reconciler: an event that ends in a dead-letter queue is retried by nothing; start that deploy by hand");
         if (plan.Alerts is null)

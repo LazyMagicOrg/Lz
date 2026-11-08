@@ -93,7 +93,15 @@ public sealed record PipelineDeployer(
     DeployerOutcomesPlan? Outcomes = null,
     InfraPlanResources? Infrastructure = null,
     InfraDeployResources? InfrastructureDeploy = null,
-    ImageDeployResources? ImageDeploy = null);
+    ImageDeployResources? ImageDeploy = null,
+    DeployerApprovalTopicPlan? ApprovalTopic = null);
+
+/// <summary>
+/// The approval topic (ProdApproval.md A6), under <c>Pipeline.Approval.Required</c>, where <c>NotifyTopicArn</c> names a topic in this
+/// account and region: created by <c>bootstrapdeployer</c> as the alerts and outcomes topics are, with a policy admitting the deployer's
+/// own role alone - the Approve state's publisher. A topic elsewhere is somebody else's to create, and is left alone.
+/// </summary>
+public sealed record DeployerApprovalTopicPlan(string TopicName, string TopicArn, string TopicPolicy);
 
 /// <summary>
 /// The outcomes list (the environment's chain entry's <c>Outcomes</c>): a topic, a rule matching every end of this deployer's
@@ -1230,7 +1238,21 @@ public static class DeployerPlanner
             Outcomes: outcomes,
             Infrastructure: infra,
             InfrastructureDeploy: infraDeploy,
-            ImageDeploy: imageDeploy);
+            ImageDeploy: imageDeploy,
+            ApprovalTopic: approvalRequired ? ApprovalTopicFor(p.Approval?.NotifyTopicArn, region, acct, $"arn:aws:iam::{acct}:role/{sk}-{env}-deployer") : null);
+    }
+
+    /// <summary>
+    /// The approval topic this command creates, or null when <paramref name="topicArn"/> is not an SNS topic in
+    /// <paramref name="acct"/> and <paramref name="region"/> - a topic in another account or region is not this account's to make.
+    /// </summary>
+    internal static DeployerApprovalTopicPlan? ApprovalTopicFor(string? topicArn, string region, string acct, string machineRoleArn)
+    {
+        var parts = topicArn?.Split(':');
+        if (parts is not { Length: 6 } || parts[0] != "arn" || parts[2] != "sns" || parts[3] != region || parts[4] != acct
+            || string.IsNullOrEmpty(parts[5]))
+            return null;
+        return new DeployerApprovalTopicPlan(parts[5], topicArn!, CrossAccount.ApprovalTopicPolicy(topicArn!, acct, machineRoleArn));
     }
 
     /// <summary>

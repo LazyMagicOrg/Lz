@@ -36,6 +36,11 @@ internal static class AlertsApply
         => EnsureTopicAsync(sns, "outcomes", plan.TopicName, plan.TopicArn, plan.TopicPolicy,
             plan.AdmitsTheIntake ? "the notify function and the intake's record function may publish" : "the notify function may publish");
 
+    /// <summary>The approval topic and its whole policy (ProdApproval.md A6), before the state machine that publishes to it.</summary>
+    public static Task EnsureTopicAsync(IAmazonSimpleNotificationService sns, DeployerApprovalTopicPlan plan)
+        => EnsureTopicAsync(sns, "approval", plan.TopicName, plan.TopicArn, plan.TopicPolicy,
+            "the deployer's Approve state may publish");
+
     private static async Task EnsureTopicAsync(
         IAmazonSimpleNotificationService sns, string what, string topicName, string topicArn, string topicPolicy, string publishers)
     {

@@ -571,4 +571,39 @@ public class DeployerPromotedPlanTests
         Assert.DoesNotContain(plan.Functions, f => f.Handler == DeployerHandlers.Decide);
         Assert.False(plan.Functions.Single(f => f.Handler == DeployerHandlers.Verify).Environment.ContainsKey(DeployerEnvironment.Predecessor));
     }
+
+    // ---- ProdApproval.md A6: the approval topic ----
+
+    [Fact]
+    public void UnderApproval_ATopicInThisAccount_IsCreatedHere_AndOnlyTheDeployersRoleMayPublish()
+    {
+        var c = Test(approval: true);
+        c.Pipeline!.Approval!.NotifyTopicArn = $"arn:aws:sns:us-west-2:{TestAccount}:scu-test-approvals";
+        var topic = Plan(c).ApprovalTopic;
+        Assert.NotNull(topic);
+        Assert.Equal("scu-test-approvals", topic!.TopicName);
+
+        var statement = Assert.Single(JsonDocument.Parse(topic.TopicPolicy).RootElement.GetProperty("Statement").EnumerateArray());
+        Assert.Equal("Allow", statement.GetProperty("Effect").GetString());
+        Assert.Equal("sns:Publish", statement.GetProperty("Action").GetString());
+        Assert.Equal(topic.TopicArn, statement.GetProperty("Resource").GetString());
+        Assert.Equal($"arn:aws:iam::{TestAccount}:root", statement.GetProperty("Principal").GetProperty("AWS").GetString());
+        Assert.Equal($"arn:aws:iam::{TestAccount}:role/scu-test-deployer",
+            statement.GetProperty("Condition").GetProperty("ArnEquals").GetProperty("aws:PrincipalArn").GetString());
+        // ... and that role is the one the machine runs as, which is granted the publish.
+        Assert.Contains(topic.TopicArn, Plan(c).RolePolicy);
+        Assert.Equal("scu-test-deployer", Plan(c).RoleName);
+    }
+
+    [Fact]
+    public void ATopicInAnotherAccountOrRegion_OrNoApproval_IsNotCreatedHere()
+    {
+        var elsewhere = Test(approval: true);   // its NotifyTopicArn is account 1's
+        Assert.Null(Plan(elsewhere).ApprovalTopic);
+        var otherRegion = Test(approval: true);
+        otherRegion.Pipeline!.Approval!.NotifyTopicArn = $"arn:aws:sns:us-east-1:{TestAccount}:scu-test-approvals";
+        Assert.Null(Plan(otherRegion).ApprovalTopic);
+        var none = Test(approval: false);
+        Assert.Null(Plan(none).ApprovalTopic);
+    }
 }

@@ -654,6 +654,31 @@ public static class CrossAccount
         return new JsonObject { ["Version"] = "2012-10-17", ["Statement"] = statements }.ToJsonString(PolicyJson);
     }
 
+    /// <summary>
+    /// The approval topic's policy (ProdApproval.md A6): the deployer's own role - the Approve state publishes as it - and nothing else,
+    /// by the account and <c>aws:PrincipalArn</c>, as <see cref="OutcomesTopicPolicy"/> does. Who RECEIVES is the subscriptions', and
+    /// the message carries no token: an answer is sent with <c>lz approve</c>, which reads the token from the execution's history.
+    /// </summary>
+    public static string ApprovalTopicPolicy(string topicArn, string targetAccountId, string machineRoleArn)
+    {
+        RequireAccount(targetAccountId, nameof(targetAccountId));
+        return new JsonObject
+        {
+            ["Version"] = "2012-10-17",
+            ["Statement"] = new JsonArray(new JsonObject
+            {
+                ["Sid"] = ApprovalAskSid,
+                ["Effect"] = "Allow",
+                ["Principal"] = new JsonObject { ["AWS"] = $"arn:aws:iam::{targetAccountId}:root" },
+                ["Action"] = "sns:Publish",
+                ["Resource"] = topicArn,
+                ["Condition"] = new JsonObject { ["ArnEquals"] = new JsonObject { ["aws:PrincipalArn"] = machineRoleArn } },
+            }),
+        }.ToJsonString(PolicyJson);
+    }
+
+    public const string ApprovalAskSid = "TheDeployerAsksForApproval";
+
     public const string OutcomesNotifySid = "TheNotifyFunctionTellsTheList";
     public const string OutcomesIntakeSid = "TheIntakeTellsTheListWhatItRefused";
 
