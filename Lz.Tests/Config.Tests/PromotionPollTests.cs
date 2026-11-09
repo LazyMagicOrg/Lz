@@ -56,8 +56,8 @@ public class PromotionPollTests
     private static readonly SeenMarker Both = Set("20261025T200000Z-2-1", "20261025T210000Z-8-1");
 
     private static PollState State(bool held = false, bool inFlight = false, IEnumerable<SeenMarker>? started = null,
-        IDictionary<SeenMarker, string>? decided = null, DateTimeOffset? lastClosed = null) => new(
-        held, inFlight,
+        IDictionary<SeenMarker, string>? decided = null, DateTimeOffset? lastClosed = null, string? hold = null) => new(
+        hold is not null ? Hold.Parse(hold) : held ? Hold.Parse("on") : Hold.Parse("off"), inFlight,
         (started ?? Array.Empty<SeenMarker>()).Select(m => m.Marker.MarkerId).ToHashSet(),
         (decided ?? new Dictionary<SeenMarker, string>()).ToDictionary(d => d.Key.Marker.MarkerId, d => d.Value),
         lastClosed);
@@ -147,6 +147,45 @@ public class PromotionPollTests
     public void UnderAHeldOrMissingHold_NothingIsStartedOrDecided()
     {
         var d = PromotionPoll.Decide(new[] { Old, NewService }, State(held: true, decided: new Dictionary<SeenMarker, string> { [Both] = "deployed" }), Now);
+        Assert.Null(d.Start);
+        Assert.Empty(d.Supersede);
+        Assert.Empty(d.Alerts);
+    }
+
+    // ---- the hold by kind (PerKindHold.md) ----
+
+    [Fact]
+    public void UnderSets_AnUndecidedSiteStarts_AndNoSetIsStartedOrSuperseded()
+    {
+        var d = PromotionPoll.Decide(new[] { Old, NewService, Both, NewSite }, State(hold: "sets", decided: new Dictionary<SeenMarker, string> { [Both] = "deployed" }), Now);
+        Assert.Same(NewSite, d.Start);
+        Assert.Empty(d.Supersede);   // Old would be superseded by the deployed Both, were sets not held
+    }
+
+    [Fact]
+    public void UnderSites_AnUndecidedSetStarts_AndNoSiteIsStartedOrSuperseded()
+    {
+        var d = PromotionPoll.Decide(new[] { OldSite, NewSite, Both }, State(hold: "sites", decided: new Dictionary<SeenMarker, string> { [NewSite] = "deployed" }), Now);
+        Assert.Same(Both, d.Start);
+        Assert.Empty(d.Supersede);   // OldSite would be superseded by the deployed NewSite, were sites not held
+    }
+
+    [Fact]
+    public void AHeldKindsMarker_ClosedWithoutADecision_DoesNotAlarm()
+    {
+        var d = PromotionPoll.Decide(new[] { NewService }, State(hold: "sets", started: new[] { NewService }), Now);
+        Assert.Null(d.Start);
+        Assert.Empty(d.Alerts);
+    }
+
+    [Fact]
+    public void UnderSets_ARunningExecution_StillHoldsTheSite()
+        => Assert.Null(PromotionPoll.Decide(new[] { NewSite }, State(hold: "sets", inFlight: true), Now).Start);
+
+    [Fact]
+    public void UnderSets_OnlySetsWaiting_StartsNothing()
+    {
+        var d = PromotionPoll.Decide(new[] { Old, NewService }, State(hold: "sets"), Now);
         Assert.Null(d.Start);
         Assert.Empty(d.Supersede);
         Assert.Empty(d.Alerts);

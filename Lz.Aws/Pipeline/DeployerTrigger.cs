@@ -681,14 +681,15 @@ public static class StartStep
                 ["skipped"] = new JsonObject { ["record"] = location.Key, ["ref"] = record.BuiltFrom.Ref, ["reason"] = reason },
             };
 
-        // THE HOLD, READ BEFORE EVERY AUTOMATED START (P5 stage J): anything but "off", or missing, starts nothing.
+        // THE HOLD, READ BEFORE EVERY AUTOMATED START (P5 stage J), BY KIND (PerKindHold.md): a site record is held by "sites",
+        // every other class by "sets"; "on", missing, or anything else holds both.
         if (settings.HoldParameter is { } holdParameter)
         {
             var hold = await executions.HoldAsync(holdParameter);
-            if (!string.Equals(hold?.Trim(), "off", StringComparison.Ordinal))
+            if (Hold.Parse(hold).HoldsClass(record.Class))
                 throw new DeployHeld(
-                    $"{holdParameter} is {(hold is null ? "missing" : $"'{hold}'")}, so {location.Key} starts no deploy; it is left in the " +
-                    "dead-letter queue to be started by hand once the hold is released.");
+                    $"{holdParameter} is {(hold is null ? "missing" : $"'{hold}'")}, which holds {(record.Class == Hold.SiteClass ? "sites" : "sets")}, " +
+                    $"so {location.Key} ({record.Class}) starts no deploy; it is left in the dead-letter queue to be started by hand once the hold is released.");
         }
 
         foreach (var execution in planned)

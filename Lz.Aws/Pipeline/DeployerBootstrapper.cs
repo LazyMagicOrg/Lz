@@ -144,7 +144,7 @@ public static class DeployerBootstrapper
             Console.WriteLine($"  PROMOTED INTO from {predecessor.Environment} (P5): deploys only sets whose pass markers are in {predecessor.EvidenceStore}");
             Console.WriteLine($"    poller:   {plannedPromotion.PollerFunctionName}, {plannedPromotion.ScheduleExpression} by {plannedPromotion.ScheduleRuleName}, " +
                               $"reserved concurrency {plannedPromotion.ReservedConcurrency}, events at most {plannedPromotion.MaximumEventAgeSeconds} s old, never retried");
-            Console.WriteLine($"    hold:     {plannedPromotion.HoldParameter}, created 'off' if missing and never reset; anything else, or missing, starts nothing");
+            Console.WriteLine($"    hold:     {plannedPromotion.HoldParameter}, created 'off' if missing and never reset; 'sets' holds sets, 'sites' holds sites, anything else (or missing) holds both");
             Console.WriteLine($"    alarms:   {string.Join(", ", plannedPromotion.Alarms.Select(a => a.Name))}");
             Console.WriteLine($"    decide:   {DeployerHandlers.Decide.Split("::")[1]} writes decisions/ in {plan.EvidenceStore}");
             if (plannedPromotion.ImageTarget is { } imageTarget && config.Pipeline.EnforceSignatures)

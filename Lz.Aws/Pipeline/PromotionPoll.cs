@@ -6,11 +6,11 @@ namespace Lz.Aws.Pipeline;
 public sealed record SeenMarker(string Key, string VersionId, PassMarker Marker, DateTimeOffset WrittenAt);
 
 /// <summary>
-/// What the poller knows of this environment at a tick: the hold (held or missing counts as held), whether any execution of
+/// What the poller knows of this environment at a tick: the hold, by kind (<see cref="Pipeline.Hold"/>), whether any execution of
 /// its deployer is running or awaiting approval, the markers it has ever started an execution for, the markers decided here
 /// with their outcome, and when its last execution closed.
 /// </summary>
-public sealed record PollState(bool Held, bool InFlight, IReadOnlySet<string> Started, IReadOnlyDictionary<string, string> Decided, DateTimeOffset? LastClosedAt);
+public sealed record PollState(Hold Hold, bool InFlight, IReadOnlySet<string> Started, IReadOnlyDictionary<string, string> Decided, DateTimeOffset? LastClosedAt);
 
 /// <summary>A tick's decision: the marker to start (if any), the older ones to decide superseded, and what to alarm on.</summary>
 public sealed record PollDecision(SeenMarker? Start, IReadOnlyList<SeenMarker> Supersede, IReadOnlyList<string> Alerts);
@@ -31,7 +31,9 @@ public readonly record struct RecordAge(string Stamp, int Attempt) : IComparable
 /// and does what it says.
 ///
 /// <list type="bullet">
-/// <item>HELD OR MISSING, nothing: no start, no decision, no alarm (rule 5). On release it resumes at the newest by dominance.</item>
+/// <item>HELD OR MISSING, nothing: no start, no decision, no alarm (rule 5). On release it resumes at the newest by dominance.
+/// BY KIND (PerKindHold.md): a marker of a held kind is set aside before anything else - never started, never superseded,
+/// never alarmed on - and the other kind goes on. An execution already running, of either kind, still holds every start.</item>
 /// <item>"HANDLED" IS THE DECISION: a decided marker is never started. A marker started whose execution closed without a
 /// decision is not restarted, and alarms; one still running is neither restarted nor superseded.</item>
 /// <item>SUPERSEDED: a marker never started, older than a set deployed here, is decided superseded (rule 3). A refused or
@@ -75,7 +77,9 @@ public static class PromotionPoll
 
     public static PollDecision Decide(IReadOnlyList<SeenMarker> markers, PollState state, DateTimeOffset now)
     {
-        if (state.Held) return new(null, Array.Empty<SeenMarker>(), Array.Empty<string>());
+        if (state.Hold.All) return new(null, Array.Empty<SeenMarker>(), Array.Empty<string>());
+        // A HELD KIND IS SET ASIDE WHOLE: rule 5 applies to it as to a held environment, and the other kind is judged alone.
+        if (!state.Hold.None) markers = markers.Where(m => !state.Hold.Holds(PassMarkerFormat.IsSite(m.Marker))).ToList();
 
         var alerts = new List<string>();
         string Id(SeenMarker m) => m.Marker.MarkerId;
@@ -170,7 +174,7 @@ public interface IExecutionStarter
 }
 
 /// <summary>
-/// THE POLLER'S TICK (§12 P5 stage I): the hold first, and nothing else under one; then the predecessor's set markers, this
+/// THE POLLER'S TICK (§12 P5 stage I): the hold first, and nothing else under one holding both kinds; then the predecessor's set markers, this
 /// environment's decisions and its deployer's executions; then what <see cref="PromotionPoll.Decide"/> says. A marker that
 /// does not parse is alarmed and left out, never started. Superseded markers are decided here, write-once, by the poller.
 /// </summary>
@@ -182,7 +186,8 @@ public static class PromotionPollStep
         PromotionPollSettings settings, IPromotionReads reads, IExecutionStarter starter, IEvidenceWriter writer, IAlertPublisher alerts, DateTimeOffset now)
     {
         var hold = await reads.HoldAsync(settings.HoldParameter);
-        if (!string.Equals(hold?.Trim(), "off", StringComparison.Ordinal))
+        var held = Hold.Parse(hold);
+        if (held.All)
             return new System.Text.Json.Nodes.JsonObject { ["held"] = true, ["hold"] = hold };
 
         var problems = new List<string>();
@@ -203,7 +208,7 @@ public static class PromotionPollStep
         var executions = await reads.ExecutionsAsync(settings.StateMachineArn);
         var names = executions.Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
         var state = new PollState(
-            Held: false,
+            Hold: held,
             InFlight: executions.Any(e => e.Status == "RUNNING"),
             Started: seen.Where(m => names.Contains(PromotionPoll.ExecutionNameFor(m.Marker.MarkerId))).Select(m => m.Marker.MarkerId).ToHashSet(),
             Decided: await reads.DecisionsAsync(settings.EvidenceStore),
@@ -240,6 +245,7 @@ public static class PromotionPollStep
         return new System.Text.Json.Nodes.JsonObject
         {
             ["held"] = false,
+            ["heldKinds"] = new System.Text.Json.Nodes.JsonArray(held.Kinds.Select(k => (System.Text.Json.Nodes.JsonNode?)k).ToArray()),
             ["markers"] = seen.Count,
             ["started"] = started,
             ["superseded"] = decision.Supersede.Count,

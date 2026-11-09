@@ -1715,7 +1715,7 @@ public static class DeployerPlanner
             [DeployerEnvironment.TriggerRoutes] = DeployerTrigger.EncodeRoutes(routes),
             // Main only (P2 stage D2). A build from any other branch is skipped, and can be deployed by hand.
             [DeployerEnvironment.TriggerRefs] = DeployerEnvironment.Join(DeployerTrigger.DefaultRefs),
-            // THE HOLD (P5 stage J), read before every start; anything but "off", or missing, starts nothing.
+            // THE HOLD (P5 stage J), read before every start: "off" holds nothing, "sets" or "sites" one kind (Hold.cs), anything else or missing both.
             [DeployerEnvironment.HoldParameter] = HoldParameterName(config),
         };
         // THE CONFIG ROUTE (P3 E): where the environment deploys from config bundles, its config repository's records start the

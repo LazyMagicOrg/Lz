@@ -139,6 +139,40 @@ public class PromotionPollStepTests
     }
 
     [Fact]
+    public async Task UnderSets_TheTickReadsOn_StartsTheSite_AndLogsTheHeldKind()
+    {
+        var w = new World { Hold = "sets" };
+        var site = SiteMarker("20261026T193011Z-40387310346-1");
+        w.Pass(Newer); w.Pass(site);
+        var result = await Tick(w);
+        Assert.Equal(PromotionPoll.ExecutionNameFor(site.MarkerId), Assert.Single(w.Started).Name);
+        Assert.False(result["held"]!.GetValue<bool>());
+        Assert.Equal(new[] { "set" }, result["heldKinds"]!.AsArray().Select(n => n!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task UnderSites_TheSetStarts_AndTheSiteWaits()
+    {
+        var w = new World { Hold = " sites " };
+        w.Pass(Newer, minutesAgo: 1); w.Pass(SiteMarker("20261026T193011Z-40387310346-1"), minutesAgo: 5);
+        await Tick(w);
+        Assert.Equal(PromotionPoll.ExecutionNameFor(Newer.MarkerId), Assert.Single(w.Started).Name);
+    }
+
+    [Theory]
+    [InlineData("Sets")]
+    [InlineData("set")]
+    [InlineData("sites,sets")]
+    public async Task AnUnknownValue_HoldsBothKinds(string hold)
+    {
+        var w = new World { Hold = hold };
+        w.Pass(SiteMarker("20261026T193011Z-40387310346-1"));
+        await Tick(w);
+        Assert.Equal(new[] { "hold" }, w.Reads);
+        Assert.Empty(w.Started);
+    }
+
+    [Fact]
     public async Task ARunningExecution_HoldsEveryStart()
     {
         var w = new World();

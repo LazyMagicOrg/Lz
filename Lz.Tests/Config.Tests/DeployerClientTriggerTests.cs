@@ -144,7 +144,8 @@ public class DeployerClientTriggerTests
     {
         public Dictionary<string, string> Existing { get; } = new(StringComparer.Ordinal);
         public List<(string Name, string Input)> Starts { get; } = new();
-        public Task<string?> HoldAsync(string parameter) => Task.FromResult<string?>("off");
+        public string? Hold { get; init; } = "off";
+        public Task<string?> HoldAsync(string parameter) => Task.FromResult(Hold);
 
         public Task<bool> StartAsync(string stateMachineArn, string name, string input)
         {
@@ -172,6 +173,18 @@ public class DeployerClientTriggerTests
         Assert.Equal(("req-20260914T173258Z-34875215076-sellerapp-1", HandStartedInput), Assert.Single(executions.Starts));
         Assert.Equal("req-20260914T173258Z-34875215076-sellerapp-1", result["started"]!.AsArray().Single()!.GetValue<string>());
         Assert.Null(result["skipped"]);
+    }
+
+    [Theory]
+    [InlineData("sets", true)]
+    [InlineData("sites", false)]
+    public async Task AClientRecord_IsHeldBySets_NotBySites(string hold, bool held)
+    {
+        var executions = new Executions { Hold = hold };
+        var run = () => StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = "/scu/dev/pipeline/hold" },
+            new Records(BuildRecordFormatTests.BundleWorkflowEmitted), executions);
+        if (held) await Assert.ThrowsAsync<DeployHeld>(run); else await run();
+        Assert.Equal(held ? 0 : 1, executions.Starts.Count);
     }
 
     [Fact]

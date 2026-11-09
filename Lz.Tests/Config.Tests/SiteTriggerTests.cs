@@ -49,6 +49,50 @@ public class SiteTriggerTests
         Assert.Equal(DeployerTrigger.ClientInputFor(new RecordLocation(Store, DevKey), SiteBucket), only.Input);
     }
 
+    // ---- the hold by kind (PerKindHold.md) ----
+
+    // Shaped as an intake-written site record (the config record's shape in ConfigTriggerTests, a site's class and key).
+    private const string SiteRecord = $$"""
+        {
+          "schema": 1, "class": "site",
+          "builtFrom": { "repo": "Scutara/ScutaraWebsite", "commit": "5440a12cb99bbc2cd916ff4246a15c88592d2630", "lane": "published",
+                         "packages": { }, "ref": "refs/heads/main" },
+          "identity": { "kind": "bundle", "bucket": "{{ArtifactStore}}", "key": "site/scutara/scutarawebsite/dev/20261023T090000Z-39900000001-1.zip",
+                        "versionId": "rEKPhw4vGJdF1RL3AWjDlbiXQOnlwYk6", "sha256": "160f48b074e84c2e0a3640a94cd8c8e0054562bf21b5bf9060ab661f7b249baf" },
+          "builtAt": "2026-10-23T09:00:00Z", "builtBy": "a-person", "workflowRunId": "39900000001",
+          "intake": { "runId": "39900000001", "runAttempt": 1, "environment": "dev", "jobId": "127960463356",
+                      "workflowRef": "Scutara/ScutaraWebsite/.github/workflows/build-site.yml@refs/heads/main",
+                      "githubDigest": "sha256:21b3ba60062cb3d41bf990af457773032f46f8410745566b6209519b61234ada",
+                      "gate1": { "result": "passed", "evidence": "gate1/1233186125-39900000001-1.json" } }
+        }
+        """;
+
+    private sealed class Records(string body) : IRecordStore
+    {
+        public Task<StoredRecord?> ReadAsync(string bucket, string key) => Task.FromResult<StoredRecord?>(new StoredRecord(body, "rv"));
+    }
+
+    private sealed class Executions(string hold) : IExecutions
+    {
+        public List<string> Starts { get; } = new();
+        public Task<string?> HoldAsync(string parameter) => Task.FromResult<string?>(hold);
+        public Task<bool> StartAsync(string stateMachineArn, string name, string input) { Starts.Add(name); return Task.FromResult(true); }
+        public Task<string?> InputOfAsync(string executionArn) => Task.FromResult<string?>(null);
+    }
+
+    [Theory]
+    [InlineData("sets", false)]
+    [InlineData("off", false)]
+    [InlineData("sites", true)]
+    [InlineData("on", true)]
+    public async Task ASiteRecord_IsHeldBySites_NotBySets(string hold, bool held)
+    {
+        var executions = new Executions(hold);
+        var run = () => StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = "/scu/dev/pipeline/hold" }, new Records(SiteRecord), executions);
+        if (held) Assert.Contains("holds sites", (await Assert.ThrowsAsync<DeployHeld>(run)).Message); else await run();
+        Assert.Equal(held ? 0 : 1, executions.Starts.Count);
+    }
+
     [Fact]
     public void AnotherEnvironmentsSiteRecord_HasNoRouteHere()
         => Assert.Throws<TriggerRefused>(() => DeployerTrigger.ExecutionsFor(

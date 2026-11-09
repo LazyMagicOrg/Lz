@@ -48,6 +48,7 @@
     <Compile Include="..\Lz.Aws\Pipeline\Promotion.cs" Link="Linked\Lz.Aws\Pipeline\Promotion.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\ApprovalAnswer.cs" Link="Linked\Lz.Aws\Pipeline\ApprovalAnswer.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\PromotionPoll.cs" Link="Linked\Lz.Aws\Pipeline\PromotionPoll.cs" />
+    <Compile Include="..\Lz.Aws\Pipeline\Hold.cs" Link="Linked\Lz.Aws\Pipeline\Hold.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\MarkPassed.cs" Link="Linked\Lz.Aws\Pipeline\MarkPassed.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerTrigger.cs" Link="Linked\Lz.Aws\Pipeline\DeployerTrigger.cs" />
     <Compile Include="..\Lz.Aws\Pipeline\DeployerAlerts.cs" Link="Linked\Lz.Aws\Pipeline\DeployerAlerts.cs" />

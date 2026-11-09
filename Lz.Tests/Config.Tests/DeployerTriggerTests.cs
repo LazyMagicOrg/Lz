@@ -400,6 +400,25 @@ public class DeployerTriggerTests
         Assert.Contains(Hold, ex.Message);
     }
 
+    [Theory]
+    [InlineData("sets")]
+    [InlineData(" sets")]
+    public async Task UnderSets_AnImageRecord_IsHeld_AndTheMessageNamesTheKind(string hold)
+    {
+        var executions = new Executions { Hold = hold };
+        var ex = await Assert.ThrowsAsync<DeployHeld>(() => StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = Hold }, MainRecord(), executions));
+        Assert.Empty(executions.Starts);
+        Assert.Contains("holds sets", ex.Message);
+    }
+
+    [Fact]
+    public async Task UnderSites_AnImageRecord_Starts()
+    {
+        var executions = new Executions { Hold = "sites" };
+        await StartStep.RunAsync(Event().ToJsonString(), Settings() with { HoldParameter = Hold }, MainRecord(), executions);
+        Assert.Single(executions.Starts);
+    }
+
     [Fact]
     public async Task UnderAnOffHold_TheRecordStartsAsBefore()
     {
