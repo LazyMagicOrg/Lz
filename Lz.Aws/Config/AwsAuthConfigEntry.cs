@@ -219,6 +219,20 @@ public class AwsAuthConfigEntry : AuthConfigEntry
     /// together. See specs/Platform/McpAuth.md §7.4 and specs/Platform/McpAgents.md M0-8.
     /// </summary>
     public McpResourceConfig? McpResource { get; set; }
+
+    /// <summary>
+    /// Confidential OIDC app clients for EXTERNAL sites that run their own server-side
+    /// authorization-code exchange against this pool (e.g. a Wix Velo backend). Each entry
+    /// provisions a <c>{poolPrefix}-{Name}-client</c> with <c>GenerateSecret=true</c>, the
+    /// auth-code flow, openid/profile/email, and the caller-supplied EXACT callback/logout
+    /// URLs — the external site owns its domain, so the URLs are config-driven rather than
+    /// framework-fixed like <see cref="ProvisionSmartstoreClient"/>. Purely additive: null or
+    /// empty ⇒ no client, secret, or branding is created, so the deploy plan is byte-for-byte
+    /// identical. The id/secret are read post-deploy via <c>DescribeUserPoolClient</c> (no
+    /// Pulumi outputs wired) and copied into the external site's secret store.
+    /// See <c>BCProjNew/Platform/WixSsoIntegration.md</c>.
+    /// </summary>
+    public List<ExternalOidcClientConfig>? ExternalOidcClients { get; set; }
 }
 
 /// <summary>
@@ -378,6 +392,26 @@ public class McpSurfaceClientConfig
 
     /// <summary>Refresh-token validity, in days (rotation on). Default <c>90</c>.</summary>
     public int RefreshTokenDays { get; set; } = 90;
+}
+
+/// <summary>
+/// A confidential OIDC app client for an external site (see
+/// <see cref="AwsAuthConfigEntry.ExternalOidcClients"/>). <c>GenerateSecret=true</c>,
+/// auth-code flow; the site runs the server-side code exchange and token verification.
+/// </summary>
+public class ExternalOidcClientConfig
+{
+    /// <summary>Name suffix — the client is <c>{poolPrefix}-{Name}-client</c> (e.g. <c>wix</c>).</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The site's EXACT OAuth redirect URI(s). Cognito rejects any non-exact redirect
+    /// (<c>redirect_mismatch</c>); no wildcards. At least one is required.
+    /// </summary>
+    public List<string> CallbackUrls { get; set; } = new();
+
+    /// <summary>Optional exact sign-out redirect URI(s) for the Cognito <c>/logout</c> endpoint.</summary>
+    public List<string> LogoutUrls { get; set; } = new();
 }
 
 /// <summary>

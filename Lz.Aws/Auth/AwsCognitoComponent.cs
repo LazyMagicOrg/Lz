@@ -752,6 +752,50 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
             }
 
             // =================================================================
+            // EXTERNAL OIDC CONFIDENTIAL CLIENTS (additive, opt-in) — generic
+            // =================================================================
+            // Confidential app clients for external sites that run their own server-side OIDC
+            // code exchange against this pool (e.g. a Wix Velo backend). Each entry gets a
+            // {poolPrefix}-{name}-client with GenerateSecret=true, the auth-code flow, and the
+            // caller-supplied EXACT callback/logout URLs — the external site owns its domain, so
+            // the URLs are config-driven rather than framework-fixed like the Smartstore client.
+            // Absent/empty ⇒ byte-identical baseline (no client, secret, or branding). The
+            // id/secret are read post-deploy via DescribeUserPoolClient (no Pulumi outputs) and
+            // copied into the external site's secret store. See Platform/WixSsoIntegration.md.
+            var externalOidcClientIds = new List<(string Name, Output<string> Id)>();
+            foreach (var ext in poolConfig.ExternalOidcClients ?? new List<ExternalOidcClientConfig>())
+            {
+                if (string.IsNullOrWhiteSpace(ext.Name))
+                    throw new Exception($"Pool '{authType}' has an ExternalOidcClient with empty Name. Check systemconfig.");
+                if (ext.CallbackUrls is null || ext.CallbackUrls.Count == 0)
+                    throw new Exception($"Pool '{authType}' ExternalOidcClient '{ext.Name}' needs at least one CallbackUrl. Check systemconfig.");
+
+                var extClient = new UserPoolClient($"{poolPrefix}-{ext.Name}-client", new UserPoolClientArgs
+                {
+                    Name = $"{poolPrefix}-{ext.Name}-client",
+                    UserPoolId = userPool.Id,
+                    GenerateSecret = true,
+                    ExplicitAuthFlows = { "ALLOW_REFRESH_TOKEN_AUTH" },
+                    SupportedIdentityProviders = { "COGNITO" },
+                    PreventUserExistenceErrors = "ENABLED",
+                    AllowedOauthFlows = { "code" },
+                    AllowedOauthScopes = { "openid", "profile", "email" },
+                    AllowedOauthFlowsUserPoolClient = true,
+                    CallbackUrls = { ext.CallbackUrls.ToArray() },
+                    LogoutUrls = { (ext.LogoutUrls ?? new List<string>()).ToArray() },
+                }, new CustomResourceOptions
+                {
+                    Parent = this,
+                    // Same adopt-friendly drift handling as the Smartstore client: generateSecret
+                    // is create-only + unreadable, so ignore the false→true drift that would
+                    // otherwise REPLACE the client and rotate its id.
+                    IgnoreChanges = { "generateSecret" },
+                });
+
+                externalOidcClientIds.Add((ext.Name, extClient.Id));
+            }
+
+            // =================================================================
             // M0-8 — MCP RESOURCE SERVER + PUBLIC PKCE CLIENT (opt-in). A Cognito resource server whose
             // identifier IS the MCP URL (so a token can carry aud == that URL under RFC 8707), plus a PUBLIC
             // auth-code + PKCE client granted the qualified scope. Absent ⇒ byte-identical baseline. Distinct
@@ -1059,6 +1103,22 @@ public class AwsCognitoComponent : ComponentResource, IAuthServiceComponent
                 var ssBrandingArgs = BuildBrandingArgsFromConventionFolder(
                     userPool.Id, smartstoreClientId, authType);
                 new ManagedLoginBranding($"{poolPrefix}-smartstore-branding", ssBrandingArgs,
+                    new CustomResourceOptions
+                    {
+                        Parent = this,
+                        DependsOn = { userPoolDomain },
+                        DeleteBeforeReplace = true,
+                    });
+            }
+
+            // ManagedLoginVersion=2 requires a per-client branding for each external OIDC
+            // client too — without it the hosted UI returns "Login pages unavailable" for that
+            // client's sign-ins. Reuse the same convention-folder source as the pool.
+            foreach (var (extName, extClientId) in externalOidcClientIds)
+            {
+                var extBrandingArgs = BuildBrandingArgsFromConventionFolder(
+                    userPool.Id, extClientId, authType);
+                new ManagedLoginBranding($"{poolPrefix}-{extName}-branding", extBrandingArgs,
                     new CustomResourceOptions
                     {
                         Parent = this,
