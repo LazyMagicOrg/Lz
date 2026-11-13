@@ -144,7 +144,7 @@ public class AwsLambdaTenantServiceComponent : ComponentResource, ITenantService
                     ""Statement"": [
                         {{ ""Effect"": ""Allow"", ""Action"": [""bedrock:InvokeModel"",""bedrock:InvokeModelWithResponseStream""], ""Resource"": ""*"" }},
                         {{ ""Effect"": ""Allow"",
-                           ""Action"": [""cognito-idp:AdminCreateUser"",""cognito-idp:AdminDeleteUser"",""cognito-idp:AdminGetUser"",""cognito-idp:AdminUpdateUserAttributes"",""cognito-idp:ListUsers""],
+                           ""Action"": [""cognito-idp:AdminCreateUser"",""cognito-idp:AdminDeleteUser"",""cognito-idp:AdminGetUser"",""cognito-idp:AdminSetUserPassword"",""cognito-idp:AdminUpdateUserAttributes"",""cognito-idp:ListUsers""],
                            ""Resource"": ""arn:aws:cognito-idp:{ids.Item2}:{ids.Item1}:userpool/*"" }},
                         {{ ""Effect"": ""Allow"",
                            ""Action"": [""cloudfront:CreateInvalidation"",""cloudfront:GetDistribution""],
