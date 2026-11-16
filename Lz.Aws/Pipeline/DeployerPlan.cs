@@ -2785,22 +2785,48 @@ public static class DeployerPlanner
         };
         if (config)
         {
+            // A HAND START'S allowDestructivePlan REACHES ReadPlan (P-12; 2026-11-16, test refused a task definition's replacement
+            // twice, the second time started by hand with the flag). ConfigMember rebuilds the state from the set, so it dropped
+            // the flag and no promoted environment could ever apply a destructive config plan - the refusal's own advice could not
+            // work. A Pass cannot copy a field that may be absent (the poller never writes it), so a start that carries it goes
+            // through ConfigMemberAllowing, which copies it as given; every other start goes through ConfigMember, unchanged.
             states["HasConfig"] = new
             {
                 Type = "Choice",
-                Choices = new[] { new { Variable = "$.set.config", IsPresent = true, Next = "ConfigMember" } },
+                Choices = new object[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["And"] = new object[]
+                        {
+                            new { Variable = "$.set.config", IsPresent = true },
+                            new { Variable = "$.allowDestructivePlan", IsPresent = true },
+                        },
+                        ["Next"] = "ConfigMemberAllowing",
+                    },
+                    new { Variable = "$.set.config", IsPresent = true, Next = "ConfigMember" },
+                },
                 Default = "ImageMember",
+            };
+            Dictionary<string, object> ConfigMemberParameters() => new()
+            {
+                ["set.$"] = "$.set",
+                ["marker.$"] = "$.marker",
+                ["record.$"] = "$.set.config.record",
+                ["verified.$"] = "$.set.config.verified",
             };
             states["ConfigMember"] = new
             {
                 Type = "Pass",
-                Parameters = new Dictionary<string, object>
-                {
-                    ["set.$"] = "$.set",
-                    ["marker.$"] = "$.marker",
-                    ["record.$"] = "$.set.config.record",
-                    ["verified.$"] = "$.set.config.verified",
-                },
+                Parameters = ConfigMemberParameters(),
+                Next = "VerifyTooling",
+            };
+            var allowing = ConfigMemberParameters();
+            allowing["allowDestructivePlan.$"] = "$.allowDestructivePlan";
+            states["ConfigMemberAllowing"] = new
+            {
+                Type = "Pass",
+                Parameters = allowing,
                 Next = "VerifyTooling",
             };
             // The config's last state - RecordInfrastructure where it is applied (I3), ReadPlan where it is only planned (I2) - goes on

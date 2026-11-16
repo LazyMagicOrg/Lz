@@ -64,8 +64,9 @@ public class DeployerPromotedPlanTests
         var states = States(PlanningPlan());
         Assert.Equal("HasConfig", states.GetProperty("IsRevert").GetProperty("Default").GetString());
         var has = states.GetProperty("HasConfig");
-        Assert.Equal("ConfigMember", has.GetProperty("Choices")[0].GetProperty("Next").GetString());
-        Assert.Equal("$.set.config", has.GetProperty("Choices")[0].GetProperty("Variable").GetString());
+        var plain = has.GetProperty("Choices").EnumerateArray().Single(c => c.TryGetProperty("Variable", out _));
+        Assert.Equal("ConfigMember", plain.GetProperty("Next").GetString());
+        Assert.Equal("$.set.config", plain.GetProperty("Variable").GetString());
         Assert.Equal("ImageMember", has.GetProperty("Default").GetString());
         var member = states.GetProperty("ConfigMember");
         Assert.Equal("VerifyTooling", member.GetProperty("Next").GetString());
@@ -77,6 +78,37 @@ public class DeployerPromotedPlanTests
         Assert.False(states.TryGetProperty("Planned", out _));
         Assert.False(states.TryGetProperty("DeployInfrastructure", out _));
         Assert.Equal("RevertImageMember", states.GetProperty("SetHold").GetProperty("Next").GetString());   // a revert skips the config
+    }
+
+    /// <summary>
+    /// A HAND START'S allowDestructivePlan REACHES ReadPlan (P-12; 2026-11-16). ConfigMember rebuilt the state without it, so
+    /// test refused a task definition's replacement even when started by hand with the flag. The first choice that matches
+    /// wins, so the start carrying the flag must be tested first; the poller's starts, without it, take ConfigMember as before.
+    /// </summary>
+    [Theory]
+    [InlineData(PipelineConfig.InfrastructurePlan)]
+    [InlineData(PipelineConfig.InfrastructureDeploy)]
+    public void AHandStartsAllowDestructivePlan_IsCarriedPastTheConfigMember_ToReadPlan(string infrastructure)
+    {
+        var states = States(PlanningPlan(TestPlanningConfig(infrastructure)));
+        var choices = states.GetProperty("HasConfig").GetProperty("Choices").EnumerateArray().ToList();
+
+        var first = choices[0];
+        Assert.Equal("ConfigMemberAllowing", first.GetProperty("Next").GetString());
+        var tested = first.GetProperty("And").EnumerateArray()
+            .Select(c => (c.GetProperty("Variable").GetString(), c.GetProperty("IsPresent").GetBoolean())).ToList();
+        Assert.Equal(new[] { ("$.set.config", true), ("$.allowDestructivePlan", true) }, tested);
+        Assert.Equal("ConfigMember", choices[1].GetProperty("Next").GetString());
+
+        var allowing = states.GetProperty("ConfigMemberAllowing");
+        Assert.Equal("VerifyTooling", allowing.GetProperty("Next").GetString());
+        var with = allowing.GetProperty("Parameters");
+        Assert.Equal("$.allowDestructivePlan", with.GetProperty("allowDestructivePlan.$").GetString());
+        // Otherwise the same state ConfigMember builds, field for field.
+        var without = states.GetProperty("ConfigMember").GetProperty("Parameters");
+        Assert.Equal(without.EnumerateObject().Select(p => (p.Name, p.Value.GetString())),
+            with.EnumerateObject().Where(p => p.Name != "allowDestructivePlan.$").Select(p => (p.Name, p.Value.GetString())));
+        Assert.False(without.TryGetProperty("allowDestructivePlan.$", out _));   // the poller's starts never carry it
     }
 
     [Fact]
