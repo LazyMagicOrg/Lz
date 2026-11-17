@@ -197,7 +197,10 @@
          a floating version would fetch whatever is newest on the day of a restore. -->
     <PackageReference Include="AWSSDK.EventBridge" Version="4.0.100.13" />
     <PackageReference Include="AWSSDK.SQS" Version="4.0.1.11" />
-    <PackageReference Include="AWSSDK.CloudWatch" Version="4.0.104.3" />
+    <!-- CloudWatch 4.1.1.1 since 2026-11-16: the 4.* packages above now resolve AWSSDK.Core 4.1.1, and 4.0.104.3's CBOR
+         protocol calls UnmarshallerContext.get_CrcStream, which Core 4.1 removed - bootstrapdeployer died writing its
+         alarms (MissingMethodException). 4.1.1.1 is the release built for Core [4.1.1, 5). -->
+    <PackageReference Include="AWSSDK.CloudWatch" Version="4.1.1.1" />
     <!-- SimpleNotificationService: the alerts topic (P2 stage D3). Exact for the same reason: the newest release needing no
          AWSSDK.Core newer than 4.0.102.4. -->
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.100.13" />
