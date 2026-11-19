@@ -72,6 +72,17 @@ public class WebAppBehavior
     /// and not just at the system level.
     /// </summary>
     public string? AuthConfig { get; set; }
+
+    /// <summary>
+    /// Whether the edge sends a visitor with no sign-in marker to this app's login route. <c>null</c> inherits from the
+    /// next-higher level (leaf-dominant by <see cref="Path"/>, as <see cref="AuthConfig"/>); unset at every level it is
+    /// <c>true</c>, so an app with an <see cref="AuthConfig"/> is gated as before. <c>false</c> is for an app that signs in
+    /// by itself and draws its own signed-out page (Scutara's React buyer's client, 2026-11-19: signing out should land on
+    /// the app, not the IdP's sign-in): it keeps its <see cref="AuthConfig"/> - and with it whatever else a plugin derives
+    /// from one, such as sending an apex visit to the subtenant host - but is not gated. Meaningless on an app with no
+    /// <see cref="AuthConfig"/>, which is never gated.
+    /// </summary>
+    public bool? EdgeGate { get; set; }
 }
 
 /// <summary>

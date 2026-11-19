@@ -173,6 +173,30 @@ public class ConfigMergerTests : IDisposable
         Assert.Equal("", Assert.Single(madePublic).AuthConfig);
     }
 
+    // EdgeGate (2026-11-19): unset everywhere it is true, so every app with an AuthConfig stays gated; false keeps the
+    // AuthConfig but lifts the gate; null inherits; a lower level overrides.
+    [Fact]
+    public void ResolveWebApps_EdgeGate_DefaultsTrue_FalseKeepsAuthConfig_NullInherits_LowerOverrides()
+    {
+        var gated = ConfigMerger.ResolveWebApps(SystemWithWebApps(
+            new WebAppBehavior { Path = "/app/", AppName = "buyer", AuthConfig = "consumerauth" }), null, null);
+        Assert.True(Assert.Single(gated).EdgeGate);
+
+        var system = SystemWithWebApps(
+            new WebAppBehavior { Path = "/app/", AppName = "buyer", AuthConfig = "consumerauth", EdgeGate = false });
+        var ungated = Assert.Single(ConfigMerger.ResolveWebApps(system, null, null));
+        Assert.False(ungated.EdgeGate);
+        Assert.Equal("consumerauth", ungated.AuthConfig);
+
+        var inherited = ConfigMerger.ResolveWebApps(system, TenantWithWebApps(
+            new WebAppBehavior { Path = "/app/", AuthConfig = null, EdgeGate = null }), null);
+        Assert.False(Assert.Single(inherited).EdgeGate);
+
+        var overridden = ConfigMerger.ResolveWebApps(system, TenantWithWebApps(
+            new WebAppBehavior { Path = "/app/" }), SubtenantWithWebApps(new WebAppBehavior { Path = "/app/", EdgeGate = true }));
+        Assert.True(Assert.Single(overridden).EdgeGate);
+    }
+
     [Fact]
     public void ResolveWebApps_SubtenantDeclaresOwnPath_LevelIsSubtenant()
     {

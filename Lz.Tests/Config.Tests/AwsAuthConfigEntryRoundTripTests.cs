@@ -42,6 +42,29 @@ public class AwsAuthConfigEntryRoundTripTests : IDisposable
         Assert.IsType<AwsAuthConfigEntry>(entry);
     }
 
+    // A web app's EdgeGate reads from its YAML key (2026-11-19); absent, it is null (inherit, true when resolved).
+    [Fact]
+    public void WebAppEdgeGatePopulatesFromYaml()
+    {
+        var path = WriteSystemConfig("""
+            Behaviors:
+              WebApps:
+                - Path: /app/
+                  AppName: buyer
+                  AuthConfig: consumerauth
+                  EdgeGate: false
+                - Path: /seller/
+                  AppName: seller
+                  AuthConfig: businessauth
+            """);
+
+        var config = ConfigLoader.LoadSystemConfig(path);
+
+        var apps = config.Behaviors!.WebApps!;
+        Assert.False(apps.Single(a => a.AppName == "buyer").EdgeGate);
+        Assert.Null(apps.Single(a => a.AppName == "seller").EdgeGate);
+    }
+
     [Fact]
     public void CognitoHardeningFieldsPopulateFromYaml()
     {

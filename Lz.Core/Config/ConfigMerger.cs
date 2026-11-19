@@ -189,7 +189,11 @@ public static class ConfigMerger
                     ? w.AuthConfig
                     : prev?.AuthConfig;
 
-                byPath[w.Path] = new ResolvedWebApp(w.Path, appName, authConfig, appLevel);
+                // EdgeGate: null inherits from the parent level; unset everywhere it is true (gated, as before the
+                // setting existed).
+                var edgeGate = w.EdgeGate ?? prev?.EdgeGate ?? true;
+
+                byPath[w.Path] = new ResolvedWebApp(w.Path, appName, authConfig, appLevel, edgeGate);
             }
         }
     }
@@ -201,10 +205,13 @@ public static class ConfigMerger
 /// <see cref="AppName"/> originated (0=system, 1=tenant, 2=subtenant) — used
 /// by callers (BCPlugin) to pick the right bucket-suffix token (e.g. {ss},
 /// {ts}, {sts}) for routing tuples. Child-level overrides that only change
-/// <see cref="AuthConfig"/> leave <see cref="Level"/> unchanged.
+/// <see cref="AuthConfig"/> leave <see cref="Level"/> unchanged. <see cref="EdgeGate"/> is
+/// <see cref="WebAppBehavior.EdgeGate"/> resolved the same way, true where no level sets it: the edge gates the app when
+/// it has an <see cref="AuthConfig"/> and this is true.
 /// </summary>
 public sealed record ResolvedWebApp(
     string Path,
     string AppName,
     string? AuthConfig,
-    int Level);
+    int Level,
+    bool EdgeGate = true);
